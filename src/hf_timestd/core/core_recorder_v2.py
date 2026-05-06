@@ -1025,6 +1025,7 @@ class CoreRecorderV2:
                 # Apply disambiguation to the chain_delay we lock in
                 effective = result.chain_delay_ns + self._t6_disambiguation_ns
                 self._t6_last_chain_delay_ns = effective
+                effective_chain_delay = effective
                 logger.info(
                     f"T6 chain_delay initial accept: {result.chain_delay_ns} ns "
                     f"(effective with disambiguation: {effective} ns)"

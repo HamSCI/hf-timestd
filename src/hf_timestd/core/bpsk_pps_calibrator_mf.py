@@ -277,9 +277,16 @@ class BpskPpsCalibratorMF:
             self.pps_consecutive += 1
 
             edge_rtp_full = edge_rtp_int + edge_rtp_frac
+            # chain_delay = "where in the second the edge arrived,"
+            # in [0, SR) sample units. We deliberately don't wrap to
+            # [-SR/2, SR/2) — chain_delay is a latency (always ≥0), and
+            # at SR=96 kHz with a ±25 kHz channel the actual radiod
+            # filter group delay can exceed 500 ms, which the legacy
+            # symmetric wrap would silently flip to a negative value
+            # and confuse the downstream subtraction. Downstream's
+            # disambiguation logic anchors the absolute reference; the
+            # calibrator's job is to report the raw modular position.
             chain_delay_samples = edge_rtp_full % self.sample_rate
-            if chain_delay_samples > self.sample_rate / 2:
-                chain_delay_samples -= self.sample_rate
             self._chain_delay_samples = float(chain_delay_samples)
             self._last_edge_rtp = edge_rtp_int
 

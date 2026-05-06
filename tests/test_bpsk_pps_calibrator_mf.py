@@ -80,6 +80,20 @@ def _feed_in_batches(cal, signal, rtp_start=0, batch_size=480):
     return last_result
 
 
+def _modular_distance(a: float, b: float, modulus: float) -> float:
+    """Smallest signed distance from ``b`` to ``a`` modulo ``modulus``.
+
+    chain_delay_samples is a modular quantity in [0, SR). Comparing
+    recovered vs injected via plain subtraction wrongly flags a
+    near-zero-vs-near-SR pair (e.g. 95999.95 vs 0.00) as far apart
+    when they are physically the same edge position.
+    """
+    d = (a - b) % modulus
+    if d > modulus / 2:
+        d -= modulus
+    return abs(d)
+
+
 class TestNoiseFreeLock:
     """In an idealized noise-free signal, the MF should lock within
     a handful of edges and report chain_delay matching the injected
@@ -93,9 +107,11 @@ class TestNoiseFreeLock:
         result = _feed_in_batches(cal, signal)
         assert result is not None, "MF calibrator failed to lock noise-free"
         assert result.locked
-        # Edge at sample 0 (and every SR samples after) → chain_delay = 0
-        # (or very close, given the squaring-based phase recovery on DC).
-        assert abs(result.chain_delay_samples) < 0.5, \
+        # Edge at sample-of-second 0. chain_delay is in [0, SR), so
+        # the recovered value is either ~0 or ~SR-ε; modular distance
+        # collapses both to "near zero".
+        err = _modular_distance(result.chain_delay_samples, 0.0, SR)
+        assert err < 0.5, \
             f"chain_delay={result.chain_delay_samples} samples, expected ~0"
 
     def test_chain_delay_matches_injected_offset(self):
@@ -112,11 +128,8 @@ class TestNoiseFreeLock:
         )
         result = _feed_in_batches(cal, signal)
         assert result is not None
-        # chain_delay reports sample-of-second of the edge, which is
-        # the injected offset modulo SR (positive or negative within
-        # the [-SR/2, SR/2) wrap range).
         recovered = result.chain_delay_samples
-        err = abs(recovered - injected)
+        err = _modular_distance(recovered, injected, SR)
         assert err < 0.1, \
             f"recovered={recovered}, injected={injected}, err={err}"
 
@@ -144,7 +157,9 @@ class TestNoiseRobustness:
         recovered = result.chain_delay_samples
         # At 20 dB SNR over a half-second integration, σ_t per edge is
         # ≪ 1 sample. Allow 2 samples of slack for robustness.
-        assert abs(recovered - injected) < 2.0
+        err = _modular_distance(recovered, injected, SR)
+        assert err < 2.0, \
+            f"recovered={recovered}, injected={injected}, err={err}"
 
 
 class TestStreamingBehaviour:
@@ -161,7 +176,7 @@ class TestStreamingBehaviour:
         # than the typical 200-sample radiod packet.
         result = _feed_in_batches(cal, signal, batch_size=100)
         assert result is not None
-        assert abs(result.chain_delay_samples - 3.0) < 0.1
+        assert _modular_distance(result.chain_delay_samples, 3.0, SR) < 0.1
 
     def test_one_giant_batch(self):
         cal = BpskPpsCalibratorMF(
@@ -170,7 +185,7 @@ class TestStreamingBehaviour:
         signal = _make_bpsk_signal(duration_s=10.0, edge_offset_samples=3.0)
         result = cal.process_samples(signal, rtp_timestamp=0)
         assert result is not None
-        assert abs(result.chain_delay_samples - 3.0) < 0.1
+        assert _modular_distance(result.chain_delay_samples, 3.0, SR) < 0.1
 
 
 class TestCarrierPhaseRecovery:
@@ -188,7 +203,7 @@ class TestCarrierPhaseRecovery:
         result = _feed_in_batches(cal, signal)
         assert result is not None, f"Failed to lock at carrier phase {phi}"
         # chain_delay should still be ~2.0 samples regardless of phase.
-        assert abs(result.chain_delay_samples - 2.0) < 0.2
+        assert _modular_distance(result.chain_delay_samples, 2.0, SR) < 0.2
 
 
 class TestResetClearsState:
