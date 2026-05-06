@@ -1049,6 +1049,65 @@ class CoreRecorderV2:
                 effective_chain_delay = self._t6_last_chain_delay_ns
             else:
                 # Within tolerance — accept and update reference.
+                # Continuously refine `_t6_disambiguation_ns` against the
+                # current T3 reading. The initial-accept disambiguation
+                # snaps to integer-sample alignment against whatever T3
+                # reported AT FIRST LOCK; T3 itself has settling
+                # transients of hundreds of microseconds in the first
+                # several minutes of fusion uptime, and longer-term drift
+                # of tens of microseconds. Without this refinement, TSL3
+                # inherits the T3-at-lock reference frame permanently
+                # and chrony sees a constant-bias outlier (#x excluded).
+                #
+                # Slow IIR (α=0.05 per edge) → time-constant ≈ 20 edges
+                # ≈ 20 s. Fast enough to track T3's settling, slow enough
+                # that T3's per-cycle noise (typically ~10–20 µs) doesn't
+                # contaminate TSL3's per-edge precision (~150 ns).
+                ref = self._get_disambiguation_reference()
+                if ref is not None:
+                    ref_offset_ms, _ref_sigma_ms, _ref_tier = ref
+                    # Recompute current implied offset using effective
+                    # chain_delay (raw + disambiguation). offset_sec is
+                    # how far the corrected wall-time falls from its
+                    # nearest integer GPS-second boundary, modulo wrap.
+                    try:
+                        last_edge_rtp = getattr(
+                            self._t6_calibrator, '_last_edge_rtp', None
+                        )
+                        if (last_edge_rtp is not None
+                                and self._t6_channel_info is not None):
+                            self._t6_channel_info.chain_delay_correction_ns = None
+                            from ka9q.rtp_recorder import rtp_to_wallclock
+                            raw_wall = rtp_to_wallclock(
+                                last_edge_rtp, self._t6_channel_info
+                            )
+                            if raw_wall is not None:
+                                effective_now = (
+                                    result.chain_delay_ns
+                                    + self._t6_disambiguation_ns
+                                )
+                                wts_now = raw_wall - (effective_now / 1e9)
+                                offset_sec_now = wts_now - round(wts_now)
+                                disagreement_sec = (
+                                    offset_sec_now - (ref_offset_ms / 1000.0)
+                                )
+                                # IIR step. Cap per-edge correction at
+                                # 10 ms so a transient T3 glitch can't
+                                # whip TSL3 violently.
+                                step_ns = int(round(
+                                    disagreement_sec * 1e9 * 0.05
+                                ))
+                                if abs(step_ns) <= 10_000_000:
+                                    self._t6_disambiguation_ns += step_ns
+                    except Exception as e:
+                        # Refinement is best-effort; never break the
+                        # accept path on a refinement error.
+                        if not getattr(self, '_t6_refine_warned', False):
+                            logger.warning(
+                                f"T6 disambiguation refinement failed: {e}"
+                            )
+                            self._t6_refine_warned = True
+
                 self._t6_last_chain_delay_ns = result.chain_delay_ns + self._t6_disambiguation_ns
                 self._t6_wrap_rejections = 0
                 effective_chain_delay = self._t6_last_chain_delay_ns
