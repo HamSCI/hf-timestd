@@ -33,6 +33,7 @@ import json
 import threading
 import subprocess
 import socket
+from collections import deque
 from pathlib import Path
 from typing import Dict, Optional, List
 from dataclasses import dataclass
@@ -266,6 +267,12 @@ class CoreRecorderV2:
         # on calibrator restart so the first stable lock is always accepted.
         self._t6_last_chain_delay_ns = None
         self._t6_wrap_rejections = 0
+        # Step-recovery: track recent rejected raw chain_delays so a
+        # genuine permanent step (chain_delay actually moved, not a
+        # transient noise wrap) can be detected and re-disambiguated.
+        # See T6_STEP_RECOVERY_WINDOW / T6_STEP_RECOVERY_TIGHT_NS for the
+        # cluster criteria.
+        self._t6_recent_raw = deque(maxlen=self.T6_STEP_RECOVERY_WINDOW)
         # Set at first stable lock from system-clock comparison; constant
         # offset added to every calibrator chain_delay report so all
         # measurements share a common disambiguated reference frame.
@@ -883,6 +890,22 @@ class CoreRecorderV2:
     # correct.  250 ms gives margin without being unrealistically tight.
     T6_DISAMBIGUATION_MAX_SIGMA_MS = 250.0
 
+    # Step-recovery thresholds for the wrap-rejector.  The wrap-rejector
+    # locks in the first stable chain_delay after disambiguation; if the
+    # underlying (raw) chain_delay later steps to a new value (because the
+    # calibrator re-locked at a different edge after a glitch, sample-rate
+    # excursion, or stream restart), every subsequent measurement gets
+    # rejected forever and TSL3's SHM samples drift to the stale value —
+    # chrony filters them out and reach falls to 0.  Recovery rule: when
+    # the rejector has seen ``T6_STEP_RECOVERY_WINDOW`` consecutive raw
+    # values that cluster within ``T6_STEP_RECOVERY_TIGHT_NS`` of each
+    # other, treat that as a real step and reset the lock so the next
+    # cycle re-runs initial-accept (re-disambiguating against the highest
+    # available timing tier).  Tight cluster discriminates a real new
+    # operating point from chaotic noise excursions.
+    T6_STEP_RECOVERY_WINDOW = 60
+    T6_STEP_RECOVERY_TIGHT_NS = 1_000_000
+
     def _get_disambiguation_reference(self):
         """Return the highest-rank non-T6 timing-authority offset estimate.
 
@@ -1073,16 +1096,45 @@ class CoreRecorderV2:
                 # TSL3's SHM updates flowing with the proven-good value
                 # so chrony does not lose Reach during a wrap event.
                 self._t6_wrap_rejections += 1
-                if self._t6_wrap_rejections == 1 or self._t6_wrap_rejections % 60 == 0:
+                self._t6_recent_raw.append(result.chain_delay_ns)
+                # Step-recovery: if rejected raws cluster tightly across a
+                # full window, the calibrator has truly re-locked at a new
+                # operating point (not a transient noise wrap).  Drop the
+                # disambiguation/lock state so the next cycle hits
+                # initial-accept and re-references against the timing
+                # tier hierarchy.
+                if (len(self._t6_recent_raw) >= self.T6_STEP_RECOVERY_WINDOW
+                        and (max(self._t6_recent_raw) - min(self._t6_recent_raw))
+                            < self.T6_STEP_RECOVERY_TIGHT_NS):
+                    spread_ns = max(self._t6_recent_raw) - min(self._t6_recent_raw)
+                    median_raw = sorted(self._t6_recent_raw)[
+                        self.T6_STEP_RECOVERY_WINDOW // 2
+                    ]
                     logger.warning(
-                        f"T6 chain_delay jump rejected: "
-                        f"new={result.chain_delay_ns} ns, "
-                        f"last_accepted={self._t6_last_chain_delay_ns} ns, "
-                        f"delta={result.chain_delay_ns - self._t6_last_chain_delay_ns} ns "
-                        f"(threshold {WRAP_THRESHOLD_NS} ns); "
-                        f"rejections={self._t6_wrap_rejections}"
+                        f"T6 chain_delay step accepted after "
+                        f"{self.T6_STEP_RECOVERY_WINDOW} consistent rejections "
+                        f"(spread={spread_ns} ns < "
+                        f"{self.T6_STEP_RECOVERY_TIGHT_NS} ns, "
+                        f"median raw={median_raw} ns, "
+                        f"old locked={self._t6_last_chain_delay_ns} ns). "
+                        f"Resetting lock for re-disambiguation on next cycle."
                     )
-                effective_chain_delay = self._t6_last_chain_delay_ns
+                    effective_chain_delay = self._t6_last_chain_delay_ns
+                    self._t6_last_chain_delay_ns = None
+                    self._t6_disambiguation_ns = 0
+                    self._t6_wrap_rejections = 0
+                    self._t6_recent_raw.clear()
+                else:
+                    if self._t6_wrap_rejections == 1 or self._t6_wrap_rejections % 60 == 0:
+                        logger.warning(
+                            f"T6 chain_delay jump rejected: "
+                            f"new={result.chain_delay_ns} ns, "
+                            f"last_accepted={self._t6_last_chain_delay_ns} ns, "
+                            f"delta={result.chain_delay_ns - self._t6_last_chain_delay_ns} ns "
+                            f"(threshold {WRAP_THRESHOLD_NS} ns); "
+                            f"rejections={self._t6_wrap_rejections}"
+                        )
+                    effective_chain_delay = self._t6_last_chain_delay_ns
             else:
                 # Within tolerance — accept and update reference.
                 # NOTE (2026-05-06): a previous version of this branch
@@ -1098,6 +1150,7 @@ class CoreRecorderV2:
                 # which integer GPS second the edge belongs to.
                 self._t6_last_chain_delay_ns = result.chain_delay_ns + self._t6_disambiguation_ns
                 self._t6_wrap_rejections = 0
+                self._t6_recent_raw.clear()
                 effective_chain_delay = self._t6_last_chain_delay_ns
 
             # Record BPSK metadata in archive sidecars.  Per the
