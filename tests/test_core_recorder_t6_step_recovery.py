@@ -40,6 +40,7 @@ def _make_recorder_at_locked_state(locked_ns: int, disambig_ns: int = 0):
     cr._t6_recent_raw = __import__('collections').deque(
         maxlen=CoreRecorderV2.T6_STEP_RECOVERY_WINDOW
     )
+    cr._t6_last_locked_wall = None
     cr._t6_shm = None
     cr._t6_channel_info = None
     cr.recorders = {}
@@ -135,6 +136,78 @@ class TestT6StepRecovery(unittest.TestCase):
 
         self.assertEqual(len(cr._t6_recent_raw), 0)
         self.assertEqual(cr._t6_wrap_rejections, 0)
+
+
+class TestT6StuckRecovery(unittest.TestCase):
+
+    def test_unlocked_for_longer_than_timeout_resets_calibrator(self):
+        # Set up a recorder previously locked, with last_locked_wall in
+        # the past beyond T6_STUCK_TIMEOUT_SEC.
+        from unittest.mock import patch
+        cr = _make_recorder_at_locked_state(locked_ns=33_000_000)
+        timeout = CoreRecorderV2.T6_STUCK_TIMEOUT_SEC
+
+        # Calibrator returns None (or unlocked) — stuck state.
+        cr._t6_calibrator.process_samples.return_value = None
+
+        # Walk monotonic time forward past the timeout.  First call
+        # initialises _t6_last_locked_wall to now; second call (after
+        # timeout has elapsed) should trigger reset.
+        with patch('hf_timestd.core.core_recorder_v2.time.monotonic') as mock_clock:
+            mock_clock.return_value = 1000.0
+            samples, quality = _samples_quality()
+            cr._t6_on_samples(samples, quality)
+            self.assertEqual(cr._t6_last_locked_wall, 1000.0)
+            self.assertEqual(cr._t6_last_chain_delay_ns, 33_000_000)
+            cr._t6_calibrator.reset.assert_not_called()
+
+            # Jump forward past the timeout — stuck-recovery should fire.
+            mock_clock.return_value = 1000.0 + timeout + 1.0
+            cr._t6_on_samples(samples, quality)
+
+        cr._t6_calibrator.reset.assert_called_once()
+        self.assertIsNone(cr._t6_last_chain_delay_ns)
+        self.assertEqual(cr._t6_disambiguation_ns, 0)
+        self.assertEqual(cr._t6_wrap_rejections, 0)
+
+    def test_locked_result_keeps_last_locked_wall_fresh(self):
+        from unittest.mock import patch
+        cr = _make_recorder_at_locked_state(locked_ns=33_000_000)
+        cr._t6_calibrator.process_samples.return_value = _calibrator_result(
+            33_500_000
+        )
+        with patch('hf_timestd.core.core_recorder_v2.time.monotonic') as mock_clock:
+            mock_clock.return_value = 2000.0
+            samples, quality = _samples_quality()
+            cr._t6_on_samples(samples, quality)
+            self.assertEqual(cr._t6_last_locked_wall, 2000.0)
+            mock_clock.return_value = 2000.0 + CoreRecorderV2.T6_STUCK_TIMEOUT_SEC + 5.0
+            # New locked sample arrives — last_locked_wall should advance,
+            # NOT trigger reset.
+            cr._t6_on_samples(samples, quality)
+            self.assertEqual(
+                cr._t6_last_locked_wall,
+                2000.0 + CoreRecorderV2.T6_STUCK_TIMEOUT_SEC + 5.0,
+            )
+        cr._t6_calibrator.reset.assert_not_called()
+
+    def test_no_stuck_reset_during_initial_acquisition(self):
+        # Fresh recorder, never locked — _t6_last_chain_delay_ns is
+        # None, so the stuck-recovery branch must NOT fire even after
+        # the timeout elapses (we'd have nothing to recover from yet).
+        from unittest.mock import patch
+        cr = _make_recorder_at_locked_state(locked_ns=33_000_000)
+        cr._t6_last_chain_delay_ns = None  # never locked
+        cr._t6_calibrator.process_samples.return_value = None
+
+        with patch('hf_timestd.core.core_recorder_v2.time.monotonic') as mock_clock:
+            mock_clock.return_value = 5000.0
+            samples, quality = _samples_quality()
+            cr._t6_on_samples(samples, quality)
+            mock_clock.return_value = 5000.0 + CoreRecorderV2.T6_STUCK_TIMEOUT_SEC + 1.0
+            cr._t6_on_samples(samples, quality)
+
+        cr._t6_calibrator.reset.assert_not_called()
 
 
 if __name__ == '__main__':

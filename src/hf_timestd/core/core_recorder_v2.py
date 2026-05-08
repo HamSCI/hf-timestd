@@ -273,6 +273,14 @@ class CoreRecorderV2:
         # See T6_STEP_RECOVERY_WINDOW / T6_STEP_RECOVERY_TIGHT_NS for the
         # cluster criteria.
         self._t6_recent_raw = deque(maxlen=self.T6_STEP_RECOVERY_WINDOW)
+        # Stuck-recovery: wall-clock time of the most recent
+        # ``result.locked = True`` cycle.  If samples flow but lock
+        # is never re-asserted (cascade gate keeps pps_consecutive at
+        # 0 because the operating point has actually moved), reset
+        # the calibrator after T6_STUCK_TIMEOUT_SEC so it re-acquires
+        # at the current peak position.  Set to None until the first
+        # samples arrive so we don't reset during cold start.
+        self._t6_last_locked_wall = None
         # Set at first stable lock from system-clock comparison; constant
         # offset added to every calibrator chain_delay report so all
         # measurements share a common disambiguated reference frame.
@@ -926,6 +934,27 @@ class CoreRecorderV2:
     T6_STEP_RECOVERY_WINDOW = 60
     T6_STEP_RECOVERY_TIGHT_NS = 1_000_000
 
+    # Stuck-recovery timeout for the calibrator.  The MF cascade-
+    # tolerance gate (in BpskPpsCalibratorMF) intentionally prevents
+    # ``_last_edge_rtp`` from moving on far-out noise edges so a
+    # transient Costas-loop excursion doesn't shift the lock.  But if
+    # the underlying signal genuinely settles at a new operating point
+    # (Costas walks to a different π-stable lock, or a multi-second
+    # carrier shift), the calibrator stays unlocked indefinitely
+    # (``pps_consecutive`` never climbs back) and the wrap-rejection
+    # branch never fires (it requires ``result.locked``), so the
+    # earlier step-recovery cannot trigger.  Observed on bee1
+    # 2026-05-08: phase walked ~5.9π over 8 hours, calibrator stuck
+    # with chain_delay frozen at the original lock and TSL3 reach=0.
+    # Recovery: when the calibrator has been unlocked for more than
+    # this many seconds, reset it (drops _last_edge_rtp, _acquired)
+    # and clear the disambiguation state so the next cycle hits
+    # initial-accept and locks at whatever the current operating point
+    # is.  60 s is wider than any single Costas-excursion we've
+    # observed (~13 s) so transient cascades don't trigger needless
+    # resets.
+    T6_STUCK_TIMEOUT_SEC = 60.0
+
     def _get_disambiguation_reference(self):
         """Return the highest-rank non-T6 timing-authority offset estimate.
 
@@ -1016,6 +1045,40 @@ class CoreRecorderV2:
         result = self._t6_calibrator.process_samples(
             samples, quality.last_rtp_timestamp
         )
+
+        # Stuck-recovery: cascade gate in the MF calibrator can keep
+        # pps_consecutive pinned at 0 indefinitely if the underlying
+        # operating point genuinely moved (e.g., Costas walked to a
+        # different π-stable lock).  result.locked stays False, the
+        # wrap-rejection / step-recovery branch is gated on
+        # result.locked and never fires.  Detect this by tracking
+        # wall time since the last locked cycle: if it exceeds the
+        # timeout while we had previously been locked, reset the
+        # calibrator + disambiguation state so the next cycle hits
+        # initial-accept at the current peak position.
+        wall_now = time.monotonic()
+        if result is not None and result.locked:
+            self._t6_last_locked_wall = wall_now
+        elif self._t6_last_locked_wall is None:
+            # First sample after init — start the timer.
+            self._t6_last_locked_wall = wall_now
+        elif (self._t6_last_chain_delay_ns is not None
+                and (wall_now - self._t6_last_locked_wall)
+                    > self.T6_STUCK_TIMEOUT_SEC):
+            stuck_for = wall_now - self._t6_last_locked_wall
+            logger.warning(
+                f"T6 calibrator stuck unlocked for {stuck_for:.1f}s "
+                f"(> {self.T6_STUCK_TIMEOUT_SEC:.0f}s threshold). "
+                f"Resetting calibrator + disambiguation; will re-acquire "
+                f"at current operating point."
+            )
+            self._t6_calibrator.reset()
+            self._t6_last_chain_delay_ns = None
+            self._t6_disambiguation_ns = 0
+            self._t6_wrap_rejections = 0
+            self._t6_recent_raw.clear()
+            self._t6_last_locked_wall = wall_now
+
         if result is not None and result.locked:
             # Wrap-rejection: refuse jumps > 10 ms from the last accepted
             # value. 10 ms is well above natural sample-quantization
