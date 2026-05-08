@@ -312,6 +312,12 @@ class CoreRecorderV2:
                         debug_dump_subthreshold_factor=self._t6_config.get(
                             'debug_dump_subthreshold_factor', 0.2
                         ),
+                        # Periodic Costas-phase log (0 disables).
+                        # Default off; enable in TOML for investigation
+                        # of the ~13-second phase excursions.
+                        phase_log_period_batches=self._t6_config.get(
+                            'phase_log_period_batches', 0
+                        ),
                     )
                     logger.info(f"T6 BPSK PPS calibrator (matched-filter) initialized: "
                                 f"freq={freq_hz/1e6:.6f} MHz, sr={sr}")

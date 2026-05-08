@@ -86,6 +86,7 @@ class BpskPpsCalibratorMF:
         debug_dump_path: Optional[str] = None,
         debug_dump_seconds: float = 60.0,
         debug_dump_subthreshold_factor: float = 0.2,
+        phase_log_period_batches: int = 0,
     ):
         if sample_rate < 8000:
             raise ValueError(
@@ -179,6 +180,19 @@ class BpskPpsCalibratorMF:
         # 3=below_threshold (sub-threshold debug capture only).
         self._debug_peaks: List[tuple] = []
 
+        # Periodic Costas-phase log emit (Phase 1 of the 2026-05-08
+        # Costas-drift investigation).  When non-zero, every Nth batch
+        # the calibrator emits a one-line ``logger.info`` with the
+        # current Costas phase, peak_running, pps state, and batch_max
+        # |y| so that a 24+ hour journal can be parsed offline to look
+        # for periodicity, time-of-day correlation, or coupling to
+        # other system events around the ~13-second phase excursions
+        # seen in the diagnostic dump.
+        self._phase_log_period_batches: int = int(phase_log_period_batches)
+        self._phase_log_counter: int = 0
+        self._phase_log_last_pps_noise: int = 0
+        self._phase_log_last_pps_ok: int = 0
+
     @property
     def locked(self) -> bool:
         return self.pps_consecutive >= self.consecutive_required
@@ -197,6 +211,9 @@ class BpskPpsCalibratorMF:
         self.pps_consecutive = 0
         self._acquired = False
         self._chain_delay_samples = None
+        self._phase_log_counter = 0
+        self._phase_log_last_pps_noise = 0
+        self._phase_log_last_pps_ok = 0
 
     def process_samples(
         self, iq_samples: np.ndarray, rtp_timestamp: int,
@@ -290,6 +307,29 @@ class BpskPpsCalibratorMF:
         # Slide buffer: keep last 2*N samples for next batch.
         self._I_buf = self._I_buf[-2 * N:]
         self._rtp_buf = self._rtp_buf[-2 * N:]
+
+        # Periodic phase log (Phase 1 of Costas-drift investigation).
+        # Emitted at the end of process_samples so peak_running and
+        # pps counters reflect any peaks detected this batch.
+        if self._phase_log_period_batches > 0:
+            self._phase_log_counter += 1
+            if self._phase_log_counter >= self._phase_log_period_batches:
+                self._phase_log_counter = 0
+                d_noise = self.pps_noise - self._phase_log_last_pps_noise
+                d_ok = self.pps_ok - self._phase_log_last_pps_ok
+                self._phase_log_last_pps_noise = self.pps_noise
+                self._phase_log_last_pps_ok = self.pps_ok
+                batch_max_y = float(np.max(np.abs(y))) if len(y) > 0 else 0.0
+                logger.info(
+                    f"T6 MF phase_log: phase_rad={self._phase:+.4f} "
+                    f"phase_deg={self._phase * 180.0 / np.pi:+.2f} "
+                    f"peak_running={self._peak_running or 0:.2f} "
+                    f"batch_max_y={batch_max_y:.2f} "
+                    f"pps_consec={self.pps_consecutive} "
+                    f"acquired={int(self._acquired)} "
+                    f"d_ok={d_ok} d_noise={d_noise} "
+                    f"chain_delay_ns={self._chain_delay_samples * 1e9 / self.sample_rate if self._chain_delay_samples else 0:.0f}"
+                )
 
         return self._maybe_result()
 
