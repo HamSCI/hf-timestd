@@ -132,6 +132,33 @@ prompt() {
     printf -v "$varname" '%s' "$result"
 }
 
+# =============================================================================
+# Helper: auto-fill from sigmond's env-var bag (CONTRACT-v0.5 §14.2),
+# fall through to prompt() when sigmond hasn't published the value.
+#
+# Cross-cutting fields (callsign, grid/location, ka9q-radio status address)
+# live in /etc/sigmond/coordination.toml and are exposed to client config
+# wizards via STATION_CALL / STATION_GRID / STATION_LAT / STATION_LON /
+# SIGMOND_RADIOD_STATUS.  When sigmond knows them, we silently use the
+# value and tell the operator we did — no need to ask the same callsign
+# into five different wizards.
+# =============================================================================
+auto_or_prompt() {
+    local varname="$1"
+    local prompt_text="$2"
+    local source_var="$3"        # env var name, e.g. STATION_CALL
+    local help_text="${4:-}"
+    local required="${5:-false}"
+
+    local source_value="${!source_var:-}"
+    if [[ -n "$source_value" ]]; then
+        printf -v "$varname" '%s' "$source_value"
+        echo -e "  ${GREEN}✓${NC} $prompt_text: ${BOLD}${source_value}${NC}  ${DIM}(from sigmond \$$source_var)${NC}"
+        return
+    fi
+    prompt "$varname" "$prompt_text" "" "$help_text" "$required"
+}
+
 prompt_yn() {
     local varname="$1"
     local prompt_text="$2"
@@ -186,17 +213,32 @@ echo "  ╔═══════════════════════
 echo "  ║       HF Time Standard — Station Configuration         ║"
 echo "  ╚══════════════════════════════════════════════════════════╝"
 echo -e "${NC}"
-echo -e "  Before you begin, have the following information ready:"
-echo ""
-echo -e "    ${BOLD}Required:${NC}"
-echo "      - Your amateur radio callsign"
-echo "      - Your station location (either Maidenhead grid square OR latitude/longitude)"
-echo "      - Your ka9q-radio status multicast address"
-echo ""
-echo -e "    ${BOLD}Optional:${NC}"
-echo "      - PSWS station ID and instrument ID (for GRAPE uploads)"
-echo "      - PSWS TOKEN (shown on your PSWS site admin page)"
-echo "      - GNSS VTEC receiver address (if you have a ZED-F9P or similar)"
+
+# Show what sigmond has already provided so the operator knows we won't re-ask.
+_sigmond_known=()
+[[ -n "${STATION_CALL:-}" ]]            && _sigmond_known+=("Callsign:           ${STATION_CALL}")
+[[ -n "${STATION_GRID:-}" ]]            && _sigmond_known+=("Grid square:        ${STATION_GRID}")
+[[ -n "${STATION_LAT:-}" ]]             && _sigmond_known+=("Latitude:           ${STATION_LAT}")
+[[ -n "${STATION_LON:-}" ]]             && _sigmond_known+=("Longitude:          ${STATION_LON}")
+[[ -n "${SIGMOND_RADIOD_STATUS:-}" ]]   && _sigmond_known+=("ka9q-radio status:  ${SIGMOND_RADIOD_STATUS}")
+
+if [[ ${#_sigmond_known[@]} -gt 0 ]]; then
+    echo -e "  ${BOLD}Already known from sigmond${NC} ${DIM}(no input needed)${NC}:"
+    for line in "${_sigmond_known[@]}"; do
+        echo -e "    ${GREEN}✓${NC} $line"
+    done
+    echo ""
+fi
+
+echo -e "  ${BOLD}You'll be asked about:${NC}"
+[[ -z "${STATION_CALL:-}" ]] && echo "    - Your amateur radio callsign"
+if [[ -z "${STATION_GRID:-}" && ( -z "${STATION_LAT:-}" || -z "${STATION_LON:-}" ) ]]; then
+    echo "    - Your station location (Maidenhead grid OR latitude/longitude)"
+fi
+[[ -z "${SIGMOND_RADIOD_STATUS:-}" ]] && echo "    - Your ka9q-radio status multicast address"
+echo "    - Timing source (radiod's clock authority)"
+echo "    - Optional: PSWS station/instrument IDs + TOKEN (for GRAPE uploads)"
+echo "    - Optional: GNSS VTEC receiver address (if you have a ZED-F9P)"
 echo ""
 read -rp "  Press Enter to continue..."
 
@@ -207,25 +249,37 @@ echo ""
 echo -e "${BOLD}${BLUE}━━━ Section 1: Station Identity ━━━${NC}"
 echo ""
 
-# Defaults from sigmond's env var bag (CONTRACT-v0.5 §14) when present.
-# Empty otherwise; existing standalone behavior is preserved.
-prompt CALLSIGN "Callsign" "${STATION_CALL:-}" "Your amateur radio callsign (e.g. W1ABC)" true
-echo ""
-echo -e "  ${DIM}Location entry method:${NC}"
-prompt_choice LOCATION_MODE "Select location input" \
-    "grid — Enter Maidenhead grid square (6 or 10 chars)" \
-    "latlon — Enter latitude/longitude (decimal degrees)"
+# Cross-cutting fields published by sigmond (CONTRACT-v0.5 §14.2) are
+# silently auto-filled; we only prompt when sigmond hasn't supplied them.
+auto_or_prompt CALLSIGN "Callsign" STATION_CALL "Your amateur radio callsign (e.g. W1ABC)" true
 
 GRID_SQUARE=""
 LATITUDE=""
 LONGITUDE=""
 
+# Pick the location-mode from whatever sigmond gave us.  If neither
+# coordinate form is published, ask the operator which they prefer.
+if [[ -n "${STATION_GRID:-}" ]]; then
+    LOCATION_MODE="grid"
+elif [[ -n "${STATION_LAT:-}" && -n "${STATION_LON:-}" ]]; then
+    LOCATION_MODE="latlon"
+else
+    echo ""
+    echo -e "  ${DIM}Location entry method:${NC}"
+    prompt_choice LOCATION_MODE "Select location input" \
+        "grid — Enter Maidenhead grid square (6 or 10 chars)" \
+        "latlon — Enter latitude/longitude (decimal degrees)"
+fi
+
 if [[ "$LOCATION_MODE" == "grid" ]]; then
-    prompt GRID_SQUARE "Grid square" "${STATION_GRID:-}" "Maidenhead locator, 6 or 10 chars (e.g. FN42ab12cd). More precision is better." true
+    auto_or_prompt GRID_SQUARE "Grid square" STATION_GRID \
+        "Maidenhead locator, 6 or 10 chars (e.g. FN42ab12cd). More precision is better." true
     # Lat/Lon will be derived from grid in the config generator.
 else
-    prompt LATITUDE "Latitude" "${STATION_LAT:-}" "Decimal degrees, positive = North. More precision is better." true
-    prompt LONGITUDE "Longitude" "${STATION_LON:-}" "Decimal degrees, positive = East, negative = West. More precision is better." true
+    auto_or_prompt LATITUDE  "Latitude"  STATION_LAT \
+        "Decimal degrees, positive = North. More precision is better." true
+    auto_or_prompt LONGITUDE "Longitude" STATION_LON \
+        "Decimal degrees, positive = East, negative = West. More precision is better." true
     # Grid will be derived from lat/lon in the config generator.
 fi
 
@@ -261,7 +315,7 @@ echo ""
 echo -e "${BOLD}${BLUE}━━━ Section 3: Radio Source (ka9q-radio) ━━━${NC}"
 echo ""
 
-prompt KA9Q_STATUS "ka9q-radio status address" "${SIGMOND_RADIOD_STATUS:-}" \
+auto_or_prompt KA9Q_STATUS "ka9q-radio status address" SIGMOND_RADIOD_STATUS \
     "Multicast address or mDNS name (e.g. hf-status.local or 239.x.x.x)" true
 
 echo ""
