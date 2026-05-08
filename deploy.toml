@@ -8,9 +8,9 @@
 
 [package]
 name             = "hf-timestd"
-version          = "7.0.0"
+version          = "7.1.0"
 description      = "HF Time Standard Analysis — WWV/WWVH/CHU/BPM timing via ka9q-radio"
-contract_version = "0.5"
+contract_version = "0.6"
 license          = "MIT"
 
 # ---------------------------------------------------------------------------
@@ -164,6 +164,24 @@ units = [
 templated_units = [
     "timestd-metrology@.service",
 ]
+
+# ---------------------------------------------------------------------------
+# CONTRACT v0.6 §17 — local CH staging tier for L2 detection events.
+#
+# L1 raw correlator output stays in HDF5 (the canonical metrology
+# artefact, read-mostly, ~kHz rate).  L2 fused detections (~1
+# row/min/station emitted by `timestd-fusion`) land in `timestd.events`
+# in parallel with the existing HDF5 write — additive, not
+# replacement.  When sigmond hasn't published SIGMOND_CLICKHOUSE_URL
+# the writer is a no-op and the HDF5 path is untouched.  Schema lives
+# in this repo (greenfield, not vendored from any upstream).
+# ---------------------------------------------------------------------------
+
+[clickhouse]
+database         = "timestd"
+schema_dir       = "clickhouse/schema/timestd"
+schema_version   = 1
+required_min_ch  = "23.8"
 
 # ---------------------------------------------------------------------------
 # Dependencies sigmond should ensure are present before installing

@@ -130,6 +130,30 @@ def _handle_inventory(args):
                 })
             data_destination = None
 
+            # CONTRACT v0.6 §17 — output sinks per instance.  HDF5 is
+            # the canonical L1 artefact (always declared); a CH sink
+            # for L2 detection events appears only when sigmond has
+            # published SIGMOND_CLICKHOUSE_URL into the env.  CH-
+            # disabled hosts stay file-only with no extra moving parts.
+            data_sinks = [
+                {
+                    'kind':           'file',
+                    'target':         data_root,
+                    'schema_ref':     None,
+                    'retention_days': 0,        # operator-managed
+                    'mb_per_day':     0,        # not estimated yet
+                },
+            ]
+            if os.environ.get('SIGMOND_CLICKHOUSE_URL', '').strip():
+                data_sinks.append({
+                    'kind':           'clickhouse',
+                    'target':         'timestd.events',
+                    'schema_ref':     'timestd:1',
+                    'retention_days': 365,      # L2 events small; year is fine
+                    'mb_per_day':     1,        # ~1 row/min/station; tiny
+                    'health':         'ok',
+                })
+
             instances.append({
                 'instance':                    'default',
                 'radiod_id':                   None,    # set by sigmond via coordination.toml
@@ -139,13 +163,7 @@ def _handle_inventory(args):
                 'frequencies_hz':              freqs,
                 'ka9q_channels':               len(freqs),
                 'data_destination':            data_destination,
-                'disk_writes': [
-                    {
-                        'path':           data_root,
-                        'mb_per_day':     0.0,    # not estimated yet
-                        'retention_days': 0,
-                    }
-                ],
+                'data_sinks':                  data_sinks,
                 'uses_timing_calibration':     False,
                 'provides_timing_calibration': bool(timing.get('authority')),
                 # Standalone fallback: clients can read these from their own
@@ -178,7 +196,7 @@ def _handle_inventory(args):
         'client':           'hf-timestd',
         'version':          version,
         'git':              GIT_INFO,
-        'contract_version': '0.5',
+        'contract_version': '0.6',
         'config_path':      str(config_path),
         'log_paths': {
             # As of v6.12 every timestd-* unit writes to journald.
