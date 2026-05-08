@@ -41,11 +41,17 @@ Requires: numpy
 
 from __future__ import annotations
 
-from typing import Optional
+import logging
+import time
+from pathlib import Path
+from typing import List, Optional
 
 import numpy as np
 
 from hf_timestd.core.bpsk_pps_calibrator import PpsCalibrationResult
+
+
+logger = logging.getLogger(__name__)
 
 __all__ = ['BpskPpsCalibratorMF']
 
@@ -76,6 +82,10 @@ class BpskPpsCalibratorMF:
         consecutive_required: int = 10,
         edge_tolerance_samples: int = 10,
         costas_loop_bw_hz: float = 1.0,
+        cascade_tolerance_ms: float = 3.0,
+        debug_dump_path: Optional[str] = None,
+        debug_dump_seconds: float = 60.0,
+        debug_dump_subthreshold_factor: float = 0.2,
     ):
         if sample_rate < 8000:
             raise ValueError(
@@ -86,6 +96,17 @@ class BpskPpsCalibratorMF:
         self.sample_rate = int(sample_rate)
         self.consecutive_required = int(consecutive_required)
         self.edge_tolerance_samples = int(edge_tolerance_samples)
+        # Cascade-tolerance gate (post-acquisition): once acquired, only
+        # update ``_last_edge_rtp`` from edges within this window.  Wider
+        # than ``edge_tolerance_samples`` so legitimate slow drift still
+        # tracks; tighter than typical Costas-loop noise excursions
+        # (10s-100s ms) so noise edges cannot pull the reference and
+        # cause cascade re-locks at a wrong within-second offset.  See
+        # the 2026-05-08 diagnostic capture in /var/lib/timestd/debug/
+        # for the data that motivated this gate.
+        self.cascade_tolerance_samples = max(
+            1, int(round(float(cascade_tolerance_ms) * sample_rate / 1000.0))
+        )
         self._N = self.sample_rate // 2
 
         # Costas state. Loop coefficient α = 1 - exp(-2π·BW·dt), where
@@ -116,7 +137,47 @@ class BpskPpsCalibratorMF:
         self.pps_ok: int = 0
         self.pps_noise: int = 0
         self.pps_consecutive: int = 0
+        # ACQUIRING (False): every detected-and-classified edge updates
+        # ``_last_edge_rtp`` so the reference walks toward whatever
+        # offset the calibrator can find consistently.  TRACKING (True,
+        # transitions once when ``pps_consecutive`` first reaches
+        # ``consecutive_required``, never falls back without ``reset()``):
+        # only edges within ``cascade_tolerance_samples`` of the
+        # reference update it — noise cascades cannot shift the lock.
+        self._acquired: bool = False
         self._chain_delay_samples: Optional[float] = None
+
+        # Diagnostic capture (opt-in via TOML).  When enabled, records
+        # the matched-filter output ``y`` and every sub/above-threshold
+        # peak the detector finds, then dumps a single NPZ when the
+        # capture window closes.  Used to diagnose why the calibrator
+        # sometimes re-locks against a candidate ~60 samples (= 2 ×
+        # edge_tolerance_samples at 96 kHz) away from the original PPS
+        # edge — the cluster pattern visible in production logs hints
+        # at a deterministic phantom peak whose source we don't yet
+        # know (Costas π-flip, MF sidelobe, multipath, dual-source).
+        # Captured fields per batch: y_full slice, rtp_at_y slice, the
+        # Costas phase, and a wall-clock timestamp.  Per peak: rtp,
+        # |y|, sign, threshold, peak_running, accept/reject reason.
+        self._debug_path: Optional[Path] = (
+            Path(debug_dump_path) if debug_dump_path else None
+        )
+        self._debug_dump_seconds: float = float(debug_dump_seconds)
+        self._debug_subthreshold_factor: float = float(
+            debug_dump_subthreshold_factor
+        )
+        self._debug_started_wall: Optional[float] = None
+        self._debug_done: bool = False
+        self._debug_y_chunks: List[np.ndarray] = []
+        self._debug_rtp_chunks: List[np.ndarray] = []
+        self._debug_phase_per_batch: List[float] = []
+        self._debug_batch_wall: List[float] = []
+        # Each peak record: (batch_idx, peak_rtp, peak_rtp_frac, ay,
+        # threshold, peak_running, sign_y, classification, gap_to_last,
+        # offset_d, last_edge_rtp_at_eval).
+        # classification: 0=accepted, 1=rejected_offset, 2=skip_short_gap,
+        # 3=below_threshold (sub-threshold debug capture only).
+        self._debug_peaks: List[tuple] = []
 
     @property
     def locked(self) -> bool:
@@ -134,6 +195,7 @@ class BpskPpsCalibratorMF:
         self.pps_ok = 0
         self.pps_noise = 0
         self.pps_consecutive = 0
+        self._acquired = False
         self._chain_delay_samples = None
 
     def process_samples(
@@ -195,6 +257,28 @@ class BpskPpsCalibratorMF:
             y_full = y
             rtp_full = rtp_at_y
 
+        # Diagnostic capture: snapshot the per-batch y / rtp / phase
+        # before peak detection (so the captured signal is exactly what
+        # the detector saw).  Per-batch y has no overlap with previous
+        # batches; the analyzer can simply concatenate by batch order.
+        if (self._debug_path is not None
+                and not self._debug_done
+                and len(y) > 0):
+            now = time.time()
+            if self._debug_started_wall is None:
+                self._debug_started_wall = now
+                logger.info(
+                    f"BPSK MF debug capture started: path={self._debug_path}, "
+                    f"window={self._debug_dump_seconds:.1f}s, "
+                    f"subthreshold_factor={self._debug_subthreshold_factor}"
+                )
+            self._debug_y_chunks.append(y.copy())
+            self._debug_rtp_chunks.append(rtp_at_y.copy())
+            self._debug_phase_per_batch.append(float(self._phase))
+            self._debug_batch_wall.append(now)
+            if (now - self._debug_started_wall) >= self._debug_dump_seconds:
+                self._flush_debug()
+
         if len(y_full) >= 3:
             self._detect_and_record_peaks(y_full, rtp_full)
 
@@ -237,9 +321,32 @@ class BpskPpsCalibratorMF:
                 self._peak_running * 0.95 + batch_max * 0.05,
             )
         threshold = 0.5 * self._peak_running
+        debug_active = (
+            self._debug_path is not None
+            and not self._debug_done
+            and self._debug_started_wall is not None
+        )
+        debug_threshold = (
+            self._debug_subthreshold_factor * self._peak_running
+            if debug_active else None
+        )
+        batch_idx = len(self._debug_y_chunks) - 1 if debug_active else -1
 
         for pi in peak_idx:
+            # CLASSIFICATION constants:
+            #   0 accepted, 1 rejected_offset, 2 skip_short_gap,
+            #   3 below_threshold.
             if ay[pi] < threshold:
+                if debug_active and ay[pi] >= debug_threshold:
+                    self._debug_peaks.append((
+                        batch_idx, int(rtp_at_y[pi]), 0.0,
+                        float(ay[pi]), float(threshold),
+                        float(self._peak_running),
+                        float(np.sign(y[pi])),
+                        3,  # below_threshold
+                        0, 0, self._last_edge_rtp or 0,
+                        self.pps_consecutive,
+                    ))
                 continue
 
             # Parabolic sub-sample interp on |y|.
@@ -253,13 +360,27 @@ class BpskPpsCalibratorMF:
 
             edge_rtp_int = int(rtp_at_y[pi])
             edge_rtp_frac = float(delta)
+            gap_dbg = 0
+            d_dbg = 0
+            last_edge_at_eval = self._last_edge_rtp or 0
 
             if self._last_edge_rtp is not None:
                 gap = (edge_rtp_int - self._last_edge_rtp) & 0xFFFFFFFF
                 if gap > 0x7FFFFFFF:
                     gap -= 0x100000000
+                gap_dbg = int(gap)
                 # Reject sidelobes / spurious peaks <0.99 s away.
                 if abs(gap) < int(0.99 * self.sample_rate):
+                    if debug_active:
+                        self._debug_peaks.append((
+                            batch_idx, edge_rtp_int, edge_rtp_frac,
+                            float(ay[pi]), float(threshold),
+                            float(self._peak_running),
+                            float(np.sign(y[pi])),
+                            2,  # skip_short_gap
+                            gap_dbg, 0, last_edge_at_eval,
+                            self.pps_consecutive,
+                        ))
                     continue
 
                 cur_off = edge_rtp_int % self.sample_rate
@@ -267,14 +388,39 @@ class BpskPpsCalibratorMF:
                 d = (cur_off - prev_off) % self.sample_rate
                 if d >= self.sample_rate // 2:
                     d -= self.sample_rate
+                d_dbg = int(d)
                 if abs(d) > self.edge_tolerance_samples:
                     self.pps_noise += 1
                     self.pps_consecutive = 0
-                    self._last_edge_rtp = edge_rtp_int
+                    # Cascade-tolerance gate: once acquired, only update
+                    # the reference if the noise edge is within
+                    # cascade_tolerance.  Out-of-cascade edges (typical
+                    # Costas-drift cascades at 100+ ms) leave
+                    # ``_last_edge_rtp`` proven-good so the calibrator
+                    # can resume normal accept-flow once Costas
+                    # recovers, instead of latching onto the drifted
+                    # offset.  During acquisition the original walking
+                    # behaviour applies so the bootstrap can converge.
+                    if (not self._acquired
+                            or abs(d) <= self.cascade_tolerance_samples):
+                        self._last_edge_rtp = edge_rtp_int
+                    if debug_active:
+                        self._debug_peaks.append((
+                            batch_idx, edge_rtp_int, edge_rtp_frac,
+                            float(ay[pi]), float(threshold),
+                            float(self._peak_running),
+                            float(np.sign(y[pi])),
+                            1,  # rejected_offset
+                            gap_dbg, d_dbg, last_edge_at_eval,
+                            self.pps_consecutive,  # already reset to 0
+                        ))
                     continue
 
             self.pps_ok += 1
             self.pps_consecutive += 1
+            if (not self._acquired
+                    and self.pps_consecutive >= self.consecutive_required):
+                self._acquired = True
 
             edge_rtp_full = edge_rtp_int + edge_rtp_frac
             # chain_delay = "where in the second the edge arrived,"
@@ -289,6 +435,104 @@ class BpskPpsCalibratorMF:
             chain_delay_samples = edge_rtp_full % self.sample_rate
             self._chain_delay_samples = float(chain_delay_samples)
             self._last_edge_rtp = edge_rtp_int
+            if debug_active:
+                self._debug_peaks.append((
+                    batch_idx, edge_rtp_int, edge_rtp_frac,
+                    float(ay[pi]), float(threshold),
+                    float(self._peak_running),
+                    float(np.sign(y[pi])),
+                    0,  # accepted
+                    gap_dbg, d_dbg, last_edge_at_eval,
+                    self.pps_consecutive,
+                ))
+
+    def _flush_debug(self) -> None:
+        """Write the captured y / peaks / phase to NPZ, then disable
+        further capture for this process."""
+        if self._debug_path is None or self._debug_done:
+            return
+        try:
+            self._debug_path.parent.mkdir(parents=True, exist_ok=True)
+            # Concatenate per-batch arrays.  Per-batch y and rtp_at_y
+            # have no overlap, so straight concat gives a clean
+            # continuous signal.
+            y_concat = (np.concatenate(self._debug_y_chunks)
+                        if self._debug_y_chunks else np.zeros(0))
+            rtp_concat = (np.concatenate(self._debug_rtp_chunks)
+                          if self._debug_rtp_chunks
+                          else np.zeros(0, dtype=np.int64))
+            # Per-batch indexing into the concatenated arrays.
+            chunk_lens = np.array(
+                [len(c) for c in self._debug_y_chunks], dtype=np.int64
+            )
+            batch_starts = np.concatenate(
+                [[0], np.cumsum(chunk_lens)[:-1]]
+            ) if len(chunk_lens) else np.zeros(0, dtype=np.int64)
+            phase_per_batch = np.array(
+                self._debug_phase_per_batch, dtype=np.float64
+            )
+            batch_wall = np.array(self._debug_batch_wall, dtype=np.float64)
+            # Peaks as 2-D float64 array (lossy on rtp ints — keep the
+            # int columns separate to preserve full precision).
+            if self._debug_peaks:
+                peaks_arr = np.array(
+                    [
+                        [
+                            r[0], r[1], r[2], r[3], r[4], r[5], r[6],
+                            r[7], r[8], r[9], r[10], r[11],
+                        ]
+                        for r in self._debug_peaks
+                    ],
+                    dtype=np.float64,
+                )
+            else:
+                peaks_arr = np.zeros((0, 12), dtype=np.float64)
+            np.savez_compressed(
+                self._debug_path,
+                y=y_concat,
+                rtp=rtp_concat,
+                batch_starts=batch_starts,
+                phase_per_batch=phase_per_batch,
+                batch_wall=batch_wall,
+                peaks=peaks_arr,
+                sample_rate=np.int64(self.sample_rate),
+                edge_tolerance_samples=np.int64(self.edge_tolerance_samples),
+                consecutive_required=np.int64(self.consecutive_required),
+                # Column legend for `peaks` (for offline analyzers):
+                # 0 batch_idx (into batch_starts/phase_per_batch),
+                # 1 peak_rtp_int, 2 peak_rtp_frac (sub-sample),
+                # 3 ay, 4 threshold, 5 peak_running, 6 sign_y,
+                # 7 classification (0 acc, 1 rej_offset,
+                #   2 skip_short_gap, 3 below_threshold),
+                # 8 gap_to_last (samples), 9 offset_d (samples,
+                #   within-second), 10 last_edge_rtp_at_eval,
+                # 11 pps_consecutive_post.
+                peaks_columns=np.array(
+                    [
+                        'batch_idx', 'peak_rtp_int', 'peak_rtp_frac',
+                        'ay', 'threshold', 'peak_running', 'sign_y',
+                        'classification', 'gap_to_last', 'offset_d',
+                        'last_edge_rtp_at_eval', 'pps_consecutive_post',
+                    ],
+                    dtype=object,
+                ),
+            )
+            logger.warning(
+                f"BPSK MF debug capture COMPLETE: file={self._debug_path}, "
+                f"batches={len(self._debug_y_chunks)}, "
+                f"y_samples={len(y_concat)}, peaks={len(self._debug_peaks)}"
+            )
+        except Exception as e:
+            logger.error(f"BPSK MF debug flush failed: {e}", exc_info=True)
+        finally:
+            # Drop references regardless so we don't keep megabytes of
+            # arrays around if write failed mid-way.
+            self._debug_y_chunks = []
+            self._debug_rtp_chunks = []
+            self._debug_phase_per_batch = []
+            self._debug_batch_wall = []
+            self._debug_peaks = []
+            self._debug_done = True
 
     def _maybe_result(self) -> Optional[PpsCalibrationResult]:
         if self.locked and self._chain_delay_samples is not None:

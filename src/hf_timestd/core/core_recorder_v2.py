@@ -298,6 +298,20 @@ class CoreRecorderV2:
                         consecutive_required=self._t6_config.get('consecutive_required', 10),
                         edge_tolerance_samples=self._t6_config.get('edge_tolerance_samples', 30),
                         costas_loop_bw_hz=self._t6_config.get('costas_loop_bw_hz', 1.0),
+                        cascade_tolerance_ms=self._t6_config.get('cascade_tolerance_ms', 3.0),
+                        # Diagnostic capture (opt-in).  When
+                        # debug_dump_path is set, the MF calibrator
+                        # records the matched-filter output ``y``,
+                        # detected peak metadata, and Costas phase per
+                        # batch to a single NPZ for offline analysis.
+                        # Used to investigate the cascade re-lock
+                        # against secondary candidates ~60 samples
+                        # away from the real PPS edge.
+                        debug_dump_path=self._t6_config.get('debug_dump_path'),
+                        debug_dump_seconds=self._t6_config.get('debug_dump_seconds', 60.0),
+                        debug_dump_subthreshold_factor=self._t6_config.get(
+                            'debug_dump_subthreshold_factor', 0.2
+                        ),
                     )
                     logger.info(f"T6 BPSK PPS calibrator (matched-filter) initialized: "
                                 f"freq={freq_hz/1e6:.6f} MHz, sr={sr}")
