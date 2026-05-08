@@ -10,6 +10,9 @@ StartLimitBurst=5
 Type=notify
 User=timestd
 Group=timestd
+# Operator identity (callsign, grid) from sigmond — CLIENT-CONTRACT §14.2
+EnvironmentFile=-/etc/sigmond/coordination.env
+
 EnvironmentFile=/etc/hf-timestd/environment
 Environment=NETRC=/etc/hf-timestd/earthdata-netrc
 Environment=MALLOC_ARENA_MAX=2

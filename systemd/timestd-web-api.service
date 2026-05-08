@@ -11,6 +11,9 @@ Group=timestd
 WorkingDirectory=/opt/hf-timestd/web-api
 # NOTE: No PYTHONPATH set - the venv has hf_timestd installed as a proper package
 # Setting PYTHONPATH to a non-existent or repo path causes import confusion
+# Operator identity (callsign, grid) from sigmond — CLIENT-CONTRACT §14.2
+EnvironmentFile=-/etc/sigmond/coordination.env
+
 Environment="PATH=/opt/hf-timestd/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 Environment=MALLOC_ARENA_MAX=2
 

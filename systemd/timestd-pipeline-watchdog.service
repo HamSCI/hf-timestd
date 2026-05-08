@@ -4,6 +4,9 @@ Documentation=https://github.com/mijahauan/hf-timestd
 
 [Service]
 Type=oneshot
+# Operator identity (callsign, grid) from sigmond — CLIENT-CONTRACT §14.2
+EnvironmentFile=-/etc/sigmond/coordination.env
+
 ExecStart=/opt/hf-timestd/scripts/pipeline-watchdog.sh
 User=root
 Nice=19

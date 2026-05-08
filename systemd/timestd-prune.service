@@ -13,6 +13,9 @@ Group=timestd
 #   2. Archive completed raw IQ days to archive-root (if mounted)
 #   3. If disk > 80%, evict by priority: products → phase2 → vtec → raw_iq
 # Raw IQ is preserved on archive storage; only deleted as last resort.
+# Operator identity (callsign, grid) from sigmond — CLIENT-CONTRACT §14.2
+EnvironmentFile=-/etc/sigmond/coordination.env
+
 ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.quota_manager \
     --data-root /var/lib/timestd \
     --threshold 80 \

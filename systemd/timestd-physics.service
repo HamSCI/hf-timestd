@@ -13,6 +13,9 @@ Group=timestd
 # Watchdog: restart if no heartbeat for 120s (2 minutes)
 WatchdogSec=120
 
+# Operator identity (callsign, grid) from sigmond — CLIENT-CONTRACT §14.2
+EnvironmentFile=-/etc/sigmond/coordination.env
+
 Environment=MALLOC_ARENA_MAX=2
 
 # Run as the installed module from the venv

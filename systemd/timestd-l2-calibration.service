@@ -8,6 +8,9 @@ Wants=timestd-metrology.service
 Type=notify
 User=timestd
 Group=timestd
+# Operator identity (callsign, grid) from sigmond — CLIENT-CONTRACT §14.2
+EnvironmentFile=-/etc/sigmond/coordination.env
+
 EnvironmentFile=/etc/hf-timestd/environment
 Environment=MALLOC_ARENA_MAX=2
 WorkingDirectory=/var/lib/timestd

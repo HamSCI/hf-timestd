@@ -13,6 +13,9 @@ User=timestd
 Group=timestd
 
 # Environment
+# Operator identity (callsign, grid) from sigmond — CLIENT-CONTRACT §14.2
+EnvironmentFile=-/etc/sigmond/coordination.env
+
 EnvironmentFile=-/etc/hf-timestd/environment
 Environment=NETRC=/etc/hf-timestd/earthdata-netrc
 

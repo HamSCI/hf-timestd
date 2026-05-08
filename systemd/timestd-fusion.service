@@ -28,6 +28,9 @@ WatchdogSec=120
 # The fusion service calls systemd_daemon.notify('READY=1') on startup
 # and systemd_daemon.notify('WATCHDOG=1') in the main loop
 
+# Operator identity (callsign, grid) from sigmond — CLIENT-CONTRACT §14.2
+EnvironmentFile=-/etc/sigmond/coordination.env
+
 Environment=MALLOC_ARENA_MAX=2
 
 # Run as the installed module from the venv

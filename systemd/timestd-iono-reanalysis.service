@@ -13,6 +13,9 @@ Nice=19
 IOSchedulingClass=idle
 
 # Ensure output directories exist with correct permissions
+# Operator identity (callsign, grid) from sigmond — CLIENT-CONTRACT §14.2
+EnvironmentFile=-/etc/sigmond/coordination.env
+
 ExecStartPre=+/bin/mkdir -p /var/lib/timestd/phase2/science/propagation_stats
 ExecStartPre=+/bin/mkdir -p /var/lib/timestd/phase2/science/tec_reanalyzed
 ExecStartPre=+/usr/bin/chown -R timestd:timestd /var/lib/timestd/phase2/science

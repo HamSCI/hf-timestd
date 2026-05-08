@@ -10,6 +10,9 @@ Group=root
 # Run the reach monitoring script
 # Alert if reach < 64 (decimal) = 25% success rate
 # Restart if reach is 0 (requires --restart-on-failure)
+# Operator identity (callsign, grid) from sigmond — CLIENT-CONTRACT §14.2
+EnvironmentFile=-/etc/sigmond/coordination.env
+
 ExecStart=/opt/hf-timestd/scripts/check-chrony-reach.sh --threshold 64 --verbose --restart-on-failure
 
 # Log output to journal

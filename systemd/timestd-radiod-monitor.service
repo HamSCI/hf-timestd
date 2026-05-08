@@ -10,6 +10,9 @@ Group=timestd
 WorkingDirectory=/opt/hf-timestd
 
 # Environment from file
+# Operator identity (callsign, grid) from sigmond — CLIENT-CONTRACT §14.2
+EnvironmentFile=-/etc/sigmond/coordination.env
+
 EnvironmentFile=-/etc/hf-timestd/environment
 
 # Run the radiod health monitor

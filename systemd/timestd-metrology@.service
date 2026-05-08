@@ -16,6 +16,9 @@ Type=simple
 User=timestd
 Group=timestd
 
+# Operator identity (callsign, grid) from sigmond — CLIENT-CONTRACT §14.2
+EnvironmentFile=-/etc/sigmond/coordination.env
+
 EnvironmentFile=/etc/hf-timestd/environment
 EnvironmentFile=/etc/hf-timestd/metrology-channels/%i.env
 # Limit glibc malloc arenas — prevents 1.5-2 GB VmData growth from numpy/scipy

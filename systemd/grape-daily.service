@@ -8,6 +8,9 @@ Type=oneshot
 User=timestd
 Group=timestd
 WorkingDirectory=/var/lib/timestd
+# Operator identity (callsign, grid) from sigmond — CLIENT-CONTRACT §14.2
+EnvironmentFile=-/etc/sigmond/coordination.env
+
 Environment=PATH=/opt/hf-timestd/venv/bin:/usr/bin:/bin
 
 # Full orchestrated pipeline: decimate → spectrogram → package → upload

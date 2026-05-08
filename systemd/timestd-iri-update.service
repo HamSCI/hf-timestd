@@ -14,6 +14,9 @@ Type=oneshot
 User=root
 Group=root
 
+# Operator identity (callsign, grid) from sigmond — CLIENT-CONTRACT §14.2
+EnvironmentFile=-/etc/sigmond/coordination.env
+
 ExecStart=/opt/hf-timestd/scripts/update-iri-indices.sh
 
 Restart=on-failure
