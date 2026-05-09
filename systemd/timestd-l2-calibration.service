@@ -25,7 +25,7 @@ ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.core.l2_calibration_serv
     --log-level INFO
 
 # Resource limits - yield to radiod which handles real-time USB/FFT
-Nice=5
+Nice=-10
 MemoryMax=600M
 MemorySwapMax=0
 

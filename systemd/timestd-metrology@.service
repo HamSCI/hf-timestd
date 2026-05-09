@@ -66,7 +66,7 @@ OOMScoreAdjust=-500
 # Limit each worker to 50% of one core; 9 workers × 50% = 450% max
 # Leaves headroom for radiod (~110%) and system on 800% total
 CPUQuota=50%
-Nice=5
+Nice=-10
 
 # --- Logging ---
 StandardOutput=journal
