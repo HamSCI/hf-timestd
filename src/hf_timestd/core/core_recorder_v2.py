@@ -860,6 +860,14 @@ class CoreRecorderV2:
                     on_samples=self._t6_on_samples,
                     low_edge=low_edge_hz,
                     high_edge=high_edge_hz,
+                    # Wider ACK timeout (vs. default 5 s) — when
+                    # several producer clients register channels in
+                    # quick succession, radiod can stall and a 5 s
+                    # window fails T6 registration.  Without T6, the
+                    # PPS calibrator never starts and TSL3 silently
+                    # goes dark.  Observed on bee1 2026-05-08 in a
+                    # multi-client restart cascade.
+                    timeout=30.0,
                 )
                 self._t6_channel_info = channel_info
                 if self.data_destination is None and channel_info is not None:
@@ -892,6 +900,9 @@ class CoreRecorderV2:
                 gain=0.0,
                 low_edge=low_edge_hz,
                 high_edge=high_edge_hz,
+                # Same wider-timeout rationale as the shared-MultiStream
+                # branch above.
+                timeout=30.0,
             )
             self._t6_channel_info = channel_info
             if self.data_destination is None and channel_info is not None:
