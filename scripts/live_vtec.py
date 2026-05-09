@@ -97,8 +97,19 @@ def main():
     # But if run as a service with no args, respect 'enabled'.
     if not (args.host or args.port or args.download_only):
         if not enabled:
-            logger.info("GNSS VTEC monitoring is disabled in config. Exiting.")
-            return
+            # Stay alive in idle so Type=notify is satisfied — exiting here
+            # makes systemd flag Result=protocol (READY=1 never sent) and
+            # Restart=always turns the disabled state into a tight respawn
+            # loop.  Notify ready, then sleep; the watchdog kick keeps
+            # systemd happy if WatchdogSec is set.
+            logger.info("GNSS VTEC monitoring is disabled in config. Idle.")
+            if SYSTEMD_AVAILABLE:
+                systemd_daemon.notify('READY=1')
+                systemd_daemon.notify('STATUS=GNSS VTEC disabled in config')
+            while True:
+                time.sleep(60)
+                if SYSTEMD_AVAILABLE:
+                    systemd_daemon.notify('WATCHDOG=1')
 
     # 1. Prepare DCB Data (only if GNSS VTEC is enabled)
     dcb_data = {}
