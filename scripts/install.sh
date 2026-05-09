@@ -561,7 +561,11 @@ for tf in \
     timestd-ionex-download.service timestd-ionex-download.timer \
     timestd-chrony-monitor.service timestd-chrony-monitor.timer \
     timestd-iono-reanalysis.service timestd-iono-reanalysis.timer \
+    timestd-iri-healthcheck.service timestd-iri-healthcheck.timer \
+    timestd-iri-update.service timestd-iri-update.timer \
     timestd-pipeline-watchdog.service timestd-pipeline-watchdog.timer \
+    timestd-prune.service timestd-prune.timer \
+    timestd-vtec.service \
     grape-daily.service grape-daily.timer \
     grape-upload-retry.service grape-upload-retry.timer \
     timestd-alert@.service
