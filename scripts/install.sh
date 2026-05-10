@@ -246,9 +246,23 @@ log_info "Directories: OK"
 # ════════════════════════════════════════════════════════════════════
 log_step "Phase 2: Configuration"
 
+# When --yes is given but no config exists yet, defer the interactive
+# wizard so the install can still complete unattended (e.g. invoked from
+# `smd install hf-timestd --yes` or another non-TTY context).  Phase 7
+# (service start) is skipped in this case — services would fail without
+# config anyway.  The user is told how to finish the configuration.
+WIZARD_DEFERRED=false
 if [[ ! -f "$MAIN_CONFIG" ]]; then
-    log_info "No config found — running setup wizard..."
-    bash "$PROJECT_DIR/scripts/setup-station.sh" --config "$MAIN_CONFIG"
+    if [[ "$AUTO_YES" == "true" ]]; then
+        log_warn "No config found and --yes given — setup wizard deferred."
+        log_warn "Configure the station before starting services with:"
+        log_warn "    sudo bash $PROJECT_DIR/scripts/setup-station.sh --config $MAIN_CONFIG"
+        log_warn "or rerun this installer without --yes."
+        WIZARD_DEFERRED=true
+    else
+        log_info "No config found — running setup wizard..."
+        bash "$PROJECT_DIR/scripts/setup-station.sh" --config "$MAIN_CONFIG"
+    fi
 elif [[ "$RECONFIG" == "true" ]]; then
     bash "$PROJECT_DIR/scripts/setup-station.sh" --config "$MAIN_CONFIG" --reconfig
 elif [[ "$FIRST_RUN" == "false" && "$AUTO_YES" == "false" ]]; then
@@ -512,6 +526,25 @@ except Exception: print('no')" 2>/dev/null)
 else
     log_info "PHaRLAP not found at $PHARLAP_HOME — raytracing disabled"
     log_info "  See docs/EXTERNAL_PREREQUISITES.md for acquisition instructions"
+fi
+
+
+# ════════════════════════════════════════════════════════════════════
+# Early-exit when station config is deferred
+# ════════════════════════════════════════════════════════════════════
+# Phases 5–8 all read values from $MAIN_CONFIG (CFG_TIERED, CFG_CALLSIGN,
+# metrology channels, archive paths, …).  When --yes was passed without
+# an existing config we deferred the wizard above; finishing those phases
+# now would either crash on unbound variables or install half-configured
+# units.  Exit cleanly so the operator can run setup-station.sh, then
+# re-run this installer to complete Phases 5–8.
+if [[ "$WIZARD_DEFERRED" == "true" ]]; then
+    log_info ""
+    log_info "Install partially complete — phases 5-8 deferred until config is set up."
+    log_info "Next steps:"
+    log_info "  1. sudo bash $PROJECT_DIR/scripts/setup-station.sh --config $MAIN_CONFIG"
+    log_info "  2. sudo bash $PROJECT_DIR/scripts/install.sh   # re-run to install systemd units + start services"
+    exit 0
 fi
 
 
