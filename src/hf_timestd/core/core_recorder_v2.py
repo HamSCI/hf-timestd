@@ -60,6 +60,17 @@ from .timing_calibrator import TimingCalibrator
 
 logger = logging.getLogger(__name__)
 
+# radiod auto-destruct timer for our channels (units: radiod main-loop
+# frames, ~50 Hz at default 20 ms blocktime → 6000 frames ≈ 120 s).
+# Without this, channels we allocated stay live in radiod forever after
+# the python process exits — radiod has no way to know we're gone, so
+# it keeps streaming bandwidth that nobody consumes. CoreRecorderV2
+# starts a keepalive thread that refreshes this every ~30 s while
+# we're running; on clean exit + crash the channel auto-destructs in
+# at most LIFETIME / 50 seconds.
+RADIOD_LIFETIME_FRAMES = 6000
+
+
 def get_host_ip() -> str:
     """Detect main network interface IP."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -216,6 +227,12 @@ class CoreRecorderV2:
         
         # Per-channel recorders (ssrc -> StreamRecorderV2)
         self.recorders: Dict[str, StreamRecorderV2] = {}
+
+        # (multi_or_control, ssrc) pairs — populated as channels are
+        # provisioned, used by the keep-alive thread to refresh radiod's
+        # LIFETIME timer so the channels self-destruct after we exit.
+        self._lifetime_entries: list = []
+        self._lifetime_thread: Optional[threading.Thread] = None
         
         logger.info(f"CoreRecorderV2: {len(self.channel_specs)} channels configured")
         logger.info(f"  Defaults: preset={self.channel_defaults.get('preset')}, "
@@ -472,6 +489,13 @@ class CoreRecorderV2:
                 recorder.start()
                 logger.info(f"Started recorder for {recorder.config.frequency_hz/1e6:.3f} MHz ({recorder.config.description})")
 
+                # Track for lifetime keepalive — legacy mode uses RadiodControl
+                # directly (per-channel RadiodStream + per-channel UDP socket).
+                if recorder.config.ssrc:
+                    self._lifetime_entries.append(
+                        (self.control, recorder.config.ssrc)
+                    )
+
                 # Register SSRC now that recorder is started and SSRC is resolved
                 if self.calibrator:
                     try:
@@ -509,8 +533,14 @@ class CoreRecorderV2:
                 )
                 return
 
+        # Start the LIFETIME keepalive thread now that every channel
+        # (archive + T6) has been provisioned and its SSRC is in
+        # self._lifetime_entries. Without this, channels self-destruct
+        # ~120 s after start; the keepalive refreshes every ~30 s.
+        self._start_lifetime_keepalive()
+
         logger.info("Core recorder running. Press Ctrl+C to stop.")
-        
+
         # Notify systemd we're ready
         if SYSTEMD_AVAILABLE:
             systemd_daemon.notify('READY=1')
@@ -609,7 +639,48 @@ class CoreRecorderV2:
         """Handle shutdown signals."""
         logger.info(f"Received signal {signum}, shutting down...")
         self.running = False
-    
+
+    def _start_lifetime_keepalive(self) -> None:
+        """Refresh radiod's LIFETIME on every active SSRC at frames/4 cadence.
+
+        No-op when no channels were provisioned with a lifetime. Failure
+        to refresh (network blip, radiod restart) must not crash the
+        recorder — log and continue; on radiod recovery the channel will
+        be re-provisioned via the normal ensure/add path.
+        """
+        if not self._lifetime_entries:
+            return
+        # Refresh every quarter of the lifetime — gives 4× safety margin
+        # against radiod self-destruct if a single refresh is missed.
+        # Floor at 1 s so absurd configs don't busy-loop.
+        interval = max(RADIOD_LIFETIME_FRAMES / 50.0 / 4.0, 1.0)
+        logger.info(
+            "lifetime keepalive: %d channels, %d frames, refresh every %.1fs",
+            len(self._lifetime_entries),
+            RADIOD_LIFETIME_FRAMES,
+            interval,
+        )
+        self._lifetime_thread = threading.Thread(
+            target=self._lifetime_loop,
+            args=(interval,),
+            daemon=True,
+            name="lifetime",
+        )
+        self._lifetime_thread.start()
+
+    def _lifetime_loop(self, interval_sec: float) -> None:
+        while self.running:
+            time.sleep(interval_sec)
+            if not self.running:
+                break
+            for owner, ssrc in self._lifetime_entries:
+                try:
+                    owner.set_channel_lifetime(ssrc, RADIOD_LIFETIME_FRAMES)
+                except Exception as exc:
+                    logger.warning(
+                        "lifetime keepalive failed (ssrc=%s): %s", ssrc, exc,
+                    )
+
     @staticmethod
     def _resolve_encoding(encoding_val) -> int:
         """Map encoding string or value to Encoding constant."""
@@ -780,6 +851,10 @@ class CoreRecorderV2:
                             f"Registered {description} on shared MultiStream "
                             f"(SSRC {recorder.config.ssrc:08x})"
                         )
+                        if recorder.config.ssrc:
+                            self._lifetime_entries.append(
+                                (self._multi, recorder.config.ssrc)
+                            )
                         # Calibrator SSRC registration happens here in
                         # shared mode (legacy mode does it in run() after
                         # recorder.start()).  ssrc is populated by
@@ -868,8 +943,12 @@ class CoreRecorderV2:
                     # goes dark.  Observed on bee1 2026-05-08 in a
                     # multi-client restart cascade.
                     timeout=30.0,
+                    # Self-destruct timer; CoreRecorderV2 keeps it refreshed.
+                    lifetime=RADIOD_LIFETIME_FRAMES,
                 )
                 self._t6_channel_info = channel_info
+                if channel_info is not None and getattr(channel_info, 'ssrc', 0):
+                    self._lifetime_entries.append((self._multi, channel_info.ssrc))
                 if self.data_destination is None and channel_info is not None:
                     self.data_destination = getattr(
                         channel_info, 'multicast_address', None
@@ -903,8 +982,12 @@ class CoreRecorderV2:
                 # Same wider-timeout rationale as the shared-MultiStream
                 # branch above.
                 timeout=30.0,
+                # Self-destruct timer; CoreRecorderV2 keeps it refreshed.
+                lifetime=RADIOD_LIFETIME_FRAMES,
             )
             self._t6_channel_info = channel_info
+            if channel_info is not None and getattr(channel_info, 'ssrc', 0):
+                self._lifetime_entries.append((self.control, channel_info.ssrc))
             if self.data_destination is None and channel_info is not None:
                 self.data_destination = getattr(channel_info, 'multicast_address', None)
                 logger.info(

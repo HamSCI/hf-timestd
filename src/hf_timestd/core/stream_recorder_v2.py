@@ -28,6 +28,16 @@ from typing import Dict, Any, Optional, Callable
 from dataclasses import dataclass
 from enum import Enum
 
+# radiod auto-destruct timer for our channels (units: radiod main-loop
+# frames, ~50 Hz at default 20 ms blocktime → 6000 frames ≈ 120 s).
+# Without this, channels we allocated stay live in radiod forever after
+# the python process exits — radiod has no way to know we're gone, so
+# it keeps streaming bandwidth that nobody consumes.  CoreRecorderV2
+# starts a keepalive thread that refreshes this every ~30 s while
+# we're running; on clean exit + crash the channel auto-destructs in
+# at most LIFETIME / 50 seconds.
+RADIOD_LIFETIME_FRAMES = 6000
+
 from ka9q import RadiodStream, ChannelInfo, StreamQuality, RadiodControl
 
 # NOTE (2026-02-03): Bootstrap functionality migrated into MetrologyEngine.
@@ -331,6 +341,8 @@ class StreamRecorderV2:
             'encoding': self.config.encoding,
             'timeout': 10.0,
             'frequency_tolerance': 1.0,
+            # Self-destruct timer; CoreRecorderV2 keeps it refreshed.
+            'lifetime': RADIOD_LIFETIME_FRAMES,
         }
         
         # Check backend capabilities
@@ -460,6 +472,8 @@ class StreamRecorderV2:
             'encoding': self.config.encoding,
             'timeout': 10.0,
             'frequency_tolerance': 1.0,
+            # Self-destruct timer; CoreRecorderV2 keeps it refreshed.
+            'lifetime': RADIOD_LIFETIME_FRAMES,
         }
 
         caps = {}
@@ -511,6 +525,8 @@ class StreamRecorderV2:
             on_samples=self._handle_samples,
             on_stream_dropped=self._on_stream_dropped,
             on_stream_restored=self._on_stream_restored,
+            # Self-destruct timer; CoreRecorderV2 keeps it refreshed.
+            lifetime=RADIOD_LIFETIME_FRAMES,
         )
         self._parent_multi = multi
         self._last_sample_time = time.time()
