@@ -137,6 +137,25 @@ the `rtp_to_utc_offset_ns` field would have to remain a permanent
 lie (always 0 by construction). That is exactly the contradiction
 that produced the +237 ms incident.
 
+### 4.1 Sign convention — locked
+
+All probes in the cascade use a single convention for `offset_ms`,
+matching `ChronyTrackingProbe`'s existing behaviour:
+
+> **`offset_ms = local_clock − source_UTC`**
+> (positive when the local system clock reads after the source's view of UTC)
+
+Consumers apply the offset as `utc_estimate = system_time − offset_ms / 1000`.
+T6's contribution under this convention is **not** `chain_delay` — that
+would be a physical RX-chain latency, a different quantity. T6 publishes
+the **residual Δ** that the BPSK-PPS SHM math already computes
+internally: the fractional-second disagreement between
+`raw_wall_time − chain_delay` and the integer-second GPS source. When
+the system is well-disciplined Δ is sub-µs; when the anchor is stale
+(V1), Δ inflates to the anchor's accumulated error.
+
+This was confirmed empirically — see §6.5.
+
 ---
 
 ## 5. Bootstrap walk-through
@@ -282,6 +301,53 @@ single-sourced even if the writes are distributed.
 
 ---
 
+
+### 6.5 Empirical finding from 2026-05-11 02:34 UTC (step 1 verification)
+
+Initial implementation of §9 step 1 (have `BpskPpsProbe` publish
+`offset_ms = chain_delay_ns / 1_000_000`) was performed against bee1
+to verify the producer-side wiring. The result revealed a semantic
+mismatch:
+
+- BPSK probe published `offset_ms = 174.147` (chain_delay in ms)
+- `ChronyTrackingProbe` (T4) published `offset_ms ≈ 0` (chrony's
+  measured offset against `time` source, currently sub-µs)
+- `FusionStatusProbe` (T3) published `offset_ms ≈ 0` (fusion D_clock,
+  currently sub-ms)
+
+`AuthorityManager._cross_check` correctly identified this as a
+disagreement:
+
+```
+disagreement_flags: [
+  "T6<->T4:174.153ms>6.002ms",
+  "T6<->T3:174.295ms>3.746ms",
+  "majority-downgrade:T6->T4"
+]
+```
+
+T6 was refused promotion despite being structurally available. The
+cascade's safety machinery worked exactly as intended.
+
+**Conclusion:** publishing `chain_delay_ns` as `offset_ms` is wrong on
+the semantic — it's a physical RX-chain latency, not a clock-vs-source
+offset. The right value to publish is Δ (the BPSK SHM residual that
+chrony observes). Δ is already computed inside
+`core_recorder_v2.py:1352-1382` as
+`wall_time_sec - round(wall_time_sec)`; it just isn't currently
+exposed.
+
+The change was reverted. §9 step 1 is reformulated below to expose Δ
+via the status file's `l6_pps` block, then have the probe read and
+forward it.
+
+**Bonus finding (V6 partially closed):** the cascade's `_cross_check`
++ `_maybe_majority_downgrade` machinery is fully implemented. The V6
+fragility ("no cross-validation between SHM producers") was already
+addressed at the *probe* level — what's missing is using the same
+machinery against the SHM segments themselves. The infrastructure for
+that exists.
+
 ## 7. V-list — pipeline fragilities and what Pattern B fixes
 
 From the 2026-05-11 review session.
@@ -293,7 +359,7 @@ From the 2026-05-11 review session.
 | V3 | L2 propagation correction inflating WWVH by ~40 ms | **standalone** — bug in `l2_calibration_service`; exposed by cascade cross-check but not fixed by it |
 | V4 | TSL3 SHM uses `round(wall_time_sec)` for integer-second choice | **closed** — integer second comes from the cascade's published offset, not `round()` |
 | V5 | `rtp_to_utc_offset_ns` published in `authority.json` but never applied | **closed** — Pattern B *is* the application |
-| V6 | Three SHM segments with no cross-validation between them | **partially closed** — each producer consulting the same offset enforces consistency; explicit disagreement detection still wanted |
+| V6 | Three SHM segments with no cross-validation between them | **partially closed** — `AuthorityManager._cross_check` machinery is already implemented at the probe level (verified 2026-05-11, see §6.5); applying the same logic to SHM-segment outputs is the remaining work |
 | V7 | Chrony's "falseticker" marking on TSL3 is silent | **standalone** — needs a feedback loop reading `chronyc tracking` for hf-timestd's own SHM segments |
 | V8 | One-shot disambiguation at first lock, never refreshed | **closed** — replaced by continuous cascade orientation |
 | V9 | No precision-domain plausibility check between layers | **partially closed** — single offset with single sigma makes plausibility one check; cross-layer assertions still want explicit testing |
@@ -353,19 +419,52 @@ genuinely independent problems.
    (Intuition says yes, since the offset is small and the loop is
    weak, but worth a formal pass.)
 
+7. **chain_delay non-reproducibility across cold starts (V8).** Three
+   observed BPSK locks on bee1 yielded three different chain_delay
+   values for the same physical chain: 334.147 ms (2026-05-10 main
+   lock), 794.147 ms (2026-05-11 02:11 transient), 174.147 ms
+   (2026-05-11 02:13 post-restart). These differ by hundreds of ms
+   each. The wrap-disambiguation at first lock picks a different
+   "integer GPS second the edge belongs to" each time. Final
+   wall-clock is correct in each case (Δ converges), but the *published
+   chain_delay* is not a reproducible physical measurement — which
+   means it cannot serve as a per-deployment calibration constant
+   (relevant for V11 modulator-latency work). The disambiguation
+   correctness deserves its own investigation; the rough hypothesis is
+   that without a stable lower-tier reference at lock time, the
+   "as-is" acceptance branch (`core_recorder_v2.py:1217`) lands on
+   whichever integer-second the calibrator state machine happened to
+   converge to. This may be related to the time of day at lock or to
+   sample-buffer phase.
+
 ---
 
 ## 9. Suggested implementation phasing
 
 Not a commitment — a draft sequence.
 
-1. **Single-flag fix to verify the model.** Modify `BpskPpsProbe`
-   to publish `offset_ms = chain_delay_ns / 1_000_000` instead of
-   `0.0`. Don't change any consumer yet. Restart fusion, observe
-   `authority.json` carries a non-zero offset, observe chrony's
-   TSL3 offset doesn't change yet (because no consumer reads it).
-   This verifies the producer side without committing to consumer
-   changes.
+1. **Expose Δ from core-recorder and forward it via the BPSK probe.**
+   (Reformulated 2026-05-11 after the original "publish chain_delay"
+   prescription proved semantically wrong — see §6.5.)
+
+   - In `core_recorder_v2.py` at the TSL3 SHM update site
+     (lines 1352-1382), compute the residual
+     `local_minus_source_ns = int(round((wall_time_sec − round(wall_time_sec)) × 1e9))`
+     and write it into the `l6_pps` block of
+     `/var/lib/timestd/status/core-recorder-status.json` alongside
+     `chain_delay_ns`.
+   - In `BpskPpsProbe.poll()`, read the new field and publish
+     `offset_ms = local_minus_source_ns / 1_000_000`. Treat the field
+     as required (probe returns `available=False` if missing) so a
+     stale producer can't poison the cascade.
+   - Restart `timestd-core-recorder` and `timestd-fusion`. Observe
+     `authority.json` carries `rtp_to_utc_offset_ns ≈ Δ` (sub-µs in
+     the steady state). Confirm no `disagreement_flags` against T3/T4.
+   - No consumer changes; TSL3 SHM consumer unchanged; chrony unaffected.
+
+   Verifies the producer side honestly. The bonus is that Δ is now
+   *visible* externally — operators can monitor it without inferring
+   from `chronyc tracking`.
 
 2. **Wire one consumer at a time, starting with TSL3 SHM.** Make
    `core_recorder_v2.py:1352-1382` read `authority.json` and replace
