@@ -550,43 +550,107 @@ it should be under Pattern B, and how exposed it is to V1.
 | **L2 calibration record `processed_at`, `calibration_date`** | audit-trail timestamps | `datetime.now(timezone.utc)` | No — audit | leave | Lowest |
 | **Future hfdl/psk/codar UTC stamps** (per spot) | UTC-of-detection | currently `datetime.now(timezone.utc)` if not using RTP | No if RTP, **Yes if system_time** | switch RTP-anchored consumers to `buffer_timing` flavor; switch system_time consumers to read authority offset | Medium (per-client) |
 
-### 10.3 What this changes about §9 step 2
+### 10.3 The right V1 fix: settled-capture + drift monitor + science archive
 
-The original step-2 prescription ("wire TSL3 SHM to read `authority.json`")
-is **architecturally wrong**: TSL3 SHM is the producer of T6's
-contribution to authority. Reading authority would be circular.
+(Materially revised 2026-05-11 after empirical testing of both
+"refresh the anchor" paths.)
 
-The **right** step 2 is one of two paths, depending on what we
-prioritize:
+**The original §9 step 2 prescription** ("wire TSL3 SHM to read
+`authority.json`") was wrong: TSL3 SHM is the producer of T6's
+cascade contribution; reading authority would be circular.
 
-**Path 2a — Fix V1 at its actual source (recommended).**
+**The first refinement** (path 2a, option 2 — refresh the anchor
+periodically via `discover_channels`, compute wall_time via
+`buffer_timing.resolve_buffer_timing`) was implemented and *produced
+jittery Δ values* (-1.1 ms / -237 µs / +128 µs across three
+consecutive PPS edges). Diagnosed and reverted (commit `214c2d8`).
 
-Refactor the TSL3 SHM path in `core_recorder_v2.py:1352-1382` to:
+**The second refinement** (path 2a, option 1 — refresh ChannelInfo
+in place, keep `ka9q.rtp_to_wallclock`) would inherit the same
+jitter, because both paths share the underlying problem: refreshing
+the anchor re-samples radiod's `(gps_time, rtp_timesnap)` pair,
+which is itself derived from radiod's *system_time* at status-emit
+moment. As chrony adjusts system_time, consecutive captures are
+not self-consistent — the projection from one anchor to a sample
+differs from the projection from a slightly-later anchor by chrony's
+slew amount in the interval. *Periodic refresh injects chrony's
+drift into Δ.*
 
-- *EITHER* refresh `self._t6_channel_info.gps_time` /
-  `.rtp_timesnap` periodically from radiod's status stream (V1
-  fix at the ka9q layer)
-- *OR* compute `raw_wall_time` from the buffer metadata that
-  contained the detected edge (V1 fix by switching to flavor B)
+**The math actually says**: a *frozen* anchor combined with the
+GPSDO-disciplined sample clock projects `wall_time = anchor_system_time
++ elapsed_via_sample_clock`. That projection equals `true_UTC_now +
+ε_0` where ε_0 is the chrony discipline error *at capture moment* and
+the sample-clock arithmetic preserves the relationship exactly
+afterwards. Chrony then sees `Δ = ε_now − ε_0` — the difference
+between current and captured discipline error. With ε_0 ≈ 0 (capture
+during settled chrony), Δ tracks chrony's *current* discipline error,
+which is exactly what we want it to.
 
-The first option is shallower but generalizes any future user of
-the frozen ChannelInfo. The second is deeper but principled. Either
-closes V1 permanently.
+**So the V1 fix is a three-layer policy**, not "refresh the anchor":
 
-The cascade infrastructure stays as-is. `local_minus_source_ns`
-publication continues to work. The only change: the value of Δ
-itself becomes immune to anchor drift.
+1. **Settled capture (closes V1's silent-failure mode).**
+   Block `_start_t6_stream`'s `discover_channels` call until chrony
+   has been settled for N cycles (e.g. `Last offset < 100 µs` for ≥3
+   cycles). If T6 starts before chrony settles, the anchor inherits
+   chrony's startup error and propagates it forever (the +237 ms
+   incident). Settled-capture means the anchor is captured when
+   ε_0 ≈ 0.
 
-**Path 2b — Wire the L1/L2/fusion SHM consumers to apply offset.**
+2. **Drift monitor + conditional re-capture (closes V1's
+   slow-failure modes).** Surface a flag when Δ exceeds expected
+   sigma over a sustained window. Triggers for re-capture, in
+   priority order:
+   - radiod restart (detected via RTP counter discontinuity or
+     wildly different `gps_time` in current status vs anchor)
+   - Sustained Δ above a hard threshold (e.g. > 1 ms for > 60 s)
+   - Operator-initiated diagnostic
 
-Lower urgency per the audit above (most consumers are V1-immune),
-but it locks the contract: every UTC-producing path consults the
-same load-bearing number. Risk-of-regression discussion needed for
-each path before committing — particularly fusion SHM, where
-double-correction is possible if D_clock_fused already absorbs
-system_time bias correctly.
+3. **Science archive (long-term assessment).** Each authority cycle
+   already publishes
+   `(utc_published, t_level_active, rtp_to_utc_offset_ns, sigma_ns,
+   disagreement_flags)`. Piping that time-series into the existing
+   ClickHouse infrastructure (the `timestd.events` table or a new
+   `timestd.authority` table) gives a queryable record of:
 
-**Recommendation: 2a first, 2b second.** V1 is the documented
-silent-failure mode that produced the +237 ms incident. Closing it
-permanently is the highest-value defensive move. 2b is appropriate
-hardening once 2a lands and V1 is no longer the dominant fragility.
+   - GPSDO drift vs. UTC over hours/days (slow walk in Δ)
+   - BPSK injector or modulator behavior (sudden steps, periodic
+     structure)
+   - Chrony discipline quality (Δ's variance)
+   - Anchor health (steps that don't correspond to known chrony
+     events)
+
+   This is the "watch for degradation *and* enhancement" path the
+   user described — it requires *recording* Δ, not refreshing the
+   anchor.
+
+**Why "freeze and monitor" not "freeze forever":** the anchor is
+correct as long as the sample clock is exact AND ε_0 ≈ 0 at
+capture. If the GPSDO walks, the sample-clock guarantee weakens.
+If radiod restarts, the RTP-counter space changes. If we discover
+ex post that ε_0 was non-zero, a re-capture closes the residual
+gap. The cascade infrastructure already detects these conditions
+(V6 cross-check, V7 chrony feedback); we just need a policy that
+*acts* on the detection by re-capturing when appropriate.
+
+**The poll-thread plumbing already shipped** (commit `214c2d8`)
+is repurposable: instead of "refresh the anchor every cycle", it
+becomes "compare radiod's current status to the captured anchor,
+raise a flag if they've drifted too far apart, trigger a
+re-capture on a hard threshold." Same code path, different policy.
+
+**Path 2b** (wire L1/L2/fusion SHM consumers to apply offset)
+remains relevant but lower priority per the consumer audit (§10.2):
+most consumers are V1-immune via Flavor B already. Pattern B
+hardening here is a defensive move, not a bug fix.
+
+**Recommendation**:
+
+1. Implement settled-capture gate in `_start_t6_stream`.
+2. Add drift monitor + flag (reuse the poll-thread plumbing
+   already in place).
+3. Define and implement the re-capture trigger logic.
+4. Wire the authority time-series archive into ClickHouse.
+
+Each step is independently verifiable. The first two are
+defensive; the third actively repairs; the fourth supports
+long-term science.
