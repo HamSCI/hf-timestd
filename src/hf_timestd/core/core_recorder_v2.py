@@ -913,7 +913,15 @@ class CoreRecorderV2:
         ``self._multi`` alongside the archive channels — one socket for
         the whole service.  In legacy mode it owns its own
         ``RadiodStream`` (and its own UDP socket) as it always has.
+
+        V1 fix layer 1: block on _wait_for_chrony_settled before
+        registering the T6 channel, so the anchor captured by
+        ka9q-python at add_channel time inherits a near-zero
+        discipline error.  See docs/TIMING-PIPELINE-WIRING.md §10.3.
         """
+        # V1 fix layer 1 — settled-capture gate.
+        self._wait_for_chrony_settled()
+
         from ka9q import RadiodStream, Encoding
         from ka9q.types import StatusType
 
@@ -1107,6 +1115,26 @@ class CoreRecorderV2:
     T6_TIMING_POLL_SEC = 5.0
     T6_TIMING_POLL_LISTEN_SEC = 2.0
 
+    # V1 fix layer 1 (settled-capture gate) per
+    # docs/TIMING-PIPELINE-WIRING.md §10.3.  Block _start_t6_stream's
+    # discover_channels call until chrony has been settled for
+    # T6_SETTLE_REQUIRED_CYCLES consecutive readings, where "settled"
+    # means |Last offset| <= T6_SETTLE_MAX_OFFSET_S.  Polling cadence
+    # is T6_SETTLE_POLL_SEC.  If chrony hasn't settled within
+    # T6_SETTLE_TIMEOUT_SEC seconds we proceed degraded (loudly logged)
+    # rather than block forever — fits comfortably within
+    # TimeoutStartSec=300 in the systemd unit.
+    #
+    # Capturing the anchor when chrony's discipline error ε_0 ≈ 0
+    # means subsequent TSL3 Δ values track chrony's *current*
+    # discipline error rather than carry a permanent baseline shift.
+    # Without this gate, a startup race produces the silent +237 ms
+    # failure documented in the 2026-05-11 incident.
+    T6_SETTLE_MAX_OFFSET_S = 0.0001        # 100 µs
+    T6_SETTLE_REQUIRED_CYCLES = 3
+    T6_SETTLE_POLL_SEC = 5.0
+    T6_SETTLE_TIMEOUT_SEC = 60.0
+
     def _get_disambiguation_reference(self):
         """Return the highest-rank non-T6 timing-authority offset estimate.
 
@@ -1178,6 +1206,126 @@ class CoreRecorderV2:
         except (FileNotFoundError, OSError, json.JSONDecodeError, KeyError, ValueError):
             pass
 
+        return None
+
+    def _wait_for_chrony_settled(self) -> bool:
+        """Block until chrony's Last offset has been below
+        ``T6_SETTLE_MAX_OFFSET_S`` for ``T6_SETTLE_REQUIRED_CYCLES``
+        consecutive readings.  Returns True if chrony settled within
+        the timeout, False if we timed out.
+
+        Capturing the T6 channel anchor when chrony is settled means
+        the anchor's system_time is within tens of µs of true UTC.
+        The sample-clock arithmetic then preserves that relationship
+        forever, so Δ tracks chrony's *current* discipline error rather
+        than carrying a permanent baseline shift.  See
+        docs/TIMING-PIPELINE-WIRING.md §10.3 for the math.
+
+        Silent no-op when chronyc is unavailable — degraded mode,
+        logged once.
+        """
+        import subprocess as _sub
+        try:
+            _sub.run(
+                ['chronyc', '-h'],
+                capture_output=True, timeout=2.0,
+            )
+        except (FileNotFoundError, OSError, _sub.TimeoutExpired):
+            logger.warning(
+                "T6 settled-capture gate: chronyc unavailable — "
+                "anchor will be captured without verification "
+                "(ε_0 may be non-zero, V1 not prevented)"
+            )
+            return False
+
+        consecutive_settled = 0
+        wait_start = time.monotonic()
+        deadline = wait_start + self.T6_SETTLE_TIMEOUT_SEC
+        logger.info(
+            f"T6 settled-capture gate: waiting for chrony "
+            f"(threshold |Last offset| <= {self.T6_SETTLE_MAX_OFFSET_S*1e6:.0f} µs, "
+            f"need {self.T6_SETTLE_REQUIRED_CYCLES} consecutive readings, "
+            f"timeout {self.T6_SETTLE_TIMEOUT_SEC:.0f}s)"
+        )
+        while time.monotonic() < deadline:
+            try:
+                proc = _sub.run(
+                    ['chronyc', '-n', 'tracking'],
+                    capture_output=True, text=True, timeout=5.0,
+                )
+            except (_sub.TimeoutExpired, OSError) as e:
+                logger.debug(f"T6 settled-capture: chronyc tracking failed: {e}")
+                time.sleep(self.T6_SETTLE_POLL_SEC)
+                consecutive_settled = 0
+                continue
+            if proc.returncode != 0:
+                time.sleep(self.T6_SETTLE_POLL_SEC)
+                consecutive_settled = 0
+                continue
+
+            last_offset = self._parse_chronyc_last_offset(proc.stdout)
+            if last_offset is None:
+                logger.debug(
+                    "T6 settled-capture: could not parse Last offset from "
+                    "chronyc tracking output"
+                )
+                time.sleep(self.T6_SETTLE_POLL_SEC)
+                consecutive_settled = 0
+                continue
+
+            if abs(last_offset) <= self.T6_SETTLE_MAX_OFFSET_S:
+                consecutive_settled += 1
+                logger.info(
+                    f"T6 settled-capture: chrony Last offset "
+                    f"{last_offset*1e6:+.1f} µs OK "
+                    f"({consecutive_settled}/{self.T6_SETTLE_REQUIRED_CYCLES})"
+                )
+                if consecutive_settled >= self.T6_SETTLE_REQUIRED_CYCLES:
+                    elapsed = time.monotonic() - wait_start
+                    logger.info(
+                        f"T6 settled-capture: chrony settled after "
+                        f"{elapsed:.1f}s — proceeding to capture anchor"
+                    )
+                    return True
+            else:
+                if consecutive_settled > 0:
+                    logger.info(
+                        f"T6 settled-capture: chrony Last offset "
+                        f"{last_offset*1e6:+.1f} µs > threshold; "
+                        f"resetting counter"
+                    )
+                consecutive_settled = 0
+            time.sleep(self.T6_SETTLE_POLL_SEC)
+
+        logger.warning(
+            f"T6 settled-capture: timeout after "
+            f"{self.T6_SETTLE_TIMEOUT_SEC:.0f}s — proceeding with degraded T6 "
+            f"(anchor may inherit non-zero ε_0; will be visible as a "
+            f"persistent Δ baseline in authority.json)"
+        )
+        return False
+
+    @staticmethod
+    def _parse_chronyc_last_offset(text: str) -> Optional[float]:
+        """Parse `chronyc tracking`'s ``Last offset`` line.
+
+        Returns the offset in seconds (float), or None if unparseable.
+        The line format is::
+
+            Last offset     : +0.000000231 seconds
+        """
+        for line in (text or '').splitlines():
+            s = line.strip()
+            if s.startswith('Last offset'):
+                _, _, val = s.partition(':')
+                val = val.strip()
+                if not val:
+                    return None
+                token = val.split()[0]
+                try:
+                    return float(token)
+                except ValueError:
+                    return None
         return None
 
     def _t6_timing_poll_loop(self):
