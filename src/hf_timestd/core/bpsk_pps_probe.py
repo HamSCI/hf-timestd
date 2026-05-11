@@ -17,13 +17,22 @@ as a high-authority source:
   - ``pps_consecutive < min_consecutive`` → unavailable (rides over
     a single bursty noise edge but drops T6 during sustained noise)
 
-offset_ms is published as 0.0: BPSK directly defines the wall-time
-alignment via chain_delay_correction_ns applied at rtp_to_wallclock,
-so from T6's reference frame there is no residual RTP→UTC offset.
-The published sigma_ms captures the calibration uncertainty
-(quantization + jitter); 0.050 ms (50 µs) matches the reserved
-{T6,T5} cross-check threshold and is consistent with the
-half-quantization-step bias at 16 kHz sample rate.
+offset_ms is forwarded from core-recorder's ``local_minus_source_ns``
+field (the residual Δ that the TSL3 SHM math computes at every push,
+i.e. the value chrony observes as the TSL3 source offset).  This is
+the Pattern B publication channel — see
+``docs/TIMING-PIPELINE-WIRING.md`` §4.1 + §9 step 1.
+
+Sign convention is ``local_clock − source_UTC`` (positive when the
+local clock reads after the source's view of UTC), consistent with
+ChronyTrackingProbe.  When the system is well-disciplined Δ is
+sub-µs; when the anchor is stale (V1) Δ inflates to whatever
+accumulated error the anchor inherited.
+
+The published sigma_ms (default 0.050 ms / 50 µs) captures the
+calibration uncertainty (quantization + matched-filter jitter); it
+matches the reserved {T6,T5} cross-check threshold and is consistent
+with the half-quantization-step bias at 16 kHz sample rate.
 """
 from __future__ import annotations
 
@@ -116,16 +125,37 @@ class BpskPpsProbe:
                 reason=f"pps_consecutive={consec} < {self.min_consecutive}",
             )
 
+        # Pattern B: forward the SHM residual Δ as offset_ms.
+        # See docstring + docs/TIMING-PIPELINE-WIRING.md §4.1 / §9.
+        residual_ns_raw = l6.get("local_minus_source_ns")
+        if residual_ns_raw is None:
+            # The producer is the same hf-timestd version we are; this
+            # field should always be present once a TSL3 SHM push has
+            # happened.  Missing → cold start, no push yet, or schema
+            # skew.  Either way the cascade can't use a missing offset.
+            return ProbeResult(
+                self.t_level, available=False,
+                reason="local_minus_source_ns missing — no TSL3 SHM push yet",
+            )
+        try:
+            residual_ns = int(residual_ns_raw)
+        except (TypeError, ValueError):
+            return ProbeResult(
+                self.t_level, available=False,
+                reason=f"local_minus_source_ns unparseable: {residual_ns_raw!r}",
+            )
+
         return ProbeResult(
             self.t_level,
             available=True,
-            offset_ms=0.0,
+            offset_ms=residual_ns / 1_000_000.0,
             sigma_ms=self.sigma_ms,
             detail={
                 "pps_ok": int(l6.get("pps_ok", 0)),
                 "pps_noise": int(l6.get("pps_noise", 0)),
                 "pps_consecutive": consec,
                 "chain_delay_ns": l6.get("chain_delay_ns"),
+                "local_minus_source_ns": residual_ns,
                 "age_sec": round(age_sec, 3),
             },
         )

@@ -275,6 +275,13 @@ class CoreRecorderV2:
         # 16 kHz) rather than the HF-fusion floor (~150 us).
         self._t6_shm = None
         self._t6_last_pushed_rtp = None
+        # Residual published by the cascade as T6's local_minus_source_ns
+        # (the value chrony sees as TSL3 offset, computed at every SHM
+        # update site).  Pattern B publication channel per
+        # docs/TIMING-PIPELINE-WIRING.md §9 step 1.  None until first
+        # SHM push.  Stored in ns to match `rtp_to_utc_offset_ns`
+        # convention.
+        self._t6_last_local_minus_source_ns = None
         # Wrap-rejection guard: the BPSK calibrator algorithm has a known
         # cascade where a noise edge near the half-second mark from a real
         # edge displaces the reference and causes chain_delay to wrap by
@@ -1367,6 +1374,12 @@ class CoreRecorderV2:
                         if raw_wall_time_sec is not None:
                             wall_time_sec = raw_wall_time_sec - (effective_chain_delay / 1e9)
                             ref_time = round(wall_time_sec)
+                            # Δ = the residual chrony will observe as the
+                            # TSL3 offset.  Stored for the BpskPpsProbe to
+                            # forward via authority.json — Pattern B.
+                            self._t6_last_local_minus_source_ns = int(round(
+                                (wall_time_sec - ref_time) * 1e9
+                            ))
                             # precision -14 = 61 us, matches T6 sigma claim of 50 us
                             self._t6_shm.update(
                                 reference_time=float(ref_time),
@@ -1442,6 +1455,10 @@ class CoreRecorderV2:
                                        * 1_000_000_000 / self._t6_calibrator.sample_rate
                                        if self._t6_calibrator._chain_delay_samples is not None
                                        else None),
+                    # Δ = chrony's view of TSL3 offset == local_clock − source_UTC.
+                    # The value the BpskPpsProbe forwards as offset_ms.  None
+                    # until the first SHM push has happened.
+                    'local_minus_source_ns': self._t6_last_local_minus_source_ns,
                 }
 
             # Write atomically
