@@ -443,7 +443,8 @@ genuinely independent problems.
 
 Not a commitment — a draft sequence.
 
-1. **Expose Δ from core-recorder and forward it via the BPSK probe.**
+1. **Expose Δ from core-recorder and forward it via the BPSK probe.** ✅ **LANDED** as hf-timestd `0cea2ec` (2026-05-11). See §10 for the per-consumer audit that step 2 onward references.
+
    (Reformulated 2026-05-11 after the original "publish chain_delay"
    prescription proved semantically wrong — see §6.5.)
 
@@ -457,40 +458,135 @@ Not a commitment — a draft sequence.
      `offset_ms = local_minus_source_ns / 1_000_000`. Treat the field
      as required (probe returns `available=False` if missing) so a
      stale producer can't poison the cascade.
-   - Restart `timestd-core-recorder` and `timestd-fusion`. Observe
-     `authority.json` carries `rtp_to_utc_offset_ns ≈ Δ` (sub-µs in
-     the steady state). Confirm no `disagreement_flags` against T3/T4.
-   - No consumer changes; TSL3 SHM consumer unchanged; chrony unaffected.
+   - **Verified**: `t_level_active=T6`, `rtp_to_utc_offset_ns ≈ 2.4 µs`,
+     `disagreement_flags=[]`, T3+T4 agree as witnesses, chrony Last
+     offset 1 ns RMS 389 ns. No consumer change; TSL3 SHM unchanged;
+     chrony unaffected. Step 1 contract is honest.
 
-   Verifies the producer side honestly. The bonus is that Δ is now
-   *visible* externally — operators can monitor it without inferring
-   from `chronyc tracking`.
+   Bonus result: Δ is now *visible* externally via `authority.json` —
+   operators can monitor it without inferring from `chronyc tracking`.
 
-2. **Wire one consumer at a time, starting with TSL3 SHM.** Make
-   `core_recorder_v2.py:1352-1382` read `authority.json` and replace
-   the `round() + manual chain_delay subtract` logic. Observe TSL3
-   offset on chrony drops to expected sigma range.
+2. **Wire one consumer at a time** — see §10 for the per-consumer
+   audit. The doc previously prescribed "start with TSL3 SHM"; that's
+   wrong (TSL3 SHM is the *producer* of T6's contribution, not a
+   downstream consumer). The corrected target depends on which
+   consumer's current source is most fragile, per §10's table.
 
-3. **Wire the L1/L2 stamping next.** Switch
-   `metrology_service.py` and `l2_calibration_service.py` to
-   `rtp_to_wallclock + offset`. Verify cross-frequency divergence
-   on WWV/CHU bands shrinks (V2/V3 are independent but Pattern B
-   exposes them more cleanly).
-
-4. **Plumb T2/T4/T5 offset into the manager.** Update
+3. **Plumb T2/T4/T5 offset into the manager.** Update
    `AuthorityManager._select_active` so chrony-tracked tiers can
    contribute. Now the cascade fully works under all
    tier-availability combinations.
 
-5. **Add the cross-checks.** Disagreement detection between
+4. **Add the cross-checks.** Disagreement detection between
    producer and consumer SHM outputs; feedback loop reading
    chrony's own verdict (V7); plausibility gates on `rtp_to_utc_offset_ns`
    magnitude (V9).
 
-6. **The standalone problems.** V2 (per-channel chain_delay), V3
+5. **The standalone problems.** V2 (per-channel chain_delay), V3
    (WWVH calibration), V10 (Kalman state), V11 (modulator latency).
    Each deserves its own session.
 
 The phasing is designed so each step is independently verifiable
 and reversible. The contract is fully expressed by the end of step
-4; everything after is hardening.
+3; everything after is hardening.
+
+---
+
+## 10. Consumer contracts
+
+Step 1 closed the **producer** half: hf-timestd publishes a load-bearing
+`rtp_to_utc_offset_ns` into `authority.json`. Step 2 closes the
+**consumer** half: every code path that produces a UTC-stamped record
+or feeds a chrony SHM segment reads the published offset and applies
+it consistently.
+
+Before wiring consumers, the architecture has an important non-uniformity
+worth surfacing: **not every consumer is equally exposed to anchor
+staleness**. Two distinct sources of "RTP-derived UTC" exist in
+hf-timestd, and they have different reliability characteristics.
+
+### 10.1 Two flavors of "RTP-derived UTC"
+
+**Flavor A — ka9q ChannelInfo, frozen at `discover_channels()`**
+
+`ka9q.rtp_to_wallclock(rtp_ts, channel)` uses `channel.gps_time` and
+`channel.rtp_timesnap`, captured **once** when the consumer process
+called `discover_channels()` at startup. radiod's status stream
+re-emits these values every cycle, but the consumer's ChannelInfo
+isn't refreshed. The anchor inherits whatever system_time error
+existed at the moment of capture.
+
+**This is the V1 vulnerability.** It applies to:
+- `core_recorder_v2.py:1366` — TSL3 SHM update path (verified vulnerable
+  2026-05-11; produced +237 ms offset until restart)
+
+**Flavor B — per-buffer GPS_TIME from the writer's metadata**
+
+`buffer_timing.resolve_buffer_timing(metadata)` uses the
+`gps_time_ns` and `rtp_timesnap` written into each buffer's metadata
+by `binary_archive_writer`. The writer captures fresh values via
+radiod's status stream and writes them per-buffer. The
+`buffer_timing.py` docstring is explicit:
+
+> *"GPS_TIME is the GPSDO-disciplined ground truth."*
+> *"start_system_time is NEVER used for timing."*
+
+**V1 does not apply** to consumers that go through buffer metadata.
+
+### 10.2 Consumer audit table
+
+For each consumer, what it stamps, where the stamp comes from, what
+it should be under Pattern B, and how exposed it is to V1.
+
+| Consumer | What it writes | Current source | V1-exposed? | Pattern-B target | Priority |
+|---|---|---|---|---|---|
+| **TSL3 SHM** (`core_recorder_v2.py:1366`) | `clockTimeStamp` (UTC of measurement) + `receiveTimeStamp` (local clock at measurement) | `rtp_to_wallclock(rtp, channel)` with **frozen ChannelInfo** | **Yes** — flavor A | refactor to use per-buffer metadata OR refresh ChannelInfo periodically — both fix V1 without circular dependence on authority | **High**: this IS the producer; V1 fix here closes the most impactful failure mode |
+| **Fusion SHM L1** (`multi_broadcast_fusion.py:5376`) | `reference_time = system_time − D_clock_fused_ms/1000`; `receiveTimeStamp = system_time` | direct `time.time()`; `D_clock_fused_ms` computed against per-buffer-anchored L1 records | No — flavor B for the L1 inputs | factor in authority offset OR rely on D_clock_fused being already correct (which depends on L2 contract); subtle, needs care | Medium: behavior near-zero impact while system disciplined; defensive against tier transitions |
+| **Fusion SHM L2** (`multi_broadcast_fusion.py:5396`) | same as L1, with L2 measurements as input | same | No — flavor B | same as L1 | Medium |
+| **L1 metrology record `timestamp_utc`** (`metrology_service.py:567,616,653,689,727`) | ISO-8601 string of "when this record was written" | `datetime.now(timezone.utc)` | No — audit trail, not measurement time | leave as system_time; audit semantics are correct | Low: audit-trail; downstream readers should use `minute_boundary_utc` for the measurement time |
+| **L1 metrology record `minute_boundary_utc`** | epoch int of the minute the tick analysis applies to | `next_minute` integer counter, advanced in lockstep with buffer-derived sample-zero UTC | No — flavor B | leave; measurement time comes from per-buffer fresh anchor | Low |
+| **L1 metrology record `d_clock_ms`** | measured residual of WWV/CHU tick vs expected integer-second | RTP-domain edge-detection math, anchored per-buffer | No — flavor B | leave; the measurement IS the cascade's input | Low |
+| **L1 metrology record `processed_at`** | when the writer finished the record | `datetime.now(timezone.utc)` | No — audit | leave | Lowest |
+| **L2 calibration record `processed_at`, `calibration_date`** | audit-trail timestamps | `datetime.now(timezone.utc)` | No — audit | leave | Lowest |
+| **Future hfdl/psk/codar UTC stamps** (per spot) | UTC-of-detection | currently `datetime.now(timezone.utc)` if not using RTP | No if RTP, **Yes if system_time** | switch RTP-anchored consumers to `buffer_timing` flavor; switch system_time consumers to read authority offset | Medium (per-client) |
+
+### 10.3 What this changes about §9 step 2
+
+The original step-2 prescription ("wire TSL3 SHM to read `authority.json`")
+is **architecturally wrong**: TSL3 SHM is the producer of T6's
+contribution to authority. Reading authority would be circular.
+
+The **right** step 2 is one of two paths, depending on what we
+prioritize:
+
+**Path 2a — Fix V1 at its actual source (recommended).**
+
+Refactor the TSL3 SHM path in `core_recorder_v2.py:1352-1382` to:
+
+- *EITHER* refresh `self._t6_channel_info.gps_time` /
+  `.rtp_timesnap` periodically from radiod's status stream (V1
+  fix at the ka9q layer)
+- *OR* compute `raw_wall_time` from the buffer metadata that
+  contained the detected edge (V1 fix by switching to flavor B)
+
+The first option is shallower but generalizes any future user of
+the frozen ChannelInfo. The second is deeper but principled. Either
+closes V1 permanently.
+
+The cascade infrastructure stays as-is. `local_minus_source_ns`
+publication continues to work. The only change: the value of Δ
+itself becomes immune to anchor drift.
+
+**Path 2b — Wire the L1/L2/fusion SHM consumers to apply offset.**
+
+Lower urgency per the audit above (most consumers are V1-immune),
+but it locks the contract: every UTC-producing path consults the
+same load-bearing number. Risk-of-regression discussion needed for
+each path before committing — particularly fusion SHM, where
+double-correction is possible if D_clock_fused already absorbs
+system_time bias correctly.
+
+**Recommendation: 2a first, 2b second.** V1 is the documented
+silent-failure mode that produced the +237 ms incident. Closing it
+permanently is the highest-value defensive move. 2b is appropriate
+hardening once 2a lands and V1 is no longer the dominant fragility.
