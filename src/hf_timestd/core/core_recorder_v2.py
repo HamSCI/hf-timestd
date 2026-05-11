@@ -282,6 +282,16 @@ class CoreRecorderV2:
         # SHM push.  Stored in ns to match `rtp_to_utc_offset_ns`
         # convention.
         self._t6_last_local_minus_source_ns = None
+        # V1 fix per docs/TIMING-PIPELINE-WIRING.md §10.3 path 2a (option 2):
+        # the RTP→wall_time math for TSL3 SHM uses a *fresh* GPS/RTP
+        # anchor — refreshed by _t6_timing_poll_loop — instead of the
+        # frozen ChannelInfo captured at discover_channels() time.
+        # ka9q's rtp_to_wallclock is no longer used on the T6 path.
+        self._t6_latest_gps_time_ns = None
+        self._t6_latest_rtp_timesnap = None
+        self._t6_timing_lock = threading.Lock()
+        self._t6_timing_poll_thread = None
+        self._t6_timing_poll_stop = threading.Event()
         # Wrap-rejection guard: the BPSK calibrator algorithm has a known
         # cascade where a noise edge near the half-second mark from a real
         # edge displaces the reference and causes chain_delay to wrap by
@@ -645,6 +655,7 @@ class CoreRecorderV2:
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals."""
         logger.info(f"Received signal {signum}, shutting down...")
+        self._t6_timing_poll_stop.set()
         self.running = False
 
     def _start_lifetime_keepalive(self) -> None:
@@ -968,6 +979,22 @@ class CoreRecorderV2:
                     f"T6 BPSK PPS registered on shared MultiStream: "
                     f"{desc} at {freq_hz/1e6:.6f} MHz"
                 )
+
+                # V1 fix — start the T6 timing-anchor refresh thread.
+                # Mirrors the dedicated-stream branch.  See
+                # docs/TIMING-PIPELINE-WIRING.md §10.3 path 2a option 2.
+                if self._t6_timing_poll_thread is None:
+                    self._t6_timing_poll_stop.clear()
+                    self._t6_timing_poll_thread = threading.Thread(
+                        target=self._t6_timing_poll_loop,
+                        name="T6TimingPoll",
+                        daemon=True,
+                    )
+                    self._t6_timing_poll_thread.start()
+                    logger.info(
+                        f"T6 timing-anchor refresh thread started "
+                        f"(interval={self.T6_TIMING_POLL_SEC}s)"
+                    )
             except Exception as e:
                 logger.error(
                     f"Failed to register T6 BPSK PPS on shared MultiStream: {e}",
@@ -1009,6 +1036,23 @@ class CoreRecorderV2:
             )
             self._t6_stream.start()
             logger.info(f"T6 BPSK PPS stream started: {desc} at {freq_hz/1e6:.6f} MHz")
+
+            # V1 fix per docs/TIMING-PIPELINE-WIRING.md §10.3 path 2a option 2.
+            # Start the T6 timing-anchor refresh thread so the TSL3 SHM math
+            # uses a fresh (gps_time, rtp_timesnap) pair each push, not the
+            # ChannelInfo frozen at discover_channels() time.
+            if self._t6_timing_poll_thread is None:
+                self._t6_timing_poll_stop.clear()
+                self._t6_timing_poll_thread = threading.Thread(
+                    target=self._t6_timing_poll_loop,
+                    name="T6TimingPoll",
+                    daemon=True,
+                )
+                self._t6_timing_poll_thread.start()
+                logger.info(
+                    f"T6 timing-anchor refresh thread started "
+                    f"(interval={self.T6_TIMING_POLL_SEC}s)"
+                )
         except Exception as e:
             logger.error(f"Failed to start T6 BPSK PPS stream: {e}", exc_info=True)
             self._t6_stream = None
@@ -1055,6 +1099,13 @@ class CoreRecorderV2:
     # observed (~13 s) so transient cascades don't trigger needless
     # resets.
     T6_STUCK_TIMEOUT_SEC = 60.0
+    # Cadence for the T6 timing-anchor refresh thread.  5 s tracks
+    # radiod's ~2 Hz status emit closely enough that anchor drift stays
+    # below one sample at 24 kHz, while keeping CPU/network overhead
+    # negligible.  The listen window must be > radiod's status emit
+    # period to reliably see the T6 channel each cycle.
+    T6_TIMING_POLL_SEC = 5.0
+    T6_TIMING_POLL_LISTEN_SEC = 2.0
 
     def _get_disambiguation_reference(self):
         """Return the highest-rank non-T6 timing-authority offset estimate.
@@ -1128,6 +1179,69 @@ class CoreRecorderV2:
             pass
 
         return None
+
+    def _t6_timing_poll_loop(self):
+        """Refresh the T6 (GPS/RTP) anchor periodically by re-querying
+        radiod's status stream.  Closes V1 for the TSL3 SHM path: every
+        SHM push uses a < T6_TIMING_POLL_SEC-old anchor instead of the
+        startup-frozen ChannelInfo.
+
+        Pattern mirrors stream_recorder_v2.py's timing poll thread —
+        we keep our own copy because the T6 stream is constructed
+        directly in core_recorder, not through stream_recorder.
+        """
+        # Seed from the initial ChannelInfo so the first SHM push has
+        # a valid anchor before this loop's first iteration completes.
+        if self._t6_channel_info is not None:
+            seed_gps = getattr(self._t6_channel_info, 'gps_time', None)
+            seed_rtp = getattr(self._t6_channel_info, 'rtp_timesnap', None)
+            if seed_gps is not None and seed_rtp is not None:
+                with self._t6_timing_lock:
+                    self._t6_latest_gps_time_ns = int(seed_gps)
+                    self._t6_latest_rtp_timesnap = int(seed_rtp)
+                logger.info(
+                    f"T6 timing anchor seeded: GPS_TIME={seed_gps}, "
+                    f"RTP_TIMESNAP={seed_rtp}"
+                )
+
+        our_ssrc = getattr(self._t6_channel_info, 'ssrc', None)
+        while not self._t6_timing_poll_stop.is_set():
+            # Wait first so the seed is the only value for the
+            # first T6_TIMING_POLL_SEC seconds (avoids a redundant
+            # discover_channels right after _start_t6_stream).
+            if self._t6_timing_poll_stop.wait(self.T6_TIMING_POLL_SEC):
+                return
+            try:
+                channels = discover_channels(
+                    self.status_address,
+                    listen_duration=self.T6_TIMING_POLL_LISTEN_SEC,
+                )
+            except Exception as e:
+                logger.debug(f"T6 timing poll: discover_channels failed: {e}")
+                continue
+
+            # Match by SSRC if known, else fall back to frequency.
+            fresh = None
+            if our_ssrc is not None:
+                fresh = channels.get(our_ssrc)
+            if fresh is None and self._t6_channel_info is not None:
+                target_freq = getattr(self._t6_channel_info, 'frequency', None)
+                if target_freq is not None:
+                    for info in channels.values():
+                        if abs(getattr(info, 'frequency', -1) - target_freq) < 1.0:
+                            fresh = info
+                            break
+
+            if fresh is None:
+                logger.debug("T6 timing poll: T6 channel not found in discovery")
+                continue
+            gps_ns = getattr(fresh, 'gps_time', None)
+            rtp_snap = getattr(fresh, 'rtp_timesnap', None)
+            if gps_ns is None or rtp_snap is None:
+                continue
+            with self._t6_timing_lock:
+                self._t6_latest_gps_time_ns = int(gps_ns)
+                self._t6_latest_rtp_timesnap = int(rtp_snap)
 
     def _t6_on_samples(self, samples, quality):
         """Sample callback for the BPSK PPS stream — feeds the calibrator."""
@@ -1360,6 +1474,14 @@ class CoreRecorderV2:
             # it sees BPSK precision directly. Only push when the
             # calibrator has advanced to a NEW edge (once per second), and
             # only after wrap-rejection has accepted the chain_delay.
+            #
+            # V1 fix work-in-progress: path 2a option 2 (buffer_timing with
+            # fresh anchor from _t6_timing_poll_loop) produced jittery Δ
+            # values in 2026-05-11 testing.  Reverted to the known-good
+            # ka9q.rtp_to_wallclock call for now; the poll-thread
+            # infrastructure stays in place for diagnostic use while we
+            # investigate the jitter.  See docs/TIMING-PIPELINE-WIRING.md
+            # §10.3 for current status.
             if self._t6_shm is not None and self._t6_channel_info is not None:
                 try:
                     last_edge_rtp = getattr(self._t6_calibrator, '_last_edge_rtp', None)
@@ -1503,7 +1625,7 @@ class CoreRecorderV2:
         """Thread-safe accessor for NTP status."""
         with self.ntp_status_lock:
             return self.ntp_status.copy()
-    
+
     # NOTE (2026-02-03): Bootstrap methods removed - functionality migrated to MetrologyEngine.
     # Removed: _on_bootstrap_provisional_lock, _on_bootstrap_full_lock,
     #          _update_bootstrap_state_if_locked, _write_bootstrap_timing_reference
