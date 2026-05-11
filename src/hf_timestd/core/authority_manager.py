@@ -548,6 +548,14 @@ class AuthorityManager:
                 tmp.flush()
                 os.fsync(tmp.fileno())
                 tmp_path = tmp.name
+            # authority.json is the canonical service-discovery artifact
+            # for consumer clients (wspr-recorder, psk-recorder, hfdl-
+            # recorder, etc.).  NamedTemporaryFile defaults to mode
+            # 0600, which silently blocks every non-timestd consumer
+            # from reading it — the symptom is the
+            # "hf-timestd authority unavailable — standalone fallback"
+            # WARNING in client logs.  Make it world-readable here.
+            os.chmod(tmp_path, 0o644)
             os.replace(tmp_path, self.output_path)
         except OSError as e:
             log.warning("AuthorityManager: failed to write %s: %s", self.output_path, e)
