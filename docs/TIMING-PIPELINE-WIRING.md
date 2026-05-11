@@ -348,6 +348,89 @@ addressed at the *probe* level — what's missing is using the same
 machinery against the SHM segments themselves. The infrastructure for
 that exists.
 
+### 6.6 V1 manifestation in psk-recorder (2026-05-11 21:08 UTC)
+
+The settled-capture work for T6 (§9 step 1, commit `9358e29`) made
+us look more carefully at how other ka9q-python consumers capture
+their per-channel anchors. **psk-recorder has the same V1 vulnerability
+and was silently corrupting its WAV slot timestamps.**
+
+Verified empirically while diagnosing BPSK Costas instability with
+a minimal stack (radiod + psk-recorder only, all of hf-timestd
+stopped, chrony locked to LAN GPS+PPS at sub-µs):
+
+Observed `inotifywait` capture of WAV writes:
+
+```
+21:08:37 → 260511_215100_21074.wav  (filename slot 21:51:00, +42 min in future)
+21:08:38 → 260511_220745_24915.wav  (filename slot 22:07:45, +59 min in future)
+21:08:41 → 260511_224152_1840.wav   (filename slot 22:41:52, +93 min in future)
+21:08:41 → 260511_213752_24919.wav  (+29 min)
+21:08:41 → 260511_212152_50318.wav  (+13 min)
+21:08:44 → 260511_214315_21140.wav  (+35 min)
+21:08:39 → 260511_210830_28180.wav  (correct — current slot)
+21:08:39 → 260511_210830_7047.wav   (correct)
+21:08:39 → 260511_210830_3575.wav   (correct)
+... 6 more channels correct ...
+21:08:46 → 260511_210830_5357.wav   (correct)
+```
+
+Five channels had slot timestamps wrong by 13 to 93 minutes;
+remaining channels were correct.
+
+**Root cause**: each `ensure_channel` call returns a `ChannelInfo`
+with `gps_time` and `rtp_timesnap` captured at the moment radiod
+created (or last updated) the SSRC for that frequency.
+psk-recorder caches the ChannelInfo per channel and uses it
+through `ka9q.rtp_to_wallclock` to compute slot start times.
+When a channel's SSRC existed in radiod from an earlier era
+(before chrony was settled, or before a radiod restart that
+shifted the RTP-counter space), the cached anchor inherits the
+older / wrong system_time, and projected slot times are wrong by
+exactly that amount.
+
+The reason different channels have different errors: radiod
+creates SSRCs at different moments. Channels whose SSRCs predate
+some discontinuity have stale anchors; channels created freshly
+since have correct ones.
+
+**Fix verified**: stopping psk-recorder, waiting for chrony to
+report sub-µs `Last offset`, then restarting psk-recorder
+forces a fresh `ensure_channel` round, producing correct
+anchors for every channel. Post-restart `inotifywait` capture:
+
+```
+21:17:54 → ft4/20260511_211745_*.wav   (10 channels — all slot 21:17:45)
+21:18:01 → ft8/20260511_211745_*.wav   (6 channels — all slot 21:17:45)
+21:18:01 → ft4/20260511_211753_*.wav   (next FT4 slot, all correct)
+21:18:09 → ft4/20260511_211800_*.wav   (next FT4 boundary, all correct)
+21:18:16 → ft8/20260511_211800_*.wav   (next FT8 boundary, all correct)
+```
+
+Every WAV written at slot_start + 9–16 s, every slot_start at a
+correct cadence boundary, on every channel.
+
+**Operational implication**: any historical `psk.spots` data
+from this station inherits whichever channel-level anchor error
+psk-recorder happened to capture. The `score`, `snr_db`, and
+message decode are accurate; the *time* assigned to the spot is
+wrong by the anchor error for that channel. Spots from
+unaffected channels were correct; spots from affected channels
+have timestamps off by minutes.
+
+**Generalisation**: V1 is not specific to the TSL3 SHM path.
+Any ka9q-python consumer that calls `ensure_channel` once and
+caches the result is vulnerable. The consumer audit table in
+§10.2 needs updating: every consumer should be assumed
+V1-vulnerable unless it either (a) uses buffer-metadata via
+`buffer_timing.resolve_buffer_timing` (Flavor B), or (b) blocks
+on settled-capture before its first `ensure_channel`.
+
+**Likely also affected (untested 2026-05-11)**: hfdl-recorder,
+wspr-recorder, wsprdaemon-client, any future client that uses
+the same `ensure_channel` pattern. Each should be audited and
+gated on chrony settle.
+
 ## 7. V-list — pipeline fragilities and what Pattern B fixes
 
 From the 2026-05-11 review session.
@@ -516,9 +599,18 @@ re-emits these values every cycle, but the consumer's ChannelInfo
 isn't refreshed. The anchor inherits whatever system_time error
 existed at the moment of capture.
 
-**This is the V1 vulnerability.** It applies to:
-- `core_recorder_v2.py:1366` — TSL3 SHM update path (verified vulnerable
-  2026-05-11; produced +237 ms offset until restart)
+**This is the V1 vulnerability.** It applies to *every*
+ka9q-python consumer that calls `ensure_channel` once and caches the
+returned `ChannelInfo`. Verified vulnerable so far:
+
+- `core_recorder_v2.py:1366` — TSL3 SHM update path (verified 2026-05-11;
+  produced +237 ms offset until restart)
+- **psk-recorder slot timing** (verified 2026-05-11, §6.6; produced WAV
+  filenames off by 13 to 93 minutes for affected channels)
+
+Likely also affected pending audit: hfdl-recorder, wspr-recorder,
+wsprdaemon-client. Every Flavor-A consumer benefits from the same
+settled-capture pattern landed for T6.
 
 **Flavor B — per-buffer GPS_TIME from the writer's metadata**
 
@@ -548,6 +640,7 @@ it should be under Pattern B, and how exposed it is to V1.
 | **L1 metrology record `d_clock_ms`** | measured residual of WWV/CHU tick vs expected integer-second | RTP-domain edge-detection math, anchored per-buffer | No — flavor B | leave; the measurement IS the cascade's input | Low |
 | **L1 metrology record `processed_at`** | when the writer finished the record | `datetime.now(timezone.utc)` | No — audit | leave | Lowest |
 | **L2 calibration record `processed_at`, `calibration_date`** | audit-trail timestamps | `datetime.now(timezone.utc)` | No — audit | leave | Lowest |
+| **psk-recorder slot WAV timestamps** | `slot_start_utc` in WAV filename + decode log | `ka9q.rtp_to_wallclock(slot_rtp, channel)` with **per-channel frozen ChannelInfo** | **Yes** — same Flavor A as TSL3 SHM (verified 2026-05-11, §6.6); some channels off by 13–93 minutes | settled-capture gate before `ensure_channel`, OR migrate to `buffer_timing` for slot timing | **High** — silently corrupts `psk.spots` time field for affected channels |
 | **Future hfdl/psk/codar UTC stamps** (per spot) | UTC-of-detection | currently `datetime.now(timezone.utc)` if not using RTP | No if RTP, **Yes if system_time** | switch RTP-anchored consumers to `buffer_timing` flavor; switch system_time consumers to read authority offset | Medium (per-client) |
 
 ### 10.3 The right V1 fix: settled-capture + drift monitor + science archive
