@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -42,6 +43,25 @@ SCHEMA_VERSION = "v1"
 # truth for rank comparisons; helpers that need to ask "is X ranked higher
 # than Y?" should consult this tuple.
 T_LEVELS_RANKED: tuple = ("T6", "T5", "T4", "T3", "T2", "T1", "T0")
+
+# Mapping from active T-level to the SHM refid hf-timestd feeds into chrony
+# under that tier.  Used by _check_chrony_self_feedback (V7): when our
+# cascade says we're active at tier X but chrony has marked the matching
+# refid as #x (falseticker) or #? (unselectable), we want to know about
+# it loudly rather than silently keep publishing a stale T-level.
+#
+# TSL1 (SHM unit 0) — fused raw L1 metrology, written by fusion service
+# TSL2 (SHM unit 1) — fused calibrated L2 timing, written by fusion service
+# TSL3 (SHM unit 2) — direct BPSK PPS, written by core_recorder T6 path
+TIER_SHM_REFID: Dict[str, str] = {
+    "T6": "TSL3",
+    "T3": "TSL2",
+}
+
+# Chrony source-state characters indicating chrony accepts the source as
+# usable for synchronisation.  Matches the convention in
+# ChronyTrackingProbe.healthy_state_chars.
+CHRONY_HEALTHY_STATES = "*+"
 
 # Cross-check disagreement thresholds per METROLOGY.md §4.5:
 # expected_agreement = 3 * sqrt(sigma_A² + sigma_B²), FLOORED at these
@@ -168,6 +188,12 @@ class AuthorityManager:
         self._update_hysteresis(results)
         active = self._pick_active(results)
         active, witnesses, flags = self._cross_check(active, results)
+        # V7: append a chrony-feedback flag if chrony has rejected the
+        # SHM segment we feed for the active tier.  Silent no-op when
+        # chronyc is unavailable.
+        feedback_flag = self._check_chrony_self_feedback(active)
+        if feedback_flag is not None:
+            flags = list(flags) + [feedback_flag]
         self._note_transition(active)
         state = self._build_state(results, active, witnesses, flags)
         self._write_state(state)
@@ -322,6 +348,57 @@ class AuthorityManager:
                 active = "T2"
 
         return active, witnesses, disagreement_flags
+
+    def _check_chrony_self_feedback(self, active: Optional[str]) -> Optional[str]:
+        """V7 — verify chrony's verdict on the SHM segment we feed for the
+        active tier.  If chrony has rejected our source (state ``#x``
+        falseticker, ``#?`` unselectable, etc.) while authority is
+        claiming the tier as active, return a disagreement flag.
+
+        Silently no-ops when chronyc is missing, times out, or returns
+        garbage — we never want this check to fail the cascade.  An
+        operator running hf-timestd without a local chrony deployment
+        won't be alarmed.
+
+        See docs/TIMING-PIPELINE-WIRING.md V7 for context.
+        """
+        if active is None:
+            return None
+        refid = TIER_SHM_REFID.get(active)
+        if refid is None:
+            # Tier isn't fed via local SHM (T2/T4/T5 are chrony-tracked
+            # external peers; T1/T0 don't produce a refclock).  Nothing to
+            # cross-check.
+            return None
+        try:
+            proc = subprocess.run(
+                ["chronyc", "-n", "-c", "sources"],
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return None
+        if proc.returncode != 0:
+            return None
+
+        for line in (proc.stdout or "").splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 3:
+                continue
+            mode, state, name = parts[0], parts[1], parts[2]
+            if mode != "#":
+                continue  # refclocks only; "^" rows are NTP peers
+            if name.upper() != refid.upper():
+                continue
+            if state in CHRONY_HEALTHY_STATES:
+                return None
+            return f"chrony-rejected-{refid}:state={state}"
+
+        # Refid not present in chrony's source list at all — chrony either
+        # isn't configured to consume our SHM segment, or the segment
+        # hasn't seen its first sample yet.  Surface as a distinct flag.
+        return f"chrony-missing-{refid}"
 
     def _check_pair(
         self, a: str, a_res: ProbeResult, b: str, b_res: ProbeResult,
