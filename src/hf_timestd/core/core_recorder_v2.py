@@ -275,6 +275,15 @@ class CoreRecorderV2:
         # 16 kHz) rather than the HF-fusion floor (~150 us).
         self._t6_shm = None
         self._t6_last_pushed_rtp = None
+        # Diagnostic counters for the T6 SHM push gate.  Pair with the
+        # periodic log line below — on the next "TSL3 dark while
+        # acquired=1" incident, the journal shows whether pushes are
+        # firing at the expected 1 Hz, stalling at 0 Hz, or running
+        # but rejected by chrony (cross-check via chronyc reach).
+        self._t6_shm_push_count = 0
+        self._t6_shm_last_log_count = 0
+        self._t6_shm_last_log_wall = time.monotonic()
+        self._t6_shm_last_push_wall = None
         # Residual published by the cascade as T6's local_minus_source_ns
         # (the value chrony sees as TSL3 offset, computed at every SHM
         # update site).  Pattern B publication channel per
@@ -1107,6 +1116,14 @@ class CoreRecorderV2:
     # observed (~13 s) so transient cascades don't trigger needless
     # resets.
     T6_STUCK_TIMEOUT_SEC = 60.0
+    # Cadence of the T6-SHM diagnostic log line.  Every 60 s emits one
+    # INFO line with pushes-per-window + the gate-decision inputs
+    # (`last_edge_rtp` vs `_t6_last_pushed_rtp`, `result.locked`,
+    # `pps_consecutive`).  Operationally cheap (1 line/min); essential
+    # for pinning down the remaining "TSL3 dark while acquired=1"
+    # failure mode that the watchdog only recovers from, not
+    # diagnoses.
+    T6_SHM_LOG_INTERVAL_SEC = 60.0
     # Cadence for the T6 timing-anchor refresh thread.  5 s tracks
     # radiod's ~2 Hz status emit closely enough that anchor drift stays
     # below one sample at 24 kHz, while keeping CPU/network overhead
@@ -1633,7 +1650,11 @@ class CoreRecorderV2:
             if self._t6_shm is not None and self._t6_channel_info is not None:
                 try:
                     last_edge_rtp = getattr(self._t6_calibrator, '_last_edge_rtp', None)
-                    if last_edge_rtp is not None and last_edge_rtp != self._t6_last_pushed_rtp:
+                    edge_advanced = (
+                        last_edge_rtp is not None
+                        and last_edge_rtp != self._t6_last_pushed_rtp
+                    )
+                    if edge_advanced:
                         # Compute raw wall-time without ka9q applying
                         # chain_delay (chain_delay_correction_ns kept None
                         # on the T6 channel), then apply chain_delay
@@ -1657,11 +1678,51 @@ class CoreRecorderV2:
                                 precision=-14,
                             )
                             self._t6_last_pushed_rtp = last_edge_rtp
+                            self._t6_shm_push_count += 1
+                            self._t6_shm_last_push_wall = time.monotonic()
                 except Exception as e:
                     # SHM push is non-fatal — log once per ~60 s of failures
                     if not getattr(self, '_t6_shm_warned', False):
                         logger.warning(f"T6 TSL3 SHM push failed: {e}")
                         self._t6_shm_warned = True
+
+                # Diagnostic: T6 SHM has a known failure mode where chrony
+                # reach decays to 0 while the matched filter keeps
+                # reporting acquired=1, pps_consec>0 in the journal —
+                # observed on bee1 2026-05-12 ~07:01 UTC after ~5h
+                # uptime.  The cause isn't yet pinned down (`_last_edge_rtp`
+                # SHOULD advance every PPS per bpsk_pps_calibrator_mf.py:477,
+                # so the != gate above SHOULD fire).  Emit a periodic
+                # log line so the next incident's data tells us whether:
+                #   (a) the push code never runs (calibrator stops calling
+                #       this callback),
+                #   (b) `last_edge_rtp == _t6_last_pushed_rtp` keeps the
+                #       gate False (calibrator advance starvation), or
+                #   (c) the push runs but chrony rejects (excessive
+                #       offset / age).  This logging is paired with the
+                #       systemd-side tsl3-watchdog.sh which bounds the
+                #       outage at ~3 min until we know which it is.
+                now_mono = time.monotonic()
+                if now_mono - self._t6_shm_last_log_wall >= self.T6_SHM_LOG_INTERVAL_SEC:
+                    elapsed = now_mono - self._t6_shm_last_log_wall
+                    elapsed_since_push = (
+                        now_mono - self._t6_shm_last_push_wall
+                        if self._t6_shm_last_push_wall is not None
+                        else None
+                    )
+                    logger.info(
+                        f"T6 SHM diag: pushes_since_last_log="
+                        f"{self._t6_shm_push_count - self._t6_shm_last_log_count} "
+                        f"(window {elapsed:.0f}s), "
+                        f"last_push_age="
+                        f"{f'{elapsed_since_push:.1f}s' if elapsed_since_push is not None else 'never'}, "
+                        f"last_edge_rtp={last_edge_rtp}, "
+                        f"_t6_last_pushed_rtp={self._t6_last_pushed_rtp}, "
+                        f"locked={getattr(result, 'locked', None) if result is not None else None}, "
+                        f"pps_consec={getattr(result, 'pps_consecutive', None) if result is not None else None}"
+                    )
+                    self._t6_shm_last_log_count = self._t6_shm_push_count
+                    self._t6_shm_last_log_wall = now_mono
 
             # Log on first lock and periodically
             if result.pps_consecutive == self._t6_calibrator.consecutive_required:
