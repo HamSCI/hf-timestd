@@ -1,0 +1,21 @@
+# /etc/systemd/system/timestd-tsl3-watchdog.service
+[Unit]
+Description=HF-Timestd TSL3 (T6 BPSK SHM) Watchdog
+Documentation=https://github.com/mijahauan/hf-timestd
+After=chrony.service
+Wants=chrony.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+
+# Runs to completion in <2s on the happy path; only does work on
+# the rare LastRx-exceeded path (which fires a systemctl restart).
+# State file under /var/lib/hf-timestd enforces a 5-minute cooldown
+# so we can't thrash if a deeper problem keeps T6 dark.
+ExecStart=/opt/hf-timestd/scripts/tsl3-watchdog.sh
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tsl3-watchdog
