@@ -188,7 +188,13 @@ class CoreRecorderV2:
                     logger.warning(f"Redirecting to discovered service: '{selected['name']}' at {selected['address']}")
                     self.status_address = selected['address']
 
-        self.control = RadiodControl(self.status_address)
+        # client_id makes ka9q-python derive a per-(client, radiod)
+        # multicast destination (CONTRACT v0.3 §7) so hf-timestd's
+        # channels never share a multicast group with peer clients on
+        # the same radiod.  Requires ka9q-python ≥ 3.14.0; with older
+        # ka9q-python the kwarg is silently ignored.
+        self.control = RadiodControl(self.status_address,
+                                      client_id="hf-timestd")
 
         # Station config
         self.station_config = config.get('station', {})

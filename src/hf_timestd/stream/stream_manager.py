@@ -322,9 +322,12 @@ class StreamManager:
         """Create a new stream in radiod."""
         spec = request.spec
         
-        # Ensure control connection
+        # Ensure control connection.  client_id triggers per-(client,
+        # radiod) destination derivation in ka9q-python ≥ 3.14.0
+        # (CONTRACT v0.3 §7).
         if not self._control:
-            self._control = RadiodControl(self.radiod_address)
+            self._control = RadiodControl(self.radiod_address,
+                                           client_id="hf-timestd")
         
         # Create or reuse channel via ka9q ensure_channel
         try:

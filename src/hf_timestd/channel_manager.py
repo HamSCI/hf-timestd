@@ -62,15 +62,19 @@ class ChannelManager:
     Uses the TLV control protocol to send commands directly to radiod.
     """
     
-    def __init__(self, status_address: str):
+    def __init__(self, status_address: str, client_id: str = "hf-timestd"):
         """
         Initialize channel manager
-        
+
         Args:
             status_address: mDNS name or IP:port of radiod status stream
+            client_id: Identity passed to RadiodControl so ka9q-python
+                derives a per-(client, radiod) multicast destination
+                (CONTRACT v0.3 §7).  Default ``"hf-timestd"`` matches
+                the other call sites; tests may override.
         """
         self.status_address = status_address
-        self.control = RadiodControl(status_address)
+        self.control = RadiodControl(status_address, client_id=client_id)
     
     def discover_existing_channels(self) -> Dict[int, ChannelInfo]:
         """
