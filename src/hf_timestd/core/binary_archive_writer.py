@@ -99,9 +99,20 @@ class BinaryArchiveConfig:
 
 @dataclass
 class MinuteBuffer:
-    """Buffer for accumulating one minute of samples."""
+    """Buffer for accumulating one chunk of samples.
+
+    ``samples`` is an ``np.memmap`` backed by ``scratch_path`` on disk
+    rather than a heap-allocated ``np.zeros`` array.  Writes go through
+    kernel page cache + writeback, so the daemon's anonymous RSS stays
+    near zero during the long fill window (~10 min at default
+    ``file_duration_sec``) instead of the prior ~115 MB-per-channel
+    sawtooth that looked like a leak in ``ps``/``top``.  At flush time
+    the same memmap is read back to feed compression / direct write,
+    then closed; the scratch file is unlinked after successful flush
+    (or on abandon after ``MAX_FLUSH_RETRIES``).
+    """
     minute_boundary: int  # Unix timestamp of minute start
-    samples: np.ndarray   # Pre-allocated buffer
+    samples: np.ndarray   # np.memmap backed by scratch_path
     write_pos: int = 0    # Current write position
     gap_count: int = 0    # Number of gaps in this minute
     gap_samples: int = 0  # Total gap samples
@@ -109,6 +120,7 @@ class MinuteBuffer:
     start_system_time: Optional[float] = None
     timing_snapshots: List[TimingSnapshot] = field(default_factory=list)  # Snapshots for this minute
     flush_attempts: int = 0  # Number of failed flush attempts
+    scratch_path: Optional[Path] = None  # backing file for the memmap; unlinked on success
     
     @property
     def is_complete(self) -> bool:
@@ -206,22 +218,26 @@ class BinaryArchiveWriter:
         self._cleanup_orphaned_tmp_files()
 
     def _cleanup_orphaned_tmp_files(self) -> None:
-        """Remove .tmp files left behind by a prior crash.
+        """Remove .tmp / .scratch files left behind by a prior crash.
 
-        These are partial writes that were never atomically renamed.
+        These are partial writes (``.tmp``) or memmap scratch files
+        (``.scratch``) that were never atomically renamed or unlinked.
         Safe to delete at startup since no other writer instance should
         be active for this channel.
         """
         try:
             count = 0
-            for tmp_file in self.archive_dir.rglob('*.tmp'):
-                try:
-                    tmp_file.unlink()
-                    count += 1
-                except OSError as e:
-                    logger.warning(f"Failed to remove orphaned tmp file {tmp_file}: {e}")
+            # Both .tmp (compressed-write half-success) and .scratch
+            # (memmap backing files from a crashed fill) need cleaning.
+            for pattern in ('*.tmp', '*.scratch'):
+                for tmp_file in self.archive_dir.rglob(pattern):
+                    try:
+                        tmp_file.unlink()
+                        count += 1
+                    except OSError as e:
+                        logger.warning(f"Failed to remove orphaned {pattern} file {tmp_file}: {e}")
             if count > 0:
-                logger.info(f"{self.config.channel_name}: cleaned up {count} orphaned .tmp file(s)")
+                logger.info(f"{self.config.channel_name}: cleaned up {count} orphaned .tmp/.scratch file(s)")
         except Exception as e:
             logger.warning(f"Error scanning for orphaned .tmp files: {e}")
 
@@ -390,13 +406,60 @@ class BinaryArchiveWriter:
         rtp_delta = int(time_delta * self.config.sample_rate)
         chunk_boundary_rtp = (self._rtp_timesnap + rtp_delta) & 0xFFFFFFFF
 
+        # Allocate the chunk buffer as a memmap backed by a scratch
+        # file in the chunk's destination directory.  Mode ``'w+'``
+        # creates the file at full size (kernel-zeroed via SIGBUS-safe
+        # sparse allocation on supporting filesystems) and lets us
+        # write through it.  At ``_flush_minute`` we read this back
+        # to drive compression / direct write, then unlink the scratch
+        # file.  Anonymous heap stays near zero for the whole fill.
+        #
+        # Per-channel scratch name (``.<channel>.scratch``) so a
+        # concurrent flush from another channel can't collide.
+        minute_dir = self._get_minute_dir(chunk_boundary)
+        minute_dir.mkdir(parents=True, exist_ok=True)
+        scratch_path = minute_dir / (
+            f"{chunk_boundary}.{self._sanitize_channel_name()}.scratch"
+        )
+        # Best-effort: clean up any leftover scratch from a previous
+        # process crash before we mmap a fresh one.  We hold the writer
+        # lock, no concurrent producer for this channel exists.
+        if scratch_path.exists():
+            try:
+                scratch_path.unlink()
+            except OSError as e:
+                logger.warning(
+                    f"could not unlink stale scratch {scratch_path}: {e} "
+                    f"(continuing with fresh memmap allocation)"
+                )
+        try:
+            samples = np.memmap(
+                str(scratch_path),
+                dtype=np.complex64,
+                mode='w+',
+                shape=(self.samples_per_chunk,),
+            )
+        except OSError as e:
+            # Fall back to heap allocation if memmap creation fails
+            # (read-only fs, ENOSPC, etc.).  Worse memory profile but
+            # preserves the old behaviour rather than crashing the
+            # recorder.  Log noisily so the operator sees it.
+            logger.error(
+                f"memmap scratch alloc failed for {self.config.channel_name} "
+                f"({scratch_path}): {e}.  Falling back to heap np.zeros — "
+                f"daemon RSS will sawtooth during this chunk's fill."
+            )
+            samples = np.zeros(self.samples_per_chunk, dtype=np.complex64)
+            scratch_path = None
+
         buffer = MinuteBuffer(
             minute_boundary=chunk_boundary,
-            samples=np.zeros(self.samples_per_chunk, dtype=np.complex64),
+            samples=samples,
             write_pos=0,
             start_rtp=chunk_boundary_rtp,  # RTP at actual chunk boundary
             start_system_time=float(chunk_boundary),  # Exactly on chunk boundary
-            timing_snapshots=[]
+            timing_snapshots=[],
+            scratch_path=scratch_path,
         )
 
         # Transfer any pending timing snapshots to this buffer
@@ -549,6 +612,9 @@ class BinaryArchiveWriter:
                 f"{buffer.minute_boundary} after {buffer.flush_attempts} "
                 f"flush failures — {buffer.write_pos} samples LOST"
             )
+            # Release the memmap so we don't strand the scratch file
+            # in archive_dir for an operator to clean up by hand.
+            self._release_scratch(buffer)
             return True  # Give up — let caller discard
 
         logger.warning(
@@ -577,6 +643,33 @@ class BinaryArchiveWriter:
                     logger.debug(f"Cleaned up partial file: {path}")
             except OSError as e:
                 logger.warning(f"Failed to clean up {path}: {e}")
+
+    def _release_scratch(self, buffer: MinuteBuffer) -> None:
+        """Release the memmap and unlink its backing scratch file.
+
+        Called on flush success (success path of _flush_minute) and on
+        abandon after MAX_FLUSH_RETRIES (_try_flush).  Idempotent: safe
+        to call on a buffer that fell back to heap allocation
+        (``scratch_path is None``) or that has already been released.
+        Errors are logged at warn level rather than raised — they imply
+        a stranded scratch file at most, not data loss.
+        """
+        if buffer.samples is not None:
+            # numpy ≥1.21: np.memmap has a no-op _mmap when uninitialised;
+            # del-ing the array drops the kernel mapping ref.  We also
+            # zero out the dataclass field so any later access raises
+            # AttributeError loudly instead of writing into a freed page.
+            buffer.samples = None  # type: ignore[assignment]
+        if buffer.scratch_path is not None:
+            try:
+                if buffer.scratch_path.exists():
+                    buffer.scratch_path.unlink()
+            except OSError as e:
+                logger.warning(
+                    f"failed to unlink scratch {buffer.scratch_path}: {e} "
+                    f"(stranded; the next chunk's _start_new_minute will retry)"
+                )
+            buffer.scratch_path = None
     
     def _flush_minute(self, buffer: MinuteBuffer) -> bool:
         """Write completed minute buffer to disk with disk full handling."""
@@ -709,9 +802,17 @@ class BinaryArchiveWriter:
                 f"({metadata['completeness_pct']:.1f}%) "
                 f"[{bin_path.name}]"
             )
-            
+
+            # Release the memmap + unlink the scratch file.  Done last
+            # so a failure here doesn't roll back the successful write —
+            # the worst case is a stranded scratch file that the next
+            # _start_new_minute call will clean up.  Setting samples to
+            # None drops the only reference; np.memmap frees pages and
+            # closes the underlying fd on GC.
+            self._release_scratch(buffer)
+
             return True
-            
+
         except OSError as e:
             # Handle disk full specifically
             if e.errno == errno.ENOSPC:

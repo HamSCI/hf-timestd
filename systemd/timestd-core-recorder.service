@@ -75,8 +75,15 @@ PrivateTmp=false
 ProtectSystem=strict
 ProtectHome=read-only
 
-# Paths we need write access to
-ReadWritePaths=/var/lib/timestd /dev/shm/timestd
+# Paths we need write access to.
+#
+# /run/hf-timestd is the RuntimeDirectory (line 33) — systemd creates it
+# but ProtectSystem=strict still requires explicit ReadWritePaths to
+# permit writes from this service when the directory is shared with
+# other writers (the fusion service also writes there).  Without this,
+# the QualitySnapshotWriter logged EROFS once every ~5 s (719/hour),
+# producing journal noise and leaving quality.json unwritten.
+ReadWritePaths=/var/lib/timestd /dev/shm/timestd /run/hf-timestd
 ReadOnlyPaths=/etc/hf-timestd
 
 # Network access for RTP multicast
