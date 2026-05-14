@@ -38,6 +38,19 @@ def _make_t6_core_recorder(*, use_shared: bool, with_multi: bool = True):
         'sample_rate': 24_000,
         'description': 'BPSK_PPS',
     }
+    # Attributes touched by _start_t6_stream / shutdown that real
+    # __init__ provides but our __new__ fast-path has to mirror by
+    # hand.  Keep this list in sync with CoreRecorderV2.__init__.
+    cr._t6_channel_info = None    # set by _start_t6_stream from ChannelInfo
+    cr._lifetime_entries = []     # appended to when LIFETIME tag is opted in
+    cr._radiod_lifetime_frames = 0  # 0 = opt-out (no keep-alive)
+    # T6 timing-anchor refresh thread (V1 fix per TIMING-PIPELINE-WIRING
+    # §10.3).  Legacy-mode _start_t6_stream checks the thread is None
+    # and constructs a new one; without these attrs it AttributeErrors
+    # before reaching the RadiodStream branch.
+    cr._t6_timing_poll_thread = None
+    import threading as _t
+    cr._t6_timing_poll_stop = _t.Event()
     return cr
 
 
@@ -126,6 +139,11 @@ class TestSharedMultiShutdown(unittest.TestCase):
         cr.output_dir = Path('/tmp/timestd-shared-test')
         cr.output_dir.mkdir(parents=True, exist_ok=True)
         cr.metrics = MagicMock()
+        # _shutdown reads _t6_channel_info to evict the T6 channel from
+        # radiod's table on stop (2026-04, T6 SSRC-orphan cleanup).
+        # Real __init__ sets this to None; the __new__ fast-path has to
+        # too, otherwise _shutdown raises AttributeError.
+        cr._t6_channel_info = None
         # _write_status reads several attrs we don't care about; stub it.
         cr._write_status = MagicMock()
         return cr

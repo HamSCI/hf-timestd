@@ -77,6 +77,11 @@ def _make_core_recorder(
     cr.calibrator = MagicMock() if with_calibrator else None
     cr._use_shared_multistream = use_shared
     cr._multi = None
+    # _initialize_channels appends to this when opting channels into
+    # radiod's LIFETIME tag (commit 0f8b622+, added 2026-05-08).  Real
+    # __init__ initialises it to []; the __new__ fast-path has to too.
+    cr._lifetime_entries = []
+    cr._radiod_lifetime_frames = 0  # 0 = opt-out, no keep-alive thread
     return cr
 
 
