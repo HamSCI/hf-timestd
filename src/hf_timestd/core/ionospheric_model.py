@@ -251,8 +251,18 @@ class IonosphericModel:
         self._calibration_data: OrderedDict[str, list] = OrderedDict()
         self.max_locations = 10  # Maximum locations to track
         
-        # Cache for IRI results (avoid repeated calculations)
-        self._iri_cache: Dict[str, LayerHeights] = {}
+        # Cache for IRI results (avoid repeated calculations).
+        # 2026-05-15: switched to OrderedDict + size cap. Key format
+        # `{lat}_{lon}_{date}_{minute_slot}` produces a new key for each
+        # 5-minute slot, so the cache otherwise grew unbounded across UTC
+        # boundaries (the date-based key prevents reuse of yesterday's
+        # entries but they never get evicted). With ~10-20 IRI queries per
+        # fusion cycle × ~7 cycles/min, growth was ~5000 entries/hour at
+        # ~300 bytes each — a known contributor to the fusion memory
+        # leak. FIFO eviction at a generous cap (5000 ~= 1 day at typical
+        # query rate) keeps in-window reuse healthy while bounding RSS.
+        self._iri_cache: 'OrderedDict[str, LayerHeights]' = OrderedDict()
+        self._iri_cache_max_size = 5000
         self._cache_ttl_seconds = 300  # 5 minute cache
         
         # IONEX support for global VTEC maps
@@ -638,8 +648,13 @@ class IonosphericModel:
                 foF2=foF2 if foF2 is not None and 1.0 < foF2 < 30.0 else None
             )
             
-            # Cache result
+            # Cache result with FIFO eviction at _iri_cache_max_size.
+            # OrderedDict.move_to_end on lookup + popitem(last=False) gives
+            # us LRU-with-cap; combined with the per-entry TTL check above
+            # the working set stays compact across long-running fusion.
             self._iri_cache[cache_key] = heights
+            if len(self._iri_cache) > self._iri_cache_max_size:
+                self._iri_cache.popitem(last=False)
             
             logger.debug(f"IRI-{self._iri_version}: hmF2={hmF2:.1f} km at ({latitude:.1f}, {longitude:.1f})")
             return heights
