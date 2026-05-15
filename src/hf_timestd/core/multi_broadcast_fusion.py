@@ -3197,10 +3197,27 @@ class MultiBroadcastFusion:
                 - reason: Explanation of validation result
                 - station_deviations: Dict of station->max_frequency_deviation_ms
         """
-        # Group measurements by station
+        # Group measurements by station, excluding cases where the
+        # propagation model didn't actually predict skywave delay —
+        # cross-frequency validation only makes sense when the model
+        # gave a real F/E-layer prediction and we're testing whether
+        # the resulting d_clock is frequency-independent.
+        #
+        # Skipped modes:
+        #   vacuum_fallback — no feasible F2 mode at current MUF;
+        #     propagation_delay defaults to distance/c, so the residual
+        #     d_clock is whatever skywave overhead the model couldn't
+        #     account for. Cross-comparing these against true skywave-
+        #     corrected d_clocks always shows huge spreads (10–20 ms)
+        #     that aren't model bugs — they're the absence of a model.
+        #   FALLBACK — metrology's L2-missing path; uses
+        #     light_time + 1.5 ms as expected_delay, same problem.
         station_freq_groups = defaultdict(lambda: defaultdict(list))
         for m in measurements:
             if m.station in ('GLOBAL_DIFF', 'BPM', 'UNKNOWN'):
+                continue
+            base_mode = (m.propagation_mode or '').split('+')[0].strip().lower()
+            if base_mode in ('vacuum_fallback', 'fallback'):
                 continue
             if m.d_clock_ms is not None and not np.isnan(m.d_clock_ms):
                 station_freq_groups[m.station][m.frequency_mhz].append(m.d_clock_ms)
