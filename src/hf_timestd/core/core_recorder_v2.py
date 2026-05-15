@@ -1428,6 +1428,51 @@ class CoreRecorderV2:
             )
             self._t6_first_sample_logged = True
 
+        # Diagnostic — count NaN / inf in upstream samples.
+        # T6 has gone repeatedly dark with phase_rad=+nan tracing back to
+        # NaN in the IQ input itself; this counter pinpoints when and how
+        # often. Logged on state transition (clean→bad, bad→clean) plus a
+        # periodic summary every 60 s while bad, so the journal isn't
+        # flooded but every NaN onset is captured. Remove once root cause
+        # is identified and fixed upstream.
+        if len(samples) > 0:
+            import numpy as _np
+            n_total = 2 * len(samples)
+            re = samples.real
+            im = samples.imag
+            n_nan = int(_np.sum(_np.isnan(re))) + int(_np.sum(_np.isnan(im)))
+            n_inf = int(_np.sum(_np.isinf(re))) + int(_np.sum(_np.isinf(im)))
+            bad_now = (n_nan + n_inf) > 0
+            prev_bad = getattr(self, '_t6_input_bad', False)
+            prev_summary_wall = getattr(self, '_t6_input_summary_wall', 0.0)
+            wall = time.monotonic()
+            if bad_now and not prev_bad:
+                amp = _np.abs(samples)
+                finite_amp = amp[_np.isfinite(amp)]
+                amp_min = float(finite_amp.min()) if finite_amp.size else float('nan')
+                amp_max = float(finite_amp.max()) if finite_amp.size else float('nan')
+                logger.warning(
+                    f"T6 input BAD onset: nan={n_nan}/{n_total} inf={n_inf}/{n_total} "
+                    f"len={len(samples)} ssrc={getattr(quality, 'ssrc', None)} "
+                    f"rtp={getattr(quality, 'last_rtp_timestamp', None)} "
+                    f"finite_amp_min={amp_min:.3g} max={amp_max:.3g}"
+                )
+                self._t6_input_summary_wall = wall
+            elif (not bad_now) and prev_bad:
+                logger.info(
+                    f"T6 input CLEAN resumed: len={len(samples)} "
+                    f"ssrc={getattr(quality, 'ssrc', None)} "
+                    f"rtp={getattr(quality, 'last_rtp_timestamp', None)}"
+                )
+            elif bad_now and (wall - prev_summary_wall) >= 60.0:
+                logger.warning(
+                    f"T6 input still BAD: nan={n_nan}/{n_total} inf={n_inf}/{n_total} "
+                    f"len={len(samples)} ssrc={getattr(quality, 'ssrc', None)} "
+                    f"rtp={getattr(quality, 'last_rtp_timestamp', None)}"
+                )
+                self._t6_input_summary_wall = wall
+            self._t6_input_bad = bad_now
+
         result = self._t6_calibrator.process_samples(
             samples, quality.last_rtp_timestamp
         )
