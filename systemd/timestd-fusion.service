@@ -33,6 +33,16 @@ EnvironmentFile=-/etc/sigmond/coordination.env
 
 Environment=MALLOC_ARENA_MAX=2
 
+# Use jemalloc instead of glibc malloc — empirically 22% slower RSS
+# growth on bee1 (2026-05-15 leak diagnostic, see commits ee90148 +
+# 2f7a431 and project_hf_timestd_fusion_audit.md). The leak is
+# primarily in C-extension internal state (h5py reader-per-cycle
+# pattern), so jemalloc doesn't eliminate the growth — but its arena
+# management is markedly better than glibc's for this workload.
+# Falls back gracefully if libjemalloc isn't installed: ld.so logs
+# one stderr warning and continues with the default allocator.
+Environment=LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
+
 # Run as the installed module from the venv
 ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.core.multi_broadcast_fusion \
     --data-root /var/lib/timestd \
