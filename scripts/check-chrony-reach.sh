@@ -81,9 +81,12 @@ fi
 
 # =============================================================================
 # NEW: Check for Chrony SHM segments (indicates fusion is writing)
+# Chrony's SHM driver uses System V shared memory with keys 0x4e545030
+# ("NTP0"), 0x4e545031 ("NTP1"), etc. — NOT files in /dev/shm — so we
+# check via `ipcs -m` for any segment whose key starts with 0x4e54503.
 # =============================================================================
 SHM_MISSING=false
-if [[ ! -e /dev/shm/chrony.0.sock ]] && [[ ! -e /dev/shm/NTP0 ]]; then
+if ! ipcs -m 2>/dev/null | grep -qE '^0x4e54503[0-9]\b'; then
     # Check if fusion service is even supposed to be writing
     if systemctl is-active --quiet timestd-fusion 2>/dev/null; then
         echo "WARNING: Chrony SHM segments not found but fusion service is running"
