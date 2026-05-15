@@ -254,10 +254,13 @@ class TestWriteMeasurement:
         finally:
             writer.close()
 
-    def test_insert_or_replace_on_duplicate_key(self, temp_dir, temp_db, sample_l2_measurement):
-        """Same (channel, timestamp_utc) → upsert. HDF5 had append-with-
-        overwrite-of-last-row semantics; SQLite mirrors that via
-        INSERT OR REPLACE."""
+    def test_duplicate_timestamps_append_both_rows(self, temp_dir, temp_db, sample_l2_measurement):
+        """Same (channel, timestamp_utc) → BOTH rows are kept (append-only,
+        no upsert). HDF5 is append-only and several products emit multiple
+        rows per timestamp_utc (different stations or tones within the
+        same processing second). The SQLite writer mirrors that — both
+        the original PK approach and a TIMESTAMP-as-UNIQUE constraint
+        would silently lose data."""
         writer = _make_writer(temp_dir, temp_db)
         try:
             writer.write_measurement(sample_l2_measurement)
@@ -269,13 +272,15 @@ class TestWriteMeasurement:
                 f"SELECT COUNT(*) FROM {writer.table} WHERE channel = ?",
                 (writer.channel,),
             ).fetchone()[0]
-            last_value = conn.execute(
-                f"SELECT clock_offset_ms FROM {writer.table} WHERE channel = ?",
+            values = conn.execute(
+                f"SELECT clock_offset_ms FROM {writer.table} "
+                f"WHERE channel = ? ORDER BY ROWID",
                 (writer.channel,),
-            ).fetchone()[0]
+            ).fetchall()
             conn.close()
-            assert row_count == 1  # upsert, not duplicate
-            assert last_value == pytest.approx(99.0)
+            assert row_count == 2  # both rows kept
+            assert values[0][0] == pytest.approx(-2.14)
+            assert values[1][0] == pytest.approx(99.0)
         finally:
             writer.close()
 

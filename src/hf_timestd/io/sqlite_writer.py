@@ -186,35 +186,47 @@ class SqliteDataProductWriter:
 
         Schema is generated from the JSON field list. ``channel`` is
         added as a leading column (the schema doesn't include it
-        because in the HDF5 layout the channel is implicit from the
-        file path; in SQLite we need it explicit).
+        consistently — most schemas omit it because the HDF5 layout has
+        the channel implicit in the file path; a few include it as a
+        regular field. We always inject our own ``channel`` column
+        from ``self.channel`` and skip any schema-side ``channel``
+        field, so the column appears exactly once.).
+
+        **No explicit primary key on (channel, timestamp_utc)** — HDF5
+        is append-only and several products emit multiple rows with the
+        same timestamp_utc (different stations or tones within the same
+        processing second). A PK on timestamp_utc would silently collapse
+        those duplicates via INSERT OR REPLACE, losing data. Instead we
+        rely on SQLite's implicit ROWID for ordering and add a non-unique
+        index on (channel, timestamp_utc) so range queries are still
+        cheap.
         """
         cols: List[str] = ["channel TEXT NOT NULL"]
         for field in self.schema["fields"]:
             name = field["name"]
+            if name == "channel":
+                # Already injected as the leading column.
+                continue
             sql_type = _sqlite_type_for_field(field)
             required = field.get("required", False)
             null_clause = " NOT NULL" if required else ""
             cols.append(f"{name} {sql_type}{null_clause}")
-        # Primary key: (channel, timestamp_utc) when timestamp_utc is in
-        # the schema. Fall back to no explicit PK otherwise (rare).
-        field_names = {f["name"] for f in self.schema["fields"]}
-        if "timestamp_utc" in field_names:
-            pk = "PRIMARY KEY (channel, timestamp_utc)"
-            cols.append(pk)
 
         ddl = f"CREATE TABLE IF NOT EXISTS {self.table} (\n    " + ",\n    ".join(cols) + "\n)"
         self._conn.execute(ddl)
-        # Index on (channel, timestamp_utc) is implicit via the PK,
-        # but add an explicit one if no PK was set so the time-range
-        # query is still cheap.
+
+        # Non-unique index for time-range queries. Pick the best
+        # ordering column the schema offers.
+        field_names = {f["name"] for f in self.schema["fields"]}
+        index_col = None
         if "timestamp_utc" in field_names:
-            # PK already covers it
-            pass
+            index_col = "timestamp_utc"
         elif "minute_boundary_utc" in field_names:
+            index_col = "minute_boundary_utc"
+        if index_col is not None:
             self._conn.execute(
-                f"CREATE INDEX IF NOT EXISTS idx_{self.table}_chan_min "
-                f"ON {self.table} (channel, minute_boundary_utc)"
+                f"CREATE INDEX IF NOT EXISTS idx_{self.table}_chan_ts "
+                f"ON {self.table} (channel, {index_col})"
             )
 
     # ------------------------------------------------------------------
@@ -298,19 +310,24 @@ class SqliteDataProductWriter:
     def _build_insert(self, measurement: Dict[str, Any]) -> tuple:
         """Build (sql, params) tuple for a single insert.
 
-        Uses INSERT OR REPLACE so duplicate (channel, timestamp_utc)
-        primary keys overwrite — matches HDF5's "last write wins"
-        semantics within a day.
+        Plain INSERT — no upsert. HDF5 is append-only and several
+        products emit multiple rows per timestamp_utc (different
+        stations/tones within the same processing second); we mirror
+        that by appending too. See _ensure_table for the reasoning.
         """
         cols: List[str] = ["channel"]
         params: List[Any] = [self.channel]
         for field in self.schema["fields"]:
             name = field["name"]
+            if name == "channel":
+                # Already injected via self.channel; skip the schema's
+                # field so we don't emit "channel" twice in the SQL.
+                continue
             if name in measurement:
                 cols.append(name)
                 params.append(self._coerce_for_sqlite(field, measurement[name]))
         placeholders = ", ".join("?" for _ in cols)
-        sql = f"INSERT OR REPLACE INTO {self.table} ({', '.join(cols)}) VALUES ({placeholders})"
+        sql = f"INSERT INTO {self.table} ({', '.join(cols)}) VALUES ({placeholders})"
         return sql, params
 
     def write_measurement(self, measurement: Dict[str, Any]) -> None:
@@ -342,6 +359,10 @@ class SqliteDataProductWriter:
             params: List[Any] = [self.channel]
             for field in self.schema["fields"]:
                 name = field["name"]
+                if name == "channel":
+                    # See _build_insert: channel is always self.channel,
+                    # never the row's own value.
+                    continue
                 if name in m:
                     cols.append(name)
                     params.append(self._coerce_for_sqlite(field, m[name]))
@@ -354,7 +375,7 @@ class SqliteDataProductWriter:
             for cols, rows in groups.items():
                 placeholders = ", ".join("?" for _ in cols)
                 sql = (
-                    f"INSERT OR REPLACE INTO {self.table} "
+                    f"INSERT INTO {self.table} "
                     f"({', '.join(cols)}) VALUES ({placeholders})"
                 )
                 self._conn.executemany(sql, rows)

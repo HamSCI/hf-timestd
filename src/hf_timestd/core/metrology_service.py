@@ -1112,11 +1112,17 @@ if __name__ == "__main__":
             "--use-tiered-storage is deprecated and ignored"
         )
 
-    # Config dict construction - merge TOML timing section
+    # Config dict construction - merge TOML timing + metrology + storage sections.
+    # The storage section drives backend selection in
+    # hf_timestd.io.make_data_product_writer (Phase 1 of HDF5 → SQLite
+    # migration). Without it here, even if [storage] write_sqlite=true is set
+    # in the TOML the writer never opts into SQLite — config.get('storage', {})
+    # would always be empty.
     config = {
         "sample_rate": 24000,
         "timing": toml_config.get("timing", {}),  # Pass timing section for authority mode
         "metrology": toml_config.get("metrology", {}),
+        "storage": toml_config.get("storage", {}),
     }
     
     station_config = {
