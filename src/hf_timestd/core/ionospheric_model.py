@@ -166,10 +166,18 @@ class LayerHeights:
     
     # Calibration applied
     calibration_offset_km: float = 0.0
-    
+
     # Solar indices used (if available)
     f107: Optional[float] = None     # 10.7 cm solar flux
     ap: Optional[float] = None       # Geomagnetic Ap index
+
+    # F2 critical frequency (MHz) — needed by HFPropagationModel for MUF check.
+    # IRI returns this directly; before this field existed, HFPropagationModel
+    # always fell back to the hardcoded default 8.0 MHz, making short-path
+    # high-band predictions (e.g. WWV 15-25 MHz from KS) systematically
+    # report no feasible mode → vacuum_fallback → cross-frequency validation
+    # failures of 5–18 ms.
+    foF2: Optional[float] = None
 
 
 @dataclass
@@ -601,20 +609,24 @@ class IonosphericModel:
                 glon=longitude
             )
             
-            # Extract peak heights from IRI output
-            # IRI returns hmF2, hmF1, hmE as single values
+            # Extract peak heights + foF2 from IRI output. IRI returns
+            # hmF2, hmF1, hmE as single values; foF2 is the F2 critical
+            # frequency in MHz, needed by HFPropagationModel for the MUF
+            # check (omitting it left the propagation model on a hardcoded
+            # 8.0 MHz default).
             hmF2 = self._extract_scalar(result.get('hmF2'), DEFAULT_F2_LAYER_HEIGHT_KM)
             hmF1 = self._extract_scalar(result.get('hmF1'), DEFAULT_F1_LAYER_HEIGHT_KM)
             hmE = self._extract_scalar(result.get('hmE'), DEFAULT_E_LAYER_HEIGHT_KM)
-            
+            foF2 = self._extract_scalar(result.get('foF2'), None)
+
             # Sanity check on values
             if not (150 < hmF2 < 500):
                 logger.warning(f"IRI hmF2={hmF2} outside valid range, using parametric")
                 return None
-            
+
             # Set tier based on which IRI version is being used
             tier = IonosphericModelTier.IRI_2020 if self._iri_version == "2020" else IonosphericModelTier.IRI_2016
-            
+
             heights = LayerHeights(
                 hmE=hmE,
                 hmF1=hmF1,
@@ -622,7 +634,8 @@ class IonosphericModel:
                 tier=tier,
                 timestamp=datetime.now(timezone.utc),
                 location=(latitude, longitude),
-                hmF2_uncertainty_km=25.0 if self._iri_version == "2020" else 28.0  # IRI-2020 slightly better
+                hmF2_uncertainty_km=25.0 if self._iri_version == "2020" else 28.0,  # IRI-2020 slightly better
+                foF2=foF2 if foF2 is not None and 1.0 < foF2 < 30.0 else None
             )
             
             # Cache result
