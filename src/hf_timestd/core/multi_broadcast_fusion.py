@@ -3513,14 +3513,20 @@ class MultiBroadcastFusion:
                            f"(confidence={confidence:.2f}, frames={frames}/9, "
                            f"decode_rate={decode_rate:.2f})")
                 
-                # Pass through DUT1 and TAI-UTC for downstream use
+                # Pass through DUT1 and TAI-UTC for downstream use.
+                # When Frame B fails to decode, metrology writes dut1_seconds=None,
+                # which HDF5 stores as NaN (hdf5_writer.py:597). Treat NaN as
+                # missing here so we don't poison set_dut1. DUT1 drifts <1 ms/day,
+                # so we cache the last good value in self._fsk_dut1 and replay it
+                # to the propagation model on every cycle — Frame B can stay
+                # broken for hours and propagation modelling still has a sane DUT1.
                 dut1 = fsk_data.get('dut1_seconds')
                 tai_utc = fsk_data.get('tai_utc')
-                if dut1 is not None:
+                if dut1 is not None and not np.isnan(dut1):
                     self._fsk_dut1 = dut1
-                    # Feed DUT1 to propagation model for UT1-corrected solar zenith
+                if self._fsk_dut1 is not None:
                     if self.physics_model is not None and hasattr(self.physics_model, 'set_dut1'):
-                        self.physics_model.set_dut1(dut1)
+                        self.physics_model.set_dut1(self._fsk_dut1)
                 if tai_utc is not None:
                     if hasattr(self, '_fsk_tai_utc') and self._fsk_tai_utc != tai_utc:
                         logger.warning(f"Fusion: TAI-UTC changed {self._fsk_tai_utc} → {tai_utc} "

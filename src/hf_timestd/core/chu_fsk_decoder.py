@@ -395,7 +395,43 @@ class CHUFSKDecoder:
                     if np.mean(soft_decision[i:i+check_len]) < -edge_thresh:
                         return i
             return None
-    
+
+    def _find_frame_b_candidates(self, soft_decision: np.ndarray, search_start: int, search_end: int) -> List[Tuple[int, float]]:
+        """
+        Enumerate plausible Frame B start positions (sec 31), sorted by UART-framing score.
+
+        _find_first_start_bit's "return first match" heuristic loses to false-positive
+        UART framing in marginal SNR — the first qualifying frame in the window is
+        sometimes not the actual data frame, producing byte misalignment that fails
+        BCD parsing every minute. Callers can iterate this list and accept the first
+        candidate whose full Frame B decode passes BCD + redundancy checks.
+        """
+        samples_per_bit_float = self.sample_rate / BAUD_RATE
+        mark_len = int(samples_per_bit_float)
+        frame_len = int(11 * samples_per_bit_float)
+        step = max(1, int(samples_per_bit_float / 4))
+        min_score = 1.5
+
+        candidates: List[Tuple[int, float]] = []
+        for i in range(search_start, min(search_end, len(soft_decision) - frame_len - mark_len), step):
+            pre_mark = np.mean(soft_decision[i:i + mark_len])
+            if pre_mark <= 0:
+                continue
+            start_pos = i + mark_len
+            start_center = int(start_pos + 0.5 * samples_per_bit_float)
+            if start_center >= len(soft_decision) or soft_decision[start_center] > 0:
+                continue
+            stop_center = int(start_pos + 10.5 * samples_per_bit_float)
+            if stop_center >= len(soft_decision) or soft_decision[stop_center] < 0:
+                continue
+            start_val = -soft_decision[start_center]
+            stop_val = soft_decision[stop_center]
+            score = pre_mark + start_val + stop_val
+            if score >= min_score:
+                candidates.append((start_pos, float(score)))
+        candidates.sort(key=lambda x: -x[1])
+        return candidates
+
     def _extract_bits(self, soft_decision: np.ndarray, start_sample: int, num_bits: int) -> Tuple[List[int], float]:
         """
         Extract bits from soft decision signal using robust timing.
@@ -873,12 +909,10 @@ class CHUFSKDecoder:
         # CHU timing: 0-10ms tick, 10-133ms mark preamble, 133-500ms FSK data.
         # Frame A (secs 32-39): search from 30ms — the 0x06 pattern match rejects
         #   false hits in the tick/preamble region.
-        # Frame B (sec 31): search from 200ms — no pattern to match, so we must
-        #   skip the tick noise region to avoid false UART framing matches.
-        if second_number == 31:
-            search_start_ms, search_end_ms = 200, 500
-        else:
-            search_start_ms, search_end_ms = 30, 500
+        # Frame B (sec 31): search from 30ms too — false matches from the
+        #   tick/sync region are filtered out by the BCD-plausibility prescreen
+        #   in the multi-candidate retry path (see Frame B decode below).
+        search_start_ms, search_end_ms = 30, 500
         search_start = (second_start_sample - slice_offset) + int(search_start_ms * self.sample_rate / 1000)
         search_end = (second_start_sample - slice_offset) + int(search_end_ms * self.sample_rate / 1000)
         
@@ -916,6 +950,38 @@ class CHUFSKDecoder:
         # Decode based on second number
         if second_number == 31:
             frame = self._decode_frame_b(raw_bytes)
+            if frame is None:
+                # Single-candidate alignment failed. Enumerate top UART-framing
+                # candidates in the search window and accept the first whose
+                # nibble-swapped year MSB is 0x02 (BCD year starts with "2") and
+                # whose _decode_frame_b succeeds. Rank surviving candidates by
+                # redundancy bit-error count (lowest wins) so we get the best
+                # alignment, not just the first valid one.
+                candidates = self._find_frame_b_candidates(soft_decision, search_start, search_end)
+                best_diff: Optional[int] = None
+                for cand_start, _cand_score in candidates[:8]:
+                    cand_bits, cand_conf = self._extract_bits(soft_decision, cand_start, BITS_PER_FRAME)
+                    if len(cand_bits) < BITS_PER_FRAME:
+                        continue
+                    cand_bytes = self._bits_to_bytes(cand_bits)
+                    if len(cand_bytes) < 10:
+                        continue
+                    swapped_1 = self._swap_nibbles(cand_bytes[1])
+                    if ((swapped_1 >> 4) & 0x0F) != 2:
+                        continue
+                    cand_frame = self._decode_frame_b(cand_bytes)
+                    if cand_frame is None:
+                        continue
+                    inverted = [(~b) & 0xFF for b in cand_bytes[:5]]
+                    diff_bits = sum(bin(a ^ b).count('1') for a, b in zip(inverted, cand_bytes[5:10]))
+                    if best_diff is None or diff_bits < best_diff:
+                        best_diff = diff_bits
+                        frame = cand_frame
+                        raw_bytes = cand_bytes
+                        bits = cand_bits
+                        bit_confidence = cand_conf
+                        data_start_sample = cand_start
+                        found_start = True
             if frame is None:
                 failure_reason = failure_reason or 'frame_b_redundancy_fail'
         else:
