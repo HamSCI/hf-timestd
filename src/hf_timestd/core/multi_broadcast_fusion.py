@@ -157,6 +157,7 @@ REVISION HISTORY
 2025-11-01: Initial implementation with CHU reference
 """
 
+import ctypes
 import logging
 import json
 import os
@@ -169,6 +170,50 @@ from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
 import numpy as np
 from datetime import datetime, timezone
+
+# ----------------------------------------------------------------------
+# malloc_trim() defensive helper — see comment block at the call site
+# (in the main loop, ~once every 60 cycles). The 2026-05-15 fusion
+# memory-leak diagnostic (commits bdb5b76 + c60fd48 + a83dda1) proved
+# the residual ~200 MB/h growth is NOT in Python-tracked objects:
+# total_kb in fusion_objgrowth stays ~24 MB across cycles while RSS
+# climbs to 250+ MB. The leak is glibc-malloc arena fragmentation from
+# numpy/h5py temporaries — large allocations get freed but glibc holds
+# the pages back from the OS. malloc_trim(0) walks the free lists and
+# munmaps what it can. Costs ~50-200 ms per call for a fragmented
+# heap; called sparingly enough that it doesn't perturb fusion's
+# 8 s interval.
+try:
+    _LIBC = ctypes.CDLL("libc.so.6", use_errno=True)
+    _LIBC.malloc_trim.argtypes = [ctypes.c_size_t]
+    _LIBC.malloc_trim.restype = ctypes.c_int
+    _MALLOC_TRIM_AVAILABLE = True
+except Exception:
+    _LIBC = None
+    _MALLOC_TRIM_AVAILABLE = False
+
+
+def _malloc_trim() -> int:
+    """Call glibc's malloc_trim(0). Returns 1 if memory was released, 0
+    otherwise. No-op on non-glibc systems."""
+    if not _MALLOC_TRIM_AVAILABLE:
+        return 0
+    try:
+        return _LIBC.malloc_trim(0)
+    except Exception:
+        return 0
+
+
+def _process_rss_kb() -> int:
+    """Read VmRSS from /proc/self/status. Returns 0 on any read error."""
+    try:
+        with open('/proc/self/status') as f:
+            for line in f:
+                if line.startswith('VmRSS:'):
+                    return int(line.split()[1])
+    except Exception:
+        pass
+    return 0
 from hf_timestd.models import (
     L3FusionTiming,
     FusionQualityGrade,
@@ -4994,6 +5039,10 @@ def run_fusion_service(
     except Exception as e:
         logger.warning(f"Fusion tracemalloc diagnostic not available: {e}")
 
+    # Local cycle counter for periodic malloc_trim. Independent of
+    # loop_metrics so the trim happens whether or not metrics is on.
+    cycle_index = 0
+
     logger.info("Starting Multi-Broadcast Fusion Dashboard Service...")
     logger.info(f"Fusion interval: {interval_sec}s, lookback: {lookback_minutes}m")
     logger.info(f"Timing authority level: {fusion.timing_authority_level}")
@@ -5546,6 +5595,28 @@ def run_fusion_service(
                     tracemalloc_diag.tick()
                 except Exception as e:
                     logger.warning(f"Fusion tracemalloc tick failed: {e}")
+
+            # Periodic glibc malloc_trim(). The 2026-05-15 leak diagnostic
+            # proved the residual ~200 MB/h growth is malloc-arena
+            # fragmentation, not Python objects (Python-tracked memory
+            # is stable at ~24 MB while RSS climbs to 250+ MB). Trimming
+            # returns freed-but-cached pages back to the OS, capping the
+            # natural drift. Called every 60 cycles (≈10 min at the 10 s
+            # cycle pace); per-call cost ~50-200 ms on a fragmented heap,
+            # negligible at this cadence.
+            cycle_index += 1
+            if cycle_index % 60 == 0 and cycle_index > 0:
+                rss_before_kb = _process_rss_kb()
+                trim_t0 = time.monotonic()
+                released = _malloc_trim()
+                trim_ms = (time.monotonic() - trim_t0) * 1000.0
+                rss_after_kb = _process_rss_kb()
+                logger.info(
+                    "fusion_malloc_trim cycle=%d released=%d duration_ms=%.1f "
+                    "rss_kb=%d → %d (delta=%+d)",
+                    cycle_index, released, trim_ms,
+                    rss_before_kb, rss_after_kb, rss_after_kb - rss_before_kb,
+                )
 
             # BREADCRUMB: Sleeping
             loop_duration = time.time() - loop_start_time
