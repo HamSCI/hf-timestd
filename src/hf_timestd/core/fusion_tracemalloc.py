@@ -1,50 +1,48 @@
-"""Tracemalloc-based memory-growth diagnostic for the fusion loop.
+"""GC-sampling memory-growth diagnostic for the fusion loop.
 
 The 2026-04-23 fusion audit identified "memory growth" as a real red
 flag, and the 2026-05-15 measurement-phase confirmed it empirically
-(245 MB/h before any fix, 203 MB/h after the _iri_cache eviction fix).
-Static code review found the obvious unbounded structures; the
-remaining ~200 MB/h needs runtime allocation-site evidence to pin down.
+(245 MB/h before any fix, 203 MB/h after _iri_cache eviction).
+
+The module is named ``fusion_tracemalloc`` for historical reasons —
+the first iteration used Python's ``tracemalloc``. That approach
+proved unworkable on bee1: per-allocation stack tracing made fusion's
+1.9 s p50 loop balloon to ~150 s (80×) due to the HDF5-heavy
+workload's allocation rate, which blew the WatchdogSec budget even
+after extending it. Replaced with a sampling approach using
+``gc.get_objects()`` — zero overhead between snapshots, and the
+per-snapshot cost (one walk of all Python objects) is paid once per
+N cycles instead of on every allocation.
+
+The trade-off: we lose file:line attribution for allocation sites.
+What we gain instead is *type-level* growth visibility — e.g.,
+"500 MB more bytes in numpy.ndarray objects across this window" —
+which is usually enough to point at the leaking subsystem.
 
 Usage:
-  Enable via environment variable HF_TIMESTD_TRACEMALLOC=1 (and
-  optionally HF_TIMESTD_TRACEMALLOC_INTERVAL=N for cycle cadence
-  between diff snapshots; default 200, i.e. ~33 min at 10 s/cycle),
-  and HF_TIMESTD_TRACEMALLOC_FRAMES=N for the stack depth captured per
-  allocation (default 3 — enough to attribute fusion's allocations to
-  the fusion-side caller without the extreme overhead of deep traces).
-  Costs scale with frames: frames=1 ~1-2% CPU, frames=3 ~5-10%,
-  frames=25 several × the normal loop time. Empirically frames=25
-  pushed fusion's 1.9 s p50 loop past the 120 s watchdog on bee1
-  2026-05-15 — the diagnostic blew up the service. With frames=3 and
-  interval=200 the overhead is bearable but **the operator should also
-  temporarily extend systemd WatchdogSec** (e.g. via a drop-in
-  raising it to 300 s) during a diagnosis window to leave headroom
-  for HDF5 reads + tracemalloc bookkeeping.
-  When disabled, the diagnostic object is None and the per-cycle
-  tick() is a no-op.
+  Enable via env vars:
+    HF_TIMESTD_TRACEMALLOC=1                  — enable
+    HF_TIMESTD_TRACEMALLOC_INTERVAL=N         — cycles between samples
+                                                 (default 50; first
+                                                 diff after ~8 min)
+  Output:
+    Every interval cycles, take a sample of gc.get_objects() bucketed
+    by type, and log the top-10 growers vs the previous sample as
+    ``fusion_objgrowth cycle=X delta_kb=+Y top: type +A KB (+N obj)...``.
 
-Output:
-  Every interval cycles, take_snapshot() compares to the previous
-  snapshot and logs the top-10 lines with the largest size delta
-  via the INFO logger. Format mirrors fusion_loop_metrics so the
-  journal export is grep-friendly:
-
-    fusion_tracemalloc cycle=N delta_kb=X total_kb=Y top=[
-      file:line +XX.X KB (count +N), ...
-    ]
-
-  At process exit (or first call), a baseline snapshot is also
-  logged with TOP-10 absolute allocators so you can compare growth
-  vs steady-state working set.
+Per-snapshot cost: ~1-2 s for a fusion process with ~1 M Python
+objects (walks gc.get_objects() once, calls sys.getsizeof on each).
+Comfortable within WatchdogSec=120 budget; no drop-in needed.
 """
 
 from __future__ import annotations
 
+import gc
 import logging
 import os
-import tracemalloc
-from typing import Optional
+import sys
+from collections import defaultdict
+from typing import Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -56,49 +54,56 @@ def _flag_enabled() -> bool:
 
 
 def _interval_cycles() -> int:
-    """Read HF_TIMESTD_TRACEMALLOC_INTERVAL. Default 200 cycles."""
+    """Read HF_TIMESTD_TRACEMALLOC_INTERVAL. Default 50 cycles."""
     try:
-        n = int(os.environ.get("HF_TIMESTD_TRACEMALLOC_INTERVAL", "200"))
+        n = int(os.environ.get("HF_TIMESTD_TRACEMALLOC_INTERVAL", "50"))
         return max(10, n)
     except ValueError:
-        return 200
+        return 50
 
 
-def _frames_depth() -> int:
-    """Read HF_TIMESTD_TRACEMALLOC_FRAMES. Default 3 (cheap-enough)."""
-    try:
-        n = int(os.environ.get("HF_TIMESTD_TRACEMALLOC_FRAMES", "3"))
-        return max(1, min(n, 50))
-    except ValueError:
-        return 3
+def _take_snapshot() -> Dict[str, Tuple[int, int]]:
+    """Walk gc.get_objects() and return {type_name: (count, total_size_bytes)}.
+
+    A gc.collect() is forced first so transient unreachable objects don't
+    skew the count. sys.getsizeof is called per-object — this gives the
+    *shallow* size (no recursion into contents), which is what we want
+    for type-level growth attribution (the references each object holds
+    show up under their own types anyway).
+    """
+    gc.collect()
+    buckets: Dict[str, Tuple[int, int]] = defaultdict(lambda: (0, 0))
+    counts: Dict[str, int] = defaultdict(int)
+    sizes: Dict[str, int] = defaultdict(int)
+    for obj in gc.get_objects():
+        # Some C-extension types raise on type(obj) — guard against weird cases.
+        try:
+            t = type(obj).__name__
+            s = sys.getsizeof(obj)
+        except Exception:
+            continue
+        counts[t] += 1
+        sizes[t] += s
+    return {t: (counts[t], sizes[t]) for t in counts}
 
 
 class TracemallocDiagnostic:
-    """Per-cycle tracemalloc snapshot + diff logger.
+    """Periodic gc-snapshot diff logger. Name kept for backwards
+    compatibility with the original tracemalloc-based design."""
 
-    Construction starts tracemalloc tracing (25-frame depth, enough to
-    distinguish call sites in fusion's nested code paths). tick()
-    advances the cycle counter and triggers a snapshot+diff every
-    `interval` calls. The diagnostic is intentionally lossy — it logs
-    deltas, not full snapshots — so the journal doesn't drown in MB of
-    per-line allocation traces.
-    """
-
-    def __init__(self, interval: Optional[int] = None, frames: Optional[int] = None):
+    def __init__(self, interval: Optional[int] = None):
         self._interval = interval if interval is not None else _interval_cycles()
-        self._frames = frames if frames is not None else _frames_depth()
         self._cycle = 0
-        self._previous_snapshot: Optional[tracemalloc.Snapshot] = None
-        tracemalloc.start(self._frames)
+        self._previous: Optional[Dict[str, Tuple[int, int]]] = None
         logger.info(
-            "fusion_tracemalloc enabled: interval=%d cycles, frames=%d (each Python "
-            "allocation gets a stack trace; expect ~1%% CPU overhead)",
-            self._interval, self._frames,
+            "fusion_objgrowth enabled: interval=%d cycles. Per-snapshot cost ~1-2 s "
+            "(walks gc.get_objects). First diff fires at cycle %d.",
+            self._interval, self._interval,
         )
-        # First snapshot serves as the baseline — log top absolute
-        # allocators once so steady-state working set is visible.
-        self._previous_snapshot = tracemalloc.take_snapshot()
-        self._log_top(self._previous_snapshot.statistics('lineno'), label='baseline_abs', kind='abs')
+        # First snapshot is the baseline — log top absolute types so the
+        # steady-state working set is visible.
+        self._previous = _take_snapshot()
+        self._log_top_abs(self._previous, label='baseline_abs')
 
     def tick(self) -> None:
         """Call once per fusion cycle. Triggers a snapshot+diff at
@@ -106,70 +111,65 @@ class TracemallocDiagnostic:
         self._cycle += 1
         if self._cycle % self._interval != 0:
             return
-        if self._previous_snapshot is None:
-            self._previous_snapshot = tracemalloc.take_snapshot()
-            return
-        current = tracemalloc.take_snapshot()
-        diff = current.compare_to(self._previous_snapshot, key_type='lineno')
-        self._log_top(diff, label=f'cycle={self._cycle}', kind='delta')
-        self._previous_snapshot = current
+        current = _take_snapshot()
+        if self._previous is not None:
+            self._log_top_delta(self._previous, current, label=f'cycle={self._cycle}')
+        self._previous = current
 
-    def _log_top(self, stats, label: str, kind: str, top_n: int = 10) -> None:
-        """Format and log the top-N statistics entries."""
-        total_kb = sum(s.size for s in stats) / 1024.0
-        top = stats[:top_n]
-        if kind == 'delta':
-            # For delta snapshots, size_diff/count_diff matter
-            parts = [
-                f"{_short_origin(s.traceback)} {s.size_diff/1024:+8.1f} KB (count {s.count_diff:+d})"
-                for s in top
-            ]
-            total_delta_kb = sum(s.size_diff for s in stats) / 1024.0
-            logger.info(
-                "fusion_tracemalloc %s delta_kb=%.1f total_kb=%.1f top:\n  %s",
-                label, total_delta_kb, total_kb, '\n  '.join(parts),
-            )
-        else:
-            parts = [
-                f"{_short_origin(s.traceback)} {s.size/1024:8.1f} KB (count {s.count})"
-                for s in top
-            ]
-            logger.info(
-                "fusion_tracemalloc %s total_kb=%.1f top:\n  %s",
-                label, total_kb, '\n  '.join(parts),
-            )
+    @staticmethod
+    def _log_top_abs(snap: Dict[str, Tuple[int, int]], label: str, top_n: int = 10) -> None:
+        total_kb = sum(s for _, s in snap.values()) / 1024.0
+        # Sort by total bytes descending.
+        top = sorted(snap.items(), key=lambda kv: -kv[1][1])[:top_n]
+        parts = [
+            f"{name:24s} {size/1024:9.1f} KB (count {count})"
+            for name, (count, size) in top
+        ]
+        logger.info(
+            "fusion_objgrowth %s total_kb=%.1f top:\n  %s",
+            label, total_kb, '\n  '.join(parts),
+        )
 
+    @staticmethod
+    def _log_top_delta(
+        prev: Dict[str, Tuple[int, int]],
+        curr: Dict[str, Tuple[int, int]],
+        label: str,
+        top_n: int = 10,
+    ) -> None:
+        all_types = set(prev) | set(curr)
+        deltas = []
+        for t in all_types:
+            pc, ps = prev.get(t, (0, 0))
+            cc, cs = curr.get(t, (0, 0))
+            deltas.append((t, cc - pc, cs - ps))
+        # Sort by size delta descending — biggest growers first.
+        deltas.sort(key=lambda x: -x[2])
+        top_growers = deltas[:top_n]
+        # Also surface the biggest shrinkers for symmetry / sanity.
+        bottom_shrinkers = sorted(deltas, key=lambda x: x[2])[:3]
 
-def _short_origin(tb) -> str:
-    """Format the topmost frame as relative-path:line."""
-    if not tb:
-        return "<unknown>"
-    frame = tb[0]
-    # Show only the last path component + line to keep log lines compact.
-    fname = frame.filename.rsplit('/', 2)
-    short = '/'.join(fname[-2:]) if len(fname) >= 2 else frame.filename
-    return f"{short}:{frame.lineno}"
+        total_size_delta_kb = sum(d[2] for d in deltas) / 1024.0
+        total_now_kb = sum(s for _, s in curr.values()) / 1024.0
+
+        grower_parts = [
+            f"{name:24s} {size_d/1024:+9.1f} KB (count {count_d:+d})"
+            for name, count_d, size_d in top_growers
+        ]
+        shrinker_parts = [
+            f"{name:24s} {size_d/1024:+9.1f} KB (count {count_d:+d})"
+            for name, count_d, size_d in bottom_shrinkers
+        ]
+        logger.info(
+            "fusion_objgrowth %s delta_kb=%+.1f total_kb=%.1f top_growers:\n  %s\nbottom_shrinkers:\n  %s",
+            label, total_size_delta_kb, total_now_kb,
+            '\n  '.join(grower_parts),
+            '\n  '.join(shrinker_parts),
+        )
 
 
 def maybe_create() -> Optional['TracemallocDiagnostic']:
-    """Factory: return a TracemallocDiagnostic if env var is set, else None.
-
-    Callers wire this in alongside FusionLoopMetrics:
-
-        td = maybe_create()
-        # ... in main loop ...
-        if td is not None: td.tick()
-
-    Idempotent against multiple calls only if tracemalloc isn't already
-    started by something else (we don't try to coexist with another
-    tracer). If called twice, the second call no-ops with a warning.
-    """
+    """Factory: return a TracemallocDiagnostic if env var is set, else None."""
     if not _flag_enabled():
-        return None
-    if tracemalloc.is_tracing():
-        logger.warning(
-            "fusion_tracemalloc: tracemalloc already running; skipping "
-            "second initialisation"
-        )
         return None
     return TracemallocDiagnostic()
