@@ -1421,10 +1421,24 @@ class CoreRecorderV2:
         # Same hook helps confirm legacy-mode startup health.
         if not getattr(self, '_t6_first_sample_logged', False):
             mode = 'shared MultiStream' if self._use_shared_multistream else 'dedicated RadiodStream'
+            # Dump radiod-granted channel encoding alongside what we asked
+            # for. The two can differ — radiod silently downgrades some IQ
+            # configurations (high sample rate + wide filter) from F32 to S16.
+            # Pre-ka9q-python 3.14.3 this caused parse_rtp_samples to decode
+            # the bytes with the wrong dtype and produce NaN-poisoned input
+            # (root cause of TSL3-dark on bee1 2026-05-15). Fixed upstream;
+            # this log line is kept so the next time the encodings disagree
+            # the journal records it instantly.
+            ci = self._t6_channel_info
+            requested = self._t6_config.get('encoding', 4)
+            granted = getattr(ci, 'encoding', None) if ci is not None else None
+            sample_dtype = getattr(samples, 'dtype', None)
             logger.info(
                 f"T6 BPSK PPS first samples: {mode}, "
-                f"len={len(samples)}, "
-                f"last_rtp_timestamp={getattr(quality, 'last_rtp_timestamp', None)}"
+                f"len={len(samples)}, dtype={sample_dtype}, "
+                f"last_rtp_timestamp={getattr(quality, 'last_rtp_timestamp', None)}, "
+                f"requested_encoding={requested}, granted_encoding={granted}, "
+                f"channel_info={ci}"
             )
             self._t6_first_sample_logged = True
 
