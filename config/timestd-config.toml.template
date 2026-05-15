@@ -259,6 +259,26 @@ enabled = false
 #                                 # better up to the receiver / aliasing limit.
 #                                 # Omit (or None) to use the iq preset's ±5 kHz default.
 
+[storage]
+# Storage backend selection. Phase 1 of the HDF5 → SQLite migration
+# (see docs/HDF5-TO-SQLITE-MIGRATION.md): producers can opt into
+# dual-write to verify SQLite output parity before any read-side
+# switch. Default off — flip to true on individual hosts as part of
+# the migration rollout.
+#
+# write_hdf5  = true  (default): write to per-product daily .h5 files
+#                                under /var/lib/timestd/phase2/{channel}/.
+# write_sqlite = false (default): when true, ALSO write to the SQLite
+#                                 database at sqlite_path. Safe to
+#                                 enable alongside HDF5 — both backends
+#                                 receive the same validated rows.
+# sqlite_path = "/var/lib/timestd/phase2/timestd.db" — single database
+#                                 for all of hf-timestd, with one table
+#                                 per data product and a channel column.
+write_hdf5 = true
+write_sqlite = false
+sqlite_path = "/var/lib/timestd/phase2/timestd.db"
+
 [gnss_vtec]
 enabled = false                         # Set to true if you have a GNSS receiver
 host = "<YOUR_GNSS_HOST>"               # IP of GNSS receiver or ser2net bridge
