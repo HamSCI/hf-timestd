@@ -351,7 +351,19 @@ class BpskPpsCalibratorMF:
         # the first observation (which may overshoot a real edge if
         # we hit one mid-batch); subsequent batches adapt slowly.
         batch_max = float(ay[peak_idx].max())
-        if self._peak_running is None:
+        # NaN-guard. If the upstream MF output is NaN-poisoned (e.g.
+        # from a radiod gap or an RTP-wrap-math glitch) some |y|
+        # values come back NaN, ay[peak_idx].max() returns NaN, and
+        # an unguarded IIR update permanently corrupts _peak_running
+        # — the threshold check `ay[pi] < threshold` then fails on
+        # every subsequent batch, no PPS detections are accepted, and
+        # TSL3 goes dark until the watchdog restarts the process.
+        # Treat NaN as "no observation this batch" and additionally
+        # self-heal if _peak_running itself is currently non-finite
+        # (so a future clean batch can recover without a restart).
+        if not np.isfinite(batch_max):
+            return
+        if self._peak_running is None or not np.isfinite(self._peak_running):
             self._peak_running = batch_max
         else:
             # IIR toward batch_max but clamped from below by 0.99×
