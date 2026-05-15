@@ -89,7 +89,7 @@ class TracemallocDiagnostic:
         self._frames = frames if frames is not None else _frames_depth()
         self._cycle = 0
         self._previous_snapshot: Optional[tracemalloc.Snapshot] = None
-        tracemalloc.start(frames)
+        tracemalloc.start(self._frames)
         logger.info(
             "fusion_tracemalloc enabled: interval=%d cycles, frames=%d (each Python "
             "allocation gets a stack trace; expect ~1%% CPU overhead)",
