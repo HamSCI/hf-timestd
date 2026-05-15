@@ -35,6 +35,7 @@ import numpy as np
 from hf_timestd.core.metrology_engine import MetrologyEngine
 from hf_timestd.models import L1MetrologyMeasurement
 from hf_timestd.io.hdf5_writer import DataProductWriter
+from hf_timestd.io import make_data_product_writer
 from hf_timestd.data_product_registry import DataProductRegistry
 from hf_timestd.interfaces.data_models import TimingConfig, TimingAuthority
 from hf_timestd.core.ring_buffer import (
@@ -139,6 +140,15 @@ class MetrologyService:
             coarse_time_path=_coarse_path,
         )
         
+        # Storage backend selection. Phase 1 of the HDF5 → SQLite
+        # migration (see docs/HDF5-TO-SQLITE-MIGRATION.md): each writer
+        # is constructed via make_data_product_writer, which returns
+        # either the HDF5 writer, the SQLite writer, or a DualWriter
+        # forwarding to both — driven by [storage] config knobs.
+        # Default config (no [storage] section, or write_sqlite=false)
+        # → today's behaviour: HDF5 writer only.
+        self._storage_config = config.get('storage', {}) or {}
+
         # Initialize Writer
         # Resolve correct subdirectory via Registry
         writer_output_dir = DataProductRegistry.get_data_dir(
@@ -147,15 +157,16 @@ class MetrologyService:
             product_name="metrology_measurements",
             create=True
         )
-        
-        self.writer = DataProductWriter(
+
+        self.writer = make_data_product_writer(
             output_dir=writer_output_dir,
             product_level="L1",
             product_name="metrology_measurements",
             channel=self.channel_name,
             version="v1",
             processing_version="1.0.0",
-            station_metadata=self.station_config
+            station_metadata=self.station_config,
+            storage_config=self._storage_config,
         )
         
         # Ring buffer reader — lazily attached in _run_ringbuffer_mode so
@@ -171,14 +182,15 @@ class MetrologyService:
                 product_name="chu_fsk",
                 create=True
             )
-            self.fsk_writer = DataProductWriter(
+            self.fsk_writer = make_data_product_writer(
                 output_dir=fsk_output_dir,
                 product_level="L2",
                 product_name="chu_fsk",
                 channel=self.channel_name,
                 version="v1",
                 processing_version="1.0.0",
-                station_metadata=self.station_config
+                station_metadata=self.station_config,
+                storage_config=self._storage_config,
             )
             logger.info(f"CHU FSK writer initialized for {channel_name}")
         
@@ -192,14 +204,15 @@ class MetrologyService:
                 product_name="test_signal",
                 create=True
             )
-            self.test_signal_writer = DataProductWriter(
+            self.test_signal_writer = make_data_product_writer(
                 output_dir=test_signal_output_dir,
                 product_level="L2",
                 product_name="test_signal",
                 channel=self.channel_name,
                 version="v1",
                 processing_version="1.0.0",
-                station_metadata=self.station_config
+                station_metadata=self.station_config,
+                storage_config=self._storage_config,
             )
             logger.info(f"Test signal writer initialized for {channel_name}")
         
@@ -211,14 +224,15 @@ class MetrologyService:
             product_name="tick_timing",
             create=True
         )
-        self.tick_writer = DataProductWriter(
+        self.tick_writer = make_data_product_writer(
             output_dir=tick_output_dir,
             product_level="L2",
             product_name="tick_timing",
             channel=self.channel_name,
             version="v1",
             processing_version="1.0.0",
-            station_metadata=self.station_config
+            station_metadata=self.station_config,
+            storage_config=self._storage_config,
         )
         logger.info(f"Tick timing writer initialized for {channel_name}")
         
@@ -232,14 +246,15 @@ class MetrologyService:
                 product_name="detection_attempts",
                 create=True
             )
-            self.attempts_writer = DataProductWriter(
+            self.attempts_writer = make_data_product_writer(
                 output_dir=attempts_output_dir,
                 product_level="L2",
                 product_name="detection_attempts",
                 channel=self.channel_name,
                 version="v1",
                 processing_version="1.0.0",
-                station_metadata=self.station_config
+                station_metadata=self.station_config,
+                storage_config=self._storage_config,
             )
             logger.info(f"Detection attempts writer initialized for {channel_name}")
 
@@ -253,14 +268,15 @@ class MetrologyService:
                 product_name="tick_phase",
                 create=True
             )
-            self.tick_phase_writer = DataProductWriter(
+            self.tick_phase_writer = make_data_product_writer(
                 output_dir=tick_phase_output_dir,
                 product_level="L2",
                 product_name="tick_phase",
                 channel=self.channel_name,
                 version="v1",
                 processing_version="1.0.0",
-                station_metadata=self.station_config
+                station_metadata=self.station_config,
+                storage_config=self._storage_config,
             )
             logger.info(f"Tick phase writer initialized for {channel_name}")
 
@@ -275,14 +291,15 @@ class MetrologyService:
                 product_name="all_arrivals",
                 create=True
             )
-            self.all_arrivals_writer = DataProductWriter(
+            self.all_arrivals_writer = make_data_product_writer(
                 output_dir=all_arrivals_output_dir,
                 product_level="L1",
                 product_name="all_arrivals",
                 channel=self.channel_name,
                 version="v1",
                 processing_version="1.0.0",
-                station_metadata=self.station_config
+                station_metadata=self.station_config,
+                storage_config=self._storage_config,
             )
             logger.info(f"All-arrivals writer initialized for {channel_name}")
 
