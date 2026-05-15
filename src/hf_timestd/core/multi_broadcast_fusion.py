@@ -4984,6 +4984,16 @@ def run_fusion_service(
     except Exception as e:
         logger.warning(f"Fusion loop metrics not available: {e}")
 
+    # Tracemalloc diagnostic (fusion audit V?? memory growth). Opt-in via
+    # env var HF_TIMESTD_TRACEMALLOC=1. When disabled, the diagnostic is
+    # None and the per-cycle tick() at the bottom of the loop short-circuits.
+    tracemalloc_diag = None
+    try:
+        from hf_timestd.core.fusion_tracemalloc import maybe_create as _tm_create
+        tracemalloc_diag = _tm_create()
+    except Exception as e:
+        logger.warning(f"Fusion tracemalloc diagnostic not available: {e}")
+
     logger.info("Starting Multi-Broadcast Fusion Dashboard Service...")
     logger.info(f"Fusion interval: {interval_sec}s, lookback: {lookback_minutes}m")
     logger.info(f"Timing authority level: {fusion.timing_authority_level}")
@@ -5528,6 +5538,14 @@ def run_fusion_service(
                     loop_metrics.finalize_and_emit()
                 except Exception as e:
                     logger.warning(f"Fusion loop metrics emit failed: {e}")
+
+            # Per-cycle tracemalloc tick — no-op unless enabled by
+            # HF_TIMESTD_TRACEMALLOC=1 at process start.
+            if tracemalloc_diag is not None:
+                try:
+                    tracemalloc_diag.tick()
+                except Exception as e:
+                    logger.warning(f"Fusion tracemalloc tick failed: {e}")
 
             # BREADCRUMB: Sleeping
             loop_duration = time.time() - loop_start_time
