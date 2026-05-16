@@ -307,6 +307,20 @@ class CoreRecorderV2:
         self._t6_timing_lock = threading.Lock()
         self._t6_timing_poll_thread = None
         self._t6_timing_poll_stop = threading.Event()
+        # V1 fix layer 2 — drift monitor (TIMING-PIPELINE-WIRING.md §10.3).
+        # Two independent signals are tracked against the settled-capture
+        # anchor; both publish via ``_write_status`` → ``BpskPpsProbe`` →
+        # ``authority.json`` so downstream consumers can see degradation.
+        # Layer 2 is monitor-only — Layer 3 will use these flags to drive
+        # re-capture.  See ``_t6_check_anchor_consistency`` and
+        # ``_t6_check_delta_breach`` for the math.
+        self._t6_drift_first_breach_wall: Optional[float] = None
+        self._t6_drift_flag_sustained: bool = False
+        self._t6_drift_flag_anchor_discontinuity: bool = False
+        self._t6_drift_anchor_residual_samples: Optional[int] = None
+        self._t6_drift_last_check_wall: Optional[float] = None
+        self._t6_drift_anchor_gps_ns: Optional[int] = None
+        self._t6_drift_anchor_rtp_timesnap: Optional[int] = None
         # Wrap-rejection guard: the BPSK calibrator algorithm has a known
         # cascade where a noise edge near the half-second mark from a real
         # edge displaces the reference and causes chain_delay to wrap by
@@ -1138,6 +1152,29 @@ class CoreRecorderV2:
     T6_TIMING_POLL_SEC = 5.0
     T6_TIMING_POLL_LISTEN_SEC = 2.0
 
+    # V1 fix layer 2 — drift monitor thresholds.  See
+    # docs/TIMING-PIPELINE-WIRING.md §10.3 step 2.
+    #
+    # Signal A (anchor consistency).  At each poll, we project the
+    # captured anchor's (gps_time, rtp_timesnap) forward by the elapsed
+    # gps_time and compare to radiod's freshly-reported rtp_timesnap.
+    # In healthy operation the residual is bounded by the sample-clock
+    # quantization plus radiod's status-emit jitter — single-digit
+    # samples.  A residual above this threshold means either radiod
+    # restarted (RTP counter discontinuity) or the host clock took an
+    # unannounced step large enough to invalidate the anchor.  1000
+    # samples ≈ 42 ms at 24 kHz: well above any legitimate drift,
+    # well below the multi-second discontinuity from a real restart.
+    T6_ANCHOR_DISCONTINUITY_SAMPLES = 1000
+    # Signal B (sustained Δ breach).  Δ = chrony's view of TSL3 offset.
+    # In settled operation |Δ| stays sub-µs.  A sustained breach of
+    # 1 ms for ≥ 60 s indicates the anchor has lost validity or the
+    # sample clock has walked far enough that the TSL3 SHM feed is
+    # misleading chrony.  Layer 3 will use these flags to drive
+    # re-capture; Layer 2 only surfaces them.
+    T6_DRIFT_HARD_THRESHOLD_NS = 1_000_000  # 1 ms
+    T6_DRIFT_SUSTAINED_SEC = 60.0
+
     # V1 fix layer 1 (settled-capture gate) per
     # docs/TIMING-PIPELINE-WIRING.md §10.3.  Block _start_t6_stream's
     # discover_channels call until chrony has been settled for
@@ -1413,6 +1450,135 @@ class CoreRecorderV2:
             with self._t6_timing_lock:
                 self._t6_latest_gps_time_ns = int(gps_ns)
                 self._t6_latest_rtp_timesnap = int(rtp_snap)
+            # V1 fix layer 2 — anchor-consistency check (Signal A).
+            # Done outside the timing lock so the check can't stall the
+            # SHM-update path on the rare contention.
+            self._t6_check_anchor_consistency(int(gps_ns), int(rtp_snap))
+
+    def _t6_check_anchor_consistency(
+        self,
+        fresh_gps_ns: int,
+        fresh_rtp_timesnap: int,
+    ) -> None:
+        """Layer 2 Signal A — project the captured anchor forward and
+        compare to radiod's fresh status reading.
+
+        The captured anchor (``_t6_drift_anchor_gps_ns``,
+        ``_t6_drift_anchor_rtp_timesnap``) is set ONCE the first time
+        this method runs after the poll thread starts.  Subsequent
+        calls project the anchor forward using ``elapsed_gps`` ×
+        sample_rate and compare against the freshly-reported
+        ``rtp_timesnap``.  In healthy operation the residual is
+        bounded by sample-clock quantization + radiod's status-emit
+        jitter — a few samples at most.
+
+        A residual above ``T6_ANCHOR_DISCONTINUITY_SAMPLES`` signals
+        that either:
+          - radiod restarted (RTP counter discontinuity), or
+          - the host system clock took a large unannounced step,
+            or
+          - the captured anchor itself was wrong.
+
+        Layer 2 raises the flag; Layer 3 will react by re-capturing.
+
+        Also catches the simpler case where either counter went
+        backwards (clear-cut RTP-namespace change).
+        """
+        # Anchor not yet seeded — capture this first refresh as the
+        # reference point.  The settled-capture gate guarantees this
+        # initial reading was taken with ε_0 ≈ 0.
+        if (self._t6_drift_anchor_gps_ns is None
+                or self._t6_drift_anchor_rtp_timesnap is None):
+            self._t6_drift_anchor_gps_ns = fresh_gps_ns
+            self._t6_drift_anchor_rtp_timesnap = fresh_rtp_timesnap
+            self._t6_drift_last_check_wall = time.monotonic()
+            logger.info(
+                f"T6 drift monitor: anchor seeded "
+                f"(gps_time={fresh_gps_ns}, rtp_timesnap={fresh_rtp_timesnap})"
+            )
+            return
+
+        self._t6_drift_last_check_wall = time.monotonic()
+
+        # Counter rollback is unambiguous evidence of namespace change.
+        if (fresh_gps_ns < self._t6_drift_anchor_gps_ns
+                or fresh_rtp_timesnap < self._t6_drift_anchor_rtp_timesnap):
+            if not self._t6_drift_flag_anchor_discontinuity:
+                logger.warning(
+                    f"T6 drift monitor: counter rollback detected "
+                    f"(anchor gps={self._t6_drift_anchor_gps_ns}, rtp={self._t6_drift_anchor_rtp_timesnap}; "
+                    f"fresh gps={fresh_gps_ns}, rtp={fresh_rtp_timesnap}) — "
+                    f"likely radiod restart"
+                )
+            self._t6_drift_flag_anchor_discontinuity = True
+            return
+
+        # We need the T6 sample rate to project the anchor.  The
+        # calibrator owns it; if absent, we cannot evaluate the
+        # residual but the rollback check above still fires.
+        if self._t6_calibrator is None:
+            return
+        sample_rate = getattr(self._t6_calibrator, 'sample_rate', None)
+        if not sample_rate or sample_rate <= 0:
+            return
+
+        elapsed_gps_ns = fresh_gps_ns - self._t6_drift_anchor_gps_ns
+        expected_rtp_delta = int(round(
+            elapsed_gps_ns * sample_rate / 1_000_000_000
+        ))
+        actual_rtp_delta = fresh_rtp_timesnap - self._t6_drift_anchor_rtp_timesnap
+        residual_samples = actual_rtp_delta - expected_rtp_delta
+        self._t6_drift_anchor_residual_samples = residual_samples
+
+        if abs(residual_samples) > self.T6_ANCHOR_DISCONTINUITY_SAMPLES:
+            if not self._t6_drift_flag_anchor_discontinuity:
+                logger.warning(
+                    f"T6 drift monitor: anchor discontinuity raised "
+                    f"(residual={residual_samples} samples, "
+                    f"threshold={self.T6_ANCHOR_DISCONTINUITY_SAMPLES} samples, "
+                    f"elapsed_gps={elapsed_gps_ns/1e9:.1f}s)"
+                )
+            self._t6_drift_flag_anchor_discontinuity = True
+
+    def _t6_check_delta_breach(self, delta_ns: int) -> None:
+        """Layer 2 Signal B — track sustained |Δ| > threshold.
+
+        Called from ``_process_t6_samples`` immediately after
+        ``_t6_last_local_minus_source_ns`` is updated.  Maintains the
+        sustained-breach state machine:
+          - first sample where |Δ| > threshold: arm the timer.
+          - subsequent samples while above threshold: check duration.
+          - sample where |Δ| ≤ threshold: clear timer.
+
+        Logs only on flag transitions to keep the journal quiet during
+        normal operation.
+        """
+        now_mono = time.monotonic()
+        if abs(delta_ns) > self.T6_DRIFT_HARD_THRESHOLD_NS:
+            if self._t6_drift_first_breach_wall is None:
+                self._t6_drift_first_breach_wall = now_mono
+                # No log here — single breaches are routine on cold
+                # start before chrony settles.  We only care about
+                # sustained breaches.
+                return
+            duration = now_mono - self._t6_drift_first_breach_wall
+            if (duration >= self.T6_DRIFT_SUSTAINED_SEC
+                    and not self._t6_drift_flag_sustained):
+                logger.warning(
+                    f"T6 drift monitor: sustained Δ breach raised "
+                    f"(|Δ|={abs(delta_ns)/1e6:.2f} ms > "
+                    f"{self.T6_DRIFT_HARD_THRESHOLD_NS/1e6:.0f} ms for "
+                    f"{duration:.0f}s >= {self.T6_DRIFT_SUSTAINED_SEC:.0f}s)"
+                )
+                self._t6_drift_flag_sustained = True
+        else:
+            if self._t6_drift_flag_sustained:
+                logger.info(
+                    f"T6 drift monitor: sustained Δ breach cleared "
+                    f"(|Δ|={abs(delta_ns)/1e6:.3f} ms back below threshold)"
+                )
+            self._t6_drift_first_breach_wall = None
+            self._t6_drift_flag_sustained = False
 
     def _t6_on_samples(self, samples, quality):
         """Sample callback for the BPSK PPS stream — feeds the calibrator."""
@@ -1736,6 +1902,10 @@ class CoreRecorderV2:
                             self._t6_last_local_minus_source_ns = int(round(
                                 (wall_time_sec - ref_time) * 1e9
                             ))
+                            # V1 fix layer 2 — Signal B (sustained Δ breach).
+                            self._t6_check_delta_breach(
+                                self._t6_last_local_minus_source_ns
+                            )
                             # precision -14 = 61 us, matches T6 sigma claim of 50 us
                             self._t6_shm.update(
                                 reference_time=float(ref_time),
@@ -1855,6 +2025,28 @@ class CoreRecorderV2:
                     # The value the BpskPpsProbe forwards as offset_ms.  None
                     # until the first SHM push has happened.
                     'local_minus_source_ns': self._t6_last_local_minus_source_ns,
+                    # V1 fix layer 2 — drift monitor flags.  See
+                    # docs/TIMING-PIPELINE-WIRING.md §10.3 and
+                    # _t6_check_anchor_consistency / _t6_check_delta_breach.
+                    # Forwarded by BpskPpsProbe into authority.json; Layer 3
+                    # will consume these to drive re-capture.
+                    'drift_monitor': {
+                        'sustained_breach': self._t6_drift_flag_sustained,
+                        'anchor_discontinuity': self._t6_drift_flag_anchor_discontinuity,
+                        'anchor_residual_samples': self._t6_drift_anchor_residual_samples,
+                        'breach_duration_sec': (
+                            round(time.monotonic() - self._t6_drift_first_breach_wall, 1)
+                            if self._t6_drift_first_breach_wall is not None else None
+                        ),
+                        'last_check_age_sec': (
+                            round(time.monotonic() - self._t6_drift_last_check_wall, 1)
+                            if self._t6_drift_last_check_wall is not None else None
+                        ),
+                        'hard_threshold_ns': self.T6_DRIFT_HARD_THRESHOLD_NS,
+                        'sustained_threshold_sec': self.T6_DRIFT_SUSTAINED_SEC,
+                        'anchor_discontinuity_samples_threshold':
+                            self.T6_ANCHOR_DISCONTINUITY_SAMPLES,
+                    },
                 }
 
             # Write atomically

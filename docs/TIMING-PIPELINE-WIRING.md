@@ -739,10 +739,31 @@ hardening here is a defensive move, not a bug fix.
 **Recommendation**:
 
 1. Implement settled-capture gate in `_start_t6_stream`.
+   **DONE** — commit `9358e29` (2026-05-09).
 2. Add drift monitor + flag (reuse the poll-thread plumbing
    already in place).
+   **DONE** — Layer 2 ships two independent signals:
+     - Signal A in `_t6_check_anchor_consistency` projects the
+       captured anchor forward against radiod's fresh status and
+       raises `_t6_drift_flag_anchor_discontinuity` on residual >
+       `T6_ANCHOR_DISCONTINUITY_SAMPLES` (or any counter rollback).
+     - Signal B in `_t6_check_delta_breach` raises
+       `_t6_drift_flag_sustained` when `|Δ| > T6_DRIFT_HARD_THRESHOLD_NS`
+       continuously for `T6_DRIFT_SUSTAINED_SEC`.
+   Both flags surface via `_write_status.l6_pps.drift_monitor` and
+   are forwarded into `authority.json` by `BpskPpsProbe`. Layer 2 is
+   **monitor-only** — Layer 3 (next) wires them into the re-capture
+   policy. See `tests/test_core_recorder_t6_drift_monitor.py`.
 3. Define and implement the re-capture trigger logic.
-4. Wire the authority time-series archive into ClickHouse.
+   **Next.** Consumes the Layer-2 flags. Should trigger on
+   `anchor_discontinuity=True` (no hysteresis — namespace change is
+   binary) and on `sustained_breach=True` (with a higher-level guard
+   so a degraded T-tier doesn't flip-flop). Re-capture itself = run
+   the settled-capture gate again, discard the old anchor in
+   `_t6_drift_anchor_{gps_ns,rtp_timesnap}`, and reset Signal-A state.
+4. Wire the authority time-series archive into SQLite (was
+   ClickHouse pre-2026-05-12 SQLite migration; see
+   `project_ch_to_sqlite_migration` memory).
 
 Each step is independently verifiable. The first two are
 defensive; the third actively repairs; the fourth supports

@@ -145,19 +145,31 @@ class BpskPpsProbe:
                 reason=f"local_minus_source_ns unparseable: {residual_ns_raw!r}",
             )
 
+        detail = {
+            "pps_ok": int(l6.get("pps_ok", 0)),
+            "pps_noise": int(l6.get("pps_noise", 0)),
+            "pps_consecutive": consec,
+            "chain_delay_ns": l6.get("chain_delay_ns"),
+            "local_minus_source_ns": residual_ns,
+            "age_sec": round(age_sec, 3),
+        }
+        # V1 fix layer 2 — forward drift-monitor flags into the
+        # ProbeResult detail so they appear in authority.json and any
+        # downstream consumer (Layer 3 re-capture trigger, sigmond
+        # health dashboard) can observe T6 degradation without parsing
+        # the upstream status file directly.  Block is None on
+        # pre-Layer-2 producers — treated as "no signal yet", not a
+        # failure.
+        drift_monitor = l6.get("drift_monitor")
+        if isinstance(drift_monitor, dict):
+            detail["drift_monitor"] = drift_monitor
+
         return ProbeResult(
             self.t_level,
             available=True,
             offset_ms=residual_ns / 1_000_000.0,
             sigma_ms=self.sigma_ms,
-            detail={
-                "pps_ok": int(l6.get("pps_ok", 0)),
-                "pps_noise": int(l6.get("pps_noise", 0)),
-                "pps_consecutive": consec,
-                "chain_delay_ns": l6.get("chain_delay_ns"),
-                "local_minus_source_ns": residual_ns,
-                "age_sec": round(age_sec, 3),
-            },
+            detail=detail,
         )
 
 
