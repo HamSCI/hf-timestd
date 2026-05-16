@@ -33,6 +33,7 @@ from hf_timestd.core.chrony_tracking_probe import (
 from hf_timestd.core.coarse_time_source import CoarseTimeFileSource
 from hf_timestd.core.fusion_status_probe import FusionStatusProbe
 from hf_timestd.core.gpsdo_probe import GpsdoProbe
+from hf_timestd.io.authority_snapshot_store import AuthoritySnapshotStore
 
 log = logging.getLogger(__name__)
 
@@ -286,6 +287,27 @@ def build_authority_runner_from_config(
             dry_run=bool(mdns_cfg.get("dry_run", False)),
         )
 
+    # V1 fix layer 4 — long-term observability store.  Default ON
+    # with a sensible local path; operator can disable by setting
+    # `[timing.authority_manager.snapshot_store] enabled = false`.
+    # Path override via the same section's `path` key.
+    snapshot_store = None
+    snap_cfg = auth_cfg.get("snapshot_store", {}) or {}
+    if snap_cfg.get("enabled", True):
+        snap_path = Path(snap_cfg.get(
+            "path", "/var/lib/timestd/authority_history.db",
+        ))
+        try:
+            snapshot_store = AuthoritySnapshotStore(snap_path)
+        except Exception as exc:
+            # Non-fatal: legacy behaviour (no archive) when the DB
+            # can't be opened (permissions, disk full, etc.).
+            log.warning(
+                "AuthoritySnapshotStore disabled at %s: %s",
+                snap_path, exc,
+            )
+            snapshot_store = None
+
     manager = AuthorityManager(
         probes=probes,
         output_path=authority_output_path,
@@ -295,5 +317,6 @@ def build_authority_runner_from_config(
         chrony_gate=chrony_gate,
         governor_radiod_provider=governor_radiod_provider,
         mdns_advertiser=mdns_advertiser,
+        snapshot_store=snapshot_store,
     )
     return AuthorityRunner(manager=manager, interval_sec=interval_sec)

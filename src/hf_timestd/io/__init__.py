@@ -18,6 +18,7 @@ from .sqlite_writer import SqliteDataProductWriter
 from .dual_writer import DualWriter, make_data_product_writer
 from .uncertainty import ISOGUMCalculator, UncertaintyBudget
 from .calibration_file import CalibrationFileWriter
+from .authority_snapshot_store import AuthoritySnapshotStore
 
 __all__ = [
     'DataProductWriter',
@@ -28,4 +29,5 @@ __all__ = [
     'ISOGUMCalculator',
     'UncertaintyBudget',
     'CalibrationFileWriter',
+    'AuthoritySnapshotStore',
 ]

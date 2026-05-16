@@ -28,12 +28,13 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Protocol, Sequence, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from hf_timestd.core.bootstrap_coordinator import BootstrapCoordinator, BootstrapState
     from hf_timestd.core.chrony_refclock_gate import ChronyRefclockGate
     from hf_timestd.core.mdns_fusion_advertiser import MdnsFusionAdvertiser
+    from hf_timestd.io.authority_snapshot_store import AuthoritySnapshotStore
 
 log = logging.getLogger(__name__)
 
@@ -141,6 +142,7 @@ class AuthorityManager:
         chrony_gate: Optional["ChronyRefclockGate"] = None,
         governor_radiod_provider: Optional[Callable[[], Optional[str]]] = None,
         mdns_advertiser: Optional["MdnsFusionAdvertiser"] = None,
+        snapshot_store: Optional["AuthoritySnapshotStore"] = None,
     ):
         self.probes = list(probes)
         self.output_path = Path(output_path)
@@ -156,6 +158,12 @@ class AuthorityManager:
         self.chrony_gate = chrony_gate
         self.governor_radiod_provider = governor_radiod_provider
         self.mdns_advertiser = mdns_advertiser
+        # V1 fix layer 4 — long-term observability.  When configured,
+        # every tick mirrors the published state + per-probe detail
+        # into a local SQLite DB so the per-cycle history (otherwise
+        # overwritten in authority.json) is queryable hours/days
+        # later.  None = no archiving (legacy behaviour preserved).
+        self.snapshot_store = snapshot_store
 
         self._avail_counters: Dict[str, int] = {lvl: 0 for lvl in T_LEVELS_RANKED}
         self._t_active: Optional[str] = None
@@ -180,6 +188,7 @@ class AuthorityManager:
             if not self._last_bootstrap.complete:
                 state = self._build_bootstrap_pending_state()
                 self._write_state(state)
+                self._write_snapshot(state, results=None)
                 self._apply_chrony_gate(state.t_level_active)
                 self._apply_mdns_advertiser(state)
                 return state
@@ -197,6 +206,7 @@ class AuthorityManager:
         self._note_transition(active)
         state = self._build_state(results, active, witnesses, flags)
         self._write_state(state)
+        self._write_snapshot(state, results)
         self._apply_chrony_gate(state.t_level_active)
         self._apply_mdns_advertiser(state)
         return state
@@ -559,6 +569,120 @@ class AuthorityManager:
             os.replace(tmp_path, self.output_path)
         except OSError as e:
             log.warning("AuthorityManager: failed to write %s: %s", self.output_path, e)
+
+    def _write_snapshot(
+        self,
+        state: AuthorityState,
+        results: Optional[Dict[str, ProbeResult]],
+    ) -> None:
+        """V1 layer 4 — mirror this tick's state + per-probe detail
+        into the long-term observability store.
+
+        The store is optional (None = legacy no-op).  Failure inside
+        the store doesn't propagate — it logs and returns.  The
+        authority.json write above has already succeeded; a stale or
+        missing row here is an observability gap, not a service
+        failure.
+
+        ``results`` is ``None`` only on the bootstrap-pending path
+        (no probes were polled).  In that case the snapshot still
+        records the published state but the per-probe detail columns
+        land as NULL.
+        """
+        if self.snapshot_store is None:
+            return
+
+        snapshot: Dict[str, Any] = {
+            "utc_published": _iso_z(self.now_fn()),
+            "schema_version": SCHEMA_VERSION,
+            "a_level": state.a_level,
+            "t_level_active": state.t_level_active,
+            "t_level_available": list(state.t_level_available),
+            "t_level_witnesses": list(state.t_level_witnesses),
+            "rtp_to_utc_offset_ns": state.rtp_to_utc_offset_ns,
+            "sigma_ns": state.sigma_ns,
+            "stations_contributing": list(state.stations_contributing),
+            "last_transition_utc": state.last_transition_utc,
+            "disagreement_flags": list(state.disagreement_flags),
+        }
+
+        if self.governor_radiod_provider is not None:
+            try:
+                governor = self.governor_radiod_provider()
+                if governor:
+                    snapshot["governor_radiod"] = str(governor)
+            except Exception:
+                pass
+
+        bs = self._last_bootstrap
+        if bs is not None:
+            snapshot["bootstrap_complete"] = 1 if bs.complete else 0
+            snapshot["bootstrap_reason"] = bs.reason
+            snapshot["bootstrap_delta_sec"] = bs.delta_sec
+
+        if results is not None:
+            _flatten_t6(snapshot, results.get("T6"))
+            _flatten_t4(snapshot, results.get("T4"))
+            _flatten_t3(snapshot, results.get("T3"))
+
+        try:
+            self.snapshot_store.insert(snapshot)
+        except Exception as exc:
+            log.warning(
+                "AuthorityManager: snapshot store raised: %s", exc,
+            )
+
+
+def _flatten_t6(snapshot: Dict[str, Any], r: Optional[ProbeResult]) -> None:
+    """Pull BpskPpsProbe detail into the flat snapshot columns,
+    including Layer 2 drift_monitor + Layer 3 recapture fields."""
+    if r is None:
+        return
+    snapshot["t6_available"] = 1 if r.available else 0
+    snapshot["t6_reason"] = r.reason
+    snapshot["t6_offset_ms"] = r.offset_ms
+    snapshot["t6_sigma_ms"] = r.sigma_ms
+    d = r.detail or {}
+    snapshot["t6_local_minus_source_ns"] = d.get("local_minus_source_ns")
+    snapshot["t6_pps_ok"] = d.get("pps_ok")
+    snapshot["t6_pps_noise"] = d.get("pps_noise")
+    snapshot["t6_pps_consecutive"] = d.get("pps_consecutive")
+    snapshot["t6_chain_delay_ns"] = d.get("chain_delay_ns")
+    dm = d.get("drift_monitor")
+    if isinstance(dm, dict):
+        snapshot["t6_anchor_discontinuity"] = (
+            1 if dm.get("anchor_discontinuity") else 0
+        )
+        snapshot["t6_sustained_breach"] = (
+            1 if dm.get("sustained_breach") else 0
+        )
+        snapshot["t6_anchor_residual_samples"] = dm.get(
+            "anchor_residual_samples"
+        )
+        snapshot["t6_breach_duration_sec"] = dm.get("breach_duration_sec")
+        snapshot["t6_recapture_count"] = dm.get("recapture_count")
+        snapshot["t6_last_recapture_reason"] = dm.get("last_recapture_reason")
+        snapshot["t6_last_recapture_age_sec"] = dm.get(
+            "last_recapture_age_sec"
+        )
+
+
+def _flatten_t4(snapshot: Dict[str, Any], r: Optional[ProbeResult]) -> None:
+    if r is None:
+        return
+    snapshot["t4_available"] = 1 if r.available else 0
+    snapshot["t4_offset_ms"] = r.offset_ms
+    snapshot["t4_sigma_ms"] = r.sigma_ms
+
+
+def _flatten_t3(snapshot: Dict[str, Any], r: Optional[ProbeResult]) -> None:
+    if r is None:
+        return
+    snapshot["t3_available"] = 1 if r.available else 0
+    snapshot["t3_offset_ms"] = r.offset_ms
+    snapshot["t3_sigma_ms"] = r.sigma_ms
+    d = r.detail or {}
+    snapshot["t3_kalman_state"] = d.get("kalman_state")
 
 
 def _iso_z(dt: datetime) -> str:

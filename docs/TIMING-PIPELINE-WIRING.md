@@ -777,9 +777,25 @@ hardening here is a defensive move, not a bug fix.
    (it just sets the flag); Signal A's setter and the reaction
    both run on the poll thread. See
    `tests/test_core_recorder_t6_recapture.py` (15 tests).
-4. Wire the authority time-series archive into SQLite (was
-   ClickHouse pre-2026-05-12 SQLite migration; see
-   `project_ch_to_sqlite_migration` memory).
+4. Wire the authority time-series archive into SQLite.
+   **DONE** — `AuthoritySnapshotStore` (`src/hf_timestd/io/
+   authority_snapshot_store.py`) maintains one row per
+   `AuthorityManager.tick()` in `/var/lib/timestd/authority_history.db`
+   (separate file from the Phase 1 migration target so the
+   verification window stays clean). Schema captures the headline
+   AuthorityState fields plus per-probe detail flattened into
+   dedicated columns: T6 BpskPpsProbe (`local_minus_source_ns`,
+   pps counters, chain_delay) including Layer 2 drift_monitor flags
+   and Layer 3 recapture state; T4 chrony tracking; T3 fusion +
+   Kalman state. `INSERT OR IGNORE` on `utc_published` (PK) handles
+   duplicate ticks; list-valued fields are JSON-encoded for
+   queryable round-trip. Store is opt-in via
+   `[timing.authority_manager.snapshot_store] enabled = true`
+   (default on); construction or runtime failures degrade to legacy
+   no-op without blocking `authority.json` publication. See
+   `tests/test_authority_snapshot_store.py` (13 tests) +
+   `TestSnapshotStore` block in `tests/test_authority_manager.py`
+   (4 integration tests).
 
 Each step is independently verifiable. The first two are
 defensive; the third actively repairs; the fourth supports

@@ -457,5 +457,125 @@ class TestAuthorityManagerBootstrap(unittest.TestCase):
         self.assertEqual(payload["bootstrap"]["coarse_station"], "WWV")
 
 
+class TestSnapshotStore(unittest.TestCase):
+    """V1 Layer 4 — every tick that writes authority.json also mirrors
+    a per-cycle snapshot row into a local SQLite store."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.out = self.tmp / "authority.json"
+        self.clock = _Clock(datetime(2026, 4, 23, 12, 0, 0, tzinfo=timezone.utc))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _mgr_with_store(self, probes, store):
+        return AuthorityManager(
+            probes=probes,
+            output_path=self.out,
+            a_level_provider=lambda: "A1",
+            upgrade_hysteresis=1,                # promote on first tick
+            now_fn=self.clock,
+            snapshot_store=store,
+        )
+
+    def test_one_row_per_tick(self) -> None:
+        from hf_timestd.io.authority_snapshot_store import AuthoritySnapshotStore
+        import sqlite3
+        db = self.tmp / "auth.db"
+        store = AuthoritySnapshotStore(db)
+        try:
+            p = FakeProbe("T3", _measure("T3", 0.5, 0.3))
+            mgr = self._mgr_with_store([p], store)
+            mgr.tick()
+            self.clock.advance(30)
+            mgr.tick()
+        finally:
+            store.close()
+        with sqlite3.connect(str(db)) as conn:
+            rows = conn.execute(
+                "SELECT t_level_active, rtp_to_utc_offset_ns, t3_offset_ms "
+                "FROM authority_snapshot ORDER BY utc_published"
+            ).fetchall()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0][0], "T3")
+        self.assertAlmostEqual(rows[0][2], 0.5)
+
+    def test_t6_drift_monitor_flattened(self) -> None:
+        """Drift-monitor + recapture fields from BpskPpsProbe detail
+        round-trip into their dedicated columns."""
+        from hf_timestd.io.authority_snapshot_store import AuthoritySnapshotStore
+        import sqlite3
+        db = self.tmp / "auth.db"
+        store = AuthoritySnapshotStore(db)
+        try:
+            t6 = FakeProbe("T6")
+            t6.set(ProbeResult(
+                "T6", available=True,
+                offset_ms=0.0024, sigma_ms=0.050,
+                detail={
+                    "local_minus_source_ns": 2384,
+                    "pps_ok": 12345,
+                    "pps_consecutive": 50,
+                    "chain_delay_ns": 174147000,
+                    "drift_monitor": {
+                        "sustained_breach": False,
+                        "anchor_discontinuity": False,
+                        "anchor_residual_samples": 12,
+                        "recapture_count": 2,
+                        "last_recapture_reason": "anchor_discontinuity",
+                        "last_recapture_age_sec": 145.3,
+                    },
+                },
+            ))
+            mgr = self._mgr_with_store([t6], store)
+            mgr.tick()
+        finally:
+            store.close()
+        with sqlite3.connect(str(db)) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM authority_snapshot"
+            ).fetchone()
+        self.assertEqual(row["t_level_active"], "T6")
+        self.assertEqual(row["t6_local_minus_source_ns"], 2384)
+        self.assertEqual(row["t6_recapture_count"], 2)
+        self.assertEqual(row["t6_last_recapture_reason"], "anchor_discontinuity")
+        self.assertEqual(row["t6_anchor_discontinuity"], 0)
+        self.assertEqual(row["t6_anchor_residual_samples"], 12)
+
+    def test_no_store_is_legacy_noop(self) -> None:
+        """When no snapshot_store is provided, tick still works and
+        authority.json is written as before — no DB activity."""
+        # No store at all; just construct the manager with default args.
+        mgr = AuthorityManager(
+            probes=[FakeProbe("T3", _measure("T3", 0.5, 0.3))],
+            output_path=self.out,
+            a_level_provider=lambda: "A1",
+            upgrade_hysteresis=1,
+            now_fn=self.clock,
+        )
+        mgr.tick()
+        # authority.json was written; that's the legacy contract.
+        self.assertTrue(self.out.exists())
+
+    def test_store_exception_does_not_block_authority_json(self) -> None:
+        """A failing store must not stop authority.json from being
+        published — the cycle's primary deliverable is the JSON."""
+        class BrokenStore:
+            def insert(self, snapshot):
+                raise RuntimeError("disk full")
+        mgr = AuthorityManager(
+            probes=[FakeProbe("T3", _measure("T3", 0.5, 0.3))],
+            output_path=self.out,
+            a_level_provider=lambda: "A1",
+            upgrade_hysteresis=1,
+            now_fn=self.clock,
+            snapshot_store=BrokenStore(),
+        )
+        mgr.tick()
+        self.assertTrue(self.out.exists())
+
+
 if __name__ == "__main__":
     unittest.main()
