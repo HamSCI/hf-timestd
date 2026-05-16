@@ -321,6 +321,16 @@ class CoreRecorderV2:
         self._t6_drift_last_check_wall: Optional[float] = None
         self._t6_drift_anchor_gps_ns: Optional[int] = None
         self._t6_drift_anchor_rtp_timesnap: Optional[int] = None
+        # V1 fix layer 3 — re-capture state.  Reaction lives on the
+        # poll thread (the sample callback can't block on the
+        # 60-second settled-capture gate).  See _t6_react_to_flags
+        # and _t6_attempt_recapture.
+        self._t6_recapture_count: int = 0
+        self._t6_last_recapture_wall: Optional[float] = None
+        self._t6_last_recapture_reason: Optional[str] = None
+        self._t6_recapture_wall_history: deque = deque(
+            maxlen=self.T6_RECAPTURE_MAX_PER_HOUR + 1
+        )
         # Wrap-rejection guard: the BPSK calibrator algorithm has a known
         # cascade where a noise edge near the half-second mark from a real
         # edge displaces the reference and causes chain_delay to wrap by
@@ -1170,10 +1180,27 @@ class CoreRecorderV2:
     # In settled operation |Δ| stays sub-µs.  A sustained breach of
     # 1 ms for ≥ 60 s indicates the anchor has lost validity or the
     # sample clock has walked far enough that the TSL3 SHM feed is
-    # misleading chrony.  Layer 3 will use these flags to drive
+    # misleading chrony.  Layer 3 uses these flags to drive
     # re-capture; Layer 2 only surfaces them.
     T6_DRIFT_HARD_THRESHOLD_NS = 1_000_000  # 1 ms
     T6_DRIFT_SUSTAINED_SEC = 60.0
+
+    # V1 fix layer 3 — re-capture policy.  Consumes the Layer 2 flags
+    # (_t6_drift_flag_{anchor_discontinuity,sustained}) and re-runs
+    # the settled-capture gate + fresh discover_channels to replace
+    # both anchors atomically.
+    #
+    # Anchor discontinuity (Signal A): bypasses hysteresis — namespace
+    # changes are binary, the old anchor is invalid the moment the
+    # rollback or large-residual is detected.  Re-capture immediately.
+    #
+    # Sustained breach (Signal B): honors hysteresis to prevent
+    # ping-pong when a degraded condition is just barely above
+    # threshold.  Cooldown caps re-captures at one per N seconds;
+    # per-hour cap protects against pathological feedback loops
+    # (e.g. chrony oscillating and dragging Δ in and out of breach).
+    T6_RECAPTURE_COOLDOWN_SEC = 300.0   # 5 min minimum between recaptures
+    T6_RECAPTURE_MAX_PER_HOUR = 5       # rate cap (sustained-breach only)
 
     # V1 fix layer 1 (settled-capture gate) per
     # docs/TIMING-PIPELINE-WIRING.md §10.3.  Block _start_t6_stream's
@@ -1454,6 +1481,10 @@ class CoreRecorderV2:
             # Done outside the timing lock so the check can't stall the
             # SHM-update path on the rare contention.
             self._t6_check_anchor_consistency(int(gps_ns), int(rtp_snap))
+            # V1 fix layer 3 — react to flags raised by Signal A
+            # (just now) or Signal B (set asynchronously from the
+            # sample callback's _t6_check_delta_breach).
+            self._t6_react_to_flags()
 
     def _t6_check_anchor_consistency(
         self,
@@ -1579,6 +1610,183 @@ class CoreRecorderV2:
                 )
             self._t6_drift_first_breach_wall = None
             self._t6_drift_flag_sustained = False
+
+    def _t6_recapture_cooldown_remaining_sec(self) -> Optional[float]:
+        """Time (seconds) remaining before a sustained-breach re-capture
+        is allowed.  Returns 0 when no cooldown is active; None when no
+        prior recapture (cooldown not engaged)."""
+        if self._t6_last_recapture_wall is None:
+            return None
+        elapsed = time.monotonic() - self._t6_last_recapture_wall
+        remaining = self.T6_RECAPTURE_COOLDOWN_SEC - elapsed
+        return remaining if remaining > 0 else 0.0
+
+    def _t6_react_to_flags(self) -> None:
+        """Layer 3 — consume Layer 2 flags and trigger re-capture when
+        appropriate.  Runs on the poll thread after every
+        _t6_check_anchor_consistency call, so:
+
+          * Signal A (anchor discontinuity) is acted on the same poll
+            tick it was raised — bypasses hysteresis.
+          * Signal B (sustained breach) is checked every 5 s; hysteresis
+            (cooldown + per-hour cap) gates the actual re-capture.
+
+        Discontinuity takes precedence — if both flags are set
+        simultaneously (e.g. a radiod restart that also produced a Δ
+        spike), the single re-capture clears both.
+        """
+        if self._t6_drift_flag_anchor_discontinuity:
+            self._t6_attempt_recapture(
+                reason="anchor_discontinuity",
+                bypass_hysteresis=True,
+            )
+            return
+        if self._t6_drift_flag_sustained:
+            self._t6_attempt_recapture(
+                reason="sustained_breach",
+                bypass_hysteresis=False,
+            )
+
+    def _t6_attempt_recapture(
+        self,
+        reason: str,
+        *,
+        bypass_hysteresis: bool = False,
+    ) -> bool:
+        """Re-run the settled-capture gate and replace both anchors
+        atomically.  Returns True on successful re-capture; False if
+        skipped (hysteresis) or failed (chrony not settled, discovery
+        timeout, fresh ChannelInfo missing fields).
+
+        The atomic swap relies on Python reference assignment being
+        single-bytecode: ``self._t6_channel_info = new_ci`` is a
+        STORE_ATTR that the SHM-path reader on the sample thread
+        can never observe in a torn state.  Worst case it sees the
+        old ChannelInfo for one PPS edge and the new one on the
+        next — never a mix.
+        """
+        now_mono = time.monotonic()
+
+        if not bypass_hysteresis:
+            if (self._t6_last_recapture_wall is not None
+                    and now_mono - self._t6_last_recapture_wall
+                        < self.T6_RECAPTURE_COOLDOWN_SEC):
+                # Inside cooldown.  Log once per cooldown window
+                # (the flag stays set so this would otherwise spam).
+                remaining = (
+                    self.T6_RECAPTURE_COOLDOWN_SEC
+                    - (now_mono - self._t6_last_recapture_wall)
+                )
+                logger.debug(
+                    "T6 Layer 3: re-capture (reason=%s) suppressed by "
+                    "cooldown (%.0fs remaining)", reason, remaining,
+                )
+                return False
+            hour_ago = now_mono - 3600.0
+            recent = [t for t in self._t6_recapture_wall_history
+                      if t >= hour_ago]
+            if len(recent) >= self.T6_RECAPTURE_MAX_PER_HOUR:
+                logger.warning(
+                    "T6 Layer 3: re-capture (reason=%s) suppressed by "
+                    "per-hour cap (%d recaptures in last 60 min) — "
+                    "investigate persistent drift source",
+                    reason, len(recent),
+                )
+                return False
+
+        # Re-run the settle gate.  This blocks the poll thread for up
+        # to T6_SETTLE_TIMEOUT_SEC (60 s) — acceptable since the SHM
+        # update path doesn't depend on the poll thread's freshness
+        # during re-capture.
+        if not self._wait_for_chrony_settled():
+            logger.warning(
+                "T6 Layer 3: re-capture requested (reason=%s) but "
+                "chrony did not settle within timeout — skipping; "
+                "flags remain set, will retry next poll cycle",
+                reason,
+            )
+            return False
+
+        # Fresh discover_channels for our SSRC.
+        try:
+            channels = discover_channels(
+                self.status_address,
+                listen_duration=self.T6_TIMING_POLL_LISTEN_SEC,
+            )
+        except Exception as exc:
+            logger.warning(
+                "T6 Layer 3: discover_channels failed during "
+                "re-capture (reason=%s): %s", reason, exc,
+            )
+            return False
+
+        our_ssrc = (
+            getattr(self._t6_channel_info, 'ssrc', None)
+            if self._t6_channel_info is not None else None
+        )
+        fresh = channels.get(our_ssrc) if our_ssrc is not None else None
+        if fresh is None and self._t6_channel_info is not None:
+            target_freq = getattr(self._t6_channel_info, 'frequency', None)
+            if target_freq is not None:
+                for info in channels.values():
+                    if abs(getattr(info, 'frequency', -1) - target_freq) < 1.0:
+                        fresh = info
+                        break
+        if fresh is None:
+            logger.warning(
+                "T6 Layer 3: T6 channel not found in discovery during "
+                "re-capture (reason=%s, ssrc=%s)", reason, our_ssrc,
+            )
+            return False
+
+        fresh_gps_ns = getattr(fresh, 'gps_time', None)
+        fresh_rtp_snap = getattr(fresh, 'rtp_timesnap', None)
+        if fresh_gps_ns is None or fresh_rtp_snap is None:
+            logger.warning(
+                "T6 Layer 3: fresh ChannelInfo missing gps_time/"
+                "rtp_timesnap during re-capture (reason=%s)", reason,
+            )
+            return False
+
+        # Snapshot old values for the log line BEFORE the swap.
+        old_gps = self._t6_drift_anchor_gps_ns
+        old_rtp = self._t6_drift_anchor_rtp_timesnap
+
+        # Build the new ChannelInfo via copy so we don't mutate the
+        # in-flight object the SHM path may be reading.  copy.copy()
+        # is sufficient — ChannelInfo is a flat dataclass.
+        import copy as _copy
+        new_ci = _copy.copy(self._t6_channel_info)
+        new_ci.gps_time = int(fresh_gps_ns)
+        new_ci.rtp_timesnap = int(fresh_rtp_snap)
+        # Reference swap — atomic across the GIL.
+        self._t6_channel_info = new_ci
+
+        with self._t6_timing_lock:
+            self._t6_latest_gps_time_ns = int(fresh_gps_ns)
+            self._t6_latest_rtp_timesnap = int(fresh_rtp_snap)
+            self._t6_drift_anchor_gps_ns = int(fresh_gps_ns)
+            self._t6_drift_anchor_rtp_timesnap = int(fresh_rtp_snap)
+
+        # Clear Layer 2 state — next poll re-evaluates from clean.
+        self._t6_drift_flag_anchor_discontinuity = False
+        self._t6_drift_flag_sustained = False
+        self._t6_drift_first_breach_wall = None
+        self._t6_drift_anchor_residual_samples = 0
+
+        # Accounting.
+        self._t6_recapture_count += 1
+        self._t6_last_recapture_wall = now_mono
+        self._t6_last_recapture_reason = reason
+        self._t6_recapture_wall_history.append(now_mono)
+
+        logger.warning(
+            "T6 Layer 3: anchor re-captured (reason=%s, count=%d): "
+            "old (gps=%s, rtp=%s) → new (gps=%s, rtp=%s)",
+            reason, self._t6_recapture_count,
+            old_gps, old_rtp, fresh_gps_ns, fresh_rtp_snap,
+        )
+        return True
 
     def _t6_on_samples(self, samples, quality):
         """Sample callback for the BPSK PPS stream — feeds the calibrator."""
@@ -2046,6 +2254,20 @@ class CoreRecorderV2:
                         'sustained_threshold_sec': self.T6_DRIFT_SUSTAINED_SEC,
                         'anchor_discontinuity_samples_threshold':
                             self.T6_ANCHOR_DISCONTINUITY_SAMPLES,
+                        # V1 fix layer 3 — re-capture state.
+                        'recapture_count': self._t6_recapture_count,
+                        'last_recapture_age_sec': (
+                            round(time.monotonic() - self._t6_last_recapture_wall, 1)
+                            if self._t6_last_recapture_wall is not None else None
+                        ),
+                        'last_recapture_reason': self._t6_last_recapture_reason,
+                        'recapture_cooldown_remaining_sec': (
+                            round(rem, 1)
+                            if (rem := self._t6_recapture_cooldown_remaining_sec()) is not None
+                            else None
+                        ),
+                        'recapture_cooldown_sec': self.T6_RECAPTURE_COOLDOWN_SEC,
+                        'recapture_max_per_hour': self.T6_RECAPTURE_MAX_PER_HOUR,
                     },
                 }
 

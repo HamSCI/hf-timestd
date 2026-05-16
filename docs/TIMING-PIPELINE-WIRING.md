@@ -755,12 +755,28 @@ hardening here is a defensive move, not a bug fix.
    **monitor-only** — Layer 3 (next) wires them into the re-capture
    policy. See `tests/test_core_recorder_t6_drift_monitor.py`.
 3. Define and implement the re-capture trigger logic.
-   **Next.** Consumes the Layer-2 flags. Should trigger on
-   `anchor_discontinuity=True` (no hysteresis — namespace change is
-   binary) and on `sustained_breach=True` (with a higher-level guard
-   so a degraded T-tier doesn't flip-flop). Re-capture itself = run
-   the settled-capture gate again, discard the old anchor in
-   `_t6_drift_anchor_{gps_ns,rtp_timesnap}`, and reset Signal-A state.
+   **DONE** — Layer 3 reacts to the Layer-2 flags from
+   `_t6_react_to_flags`, called every poll tick after
+   `_t6_check_anchor_consistency`. `_t6_attempt_recapture` re-runs
+   the settled-capture gate, calls a fresh `discover_channels`,
+   builds a new `ChannelInfo` via `copy.copy` (so the SHM-path
+   reader on the sample thread can't see a torn anchor — Python
+   reference assignment is atomic across the GIL), and swaps in
+   the new anchor. Both anchor sets (`_t6_channel_info` and
+   `_t6_drift_anchor_{gps_ns,rtp_timesnap}`) update atomically;
+   both Signal A and B flags clear; `_t6_recapture_count` and a
+   rolling per-hour history advance. Hysteresis policy:
+     - `anchor_discontinuity` bypasses cooldown and per-hour cap
+       (namespace change is binary).
+     - `sustained_breach` honors `T6_RECAPTURE_COOLDOWN_SEC=300`
+       (5 min) + `T6_RECAPTURE_MAX_PER_HOUR=5` (pathological
+       feedback-loop guard).
+   Re-capture is driven from the poll thread, NOT the sample
+   callback — the sample path can't block on the 60 s settled-
+   capture gate. Signal B's setter still runs on the sample thread
+   (it just sets the flag); Signal A's setter and the reaction
+   both run on the poll thread. See
+   `tests/test_core_recorder_t6_recapture.py` (15 tests).
 4. Wire the authority time-series archive into SQLite (was
    ClickHouse pre-2026-05-12 SQLite migration; see
    `project_ch_to_sqlite_migration` memory).
