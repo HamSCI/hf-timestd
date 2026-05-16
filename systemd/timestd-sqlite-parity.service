@@ -1,0 +1,16 @@
+[Unit]
+Description=HF-Timestd SQLite parity check (HDF5 vs SQLite dual-write verification)
+Documentation=https://github.com/mijahauan/hf-timestd
+Documentation=file:///opt/git/sigmond/hf-timestd/docs/HDF5-TO-SQLITE-MIGRATION.md
+
+[Service]
+Type=oneshot
+User=timestd
+Group=timestd
+ExecStart=/opt/git/sigmond/hf-timestd/scripts/parity_check_all.sh
+# StandardOutput / StandardError go to the journal by default
+# (journalctl -u timestd-sqlite-parity).
+# Nice it down so it doesn't compete with the live metrology services.
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

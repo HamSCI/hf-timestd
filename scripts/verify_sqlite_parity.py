@@ -56,7 +56,26 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def read_hdf5(args: argparse.Namespace) -> List[Dict[str, Any]]:
+def _time_window(args: argparse.Namespace) -> Tuple[str, str]:
+    """Build a single (start_iso, end_iso) window used by BOTH backends.
+
+    Leaves a 60-second flush buffer at the end of the window — HDF5
+    writers use SWMR and recently-appended rows may not be visible to
+    readers for ~tens of seconds. Without the buffer, the boundary
+    produces spurious "sql_only" divergences (rows committed to SQLite
+    WAL but not yet flushed for HDF5 readers). The buffer pushes both
+    reads back into the steady-state region where SWMR has caught up.
+    """
+    now = datetime.now(timezone.utc)
+    end = now - timedelta(seconds=60)
+    start = end - timedelta(hours=args.hours)
+    return (
+        start.isoformat().replace("+00:00", "Z"),
+        end.isoformat().replace("+00:00", "Z"),
+    )
+
+
+def read_hdf5(args: argparse.Namespace, start_iso: str, end_iso: str) -> List[Dict[str, Any]]:
     """Use DataProductReader to read N hours of data from the HDF5 archive."""
     from hf_timestd.io import DataProductReader
     from hf_timestd.data_product_registry import DataProductRegistry
@@ -74,21 +93,12 @@ def read_hdf5(args: argparse.Namespace) -> List[Dict[str, Any]]:
         product_name=args.product,
         channel=args.channel,
     )
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(hours=args.hours)
-    return reader.read_time_range(
-        start=start.isoformat().replace("+00:00", "Z"),
-        end=end.isoformat().replace("+00:00", "Z"),
-    )
+    return reader.read_time_range(start=start_iso, end=end_iso)
 
 
-def read_sqlite(args: argparse.Namespace) -> List[Dict[str, Any]]:
+def read_sqlite(args: argparse.Namespace, start_iso: str, end_iso: str) -> List[Dict[str, Any]]:
     """Read the same time range from SQLite via a raw query."""
     table = f"{args.level}_{args.product}"
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(hours=args.hours)
-    start_iso = start.isoformat().replace("+00:00", "Z")
-    end_iso = end.isoformat().replace("+00:00", "Z")
 
     conn = sqlite3.connect(f"file:{args.sqlite_db}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
@@ -138,9 +148,45 @@ def normalise(value: Any) -> Any:
     return value
 
 
+def _is_hdf5_default_fill(x: Any) -> bool:
+    """Recognise the type-default values HDF5's writer substitutes for
+    Python None in `hdf5_writer.py:_append_measurement`:
+      - integer → 0
+      - string  → ""
+      - boolean → False
+      - float   → NaN (already mapped to None by normalise())
+
+    SQLite, by contrast, stores actual NULL for missing values. When
+    one side is None and the other is the corresponding HDF5 fill, the
+    two backends are semantically equivalent ("missing") even though
+    they look different at the raw-value level. The dual-write parity
+    check should not flag these as divergences — they're an artefact
+    of HDF5's inability to represent NULL.
+
+    Side effect: a real 0 / empty string / False that should differ
+    from a real NULL will be silently treated as equivalent here. That
+    is acceptable for Phase 1 verification — the cases we actually
+    care about (different non-fill values across backends) are still
+    caught.
+    """
+    if isinstance(x, str) and x == "":
+        return True
+    if isinstance(x, bool) and x is False:
+        return True
+    # `isinstance(x, int)` is True for booleans too — exclude those.
+    if isinstance(x, int) and not isinstance(x, bool) and x == 0:
+        return True
+    return False
+
+
 def values_equal(a: Any, b: Any) -> bool:
     a, b = normalise(a), normalise(b)
     if a is None and b is None:
+        return True
+    # HDF5 default-fill ↔ SQLite NULL — semantically equivalent.
+    if a is None and _is_hdf5_default_fill(b):
+        return True
+    if b is None and _is_hdf5_default_fill(a):
         return True
     if a is None or b is None:
         return False
@@ -191,13 +237,18 @@ def diff_rows(
 
 def main() -> int:
     args = parse_args()
+    # Compute the time window ONCE so HDF5 and SQLite reads use
+    # identical bounds — otherwise a few-microsecond drift between
+    # two now() calls can leak a boundary row into one but not the
+    # other.
+    start_iso, end_iso = _time_window(args)
     try:
-        h5_rows = read_hdf5(args)
+        h5_rows = read_hdf5(args, start_iso, end_iso)
     except Exception as e:
         print(f"ERROR reading HDF5: {e}", file=sys.stderr)
         return 2
     try:
-        sql_rows = read_sqlite(args)
+        sql_rows = read_sqlite(args, start_iso, end_iso)
     except Exception as e:
         print(f"ERROR reading SQLite: {e}", file=sys.stderr)
         return 2
