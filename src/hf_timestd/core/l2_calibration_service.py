@@ -608,25 +608,24 @@ class L2CalibrationService:
                     logger.warning(f"{channel}: No propagation modes for {station_id}")
                     return None
 
-                # raw_toa_ms is D_clock (timing residual = arrival - expected_delay).
-                # Try every candidate mode and pick the highest-confidence identification.
-                best_mode_result = None
-                for candidate_mode in modes:
-                    candidate_arrival_ms = raw_toa_ms + candidate_mode.total_delay_ms
-                    candidate_result = self.prop_solver.identify_mode(
-                        station=station_id,
-                        measured_delay_ms=candidate_arrival_ms,
-                        frequency_mhz=frequency_mhz
-                    )
-                    if (best_mode_result is None or
-                            candidate_result.confidence > best_mode_result.confidence):
-                        best_mode_result = candidate_result
-                mode_result = best_mode_result
+                # Pick the climatologically-dominant mode directly (M-H23).
+                # `modes` is sorted by delay and (Tier-1) MUF-feasibility-
+                # filtered; the propagation model defines its primary mode as
+                # the shortest-delay feasible arrival, so the first viable
+                # candidate IS that mode.
+                #
+                # The prior code instead reconstructed an "arrival" from each
+                # candidate's own delay (raw_toa_ms + candidate.total_delay_ms)
+                # and fed it back into identify_mode — circular: every candidate
+                # self-identified, and the loosest-uncertainty mode "won".
+                # raw_toa_ms is a timing residual (D_clock), not an absolute
+                # measured delay, so identify_mode cannot be used here.
+                dominant = next((m for m in modes if m.viable), modes[0])
 
-                propagation_delay_ms = mode_result.calculated_delay_ms
-                mode_label = mode_result.identified_mode.value
-                mode_confidence = mode_result.confidence
-                n_hops = mode_result.n_hops
+                propagation_delay_ms = dominant.total_delay_ms
+                mode_label = dominant.mode.value
+                mode_confidence = dominant.model_confidence
+                n_hops = dominant.n_hops
             else:
                 # Geometric-only fallback: great-circle speed-of-light delay.
                 # No ionospheric correction; uncertainty inflated accordingly.

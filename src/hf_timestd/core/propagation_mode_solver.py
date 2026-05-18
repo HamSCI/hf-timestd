@@ -144,7 +144,13 @@ class ModeCandidate:
     # Viability
     viable: bool = True  # False if geometry impossible (e.g., too steep)
     muf_limited: bool = False  # True if frequency > MUF for this mode
-    
+
+    # Confidence of the propagation model that produced this candidate (0-1).
+    # Tier-1 sets it from the HFPropagationModel prediction (iono-data quality:
+    # wamipe/giro/iri/fallback); the parametric Tier-2 fallback leaves it 0,
+    # i.e. treated as low-confidence.
+    model_confidence: float = 0.0
+
     def __str__(self) -> str:
         return (f"{self.mode.value}: {self.total_delay_ms:.2f} ms "
                 f"(±{self.delay_uncertainty_ms:.2f} ms), "
@@ -476,6 +482,7 @@ class PropagationModeSolver:
                     total_delay_ms=arr.delay_ms,
                     delay_uncertainty_ms=arr.uncertainty_ms,
                     viable=arr.is_feasible,
+                    model_confidence=prediction.model_confidence,
                 ))
             candidates.sort(key=lambda c: c.total_delay_ms)
             logger.debug(

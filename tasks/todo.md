@@ -1,42 +1,49 @@
-# M-H21 — chrony SHM struct format vs segment size
+# M-H23 — L2 propagation-mode selection is near-circular
 
 ## Finding
-`chrony_shm.py`: the pack format `'@ii q i 4x q i iiii II iiiiiiii'` produces
-92 bytes (confirmed via `struct.calcsize`), but the SHM segment is
-`SHM_SIZE = 96` — the two were independent constants that could drift. The
-header docstring described a stale 56-byte layout (and had the clock/receive
-semantics backwards plus a since-removed bogus pad).
+`l2_calibration_service.py _calibrate_measurement` chose the propagation mode
+by feeding each candidate's own delay back into `identify_mode`:
 
-## Fix
-- New module constant `SHM_STRUCT_FORMAT = '@ii q i 4x q i iiii II iiiiiiii 4x'`
-  — the trailing `4x` is chrony's C struct trailing padding (time_t forces
-  8-byte struct alignment). The format now totals exactly 96 bytes = chrony's
-  real `struct shmTime`.
-- `SHM_SIZE = struct.calcsize(SHM_STRUCT_FORMAT)` — derived, cannot drift.
-- `struct.pack` in `update()` uses the constant.
-- Header docstring rewritten to the true 96-byte layout (dummy[8] + pad,
-  clock = reference time, receive = system time).
+    candidate_arrival = raw_toa_ms + candidate.total_delay_ms
+    identify_mode(measured_delay_ms=candidate_arrival)   # identifies `candidate`
 
-Deviation from the finding: it prescribed `dummy[10]`, but dummy[10] from
-offset 60 is 100 bytes, not 96. chrony's struct has `int dummy[8]`; its C
-sizeof is 96 (92 fields + 4 trailing pad). The fix represents that pad as
-`4x` — correct, and arithmetically consistent with the 96-byte segment.
+`raw_toa_ms` is a small timing residual (D_clock), not an absolute measured
+delay, so `candidate_arrival ≈ candidate.total_delay_ms` and every candidate
+self-identified. The "winner" was whichever mode had the loosest
+`delay_uncertainty_ms`. `propagation_delay_ms`, `n_hops`, `u_iono ∝ √n_hops`
+were all chosen by tautology.
 
-Scope: `src/hf_timestd/core/chrony_shm.py`. No behavioural change — the
-packed record now fills all 96 bytes (the last 4, which chrony ignores, are
-explicit zero pad rather than left untouched).
+## Fix (pick the climatological primary)
+`identify_mode` genuinely cannot be used here — L2 has only the residual, not
+a measured delay. `calculate_modes` already returns candidates sorted by delay
+and (Tier-1) MUF-feasibility-filtered; the propagation model itself defines its
+primary mode as the shortest-delay feasible arrival. So:
+
+- `_calibrate_measurement`: drop the circular loop; the dominant mode is
+  `next((m for m in modes if m.viable), modes[0])`.
+- `mode_confidence` (drives `u_prop_model` in the uncertainty budget) is now
+  sourced from the propagation model: new `ModeCandidate.model_confidence`
+  field, set by the Tier-1 path from `prediction.model_confidence`
+  (iono-data quality); Tier-2 parametric fallback leaves it 0 (low-confidence).
+- `identify_mode` is left intact — still correctly used by
+  `back_calculate_emission_time` with a real measured delay.
+
+Scope: `l2_calibration_service.py` (call site) + `propagation_mode_solver.py`
+(one dataclass field + one Tier-1 set site). +26 -20.
 
 ## Tasks — done
-- [x] `SHM_STRUCT_FORMAT` constant; `SHM_SIZE` derived via `struct.calcsize`
-- [x] `struct.pack` uses the constant; inline-comment "92"->"96"
-- [x] Rewrite the header docstring (full 96-byte layout)
-- [x] Tests: 2 added to `tests/unit/test_chrony_shm.py`
+- [x] Add `ModeCandidate.model_confidence`; Tier-1 sets it from the prediction
+- [x] `_calibrate_measurement`: replace the circular loop with first-viable pick
+- [x] Tests: `tests/test_l2_mode_selection.py` (2)
 - [x] Full suite run
 
 ## Review
-- Files: `chrony_shm.py` (+34 -19); `tests/unit/test_chrony_shm.py` (+21).
-- New tests (`TestStructLayout`): `SHM_SIZE == struct.calcsize(SHM_STRUCT_FORMAT)`
-  (cannot drift); both equal 96 (chrony's `struct shmTime`). Verified the old
-  format calcsized to 92, the new one to 96.
-- Full repo suite: 1626 passed, 9 subtests passed (1624 + 2 new). One
+- Files: `l2_calibration_service.py` (+18 -19), `propagation_mode_solver.py`
+  (+8 -1); new `tests/test_l2_mode_selection.py` (2 tests).
+- New suite 2/2: mode selection is independent of `raw_toa_ms` (varying the
+  D_clock residual leaves propagation_mode/n_hops/delay/confidence unchanged,
+  while clock_offset still tracks it); the chosen mode equals `calculate_modes`'
+  first viable candidate and its confidence is that candidate's
+  `model_confidence`.
+- Full repo suite: 1628 passed, 9 subtests passed (1626 + 2 new). One
   pre-existing unrelated `test_l2_clickhouse_wire` failure, deselected.
