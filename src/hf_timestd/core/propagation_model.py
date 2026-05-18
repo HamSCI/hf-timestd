@@ -588,22 +588,20 @@ class HFPropagationModel:
         else:
             elevation_deg = 90.0
         
-        # Check MUF (Maximum Usable Frequency)
-        # MUF = foF2 * sec(i) where i is the angle of incidence at the layer
-        # For oblique incidence: sec(i) ≈ distance factor
-        # Simplified: MUF ≈ foF2 / sin(elevation)
-        if elevation_deg > 0:
-            muf = foF2 / math.sin(math.radians(elevation_deg))
-        else:
-            muf = foF2 * 3.0  # Rough estimate for very low angles
-        
-        # E-layer MUF is lower
-        if mode.layer == 'E':
-            foE = iono_params.get('foE_MHz', 3.0)
-            if elevation_deg > 0:
-                muf = foE / math.sin(math.radians(elevation_deg))
-            else:
-                muf = foE * 3.0
+        # Check MUF (Maximum Usable Frequency).
+        # Secant law: MUF = f_critical / cos(i0), where i0 is the ray's angle
+        # of incidence at the reflecting layer. On a curved Earth the layer at
+        # height h curves away from the launch point, so i0 is steeper (closer
+        # to vertical) than the flat-Earth value — from the law of sines,
+        # sin(i0) = R*cos(elev)/(R+h). The flat-Earth secant law foF2/sin(elev)
+        # overestimates the MUF and would mis-gate high-band short-path modes
+        # as feasible (P-H15).
+        sin_i0 = min(1.0, R * math.cos(math.radians(elevation_deg)) / (R + h))
+        cos_i0 = math.sqrt(max(0.0, 1.0 - sin_i0 ** 2))
+
+        # Critical frequency of the reflecting layer (E uses foE, F uses foF2).
+        f_critical = iono_params.get('foE_MHz', 3.0) if mode.layer == 'E' else foF2
+        muf = f_critical / max(cos_i0, 1e-3)
         
         # Is the frequency below the MUF? (with margin)
         is_feasible = frequency_mhz <= muf * 1.1  # 10% margin for model uncertainty
