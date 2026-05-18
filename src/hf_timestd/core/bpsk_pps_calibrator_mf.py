@@ -90,6 +90,20 @@ COSTAS_PHASE_BAND_RAD = 0.5     # |φ − φ_EMA| above this ⇒ φ wandered off
 COSTAS_RELOCK_S = 0.5           # φ quiescent this long (s) before re-lock.
 
 
+# Genuine chain-delay step detection — TSL3 displaced-reference fix
+# (see docs/TSL3_COSTAS_DRIFT_2026-05-18.md).  Once acquired, an
+# off-position edge is treated as a phantom and held inert; the lock is
+# never moved by a transient.  A *real* chain-delay step (an RF/DSP
+# change — a cable, a radiod filter reconfig) is rare and moves the true
+# edge to a new fixed sample-of-second; it is distinguished from a
+# phantom burst purely by persistence.  Only after this many consecutive
+# off-position edges all agree on one new position does the calibrator
+# re-home its lock.  At 1 PPS this is ~60 s — comfortably longer than the
+# ~10-15 s Costas excursions, so excursion phantoms can never be mistaken
+# for a step.
+STEP_CONFIRM_EDGES = 60
+
+
 class BpskPpsCalibratorMF:
     """Matched-filter BPSK PPS calibrator.
 
@@ -116,7 +130,6 @@ class BpskPpsCalibratorMF:
         consecutive_required: int = 10,
         edge_tolerance_samples: int = 10,
         costas_loop_bw_hz: float = 1.0,
-        cascade_tolerance_ms: float = 3.0,
         debug_dump_path: Optional[str] = None,
         debug_dump_seconds: float = 60.0,
         debug_dump_subthreshold_factor: float = 0.2,
@@ -131,17 +144,6 @@ class BpskPpsCalibratorMF:
         self.sample_rate = int(sample_rate)
         self.consecutive_required = int(consecutive_required)
         self.edge_tolerance_samples = int(edge_tolerance_samples)
-        # Cascade-tolerance gate (post-acquisition): once acquired, only
-        # update ``_last_edge_rtp`` from edges within this window.  Wider
-        # than ``edge_tolerance_samples`` so legitimate slow drift still
-        # tracks; tighter than typical Costas-loop noise excursions
-        # (10s-100s ms) so noise edges cannot pull the reference and
-        # cause cascade re-locks at a wrong within-second offset.  See
-        # the 2026-05-08 diagnostic capture in /var/lib/timestd/debug/
-        # for the data that motivated this gate.
-        self.cascade_tolerance_samples = max(
-            1, int(round(float(cascade_tolerance_ms) * sample_rate / 1000.0))
-        )
         self._N = self.sample_rate // 2
 
         # Costas state. Loop coefficient α = 1 - exp(-2π·BW·dt), where
@@ -185,16 +187,28 @@ class BpskPpsCalibratorMF:
 
         self.pps_ok: int = 0
         self.pps_noise: int = 0
+        # Off-position edges seen while acquired (phantoms — see
+        # _detect_and_record_peaks).  Diagnostic only: a phantom is inert,
+        # it does not touch the lock.
+        self.pps_phantom: int = 0
         self.pps_consecutive: int = 0
-        # ACQUIRING (False): every detected-and-classified edge updates
-        # ``_last_edge_rtp`` so the reference walks toward whatever
-        # offset the calibrator can find consistently.  TRACKING (True,
-        # transitions once when ``pps_consecutive`` first reaches
-        # ``consecutive_required``, never falls back without ``reset()``):
-        # only edges within ``cascade_tolerance_samples`` of the
-        # reference update it — noise cascades cannot shift the lock.
+        # ACQUIRING (False): every detected edge walks ``_last_edge_rtp``
+        # so the bootstrap converges on whatever offset it can find
+        # consistently.  TRACKING (True — set once ``pps_consecutive``
+        # first reaches ``consecutive_required``, never cleared without
+        # ``reset()``): the true PPS edge is GPSDO-pinned to a fixed
+        # sample-of-second, so an edge more than ``edge_tolerance_samples``
+        # off is a phantom and is held inert (it cannot reset the lock or
+        # move the reference).  Only a persistent run of off-position
+        # edges — a genuine chain-delay step — re-homes the lock; see
+        # ``_note_step_candidate`` and ``STEP_CONFIRM_EDGES``.
         self._acquired: bool = False
         self._chain_delay_samples: Optional[float] = None
+        # Genuine-step candidate tracker (TSL3 displaced-reference fix):
+        # the RTP of the most recent off-position edge and how many
+        # consecutive off-position edges have agreed on that position.
+        self._step_candidate_rtp: Optional[int] = None
+        self._step_candidate_count: int = 0
 
         # Diagnostic capture (opt-in via TOML).  When enabled, records
         # the matched-filter output ``y`` and every sub/above-threshold
@@ -271,9 +285,12 @@ class BpskPpsCalibratorMF:
         self._peak_running = None
         self.pps_ok = 0
         self.pps_noise = 0
+        self.pps_phantom = 0
         self.pps_consecutive = 0
         self._acquired = False
         self._chain_delay_samples = None
+        self._step_candidate_rtp = None
+        self._step_candidate_count = 0
         self._phase_log_counter = 0
         self._phase_log_last_pps_noise = 0
         self._phase_log_last_pps_ok = 0
@@ -410,6 +427,8 @@ class BpskPpsCalibratorMF:
                     f"acquired={int(self._acquired)} "
                     f"costas_locked={int(self._costas_locked)} "
                     f"dphase_ema={self._dphase_ema:.5f} "
+                    f"pps_phantom={self.pps_phantom} "
+                    f"step_cand={self._step_candidate_count} "
                     f"d_ok={d_ok} d_noise={d_noise} "
                     f"chain_delay_ns={self._chain_delay_samples * 1e9 / self.sample_rate if self._chain_delay_samples else 0:.0f}"
                 )
@@ -478,6 +497,36 @@ class BpskPpsCalibratorMF:
                 f"T6 Costas re-locked: phase_rad={self._phase:+.4f} "
                 f"dphase_ema={self._dphase_ema:.5f} — edge acceptance resumed"
             )
+
+    def _note_step_candidate(self, edge_rtp_int: int) -> bool:
+        """Track a run of off-position edges to tell a genuine chain-delay
+        step from a transient phantom burst (TSL3 displaced-reference fix).
+
+        Each off-position edge seen while acquired is fed here.  If it
+        agrees (within ``edge_tolerance_samples``) with the running
+        candidate's within-second position, the run extends; otherwise
+        the run restarts at this edge.  Returns ``True`` once the run
+        reaches ``STEP_CONFIRM_EDGES`` — the caller then re-homes the lock
+        to the new position.  An accepted on-position edge clears the
+        candidate (done by the caller), so a phantom burst — which is
+        interleaved with real edges — can never reach the threshold; only
+        a true step, where the old edge is simply gone, can.
+        """
+        if self._step_candidate_rtp is not None:
+            cur_off = edge_rtp_int % self.sample_rate
+            cand_off = self._step_candidate_rtp % self.sample_rate
+            dc = (cur_off - cand_off) % self.sample_rate
+            if dc >= self.sample_rate // 2:
+                dc -= self.sample_rate
+            if abs(dc) <= self.edge_tolerance_samples:
+                self._step_candidate_count += 1
+                self._step_candidate_rtp = edge_rtp_int
+                return self._step_candidate_count >= STEP_CONFIRM_EDGES
+        # First off-position edge, or one inconsistent with the running
+        # candidate — (re)start the run here.
+        self._step_candidate_rtp = edge_rtp_int
+        self._step_candidate_count = 1
+        return False
 
     def _detect_and_record_peaks(
         self, y: np.ndarray, rtp_at_y: np.ndarray,
@@ -624,34 +673,66 @@ class BpskPpsCalibratorMF:
                     d -= self.sample_rate
                 d_dbg = int(d)
                 if abs(d) > self.edge_tolerance_samples:
-                    self.pps_noise += 1
-                    self.pps_consecutive = 0
-                    # Cascade-tolerance gate: once acquired, only update
-                    # the reference if the noise edge is within
-                    # cascade_tolerance.  Out-of-cascade edges (typical
-                    # Costas-drift cascades at 100+ ms) leave
-                    # ``_last_edge_rtp`` proven-good so the calibrator
-                    # can resume normal accept-flow once Costas
-                    # recovers, instead of latching onto the drifted
-                    # offset.  During acquisition the original walking
-                    # behaviour applies so the bootstrap can converge.
-                    if (not self._acquired
-                            or abs(d) <= self.cascade_tolerance_samples):
+                    if not self._acquired:
+                        # ACQUIRING — no lock to protect yet; walk the
+                        # reference freely so the bootstrap converges.
+                        self.pps_noise += 1
+                        self.pps_consecutive = 0
                         self._last_edge_rtp = edge_rtp_int
+                        if debug_active:
+                            self._debug_peaks.append((
+                                batch_idx, edge_rtp_int, edge_rtp_frac,
+                                float(ay[pi]), float(threshold),
+                                float(self._peak_running),
+                                float(np.sign(y[pi])),
+                                1,  # rejected_offset
+                                gap_dbg, d_dbg, last_edge_at_eval,
+                                self.pps_consecutive,
+                            ))
+                        continue
+
+                    # ACQUIRED — the true PPS edge is GPSDO-pinned to a
+                    # fixed sample-of-second and cannot physically drift,
+                    # so an edge this far off is a phantom (a Costas /
+                    # matched-filter sidelobe on the ~100 ms grid), not
+                    # the true edge.  A phantom is INERT: it does not
+                    # reset ``pps_consecutive`` and does not walk
+                    # ``_last_edge_rtp``, so a phantom burst can neither
+                    # break the lock nor hop it to another grid cell —
+                    # the calibrator coasts on its last-good chain delay.
+                    # Only a persistent run of off-position edges that
+                    # agree on one new position is a genuine chain-delay
+                    # step; ``_note_step_candidate`` confirms that and the
+                    # edge then falls through to be accepted at the new
+                    # operating point.
+                    self.pps_phantom += 1
+                    stepped = self._note_step_candidate(edge_rtp_int)
                     if debug_active:
                         self._debug_peaks.append((
                             batch_idx, edge_rtp_int, edge_rtp_frac,
                             float(ay[pi]), float(threshold),
                             float(self._peak_running),
                             float(np.sign(y[pi])),
-                            1,  # rejected_offset
+                            1,  # rejected_offset (phantom — lock held)
                             gap_dbg, d_dbg, last_edge_at_eval,
-                            self.pps_consecutive,  # already reset to 0
+                            self.pps_consecutive,
                         ))
-                    continue
+                    if not stepped:
+                        continue
+                    logger.warning(
+                        f"T6 BPSK chain-delay step adopted: lock re-homed "
+                        f"{d_dbg:+d} samples "
+                        f"({d_dbg * 1e6 / self.sample_rate:+.1f} us) after "
+                        f"{STEP_CONFIRM_EDGES} consistent off-position "
+                        f"edges — a genuine RF/DSP chain-delay change"
+                    )
 
             self.pps_ok += 1
             self.pps_consecutive += 1
+            # An on-position edge (or a just-confirmed step) means the
+            # lock is sound — clear any pending step candidate.
+            self._step_candidate_rtp = None
+            self._step_candidate_count = 0
             if (not self._acquired
                     and self.pps_consecutive >= self.consecutive_required):
                 self._acquired = True

@@ -122,7 +122,6 @@ def _make_acquired_calibrator(costas_locked: bool) -> BpskPpsCalibratorMF:
         sample_rate=SR,
         consecutive_required=10,
         edge_tolerance_samples=30,
-        cascade_tolerance_ms=3.0,
     )
     cal._last_edge_rtp = 1_000_000
     cal.pps_consecutive = cal.consecutive_required
@@ -181,8 +180,8 @@ class TestCostasEdgeGate(unittest.TestCase):
         not walk _last_edge_rtp (which is what re-locked TSL3 biased)."""
         cal = _make_acquired_calibrator(costas_locked=False)
         ref0 = cal._last_edge_rtp
-        # Phantom ~1.1 ms off — inside cascade_tolerance, so without the
-        # Costas gate it would walk the reference.
+        # Phantom ~1.1 ms off — the Costas gate coasts, so it is never
+        # even classified (no reference walk, no lock change).
         phantom_rtp = cal._last_edge_rtp + SR + 106
         _drive_one_peak(cal, rtp_at_peak=phantom_rtp)
         self.assertEqual(cal._last_edge_rtp, ref0)

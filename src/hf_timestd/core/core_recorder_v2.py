@@ -379,7 +379,6 @@ class CoreRecorderV2:
                         consecutive_required=self._t6_config.get('consecutive_required', 10),
                         edge_tolerance_samples=self._t6_config.get('edge_tolerance_samples', 30),
                         costas_loop_bw_hz=self._t6_config.get('costas_loop_bw_hz', 1.0),
-                        cascade_tolerance_ms=self._t6_config.get('cascade_tolerance_ms', 3.0),
                         # Diagnostic capture (opt-in).  When
                         # debug_dump_path is set, the MF calibrator
                         # records the matched-filter output ``y``,
@@ -2232,6 +2231,12 @@ class CoreRecorderV2:
                     ),
                     'pps_ok': self._t6_calibrator.pps_ok,
                     'pps_noise': self._t6_calibrator.pps_noise,
+                    # Off-position (phantom) edges held inert while
+                    # acquired — TSL3 displaced-reference fix.  None for
+                    # the legacy non-MF calibrator.
+                    'pps_phantom': getattr(
+                        self._t6_calibrator, 'pps_phantom', None
+                    ),
                     'pps_consecutive': self._t6_calibrator.pps_consecutive,
                     'chain_delay_ns': (self._t6_calibrator._chain_delay_samples
                                        * 1_000_000_000 / self._t6_calibrator.sample_rate
