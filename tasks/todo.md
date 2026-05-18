@@ -1,49 +1,34 @@
-# M-H23 — L2 propagation-mode selection is near-circular
+# P-C1 / P-C2 — physics-service coupling & ionogram-calibration crash
 
-## Finding
-`l2_calibration_service.py _calibrate_measurement` chose the propagation mode
-by feeding each candidate's own delay back into `identify_mode`:
+## Outcome — both already remediated
+Both Critical physics findings were already fixed by commit `c9117b3`
+("Tier-1 remediation"), verified by inspection + git blame:
 
-    candidate_arrival = raw_toa_ms + candidate.total_delay_ms
-    identify_mode(measured_delay_ms=candidate_arrival)   # identifies `candidate`
+**P-C1** — `systemd/timestd-physics.service` now has `Wants=` (not `Requires=`)
+on `timestd-l2-calibration.service`, `Type=simple` (not `notify`), and the
+`ExecStartPre` chown is scoped to the physics-owned `phase2/fusion` and
+`phase2/science` subdirs (not the whole `phase2` tree). All three carry
+explanatory comments referencing `METROLOGY_PHYSICS_SPLIT.md`. A systemd unit
+file is config, not unit-testable in any meaningful way — verified by
+inspection, no test.
 
-`raw_toa_ms` is a small timing residual (D_clock), not an absolute measured
-delay, so `candidate_arrival ≈ candidate.total_delay_ms` and every candidate
-self-identified. The "winner" was whichever mode had the loosest
-`delay_uncertainty_ms`. `propagation_delay_ms`, `n_hops`, `u_iono ∝ √n_hops`
-were all chosen by tautology.
+**P-C2** — `IonosphericModel.update_calibration_from_ionogram` now calls
+`get_layer_heights(timestamp=, latitude=, longitude=)` by keyword (real
+signature), reads `base_heights.hmF2` (correct field), computes `loc_key`
+inline, and stores into `self._calibration_data` (the real attribute). The
+three nonexistent-identifier references and the swapped args are gone.
 
-## Fix (pick the climatological primary)
-`identify_mode` genuinely cannot be used here — L2 has only the residual, not
-a measured delay. `calculate_modes` already returns candidates sorted by delay
-and (Tier-1) MUF-feasibility-filtered; the propagation model itself defines its
-primary mode as the shortest-delay feasible arrival. So:
-
-- `_calibrate_measurement`: drop the circular loop; the dominant mode is
-  `next((m for m in modes if m.viable), modes[0])`.
-- `mode_confidence` (drives `u_prop_model` in the uncertainty budget) is now
-  sourced from the propagation model: new `ModeCandidate.model_confidence`
-  field, set by the Tier-1 path from `prediction.model_confidence`
-  (iono-data quality); Tier-2 parametric fallback leaves it 0 (low-confidence).
-- `identify_mode` is left intact — still correctly used by
-  `back_calculate_emission_time` with a real measured delay.
-
-Scope: `l2_calibration_service.py` (call site) + `propagation_mode_solver.py`
-(one dataclass field + one Tier-1 set site). +26 -20.
-
-## Tasks — done
-- [x] Add `ModeCandidate.model_confidence`; Tier-1 sets it from the prediction
-- [x] `_calibrate_measurement`: replace the circular loop with first-viable pick
-- [x] Tests: `tests/test_l2_mode_selection.py` (2)
-- [x] Full suite run
+## Task — done
+The P-C2 finding explicitly asked for "a unit test exercising the path" — that
+was the only thing missing. Added `tests/test_ionospheric_ionogram_calibration.py`
+(2 tests). No source change.
 
 ## Review
-- Files: `l2_calibration_service.py` (+18 -19), `propagation_mode_solver.py`
-  (+8 -1); new `tests/test_l2_mode_selection.py` (2 tests).
-- New suite 2/2: mode selection is independent of `raw_toa_ms` (varying the
-  D_clock residual leaves propagation_mode/n_hops/delay/confidence unchanged,
-  while clock_offset still tracks it); the chosen mode equals `calculate_modes`'
-  first viable candidate and its confidence is that candidate's
-  `model_confidence`.
-- Full repo suite: 1628 passed, 9 subtests passed (1626 + 2 new). One
+- Files: new `tests/test_ionospheric_ionogram_calibration.py` (2 tests).
+- New tests: `update_calibration_from_ionogram` runs without crashing and
+  stores a correct anchor (offset = measured − model-predicted hmF2, clamped
+  ±150 km; `get_calibration_stats` reflects it); an extreme measured height
+  clamps the offset to ±150 km. Verified live: a first call produced
+  predicted hmF2 212.1 km, offset +107.9 km, one stored entry.
+- Full repo suite: 1630 passed, 9 subtests passed (1628 + 2 new). One
   pre-existing unrelated `test_l2_clickhouse_wire` failure, deselected.
