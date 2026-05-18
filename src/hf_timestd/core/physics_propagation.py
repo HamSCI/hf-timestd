@@ -61,6 +61,7 @@ Author: HF Time Standard Team
 
 import logging
 import math
+import warnings
 import numpy as np
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -194,6 +195,17 @@ class PhysicsPropagationModel:
             pylap_cache_dir: Directory to cache PyLap results
             ionex_dir: Directory containing IONEX files (Tier 1.5)
         """
+        # P-H12: this model is deprecated and superseded by
+        # propagation_model.HFPropagationModel. Warn loudly on use — its own
+        # Tier-2 iono-delay term is unit-wrong (TECU not el/m²), so callers
+        # must not rely on it.
+        warnings.warn(
+            "PhysicsPropagationModel is deprecated and will be removed in a "
+            "future release; use propagation_model.HFPropagationModel instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
         self.receiver_lat = receiver_lat
         self.receiver_lon = receiver_lon
         self.enable_pylap = enable_pylap
