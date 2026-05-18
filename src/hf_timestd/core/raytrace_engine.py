@@ -11,6 +11,30 @@ critical path.  It augments PropagationModeSolver with full numerical ray
 tracing when pyLAP is available; the rest of the pipeline degrades gracefully
 when it is not.
 
+Deployment status (P-H14)
+-------------------------
+As of the 2026-05 metrology/physics review this engine is **complete but not
+yet wired into any caller** — neither HFPropagationModel nor
+PropagationModeSolver constructs a RaytraceEngine.  This is a deliberate
+deferral, not an oversight:
+
+  * pyLAP/PHaRLAP is an optional dependency requiring a manual native install
+    and three environment variables (see "Environment setup" below).  It is
+    absent on the standard deployment, so a wired-in call would resolve to the
+    geometric fallback anyway.
+  * A single 2-D ray trace is orders of magnitude more expensive than the
+    analytic tier, and PHaRLAP's Fortran ODE solver can enter runaway loops —
+    every call is already isolated in a worker process with a timeout
+    (``_raytrace_with_timeout``).  That cost rules it out of the real-time
+    chrony-feed path.
+
+The intended wiring, when scheduled, is **reanalysis-only and advisory**:
+HFPropagationModel / PropagationModeSolver would, when ``is_available()`` is
+true, call ``compute_modes()`` asynchronously as a Tier-0 cross-check whose
+result is logged and compared against the analytic prediction but never
+blocks or replaces the delivered delay.  Until then this module is retained,
+tested for graceful degradation, and intentionally unreferenced.
+
 Environment setup (macOS / Linux)
 ----------------------------------
     export PHARLAP_HOME=/path/to/pharlap_4.7.4

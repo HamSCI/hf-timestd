@@ -18,6 +18,11 @@ Key improvements over the previous model:
 4. Adaptive uncertainty based on model confidence
 5. Self-consistency checks via multi-frequency differential delay
 
+A complete PHaRLAP ray-tracing engine (core/raytrace_engine.py) exists as a
+would-be Tier-0 physics overlay but is deliberately NOT wired into this model.
+See that module's "Deployment status (P-H14)" docstring section for the
+rationale and the intended reanalysis-only, advisory wiring path.
+
 ================================================================================
 PHYSICS
 ================================================================================
