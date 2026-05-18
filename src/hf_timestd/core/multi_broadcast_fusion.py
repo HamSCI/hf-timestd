@@ -289,6 +289,11 @@ class BroadcastMeasurement:
     l2_tec_estimate: Optional[float] = None          # TECU estimate
     l2_model_confidence: Optional[float] = None      # Physics model confidence
 
+    # Per-broadcast Kalman posterior uncertainty (ms). Set by
+    # _apply_broadcast_kalmans; used as σ_i for inverse-variance fusion
+    # weighting in _calculate_weights (M-H12).
+    kalman_uncertainty_ms: Optional[float] = None
+
 
 
 @dataclass
@@ -1173,12 +1178,12 @@ class MultiBroadcastFusion:
                 confidence=m.confidence,
                 snr_db=m.snr_db,
                 quality_grade=m.quality_grade,
-                channel_name=m.channel_name
+                channel_name=m.channel_name,
+                # Per-broadcast Kalman posterior σ — the statistical uncertainty
+                # used for inverse-variance fusion weighting (M-H12).
+                kalman_uncertainty_ms=kalman_uncertainty,
             )
-            
-            # Store Kalman uncertainty for weighting
-            filtered_m.kalman_uncertainty_ms = kalman_uncertainty
-            
+
             filtered_measurements.append(filtered_m)
         
         return filtered_measurements
@@ -2042,23 +2047,26 @@ class MultiBroadcastFusion:
         measurements: List[BroadcastMeasurement]
     ) -> List[float]:
         """
-        Calculate statistically optimal weights for each measurement.
-        
-        Uses inverse variance weighting (precision) as the base:
-            w_i = 1 / σ²_i
-        
-        This is the statistically optimal weighting for combining independent
-        measurements with different uncertainties (ISO GUM, GUM-S1).
-        
-        Weights are then scaled by confidence to account for non-statistical
-        quality factors:
-        - Discrimination quality (WWV vs WWVH separation)
-        - Propagation mode reliability (1E vs 3F)
-        - Signal quality (SNR, multipath)
+        Calculate statistically optimal fusion weights for each measurement.
+
+        Inverse-variance (precision) weighting:
+
+            w_i = trust_i / σ²_i
+
+        σ_i is the per-broadcast Kalman posterior uncertainty
+        (``kalman_uncertainty_ms``) — the genuine statistical uncertainty of
+        that broadcast's filtered D_clock. SNR already drives σ_i (the
+        per-broadcast Kalman is fed snr_db), so it is NOT reapplied here
+        (M-H12: SNR was previously triple-counted — snr_scale, an
+        SNR-boosted confidence, and σ_i — while the real σ_i went unused).
+
+        trust_i is a small non-statistical quality scalar for factors the
+        Kalman σ cannot see: measurement grade, propagation-mode reliability
+        and ambiguity, and station-path priority.
         """
         weights = []
-        
-        # Quality scaling factors (applied to base inverse-variance weight)
+
+        # Non-statistical trust factors (multiplied into the 1/σ² weight)
         grade_scale = {'A': 1.0, 'B': 0.9, 'C': 0.7, 'D': 0.5}
         mode_scale = {
             '1E': 1.0, '1F': 0.95, '2F': 0.85, '3F': 0.7, 'GW': 1.0
@@ -2084,7 +2092,12 @@ class MultiBroadcastFusion:
         # about which station is being detected. This prevents locking onto wrong timing.
         from .wwv_constants import UNAMBIGUOUS_BOOTSTRAP_CHANNELS
         is_bootstrap = self.calibration_update_count < 100
-        
+
+        # Fallback σ when a measurement carries no per-broadcast Kalman
+        # uncertainty (e.g. it never passed through _apply_broadcast_kalmans).
+        DEFAULT_SIGMA_MS = 1.0   # historical default uncertainty
+        MIN_SIGMA_MS = 0.05      # floor so 1/σ² stays finite
+
         for m in measurements:
             # Special handling for GLOBAL_DIFF (cross-station validation)
             if m.station == 'GLOBAL_DIFF':
@@ -2094,20 +2107,18 @@ class MultiBroadcastFusion:
                 weights.append(max(10.0, base_weight * confidence_scale))
                 continue
             
-            # CRITICAL FIX: Use inverse variance (precision) as base weight
-            # This is the statistically optimal weighting formula
-            if m.uncertainty_ms is None or m.uncertainty_ms <= 0:
-                # Fallback for missing/invalid uncertainty
-                # Use inverse confidence as a rough proxy
-                base_weight = 1.0 / max(0.1, (1.0 / max(0.01, m.confidence)))
-            else:
-                # Inverse variance: w = 1/σ²
-                base_weight = 1.0 / (m.uncertainty_ms ** 2)
-            
-            # Scale by confidence to account for non-statistical factors
-            # (discrimination quality, propagation mode reliability, etc.)
-            confidence_scale = m.confidence if m.confidence > 0 else 0.5
-            
+            # Inverse-variance base weight: w = 1/σ², with σ = the per-broadcast
+            # Kalman posterior uncertainty (M-H12). SNR is already folded into
+            # σ_i by the per-broadcast Kalman, so it is NOT reapplied below.
+            sigma_ms = m.kalman_uncertainty_ms
+            if sigma_ms is None or sigma_ms <= 0:
+                # Measurement never passed through the per-broadcast Kalman;
+                # fall back to its declared uncertainty, then a 1 ms default.
+                sigma_ms = m.uncertainty_ms if (m.uncertainty_ms and m.uncertainty_ms > 0) else DEFAULT_SIGMA_MS
+            sigma_ms = max(sigma_ms, MIN_SIGMA_MS)
+            base_weight = 1.0 / (sigma_ms ** 2)
+
+            # Non-statistical trust factors — quality the Kalman σ cannot see.
             # Scale by quality grade (measurement process quality)
             grade_scale_factor = grade_scale.get(m.quality_grade, 0.5)
             
@@ -2148,24 +2159,13 @@ class MultiBroadcastFusion:
                     logger.debug(f"Ignored exception: {e}")
                     pass  # Fail silently - mode scoring is an enhancement, not critical
             
-            # Scale by SNR (signal quality)
-            if m.snr_db is not None:
-                if m.snr_db > 15:
-                    snr_scale = 1.0
-                elif m.snr_db > 10:
-                    snr_scale = 0.95
-                elif m.snr_db > 5:
-                    snr_scale = 0.85
-                else:
-                    snr_scale = 0.7
-            else:
-                snr_scale = 0.9  # Default if SNR unknown
-            
             # Apply station priority (primary anchors vs secondary sources)
             station_priority_factor = station_priority.get(m.station, 0.5)
-            
-            # Combine: base precision × quality factors × station priority
-            w = base_weight * confidence_scale * grade_scale_factor * mode_scale_factor * snr_scale * station_priority_factor
+
+            # w = inverse-variance precision × a small non-statistical trust
+            # scalar. SNR is deliberately absent here — it lives in σ_i (M-H12).
+            trust = grade_scale_factor * mode_scale_factor * station_priority_factor
+            w = base_weight * trust
             
             # BOOTSTRAP PREFERENCE (2026-01-24): Boost unambiguous channels during bootstrap
             # WWV 20/25 MHz and all CHU frequencies have no station ambiguity
@@ -2190,9 +2190,35 @@ class MultiBroadcastFusion:
             
             # Ensure minimum weight for numerical stability
             weights.append(max(0.01, w))
-        
+
         return weights
-    
+
+    @staticmethod
+    def _wls_uncertainty(weights: np.ndarray, values: np.ndarray,
+                         fused: float) -> float:
+        """
+        Uncertainty of a WLS weighted mean (M-H12).
+
+        Returns the larger of two estimates:
+          - formal:  sqrt(1/Σw) — inverse-variance precision of the mean
+          - scatter: sqrt(Σw·(xᵢ−fused)²/Σw) — observed weighted spread of
+                     the inputs about the fused value
+
+        Taking max() is a Birge-style robustness guard: if the inputs disagree
+        by more than their σᵢ predict (Σw·residuals² large), trust the observed
+        spread rather than the optimistic formal precision. It is deliberately
+        conservative — the fused estimate is never reported tighter than the
+        broadcasts that produced it.
+
+        Returns NaN if the weights sum to zero (caller should fall back).
+        """
+        sum_w = float(np.sum(weights))
+        if sum_w <= 0:
+            return float('nan')
+        formal = np.sqrt(1.0 / sum_w)
+        scatter = np.sqrt(np.sum(weights * (values - fused) ** 2) / sum_w)
+        return float(max(formal, scatter))
+
     def _reject_outliers(
         self,
         measurements: List[BroadcastMeasurement],
@@ -3936,9 +3962,13 @@ class MultiBroadcastFusion:
             # filter would violate the white-innovation assumption (M-H13).
             self.holdover_mode = False
 
-            # fused_d_clock is already the weighted mean; measurement_uncertainty
-            # is the combined ISO GUM uncertainty. Apply station-count scaling.
-            wls_uncertainty = measurement_uncertainty * station_scale
+            # WLS uncertainty of the fused weighted mean (M-H12): the larger of
+            # the formal inverse-variance precision and the observed weighted
+            # scatter (see _wls_uncertainty). Falls back to the RSS budget only
+            # in the degenerate zero-weight case.
+            wls_uncertainty = self._wls_uncertainty(w, d_calibrated, fused_d_clock)
+            if not np.isfinite(wls_uncertainty):
+                wls_uncertainty = measurement_uncertainty
 
             # Record this valid fusion for holdover calculations
             self.last_valid_fusion_time = current_time

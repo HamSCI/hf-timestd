@@ -127,8 +127,12 @@ class TestFusionOutputIsWlsMean(unittest.TestCase):
             result = fusion.fuse(skip_write=True)
 
             self.assertIsNotNone(result)
+            # holdover_mode False ⇒ the valid multi-station (WLS) branch ran.
+            # The LOCKED *status* is not asserted here: post-Increment-3 the
+            # lock gate uses the real WLS uncertainty, so a cold cycle 1 (fresh
+            # per-broadcast Kalmans) is REACQUIRING until they converge — see
+            # test_fusion_wls_weighting.TestConvergenceTiming.
             self.assertFalse(fusion.holdover_mode)
-            self.assertEqual(result.kalman_state, 'LOCKED')
             # On the very first cycle there is no history. The fused value must
             # therefore be a pure combination of this cycle's inputs — i.e.
             # bracketed by them. An L3 Kalman anchored elsewhere need not be.

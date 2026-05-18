@@ -1,82 +1,73 @@
-# Dual-Kalman rework — Increment 2 (M-H13: remove the L3 Kalman)
+# Dual-Kalman rework — Increment 3 (M-H12: inverse-variance fusion weights)
 
 ## Goal
-Eliminate the cascaded L3 Kalman in `multi_broadcast_fusion.py`. The
-per-broadcast Kalman banks (Increment 1) already smooth each broadcast's
-D_clock; WLS optimally combines them. A second Kalman on top violates the
-white-innovation assumption (optimistic covariance). `fuse()` now outputs the
-WLS weighted mean directly.
+Make `_calculate_weights` the inverse-variance scheme it claims to be. The bug:
+`base_weight = 1/σ²` used `uncertainty_ms`, which the per-broadcast-Kalman pass
+drops to `None` → constant fallback → "inverse-variance" weighting did nothing.
+Meanwhile SNR was triple-counted (snr_scale, an SNR-boosted confidence, and the
+per-broadcast Kalman) and the genuine per-broadcast `kalman_uncertainty_ms` was
+computed and never used.
 
-Scope: `src/hf_timestd/core/multi_broadcast_fusion.py` only — verified no
-external readers of L3-Kalman internals; web-api/tests touch only the
-`FusedResult.kalman_state` *string* field, which is kept.
+Scope: `src/hf_timestd/core/multi_broadcast_fusion.py` only.
 
 ## Decisions
-- Kept attribute names `kalman_converged` / `kalman_n_updates` and the
-  `FusedResult.kalman_state` string field — repurposed, not renamed
-  (minimal blast radius). Comments/docstrings made honest.
-- Holdover & leap-second hold coast the fused output on a new
-  `last_locked_d_clock` anchor (S2). Per-broadcast predict-only coast (S3)
-  remains Increment 3.
-- `kalman_converged` now has a single definition: the WLS branch criterion
-  (≥2 stations, wls_uncertainty < 3 ms).
+- `σ_i = kalman_uncertainty_ms` (declared on the `BroadcastMeasurement`
+  dataclass). `w_i = trust_i / σ_i²`.
+- `trust_i = grade × mode(×ambiguity) × station_priority` — a small
+  non-statistical scalar. `snr_scale` and `confidence` dropped from the
+  per-measurement weight: SNR already lives in σ_i (the per-broadcast Kalman
+  is fed snr_db); confidence is SNR-contaminated.
+- WLS uncertainty `= max(√(1/Σw), weighted_scatter)`, extracted into the pure
+  static helper `_wls_uncertainty` so it is directly testable.
+- Stay atomic (per user): the line-4163 `uncertainty = measurement_uncertainty`
+  overwrite is M-H15, left untouched. So `wls_uncertainty` feeds the holdover
+  base uncertainty and the lock gate now; the reported LOCKED uncertainty still
+  routes through the RSS budget until M-H15 is done.
 
 ## Tasks — all done
-- [x] git worktree `dual-kalman-increment-2` off `metrology-physics-review-remediation`
-- [x] Delete `_kalman_update` (210 lines)
-- [x] `fuse()`: `fused_d_clock = fused_d_clock_raw`; drop use_l2_kalman /
-      k_state_active / kalman_uncertainty / correction_alpha / dead
-      weighted-scatter measurement_uncertainty
-- [x] `self.kalman_n_updates += 1` once per `fuse()` cycle
-- [x] `last_locked_d_clock` attr; set in WLS branch
-- [x] Holdover branch coasts on `last_locked_d_clock`; `_fsk_leap_second_hold`
-      routed into holdover/coast; logs use `fused_d_clock`
-- [x] Monotonicity check relocated after the holdover/WLS branch (guards the
-      final emitted value)
-- [x] `__init__` cleanup (L1/L2 state, P, convergence threshold, drift-window
-      attrs, correction_alpha, _updates_since_restart)
-- [x] `save_state` / `load_state`: `_kalman_state` blocks removed; legacy keys
-      ignored on load
-- [x] Shutdown block: `kalman_state[0]` → `last_fused_d_clock`
-- [x] Dead `uncertainty_threshold` line removed
-- [x] Contradictory architecture comments fixed
-- [x] Tests added: `tests/test_fusion_l3_kalman_removal.py`
+- [x] git branch `dual-kalman-increment-3` off `dual-kalman-increment-2`
+- [x] Declare `kalman_uncertainty_ms` on the `BroadcastMeasurement` dataclass
+- [x] `_apply_broadcast_kalmans`: set it via the constructor
+- [x] `_calculate_weights`: σ_i = kalman_uncertainty_ms; drop snr_scale +
+      confidence; trust scalar = grade × mode × station_priority; σ fallback
+      chain (kalman → uncertainty_ms → 1 ms) with a 0.05 ms floor
+- [x] Add `_wls_uncertainty` static helper; LOCKED branch uses it
+- [x] Tests: `tests/test_fusion_wls_weighting.py` (9); update one Increment 2
+      test for the new convergence timing
 - [x] Full suite run
 
 ## Review
 
 **Files changed**
-- `src/hf_timestd/core/multi_broadcast_fusion.py` — net −310 lines
-  (141 insertions, 451 deletions).
-- `tests/test_fusion_l3_kalman_removal.py` — new, 7 tests.
+- `src/hf_timestd/core/multi_broadcast_fusion.py` — +91 −57.
+- `tests/test_fusion_wls_weighting.py` — new, 9 tests.
+- `tests/test_fusion_l3_kalman_removal.py` — 1 assertion relaxed (see below).
 
-**Behavioural change**
-- `fuse()` output (`d_clock_fused_ms`) is now the WLS weighted mean of the
-  per-broadcast-Kalman-filtered, calibrated D_clocks — one fewer smoothing
-  stage. Slightly noisier cycle-to-cycle, but the previous covariance was
-  optimistic; the discontinuity filter + per-broadcast Kalmans absorb it.
-- Holdover (incl. leap-second hold) coasts the output on the last LOCKED
-  value and grows uncertainty — it no longer emits a noisy single-broadcast
-  mean or a leap-second-stepped value.
-- On restart there is no persisted L3 filter state; status shows ACQUIRING
-  until the WLS branch re-converges (~1 cycle with 2 stations). Legacy
-  `_kalman_state` keys in old calibration JSON are ignored.
+**Behavioural change — cold-start convergence timing**
+The lock gate (`kalman_converged` ⇐ `wls_uncertainty < 3 ms`) now uses the
+genuine WLS uncertainty. A cold start has fresh per-broadcast Kalmans (σ≈10 ms),
+so cycle 1's WLS uncertainty is ≈4.2 ms → status is honestly `REACQUIRING`;
+`LOCKED` follows on cycle 2 once those filters converge. The old code locked on
+cycle 1 because it used the a-priori RSS budget, ignoring per-broadcast
+convergence. Warm restarts are unaffected — per-broadcast Kalman state is
+persisted (Increment 1), so they load converged and lock immediately. The
+Increment 2 test `test_locked_cycle_outputs_weighted_mean` dropped its
+`kalman_state == 'LOCKED'` assertion accordingly (its real subject — output is
+the bracketed WLS mean — is unchanged); `TestConvergenceTiming` now covers the
+REACQUIRING→LOCKED progression explicitly.
 
 **Verification**
-- `python -m py_compile` + AST parse: OK.
-- New suite `test_fusion_l3_kalman_removal.py`: 7/7 pass — L3 method/attrs
-  gone, save/load drops legacy blocks, LOCKED cycle outputs a bracketed WLS
-  mean, holdover coasts on the anchor and ignores a 99 ms single-station
-  spike, `kalman_n_updates` counts cycles.
-- Full repo suite: 1593 passed, 9 subtests passed. One pre-existing
-  unrelated failure (`test_l2_clickhouse_wire … test_returns_noop_writer…`)
-  — confirmed it fails identically on the base branch (ClickHouse env
-  config, untouched by this work).
+- `python -m py_compile`: OK.
+- New suite `test_fusion_wls_weighting.py`: 9/9 — weight ∝ 1/σ², SNR no longer
+  changes the weight, σ fallback chain, `_wls_uncertainty` formula (agreement→
+  formal, disagreement→scatter, weighted, zero-weight→NaN), wiring, and
+  cold-start REACQUIRING→LOCKED.
+- Full repo suite: 1609 passed, 9 subtests passed (1593 + 16 new). One
+  pre-existing unrelated `test_l2_clickhouse_wire` failure, deselected —
+  fails identically on the base branch.
 
 **Not done here (tracked elsewhere)**
-- S3: per-broadcast Kalman predict-only coast during leap-second hold —
-  Increment 3.
-- Increment 3 (M-H12): `_calculate_weights` uses per-broadcast
-  `kalman_uncertainty_ms`; WLS uncertainty = max(√(1/Σw), weighted_scatter).
-- `uv.lock` reverted — `uv run` re-resolved `ka9q-python`; out of scope for
-  this increment, left for a deliberate dependency bump.
+- M-H15: the `uncertainty = measurement_uncertainty` overwrite (line ~4163)
+  still clobbers the LOCKED-cycle reported uncertainty. Until then the new
+  WLS uncertainty drives the holdover base + lock gate but not the value
+  reported to chrony on a LOCKED cycle.
