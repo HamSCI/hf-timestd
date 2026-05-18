@@ -107,15 +107,6 @@ class L2CalibrationService:
             except Exception as e:
                 logger.warning(f"PropagationModeSolver init failed ({e}); geometric fallback active")
                 self.prop_solver = None
-        
-        # CONTRACT v0.6 §17 — additive ClickHouse staging tier for L2
-        # detection events.  HDF5 (the per-channel DataProductWriter
-        # below) remains the canonical L1/L2 artefact; CH receives a
-        # one-row-per-measurement parallel feed that the future
-        # hs-uploader library reads.  No-op when SIGMOND_CLICKHOUSE_URL
-        # is unset.  Module-not-found is graceful: hf-timestd remains
-        # runnable on hosts that don't have sigmond installed.
-        self._ch_writer = self._build_ch_writer()
 
         # Initialize readers and writers per channel
         self.l1_readers: Dict[str, DataProductReader] = {}
@@ -221,138 +212,11 @@ class L2CalibrationService:
         for writer in self.l2_writers.values():
             writer.close()
 
-        # Drain the CONTRACT v0.6 §17 CH writer, if any.
-        if self._ch_writer is not None:
-            try:
-                self._ch_writer.close()
-            except Exception as exc:                  # noqa: BLE001
-                logger.warning("CH writer close failed: %s", exc)
-    
     def _handle_signal(self, signum, frame):
         """Handle shutdown signals."""
         logger.info(f"Received signal {signum}")
         self.stop()
 
-    # ── CONTRACT v0.6 §17 — local CH staging tier ──────────────────────────
-    #
-    # The two helpers below keep all the ClickHouse-specific logic in
-    # one place so the rest of the service is untouched when CH isn't
-    # configured.  Both are no-ops in that case (writer.is_noop, the
-    # row builder is never called).
-
-    @staticmethod
-    def _build_ch_writer():
-        """Construct a ``sigmond.hamsci_ch.Writer`` for ``timestd.events``.
-
-        Returns ``None`` when sigmond isn't installed (graceful — the
-        HDF5 path runs unaffected).  When sigmond IS available but
-        ``SIGMOND_CLICKHOUSE_URL`` is unset, the writer is a no-op (its
-        ``is_noop`` attribute is ``True`` and ``insert()`` is a free
-        call).  See sigmond/lib/sigmond/hamsci_ch/writer.py.
-        """
-        try:
-            from sigmond.hamsci_ch import Writer  # type: ignore[import-not-found]
-        except ImportError as exc:
-            logger.debug(
-                "sigmond.hamsci_ch unavailable (%s); CH path disabled "
-                "(HDF5 unchanged)",
-                exc,
-            )
-            return None
-        try:
-            return Writer.from_env(
-                table="events",
-                mode="timestd",
-                schema_version=1,
-                batch_rows=200,           # ~1 row/min/station; flush often
-            )
-        except Exception as exc:                       # noqa: BLE001
-            logger.warning(
-                "CH writer init failed (%s); HDF5 path unaffected", exc,
-            )
-            return None
-
-    @staticmethod
-    def _ch_row_from_l2(
-        l2_measurement,
-        channel: str,
-        l2_dict: dict,
-    ) -> dict:
-        """Build one ``timestd.events`` row from an L2 measurement.
-
-        Schema: clickhouse/schema/timestd/001_create_events.sql.  The
-        row keys MUST match the column names exactly — the
-        ``hamsci_ch.Writer`` passes the dict to ``clickhouse_connect``
-        which uses keys for column lookup.
-        """
-        from datetime import datetime, timezone
-
-        # Timestamp — use the minute_boundary_utc as the canonical
-        # event time so duplicate cycles dedup cleanly via the
-        # ReplacingMergeTree primary key.
-        try:
-            ts = datetime.fromtimestamp(
-                int(l2_dict.get("minute_boundary_utc", 0)),
-                tz=timezone.utc,
-            ).replace(tzinfo=None)
-        except (ValueError, TypeError, OSError):
-            ts = datetime.utcnow()
-
-        station_value = l2_dict.get("station") or ""
-        if hasattr(station_value, "value"):
-            station_value = station_value.value
-        elif hasattr(station_value, "name"):
-            station_value = station_value.name
-
-        discrim = l2_dict.get("discrimination_method") or ""
-        if hasattr(discrim, "value"):
-            discrim = discrim.value
-        elif hasattr(discrim, "name"):
-            discrim = discrim.name
-
-        quality_flag = l2_dict.get("quality_flag") or ""
-        if hasattr(quality_flag, "value"):
-            quality_flag = quality_flag.value
-        elif hasattr(quality_flag, "name"):
-            quality_flag = quality_flag.name
-
-        quality_grade = l2_dict.get("quality_grade") or ""
-        if hasattr(quality_grade, "value"):
-            quality_grade = quality_grade.value
-        elif hasattr(quality_grade, "name"):
-            quality_grade = quality_grade.name
-
-        freq_mhz = float(l2_dict.get("frequency_mhz", 0.0) or 0.0)
-        propagation_mode = str(l2_dict.get("propagation_mode") or "")
-
-        return {
-            "time":                       ts,
-            # The common-header fields are populated by the writer-side
-            # extras when the daemon emits them via env (sigmond's
-            # render_env publishes STATION_CALL / STATION_GRID); leave
-            # blank here so we don't shadow operator config.
-            "host_call":                  "",
-            "host_grid":                  "",
-            "radiod_id":                  "",
-            "instance":                   channel,
-            "processing_version":         str(l2_dict.get("processing_version") or ""),
-            "station":                    str(station_value),
-            "frequency_khz":              int(round(freq_mhz * 1000)),
-            "raw_toa_ms":                 float(l2_dict.get("raw_arrival_time_ms", 0.0) or 0.0),
-            "toa_uncertainty_ms":         float(l2_dict.get("uncertainty_ms", 0.0) or 0.0),
-            "clock_offset_ms":            float(l2_dict.get("clock_offset_ms", 0.0) or 0.0),
-            "expanded_uncertainty_ms":    l2_dict.get("expanded_uncertainty_ms"),
-            "snr_db":                     l2_dict.get("snr_db"),
-            "doppler_hz":                 l2_dict.get("doppler_hz"),
-            "distance_km":                l2_dict.get("distance_km"),
-            "propagation_mode":           propagation_mode,
-            "n_hops":                     l2_dict.get("n_hops"),
-            "quality_flag":               str(quality_flag),
-            "quality_grade":              str(quality_grade),
-            "discrimination_method":      str(discrim),
-            "delay_plausible":            1 if quality_flag in ("GOOD", "MARGINAL") else 0,
-        }
-    
     def _seed_last_processed(self):
         """Initialise last_processed and lookback_minutes from existing L2 output.
 
@@ -525,21 +389,6 @@ class L2CalibrationService:
                         # Write to HDF5 (canonical L2 artefact).
                         l2_dict = l2_measurement.model_dump(mode='json')
                         self.l2_writers[channel].write_measurement(l2_dict)
-
-                        # CONTRACT v0.6 §17 — also stream into the local
-                        # CH staging tier when configured.  The HDF5
-                        # path above is unaffected by CH-side failures.
-                        if self._ch_writer is not None and not self._ch_writer.is_noop:
-                            try:
-                                row = L2CalibrationService._ch_row_from_l2(
-                                    l2_measurement, channel, l2_dict,
-                                )
-                                self._ch_writer.insert([row])
-                            except Exception as exc:  # noqa: BLE001
-                                logger.warning(
-                                    "%s: CH insert failed (HDF5 path unaffected): %s",
-                                    channel, exc,
-                                )
 
                         # Update last processed
                         minute_boundary = l1_dict.get('minute_boundary_utc', 0)

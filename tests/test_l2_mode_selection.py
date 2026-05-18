@@ -24,7 +24,7 @@ from hf_timestd.core.propagation_mode_solver import PropagationModeSolver
 
 def _service() -> L2CalibrationService:
     """An L2CalibrationService with just what _calibrate_measurement needs —
-    bypassing the heavy constructor (writers, ClickHouse, seeding)."""
+    bypassing the heavy constructor (writers, seeding)."""
     svc = object.__new__(L2CalibrationService)
     svc.receiver_lat = 44.96
     svc.receiver_lon = -93.05

@@ -130,11 +130,9 @@ def _handle_inventory(args):
                 })
             data_destination = None
 
-            # CONTRACT v0.6 §17 — output sinks per instance.  HDF5 is
-            # the canonical L1 artefact (always declared); a CH sink
-            # for L2 detection events appears only when sigmond has
-            # published SIGMOND_CLICKHOUSE_URL into the env.  CH-
-            # disabled hosts stay file-only with no extra moving parts.
+            # Output sinks per instance. HDF5 is the canonical L1/L2
+            # artefact. (The CONTRACT v0.6 §17 ClickHouse staging sink was
+            # removed — hf-timestd stages L2 events to SQLite, not ClickHouse.)
             data_sinks = [
                 {
                     'kind':           'file',
@@ -144,15 +142,6 @@ def _handle_inventory(args):
                     'mb_per_day':     0,        # not estimated yet
                 },
             ]
-            if os.environ.get('SIGMOND_CLICKHOUSE_URL', '').strip():
-                data_sinks.append({
-                    'kind':           'clickhouse',
-                    'target':         'timestd.events',
-                    'schema_ref':     'timestd:1',
-                    'retention_days': 365,      # L2 events small; year is fine
-                    'mb_per_day':     1,        # ~1 row/min/station; tiny
-                    'health':         'ok',
-                })
 
             instances.append({
                 'instance':                    'default',
