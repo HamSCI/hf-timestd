@@ -4185,12 +4185,28 @@ class MultiBroadcastFusion:
             )
         
         # ====================================================================
-        # v6.0 ARCHITECTURE: WLS Fusion (No L3 Kalman)
+        # FINAL UNCERTAINTY BUDGET (M-H15)
         # ====================================================================
-        # Per-broadcast Kalmans have already smoothed measurements.
-        # We use the measurement uncertainty directly without additional filtering.
-        # This preserves ionospheric science signal and avoids false smoothing.
-        uncertainty = measurement_uncertainty
+        # The LOCKED/holdover branch above set `uncertainty` to the fusion
+        # statistical term — the WLS uncertainty of the weighted mean when
+        # LOCKED, or the dropout-grown holdover uncertainty otherwise. Combine
+        # it (RSS, per ISO GUM) with the non-statistical budget components.
+        #
+        # This line previously read `uncertainty = measurement_uncertainty`,
+        # which DISCARDED the branch result: holdover uncertainty never grew at
+        # Chrony during a dropout, and the WLS uncertainty was inert. The crude
+        # statistical term inside `measurement_uncertainty` is intentionally not
+        # re-added here — the branch value is the better estimate and supersedes
+        # it (RSS-ing both would double-count the statistical contribution).
+        uncertainty = float(np.sqrt(
+            uncertainty**2 +                       # WLS / holdover statistical term
+            systematic_uncertainty**2 +            # Calibration convergence
+            propagation_uncertainty**2 +           # Mode-dependent ionospheric
+            rtp_jitter_ms**2 +                     # RTP timestamp jitter
+            tone_detection_uncertainty**2 +        # Phase ambiguity (SNR-dependent)
+            multipath_uncertainty**2               # Delay spread
+        ))
+        uncertainty = max(uncertainty_floor, uncertainty)
         
         # ====================================================================
         # SINGLE-STATION MODE SAFEGUARDS (CRITICAL FIX 2026-01-10)
