@@ -2222,6 +2222,14 @@ class CoreRecorderV2:
                 status['l6_pps'] = {
                     'enabled': True,
                     'locked': self._t6_calibrator.locked,
+                    # Costas carrier-recovery loop health (Layer A TSL3
+                    # fix).  False during a phase excursion — the
+                    # calibrator is coasting on the last-good chain delay
+                    # and accepting no edges until the loop re-locks.
+                    # None when the legacy (non-MF) calibrator is active.
+                    'costas_locked': getattr(
+                        self._t6_calibrator, 'costas_locked', None
+                    ),
                     'pps_ok': self._t6_calibrator.pps_ok,
                     'pps_noise': self._t6_calibrator.pps_noise,
                     'pps_consecutive': self._t6_calibrator.pps_consecutive,

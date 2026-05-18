@@ -1,8 +1,17 @@
 # TSL3 BPSK-PPS Costas-drift — scoping & critical TODO
 
-**Status:** CRITICAL — **scoped, not started.** Queued to begin **after** the
-`docs/CODE_REVIEW_2026-05-17_METROLOGY_PHYSICS.md` remediation sequence
-(remaining `M-H##` and all `P-##` findings) is complete.
+**Status:** CRITICAL — **Layer A implemented** on branch
+`tsl3-costas-drift-fix` (off `origin/main`), not yet deployed. **Layer B**
+(eliminate the excursions) remains open and needs more captures.
+
+> **Layer A — done.** A Costas lock-quality signal (`_update_costas_lock`
+> in `bpsk_pps_calibrator_mf.py`) gates edge acceptance once acquired: an
+> excursion now makes the calibrator coast on the last-good chain delay
+> instead of re-locking against a phantom. Verified by replaying this
+> capture through the detector — the whole excursion (t≈15.1–29.8 s) is
+> gated off, including the accepted phantom at t=25.6 s. The
+> `cascade_tolerance_ms` "backstop" was deliberately *not* tightened: see
+> the note at the end of the Layer A section.
 
 **Diagnosed:** 2026-05-18 (bee1, live system, on pre-`metrology-physics-review-remediation`
 code — the remediation branch was *not* deployed; nothing in that branch is
@@ -80,8 +89,26 @@ holdover.
    re-lock.
 3. Result: an excursion → TSL3 holds its precise last-good delay instead of
    re-locking biased; chrony keeps TSL3.
-4. Backstop: tighten `cascade_tolerance_ms` (3.0 ms is wide enough to admit a
-   ~1 ms phantom).
+4. ~~Backstop: tighten `cascade_tolerance_ms`~~ — **not done, deliberately.**
+   Swapping 3.0 ms for another arbitrary millisecond figure does not address
+   the real point: the whole chain (LB-1421 → TS1 → RX-888) shares one
+   GPSDO, so the true PPS edge sits at a *fixed* sample-of-second with zero
+   drift — `_detect_and_record_peaks` already measures the deviation from
+   that GPSDO-predicted position (`d`); only its tolerance is arbitrary.
+   With the Layer A gate in place, phantoms only occur during excursions
+   and are gated off before ever reaching the accept path, so the cascade
+   window is near-vestigial. `cascade_tolerance_ms` stays 3.0. **Layer-B
+   cleanup note:** reconsider whether a no-drift GPSDO-locked system should
+   have a separate "drift" window (`cascade_tolerance` wider than
+   `edge_tolerance`) at all.
+
+**Implemented as:** `_update_costas_lock` in `bpsk_pps_calibrator_mf.py`.
+Two tests on the existing Costas phase — a motion test (EMA of per-batch
+|Δφ|) and a band test (φ vs a slow EMA frozen during motion) — plus a
+short re-lock debounce; gated in `_detect_and_record_peaks` only once
+`_acquired` (the bootstrap still walks freely). Thresholds (the `COSTAS_*`
+module constants) are derived from the 2026-05-08 capture, where the
+normal and excursion regimes are separated 5–10×.
 
 Effort: moderate, contained to `bpsk_pps_calibrator_mf.py` — a lock-quality
 metric plus gating in the edge-acceptance path; testable against the existing

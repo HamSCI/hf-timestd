@@ -1,207 +1,103 @@
-# core-recorder: 9 sockets → 1 MultiStream
+# TSL3 BPSK-PPS Costas-drift — Layer A fix
 
 ## Context
 
-`timestd-core-recorder.service` currently opens **one ka9q-python
-`RadiodStream` per archive channel + one for the L6 BPSK PPS calibrator**
-— ~10 UDP sockets all bound to `0.0.0.0:5004` and joined to the same
-radiod multicast group. Per Linux kernel semantics, each socket joining
-the same multicast group receives its own clone of every packet, so
-core-recorder is processing roughly **N× the radiod firehose** through
-a single Python GIL-locked thread (~270 MB/s observed on bee1 with
-N=9 sockets at 24 kHz IQ each).
+The BPSK PPS calibrator (`src/hf_timestd/core/bpsk_pps_calibrator_mf.py`,
+feeds chrony refclock TSL3) intermittently has ~10–15 s Costas
+carrier-recovery phase excursions. During an excursion the matched filter
+produces strong phantom peaks; a phantom inside `cascade_tolerance_ms`
+walks `_last_edge_rtp` and TSL3 re-locks biased (live: −1.1 ms on bee1
+2026-05-18). Scoped in `docs/TSL3_COSTAS_DRIFT_2026-05-18.md`.
 
-Diagnosed live on bee1 2026-04-27:
+**Layer A**: add a Costas lock-quality signal and gate edge acceptance on
+it, so an excursion coasts on the last-good chain delay instead of
+re-locking biased.
 
-- core-recorder's 9 sockets: 49,609,334 cumulative drops, several at
-  80%+ of their 16 MiB per-socket buffer.
-- radiod itself pinned/scheduled to CPU 1 at 130% CPU; CPU 1 at 0% idle.
-- hfdl-recorder's resequencer reports ~2 "Lost packet recovery" events/s
-  with mean gap = 70 875 samples (~320 ms) — **ALL clients see these
-  gaps because they originate at the radiod source, starved by softirq
-  pressure on CPU 1.**
+## Detector design (validated against the 2026-05-08 debug capture)
 
-The 9-socket pattern is **historical, not load-bearing** (operator-
-confirmed). Replacing it with a single `MultiStream` subscription that
-demuxes by SSRC drops kernel multicast-fanout work for core-recorder
-from N× to 1×, freeing CPU 1 softirq cycles for radiod. **Timing
-precision is paramount and must be fully preserved.**
+Per-batch, two cheap tests on the existing Costas phase state:
 
-## Architecture decision
+1. **Motion test** — EMA of the per-batch phase increment
+   `|Δφ|` stays below `COSTAS_DPHASE_MAX`. Normal `|Δφ|` EMA ≪ 0.001 rad;
+   during an excursion it sits ~0.012–0.015 rad.
+2. **Band test** — `|φ − φ_ema|` within `COSTAS_PHASE_BAND`, where `φ_ema`
+   is a slow EMA of φ **frozen while the motion test fails** (so it cannot
+   chase φ into the excursion). Normal deviation ~1e-4 rad; excursion >5 rad.
 
-**Adopt:** `CoreRecorderV2` owns one shared `MultiStream`. Each
-`StreamRecorderV2` keeps its public shape (config, archive writer,
-ring buffer, health monitor, `start()`/`stop()` API), but its `start()`
-no longer creates a `RadiodStream` — it just performs `ensure_channel`,
-seeds timing, and registers its `_handle_samples` callback with the
-parent `MultiStream`. The L6 BPSK PPS channel registers an additional
-callback on the same `MultiStream`. `CoreRecorderV2` starts the
-`MultiStream` exactly once after every channel is added and stops it
-exactly once at shutdown.
+`costas_locked = motion_ok AND band_ok`, with a short re-lock debounce
+(`COSTAS_RELOCK_SEC`) so acceptance only resumes once φ is fully settled.
 
-**Reject:** custom RTPRecorder + manual SSRC demux. Reinvents work
-ka9q-python already does in `MultiStream`, and we'd have to maintain
-the per-channel `PacketResequencer` / `StreamQuality` / batched
-delivery machinery ourselves.
+Simulation over the real capture (3287 batches, one excursion):
+100% locked in both normal regions, 0% locked through the excursion;
+unlock at t≈15.1 s (onset), re-lock at t≈29.8 s (after recovery). The
+phantom that was actually accepted in the capture was at t=25.6 s — well
+inside the gated-off window.
 
-**Reject:** keeping per-channel `RadiodStream`s and only consolidating
-the L6 channel. Doesn't address the 9× fanout that's actually causing
-CPU 1 starvation.
+Constants (hardcoded, physically motivated, cited to the capture):
+`TAU_PHASE_EMA=10 s`, `TAU_DPHASE_EMA=0.5 s`, `COSTAS_DPHASE_MAX=0.004 rad`,
+`COSTAS_PHASE_BAND=0.5 rad`, `COSTAS_RELOCK_SEC=0.5 s`. EMA coefficients
+derived per-batch from `dt`, like the existing `_alpha`.
 
-### Timing-precision preservation
+## Plan
 
-`MultiStream` and `RadiodStream` deliver `on_samples(samples, quality)`
-identically per slot — same `~10-packet` batch interval, same
-`quality.last_rtp_timestamp` semantics. Per `ka9q-python/multi_stream.py`
-[L305–310](../../ka9q-python/ka9q/multi_stream.py#L305) each
-`_ChannelSlot` updates its own `quality.last_rtp_timestamp = header.timestamp`
-on every packet; the callback is invoked at the same cadence as
-`RadiodStream`. **No precision is lost.**
+- [x] **Detector** — `_update_costas_lock` in `bpsk_pps_calibrator_mf.py`,
+      called from `process_samples` after the Costas phase update. New
+      state: `_phase_ema`, `_dphase_ema`, `_costas_locked`,
+      `_costas_relock_counter`; coefficients derived alongside `_alpha`.
+      Public `costas_locked` property added.
+- [x] **Gate** — in `_detect_and_record_peaks`, when `_acquired and not
+      _costas_locked`: returns before any classification — no
+      `_last_edge_rtp` / `pps_*` / `_chain_delay_samples` / `_peak_running`
+      mutation (coast). Phantoms still recorded to the debug capture as
+      classification `4`. Inert during acquisition.
+- [x] **reset()** — new state cleared.
+- [x] **Observability** — locked→unlocked (warning) / unlocked→locked
+      (info) transition logs in `_update_costas_lock`; `costas_locked` +
+      `dphase_ema` added to the periodic phase log and `costas_locked` to
+      the `l6_pps` status dict in `core_recorder_v2.py` (via `getattr`, so
+      the legacy non-MF calibrator path is safe).
+- [x] **Backstop** — DROPPED. `cascade_tolerance_ms` 3.0→1.0 would swap one
+      arbitrary ms window for another. The true PPS edge is GPSDO-locked to
+      a fixed sample-of-second (zero drift); the real guardrail is the
+      Costas gate (phantoms only occur during excursions, now gated off
+      before the accept path). Cascade window stays 3.0; whether a no-drift
+      system should have a separate "drift" window at all is a Layer-B
+      cleanup note.
+- [x] **Tests** — new file `test_bpsk_pps_calibrator_mf_costas_gate.py`
+      (10 tests): detector white-box (lock debounce, excursion unlock,
+      band-test holds through a plateau, re-lock after recovery); gate
+      (locked accepts, unlocked coasts, phantom can't walk the reference,
+      result keeps flowing, inert during acquisition); one integration
+      test through `process_samples` with a swept carrier. Cascade-gate
+      helper updated (`_costas_locked=True` = full TRACKING). All 28 BPSK
+      tests pass.
+- [x] Update the scoping doc status (Layer A implemented).
 
-The two precision-critical paths in this service are unaffected:
+## Review
 
-1. **`_l6_on_samples` PPS calibration** ([core_recorder_v2.py:645](../src/hf_timestd/core/core_recorder_v2.py#L645))
-   reads `quality.last_rtp_timestamp` per batch — identical under
-   `MultiStream`.
-2. **Per-channel timing seed** ([stream_recorder_v2.py:384–410](../src/hf_timestd/core/stream_recorder_v2.py#L384))
-   reads `gps_time_ns` and `rtp_timesnap` from `channel_info` returned
-   by `ensure_channel()` — independent of which receive abstraction
-   we use. Stays exactly as-is.
+Implemented Layer A of the TSL3 Costas-drift fix on branch
+`tsl3-costas-drift-fix` (off `origin/main`, with the scoping doc
+cherry-picked from `0495d22`).
 
-## Files modified
+**What changed**
+- `bpsk_pps_calibrator_mf.py`: `_update_costas_lock` detector +
+  `costas_locked` property + the gate in `_detect_and_record_peaks` +
+  five `COSTAS_*` module constants + transition/phase-log observability.
+- `core_recorder_v2.py`: `costas_locked` in the `l6_pps` status dict.
+- `test_bpsk_pps_calibrator_mf_costas_gate.py`: new, 10 tests.
+- `docs/TSL3_COSTAS_DRIFT_2026-05-18.md`: status → Layer A done.
 
-- `src/hf_timestd/core/core_recorder_v2.py` — owns the shared
-  `MultiStream`, registers each `StreamRecorderV2` and the L6
-  callback on it, starts it once.
-- `src/hf_timestd/core/stream_recorder_v2.py` — `start()` no longer
-  creates a `RadiodStream`; instead exposes a `register_with(multi)`
-  method that calls `multi.add_channel(...)`. `stop()` no longer
-  stops the stream (parent owns it); just finalizes archive + ring.
-  Health monitor's "stream dead" branch becomes "ask parent to
-  re-add this channel" instead of recreating the per-channel socket.
+**Verification**
+- 28/28 BPSK calibrator tests pass.
+- The *implemented* detector replayed over the real 2026-05-08 capture
+  gates the entire excursion (locked t<15.1 s and t>29.8 s, 0/650
+  batches locked through the excursion) — the phantom accepted at
+  t=25.6 s in that capture falls inside the gated-off window.
 
-## Sequenced implementation
+**Deferred**
+- Layer B (eliminate the excursions) — needs more captures.
+- Whether a GPSDO-locked (no-drift) system should keep a separate
+  `cascade_tolerance` "drift" window at all — Layer-B cleanup note.
 
-Each step gates on the verification before moving on. Service can be
-stopped between steps.
-
-### Step 1 — Add a `register_with(multi)` method to `StreamRecorderV2`
-
-- New method that does what `_create_channel()` does today minus the
-  `RadiodStream` creation: calls `ensure_channel()`, captures
-  `channel_info`, seeds archive writer + ring buffer with `gps_time_ns`
-  / `rtp_timesnap`, then calls
-  `multi.add_channel(frequency_hz=…, preset=…, sample_rate=…,
-  encoding=…, on_samples=self._handle_samples,
-  on_stream_dropped=…, on_stream_restored=…)`.
-- Leave the old `start()` / `_create_channel()` paths in place for now.
-- Unit test: a `StreamRecorderV2` instance can be `register_with`'d
-  against a fake `MultiStream`-shaped mock and the per-channel timing
-  seed runs exactly once.
-
-### Step 2 — Have `CoreRecorderV2._initialize_channels()` build a shared `MultiStream`
-
-- After the existing `for ch_spec in self.channel_specs` loop, instead
-  of constructing each `StreamRecorderV2` and letting it self-start,
-  build one `multi = MultiStream(control=self.control)` and call
-  `recorder.register_with(multi)` for each.
-- Save `multi` on `self._multi`.
-- Don't call `multi.start()` yet — keep that for the run/serve path.
-- Unit test: with a stubbed `MultiStream`, `_initialize_channels()`
-  produces the right number of `add_channel` calls.
-
-### Step 3 — Migrate the L6 BPSK PPS channel onto the shared `MultiStream`
-
-- `_start_l6_stream()` ([core_recorder_v2.py:607](../src/hf_timestd/core/core_recorder_v2.py#L607))
-  drops the `RadiodStream(channel=channel_info, …)` construction. It
-  instead calls `self._multi.add_channel(frequency_hz=…, preset='iq',
-  sample_rate=…, encoding=Encoding.F32, on_samples=self._l6_on_samples)`.
-- Verification: `quality.last_rtp_timestamp` still arrives in the
-  callback (smoke check at INFO level).
-
-### Step 4 — Start the `MultiStream` once, after all channels added
-
-- In whichever method begins receiving (likely `run()` or the start
-  flow), call `self._multi.start()` after `_initialize_channels()` and
-  `_start_l6_stream()`. Verify `READY=1` sd_notify still fires at the
-  right point.
-
-### Step 5 — Stop tearing down per-channel streams in `StreamRecorderV2.stop()`
-
-- Remove the `self.stream.stop()` call ([stream_recorder_v2.py:598](../src/hf_timestd/core/stream_recorder_v2.py#L598)).
-- Keep the archive-writer flush + final-quality return. The final
-  quality comes from the per-slot `quality` object on the parent
-  `MultiStream`'s `_ChannelSlot`.
-- `CoreRecorderV2.shutdown()` calls `self._multi.stop()` exactly once
-  after all `StreamRecorderV2.stop()`s have flushed.
-
-### Step 6 — Re-route the health monitor's "stream dead" recovery
-
-- Today: `_health_monitor_loop` detects a stale stream and calls
-  `_create_channel()` to rebuild its own `RadiodStream`.
-- New: detect a stale slot (no `last_packet_utc` advance) and call
-  `self._multi.remove_channel(ssrc)` followed by `self.register_with(self._parent_multi)`.
-- ka9q-python's MultiStream-level health monitor handles "socket died /
-  radiod restarted" globally; the per-channel one becomes "this slot
-  isn't producing — re-provision it" — narrower job.
-
-### Step 7 — End-to-end verification on bee1 (service stopped first)
-
-```bash
-sudo systemctl stop timestd-core-recorder.service
-sudo systemctl restart timestd-core-recorder.service   # post-deploy
-sudo ss -uan -p | grep timestd-core-recorder | wc -l   # expect: 1, was: 9
-nstat -az UdpRcvbufErrors                              # rate-of-change should fall sharply
-```
-
-Then verify the timing chain end-to-end:
-
-- `journalctl -u timestd-core-recorder -f` shows per-channel
-  "Seeded timing from channel_info" lines for all archive channels.
-- `journalctl -u timestd-core-recorder -f` shows the
-  "L6 BPSK PPS LOCKED: chain_delay=…" line within ~30 s of restart.
-- `ls /var/lib/timestd/raw_buffer/<channel>/*.bin.zst` shows the same
-  10-min cadence as before.
-- `journalctl -u timestd-metrology@CHU_7850 -n 50` shows L1A tone
-  detection still producing measurements with the same precision band
-  (sub-50 µs per METROLOGY.md §4.3).
-- `journalctl -u timestd-fusion -n 50` shows Chrony SHM still being
-  fed at the configured cadence.
-- hfdl-recorder's resequencer rate (`/var/log/hfdl-recorder/*.log`)
-  drops measurably as a side-effect — direct evidence that radiod's
-  CPU 1 pressure relaxed.
-
-## Risks & rollback
-
-| Risk | Likelihood | Mitigation |
-|---|---|---|
-| Single-socket failure stops all channels | low (psk-recorder runs 65 channels on one MultiStream in production) | MultiStream's internal health monitor + ka9q-python reconnect logic; systemd `Restart=on-failure` for the unit |
-| Re-seeding timing on radiod restart breaks across the SSRC-demux boundary | medium (the hairy part) | `register_with()` path explicitly re-runs `ensure_channel()` and re-seeds — same logic as `_create_channel()` today, just gated on `multi.remove_channel/add_channel` round-trip |
-| Per-channel back-pressure interferes with others on shared callback thread | low (callbacks complete quickly: numpy→bytes→queue) | Profile if drops appear; archive writer already runs writes async via ring buffer |
-| L6 calibrator timing slips on the shared callback thread | low (PPS is per-second, callback batch is ~10 ms) | Smoke test L6 LOCKED message after restart; if jitter increases, fall back to L6-on-its-own-MultiStream |
-
-**Rollback:** keep the old `_create_channel()` and `_start_l6_stream()`
-paths (don't delete) and add a `recorder.legacy_per_channel_streams =
-true` config flag. If verification step 7 fails, set the flag and
-restart — previous behavior. Remove the flag in a follow-up commit
-once production has run cleanly for a week.
-
-## Success criteria
-
-1. `sudo ss -uan -p | grep timestd-core-recorder` shows **1 UDP socket**
-   (previously 9 + L6).
-2. `nstat UdpRcvbufErrors` rate-of-change drops at least an order of
-   magnitude system-wide (the timestd contribution was ~30 k/s).
-3. `journalctl -u timestd-metrology@*` shows no precision regression
-   over a 24 h sample (compare L1A tone-edge std-dev pre vs. post).
-4. `timestd-fusion` continues to drive Chrony SHM at the same cadence;
-   `chronyc sources` shows no degradation in the timestd refclock
-   stratum.
-5. `hfdl-recorder`'s resequencer "Lost packet recovery" rate falls —
-   independent confirmation that radiod source-side pressure relaxed.
-
-## Critical files to modify
-
-- [src/hf_timestd/core/core_recorder_v2.py](../src/hf_timestd/core/core_recorder_v2.py) — `_initialize_channels`, `_start_l6_stream`, `run`, `shutdown`
-- [src/hf_timestd/core/stream_recorder_v2.py](../src/hf_timestd/core/stream_recorder_v2.py) — add `register_with`, deprecate inline `RadiodStream` creation in `start`/`_create_channel`, narrow `stop`
-- [tests/](../tests/) — at least one new test asserting one MultiStream is created, all add_channel calls happen before start, and per-channel timing seed still runs
+**Deployment note** — not deployed. The fix is automatic (no new config
+keys). `cascade_tolerance_ms` was intentionally left at 3.0.

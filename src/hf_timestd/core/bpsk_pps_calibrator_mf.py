@@ -23,6 +23,14 @@ machinery in the legacy calibrator: the matched filter integrates
 noise out coherently rather than relying on tolerance windows around
 an evolving reference, so noise-edge classification is unnecessary.
 
+Costas lock-quality gate (Layer A of the TSL3 Costas-drift fix, see
+docs/TSL3_COSTAS_DRIFT_2026-05-18.md): the carrier-recovery loop makes
+intermittent ~10-15 s phase excursions during which the matched filter
+throws strong phantom peaks.  ``_update_costas_lock`` tracks whether the
+loop is quiescent; once acquired, edge acceptance is gated on it, so an
+excursion makes the calibrator coast on the last-good chain delay (a
+brief holdover) instead of re-locking against a phantom.
+
 Recommended radiod channel configuration: ±25 kHz filter at 96 kHz
 sample rate. See sweep_bpsk_filter_widths.py for the verification
 (σ_t scales as 1/B in the band-limited-step regime; wider is better
@@ -54,6 +62,32 @@ from hf_timestd.core.bpsk_pps_calibrator import PpsCalibrationResult
 logger = logging.getLogger(__name__)
 
 __all__ = ['BpskPpsCalibratorMF']
+
+
+# Costas lock-quality detector — Layer A of the TSL3 Costas-drift fix
+# (see docs/TSL3_COSTAS_DRIFT_2026-05-18.md).  The LB-1421 → TS1 → RX-888
+# chain shares one GPSDO, so the residual carrier offset is sub-Hz and a
+# healthy Costas phase is near-stationary; any *sustained* phase motion
+# is a carrier-recovery excursion, during which the matched filter throws
+# phantom peaks that can corrupt the PPS lock.
+#
+# Thresholds are derived from the 2026-05-08 debug capture
+# (/var/lib/timestd/debug/bpsk_mf_capture.npz, 3287 batches, one
+# excursion): in normal operation the per-batch |Δφ| EMA is ≪1e-3 rad and
+# φ tracks its EMA to ~1e-4 rad; through the excursion the |Δφ| EMA sat at
+# ~0.012-0.015 rad and φ swung >5 rad off.  The two regimes are separated
+# by 5-10×, so the exact values are not critical — a sweep across them all
+# reproduced the same clean separation.  They are physically motivated
+# (sub-Hz carrier ⇒ stationary phase), not operator knobs, so they are
+# module constants rather than config; Layer B may revisit them.
+# The φ-EMA tracks legitimate sub-Hz drift but is frozen while the loop
+# is in motion, so it cannot chase φ into an excursion (see
+# _update_costas_lock).
+COSTAS_TAU_PHASE_EMA_S = 10.0   # φ-EMA time constant (s).
+COSTAS_TAU_DPHASE_EMA_S = 0.5   # |Δφ|-EMA time constant (s).
+COSTAS_DPHASE_MAX_RAD = 0.004   # |Δφ| EMA above this ⇒ loop in motion.
+COSTAS_PHASE_BAND_RAD = 0.5     # |φ − φ_EMA| above this ⇒ φ wandered off.
+COSTAS_RELOCK_S = 0.5           # φ quiescent this long (s) before re-lock.
 
 
 class BpskPpsCalibratorMF:
@@ -118,6 +152,20 @@ class BpskPpsCalibratorMF:
         self._phase_initialized = False
         self._alpha: Optional[float] = None
 
+        # Costas lock-quality state (Layer A TSL3 fix — see
+        # _update_costas_lock and the COSTAS_* module constants).  The
+        # EMA coefficients and the relock-debounce length are pinned
+        # lazily alongside _alpha (they depend on the per-batch dt).
+        # _phase_ema is the band reference; it is frozen whenever the
+        # loop is in motion so it cannot chase phase into an excursion.
+        self._costas_phase_ema_alpha: Optional[float] = None
+        self._costas_dphase_ema_alpha: Optional[float] = None
+        self._costas_relock_batches: Optional[int] = None
+        self._phase_ema: Optional[float] = None
+        self._dphase_ema: float = 0.0
+        self._costas_locked: bool = False
+        self._costas_relock_counter: int = 0
+
         self._I_buf = np.zeros(0, dtype=np.float32)
         self._rtp_buf = np.zeros(0, dtype=np.int64)
 
@@ -177,7 +225,9 @@ class BpskPpsCalibratorMF:
         # threshold, peak_running, sign_y, classification, gap_to_last,
         # offset_d, last_edge_rtp_at_eval).
         # classification: 0=accepted, 1=rejected_offset, 2=skip_short_gap,
-        # 3=below_threshold (sub-threshold debug capture only).
+        # 3=below_threshold (sub-threshold debug capture only),
+        # 4=costas_unlocked (peak seen while the Costas-lock gate was
+        # coasting — no lock state was touched).
         self._debug_peaks: List[tuple] = []
 
         # Periodic Costas-phase log emit (Phase 1 of the 2026-05-08
@@ -197,9 +247,22 @@ class BpskPpsCalibratorMF:
     def locked(self) -> bool:
         return self.pps_consecutive >= self.consecutive_required
 
+    @property
+    def costas_locked(self) -> bool:
+        """True when the Costas carrier-recovery loop is quiescent — phase
+        near-stationary and within band of its slow EMA.  False during a
+        carrier-recovery excursion (see ``_update_costas_lock``).  Once
+        ``_acquired``, edge acceptance is gated on this so an excursion
+        coasts on the last-good chain delay (Layer A TSL3 fix)."""
+        return self._costas_locked
+
     def reset(self) -> None:
         self._phase = 0.0
         self._phase_initialized = False
+        self._phase_ema = None
+        self._dphase_ema = 0.0
+        self._costas_locked = False
+        self._costas_relock_counter = 0
         self._I_buf = np.zeros(0, dtype=np.float32)
         self._rtp_buf = np.zeros(0, dtype=np.int64)
         self._last_edge_rtp = None
@@ -228,6 +291,17 @@ class BpskPpsCalibratorMF:
             self._alpha = float(
                 1.0 - np.exp(-2.0 * np.pi * self._costas_loop_bw_hz * dt)
             )
+            # Costas lock-quality coefficients — pinned here because they
+            # depend on the per-batch dt, exactly like _alpha.
+            self._costas_phase_ema_alpha = float(
+                1.0 - np.exp(-dt / COSTAS_TAU_PHASE_EMA_S)
+            )
+            self._costas_dphase_ema_alpha = float(
+                1.0 - np.exp(-dt / COSTAS_TAU_DPHASE_EMA_S)
+            )
+            self._costas_relock_batches = max(
+                1, int(np.ceil(COSTAS_RELOCK_S / dt))
+            )
 
         # Costas: square + halve-angle gives carrier phase modulo π.
         sq_mean = np.mean(s.astype(np.complex128) ** 2)
@@ -235,12 +309,19 @@ class BpskPpsCalibratorMF:
         if not self._phase_initialized:
             self._phase = phi_estimate
             self._phase_initialized = True
+            phase_increment = 0.0
         else:
             # Wrap delta to [-π/2, π/2) — the squaring leaves a π
             # ambiguity, so phi_estimate may flip by π between batches
             # if the BPSK polarity at the batch boundary differs.
             delta = ((phi_estimate - self._phase) + np.pi / 2) % np.pi - np.pi / 2
-            self._phase += self._alpha * delta
+            phase_increment = self._alpha * delta
+            self._phase += phase_increment
+
+        # Costas lock-quality update (Layer A TSL3 fix).  Runs every
+        # batch — including the buffer-fill phase — so the detector is
+        # warm by the time edge acceptance starts gating on it.
+        self._update_costas_lock(phase_increment)
 
         s_rot = s * np.exp(-1j * self._phase)
         I_batch = s_rot.real.astype(np.float32)
@@ -327,11 +408,76 @@ class BpskPpsCalibratorMF:
                     f"batch_max_y={batch_max_y:.2f} "
                     f"pps_consec={self.pps_consecutive} "
                     f"acquired={int(self._acquired)} "
+                    f"costas_locked={int(self._costas_locked)} "
+                    f"dphase_ema={self._dphase_ema:.5f} "
                     f"d_ok={d_ok} d_noise={d_noise} "
                     f"chain_delay_ns={self._chain_delay_samples * 1e9 / self.sample_rate if self._chain_delay_samples else 0:.0f}"
                 )
 
         return self._maybe_result()
+
+    def _update_costas_lock(self, phase_increment: float) -> None:
+        """Update the Costas lock-quality state from this batch's realised
+        phase increment, and log any locked⇄unlocked transition.
+
+        Two tests (see the COSTAS_* module constants and
+        docs/TSL3_COSTAS_DRIFT_2026-05-18.md):
+
+          motion — the |Δφ| EMA stays below ``COSTAS_DPHASE_MAX_RAD``.  A
+            healthy loop barely moves (sub-Hz carrier); an excursion
+            slews it.
+          band   — φ stays within ``COSTAS_PHASE_BAND_RAD`` of
+            ``_phase_ema``, a slow EMA of φ that is *frozen whenever the
+            motion test fails*, so it cannot follow φ into an excursion
+            and silently re-validate a wandered phase.
+
+        ``_costas_locked`` is motion ∧ band, with a ``COSTAS_RELOCK_S``
+        debounce on the unlocked→locked edge so edge acceptance only
+        resumes once φ is fully settled.  Unlock is immediate — it is the
+        protective direction.
+        """
+        self._dphase_ema += self._costas_dphase_ema_alpha * (
+            abs(phase_increment) - self._dphase_ema
+        )
+        motion_ok = self._dphase_ema <= COSTAS_DPHASE_MAX_RAD
+
+        # Band reference: track φ only while the loop is quiescent, so an
+        # excursion cannot drag _phase_ema along with it.
+        if self._phase_ema is None:
+            self._phase_ema = self._phase
+        elif motion_ok:
+            self._phase_ema += self._costas_phase_ema_alpha * (
+                self._phase - self._phase_ema
+            )
+        band_ok = abs(self._phase - self._phase_ema) <= COSTAS_PHASE_BAND_RAD
+
+        quiescent = motion_ok and band_ok
+        was_locked = self._costas_locked
+        if self._costas_locked:
+            if not quiescent:
+                self._costas_locked = False
+                self._costas_relock_counter = 0
+        elif quiescent:
+            self._costas_relock_counter += 1
+            if self._costas_relock_counter >= self._costas_relock_batches:
+                self._costas_locked = True
+        else:
+            self._costas_relock_counter = 0
+
+        if was_locked and not self._costas_locked:
+            logger.warning(
+                "T6 Costas UNLOCKED (carrier-recovery excursion): "
+                f"phase_rad={self._phase:+.4f} "
+                f"dphase_ema={self._dphase_ema:.5f} "
+                f"phase_ema={self._phase_ema:+.4f} "
+                f"acquired={int(self._acquired)} — edge acceptance gated, "
+                "coasting on last-good chain delay"
+            )
+        elif not was_locked and self._costas_locked:
+            logger.info(
+                f"T6 Costas re-locked: phase_rad={self._phase:+.4f} "
+                f"dphase_ema={self._dphase_ema:.5f} — edge acceptance resumed"
+            )
 
     def _detect_and_record_peaks(
         self, y: np.ndarray, rtp_at_y: np.ndarray,
@@ -345,6 +491,42 @@ class BpskPpsCalibratorMF:
         is_peak = (ay[1:-1] >= ay[:-2]) & (ay[1:-1] > ay[2:])
         peak_idx = np.where(is_peak)[0] + 1
         if len(peak_idx) == 0:
+            return
+
+        # Costas-lock gate (Layer A TSL3 fix).  Once acquired, a
+        # carrier-recovery excursion must never corrupt the lock: while
+        # the Costas loop is unlocked the matched filter throws phantom
+        # peaks (see docs/TSL3_COSTAS_DRIFT_2026-05-18.md), so we accept
+        # no edges and touch none of _last_edge_rtp / pps_* /
+        # _chain_delay_samples / _peak_running.  The calibrator coasts on
+        # the last-good chain delay — TSL3 holds, like a leap-second
+        # hold — until the loop re-locks.  The gate is inert during
+        # acquisition (_acquired False) so the bootstrap can still walk
+        # the reference toward a consistent offset.
+        if self._acquired and not self._costas_locked:
+            # Still record the phantoms for the debug capture (Layer B
+            # analysis) — but mutate no lock state.  Uses the frozen
+            # _peak_running / threshold from before the excursion.
+            if (self._debug_path is not None
+                    and not self._debug_done
+                    and self._debug_started_wall is not None
+                    and self._peak_running is not None):
+                batch_idx = len(self._debug_y_chunks) - 1
+                debug_threshold = (
+                    self._debug_subthreshold_factor * self._peak_running
+                )
+                frozen_threshold = 0.5 * self._peak_running
+                for pi in peak_idx:
+                    if ay[pi] >= debug_threshold:
+                        self._debug_peaks.append((
+                            batch_idx, int(rtp_at_y[pi]), 0.0,
+                            float(ay[pi]), float(frozen_threshold),
+                            float(self._peak_running),
+                            float(np.sign(y[pi])),
+                            4,  # costas_unlocked
+                            0, 0, self._last_edge_rtp or 0,
+                            self.pps_consecutive,
+                        ))
             return
 
         # Adaptive threshold from running peak estimate. Bootstrap on
@@ -387,7 +569,7 @@ class BpskPpsCalibratorMF:
         for pi in peak_idx:
             # CLASSIFICATION constants:
             #   0 accepted, 1 rejected_offset, 2 skip_short_gap,
-            #   3 below_threshold.
+            #   3 below_threshold, 4 costas_unlocked.
             if ay[pi] < threshold:
                 if debug_active and ay[pi] >= debug_threshold:
                     self._debug_peaks.append((
@@ -555,7 +737,8 @@ class BpskPpsCalibratorMF:
                 # 1 peak_rtp_int, 2 peak_rtp_frac (sub-sample),
                 # 3 ay, 4 threshold, 5 peak_running, 6 sign_y,
                 # 7 classification (0 acc, 1 rej_offset,
-                #   2 skip_short_gap, 3 below_threshold),
+                #   2 skip_short_gap, 3 below_threshold,
+                #   4 costas_unlocked),
                 # 8 gap_to_last (samples), 9 offset_d (samples,
                 #   within-second), 10 last_edge_rtp_at_eval,
                 # 11 pps_consecutive_post.

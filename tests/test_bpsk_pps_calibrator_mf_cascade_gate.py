@@ -53,6 +53,10 @@ def _make_acquired_calibrator(sample_rate: int = 96000) -> BpskPpsCalibratorMF:
     cal.pps_consecutive = cal.consecutive_required
     cal._acquired = True
     cal._peak_running = 100.0
+    # Full TRACKING state also means the Costas loop is locked — the
+    # cascade gate is a Costas-locked behaviour path.  Without this the
+    # Layer-A Costas gate would coast and skip edge processing entirely.
+    cal._costas_locked = True
     return cal
 
 
