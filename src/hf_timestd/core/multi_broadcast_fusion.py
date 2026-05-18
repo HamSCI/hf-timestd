@@ -113,11 +113,14 @@ CHU AS REFERENCE:
 ================================================================================
 OUTLIER REJECTION
 ================================================================================
-Uses weighted Median Absolute Deviation (MAD) for robust outlier detection:
+A single pre-fusion pass rejects outliers using the Median Absolute
+Deviation (MAD) of the CALIBRATED residuals:
 
-    MAD = median(|D_clock_i - weighted_median|) × 1.4826
+    MAD = median(|d_cal_i - median(d_cal)|) × 1.4826
     
-Measurements with deviation > 3σ are rejected.
+Measurements deviating more than 3.5σ from the median are rejected.
+Detection runs on calibrated residuals, not raw D_clock: raw values
+carry 30-60 ms inter-broadcast offsets that would swamp the MAD.
 
 This prevents ionospheric events or detection errors on one channel
 from corrupting the fused estimate.
@@ -2233,50 +2236,6 @@ class MultiBroadcastFusion:
         scatter = np.sqrt(np.sum(weights * (values - fused) ** 2) / sum_w)
         return float(max(formal, scatter))
 
-    def _reject_outliers(
-        self,
-        measurements: List[BroadcastMeasurement],
-        weights: List[float],
-        sigma_threshold: float = 3.0
-    ) -> Tuple[List[BroadcastMeasurement], List[float], int]:
-        """
-        Reject outliers using weighted median absolute deviation.
-        
-        Returns filtered measurements, weights, and count of rejected.
-        """
-        if len(measurements) < 4:
-            return measurements, weights, 0
-        
-        # Calculate weighted median
-        d_clocks = np.array([m.d_clock_ms for m in measurements])
-        w = np.array(weights)
-        
-        sorted_idx = np.argsort(d_clocks)
-        sorted_d = d_clocks[sorted_idx]
-        sorted_w = w[sorted_idx]
-        cumsum = np.cumsum(sorted_w)
-        median_idx = np.searchsorted(cumsum, cumsum[-1] / 2)
-        weighted_median = sorted_d[min(median_idx, len(sorted_d)-1)]
-        
-        # Calculate MAD
-        deviations = np.abs(d_clocks - weighted_median)
-        mad = np.median(deviations) * 1.4826  # Scale to std dev
-        
-        if mad < 0.1:
-            mad = 0.1  # Minimum to avoid divide by zero
-        
-        # Reject outliers
-        keep_mask = deviations < (sigma_threshold * mad)
-
-        # FIX 2: Removed "God Mode" immunity for GLOBAL_DIFF
-        # It must survive the same statistical scrutiny as other measurements
-        
-        filtered_m = [m for m, keep in zip(measurements, keep_mask) if keep]
-        filtered_w = [w for w, keep in zip(weights, keep_mask) if keep]
-        n_rejected = len(measurements) - len(filtered_m)
-        
-        return filtered_m, filtered_w, n_rejected
-    
     def _get_broadcast_key(self, station: str, frequency_mhz: float) -> str:
         """
         Generate broadcast key for calibration lookup.
@@ -3150,10 +3109,12 @@ class MultiBroadcastFusion:
         # stricter chrony feed criteria prevent discontinuities.
         measurements = [m for m in measurements if m.d_clock_ms is not None and not np.isnan(m.d_clock_ms)]
         
-        # CRITICAL FIX: Pre-fusion outlier rejection using CALIBRATED values
-        # Raw d_clock_ms has 30-60ms offsets between broadcasts (propagation model error).
-        # Using raw values makes the MAD huge, letting real outliers slip through.
-        # Apply calibration first so outlier detection sees the residual scatter.
+        # OUTLIER REJECTION — single pre-fusion pass on CALIBRATED residuals
+        # (M-H16). Raw d_clock_ms carries 30-60ms inter-broadcast offsets
+        # (propagation-model error) that would swamp the MAD, so calibration is
+        # applied first and detection sees only the residual scatter. A second,
+        # raw-value pass (the old _reject_outliers call) was removed — M-H16.
+        n_rejected = 0
         if len(measurements) > 2:
             with self._phase("calibration_apply"):
                 cal_for_outlier = self._apply_calibration(measurements)
@@ -3206,6 +3167,7 @@ class MultiBroadcastFusion:
                     f"Keeping all to prevent Kalman starvation."
                 )
             elif len(keep_indices) < len(measurements):
+                n_rejected = len(measurements) - len(keep_indices)
                 measurements = [measurements[i] for i in keep_indices]
         
         if not measurements:
@@ -3660,21 +3622,6 @@ class MultiBroadcastFusion:
                         logger.warning(f"TEC solver returned None for {station} (inputs: {len(tec_input)})")
                 else:
                      logger.info(f"Skipping TEC for {station}: Only {len(station_meas)} measurements (Need >=2)")
-        
-        # ====================================================================
-        
-        # ====================================================================
-        
-        # ====================================================================
-        
-        # Reject outliers
-        measurements, weights, n_rejected = self._reject_outliers(
-            measurements, weights
-        )
-        
-        if len(measurements) < 1:
-            logger.debug("Too few measurements after outlier rejection")
-            return None
         
         # CRITICAL: Filter out any measurements with NaN values or unlocked GPSDO before fusion
         # This is a safety net to prevent NaN from propagating and to exclude unlocked measurements
