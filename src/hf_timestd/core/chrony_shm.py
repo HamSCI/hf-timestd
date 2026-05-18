@@ -13,20 +13,27 @@ Add to /etc/chrony/chrony.conf:
     
 Restart: sudo systemctl restart chronyd
 
-Structure Layout (struct shmTime on 64-bit Linux):
--------------------------------------------------
-    int    mode;                 // 0-3   (Mode 1 = use count locking)
-    int    count;                // 4-7   (Sequence counter)
-    time_t clockTimeStampSec;    // 8-15  (System time seconds)
-    int    clockTimeStampUSec;   // 16-19 (System time microseconds)
-    [pad]                        // 20-23 (Alignment padding)
-    time_t receiveTimeStampSec;  // 24-31 (Reference time seconds)
-    int    receiveTimeStampUSec; // 32-35 (Reference time microseconds)
-    [pad]                        // 36-39 (Alignment padding)
-    int    leap;                 // 40-43 (Leap second indicator)
-    int    precision;            // 44-47 (log2 precision)
-    int    nsamples;             // 48-51 (Number of samples)
-    int    valid;                // 52-55 (Data is valid)
+Structure Layout (struct shmTime, x86-64 Linux — the chrony/ntpd/gpsd SHM
+refclock ABI; native alignment, time_t = int64):
+--------------------------------------------------------------------------
+    int      mode;                 // 0-3   (Mode 1 = count-locking protocol)
+    int      count;                // 4-7   (sequence-lock counter)
+    time_t   clockTimeStampSec;    // 8-15  (reference clock time, seconds)
+    int      clockTimeStampUSec;   // 16-19 (reference clock time, microseconds)
+    [pad]                          // 20-23 (8-byte alignment for the time_t below)
+    time_t   receiveTimeStampSec;  // 24-31 (system/receive time, seconds)
+    int      receiveTimeStampUSec; // 32-35 (system/receive time, microseconds)
+    int      leap;                 // 36-39 (leap-second indicator — NO pad here)
+    int      precision;            // 40-43 (log2 precision)
+    int      nsamples;             // 44-47 (number of samples)
+    int      valid;                // 48-51 (data-is-valid flag)
+    unsigned clockTimeStampNSec;   // 52-55 (reference clock time, nanoseconds)
+    unsigned receiveTimeStampNSec; // 56-59 (system/receive time, nanoseconds)
+    int      dummy[8];             // 60-91 (reserved — chrony ignores it)
+    [pad]                          // 92-95 (C struct trailing padding)
+
+Total: 96 bytes. The packing format and the segment size both come from the
+single SHM_STRUCT_FORMAT constant, so they cannot drift (see SHM_SIZE).
 
 NOTE: Chrony creates the SHM segment. We attach to it.
       If running as non-root, ensure permissions allow access.
@@ -50,8 +57,14 @@ logger = logging.getLogger(__name__)
 # 0x4e545030 = "NTP0" in ASCII
 SHM_KEY_BASE = 0x4e545030
 
-# SHM segment size (must match chronyd expectation)
-SHM_SIZE = 96  # bytes
+# struct shmTime packing format — see the module docstring for the layout.
+# The trailing `4x` is the C struct's trailing padding (time_t forces 8-byte
+# struct alignment); `iiiiiiii` is dummy[8], a reserved field chrony ignores.
+SHM_STRUCT_FORMAT = '@ii q i 4x q i iiii II iiiiiiii 4x'
+
+# SHM segment size — derived from the format so the two cannot drift (M-H21).
+# chronyd's `struct shmTime` is 96 bytes on x86-64.
+SHM_SIZE = struct.calcsize(SHM_STRUCT_FORMAT)  # 96 bytes
 
 
 class ChronySHM:
@@ -308,7 +321,8 @@ class ChronySHM:
 
             # Pack the SHM structure to match chrony's `struct shmTime`
             # exactly (refclock_shm.c). This is the NTP shmTime layout
-            # used by chrony, ntpd, and gpsd — 92 bytes on x86_64 Linux.
+            # used by chrony, ntpd, and gpsd — 96 bytes on x86_64 Linux
+            # (92 bytes of fields + 4 bytes of C struct trailing padding).
             #
             # Layout (native C alignment, time_t = int64):
             #   0-3:   int mode
@@ -326,7 +340,8 @@ class ChronySHM:
             #   48-51: int valid
             #   52-55: unsigned clockTimeStampNSec
             #   56-59: unsigned receiveTimeStampNSec
-            #   60-91: int dummy[8]
+            #   60-91: int dummy[8]  (reserved — chrony ignores it)
+            #   92-95: C struct trailing padding (`4x`)
             #
             # 2026-05-06 fix: a previous version of this struct format
             # inserted an extra `4x` between recv_usec and leap, claiming
@@ -344,7 +359,7 @@ class ChronySHM:
             # = 0 and exposing the bug fully — chrony saw recv_time off
             # by ~1 second and excluded TSL3 as an outlier (#x).
             data = struct.pack(
-                '@ii q i 4x q i iiii II iiiiiiii',
+                SHM_STRUCT_FORMAT,
                 1,              # mode = 1 (count-locking protocol)
                 self.count,     # count (odd = write in progress)
                 clock_sec,      # clockTimeStampSec (8-15)
