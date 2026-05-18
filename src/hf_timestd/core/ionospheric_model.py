@@ -706,11 +706,14 @@ class IonosphericModel:
         diurnal_phase = 2 * math.pi * (local_solar_time - 14.0) / 24.0
         diurnal_term = -HMF2_DIURNAL_AMP_KM * math.cos(diurnal_phase)
         
-        # Solar activity term (if F10.7 available)
-        # Higher solar flux → denser ionosphere → lower hmF2
-        # Typical range: F10.7 = 70 (solar min) to 250 (solar max)
+        # Solar activity term (if F10.7 available).
+        # Higher solar flux RAISES hmF2: the F2 peak moves up as the layer
+        # expands with increased ionization (P-H16 — the sign was inverted,
+        # which contradicted HMF2_SOLAR_FACTOR's own "height increase" comment
+        # and under-predicted hmF2 by ~30-50 km at solar maximum).
+        # Typical range: F10.7 = 70 (solar min) to 250 (solar max).
         if f107 is not None:
-            solar_term = -HMF2_SOLAR_FACTOR * (f107 - 100)
+            solar_term = HMF2_SOLAR_FACTOR * (f107 - 100)
         else:
             solar_term = 0.0  # Assume moderate activity
         
