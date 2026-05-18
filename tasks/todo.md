@@ -1,55 +1,41 @@
-# S3 — per-broadcast Kalman coast during a leap-second hold
+# M-H14 — GNSS-VTEC TEC correction in RTP mode
 
-## Goal
-During a CHU-FSK-detected TAI-UTC change (`_fsk_leap_second_hold`), every
-measurement is stepped by ~1 s. Increment 2 routed that into the fusion-level
-holdover coast, but `_apply_broadcast_kalmans` still ran a full `update()` on
-the stepped measurement — corrupting each per-broadcast Kalman's state.
+## Finding
+The code review (2026-05-17) flagged the GNSS-VTEC block in `fuse()` as
+mutating `m.d_clock_ms` with no RTP gate, injecting iono model error into a
+GPS+PPS-pinned D_clock.
 
-S3: coast the per-broadcast Kalmans (`predict()`, not `update()`) for the
-duration of the hold.
+## Outcome — already fixed
+Investigation (git blame) shows M-H14 was **already remediated** by commit
+`c9117b3` ("Metrology/physics review + Tier-1 remediation + dual-Kalman
+increment 1"). The GNSS-VTEC block now gates on `if self.is_rtp_authority:` —
+in RTP mode it is a cross-check only (tags `propagation_mode`/`confidence`);
+the `m.d_clock_ms` mutation lives in the `elif`/`else` arms, reached only when
+`not is_rtp_authority`. The HF-TEC block below is likewise gated.
 
-Scope: `src/hf_timestd/core/multi_broadcast_fusion.py` — `_apply_broadcast_kalmans` only.
+No code change required. The fix had **no regression test** — that gap is
+what this task closes.
 
-## Fix
-`_apply_broadcast_kalmans` reads `self._fsk_leap_second_hold` once; per
-measurement, when the hold is active it calls `kalman.predict()` (advance the
-motion model, grow covariance) instead of `kalman.update(d_clock, snr)`.
-`predict()` already guards the uninitialised case (returns 0.0, 100 ms σ → the
-broadcast gets ~zero fusion weight). The hold is brief (~1 cycle), so a single
-`predict(dt=1.0)` per cycle is the correct coast.
-
-## Tasks — all done
-- [x] git branch `s3-leap-second-coast` off `metrology-physics-review-remediation`
-- [x] `_apply_broadcast_kalmans`: predict() vs update() branch on the hold;
-      docstring updated
-- [x] Tests: `tests/test_fusion_leap_second_coast.py` (3)
+## Task — done
+- [x] git branch `mh14-rtp-gate-test` off `metrology-physics-review-remediation`
+- [x] Add `tests/test_fusion_gnss_vtec_rtp_gate.py` (2 tests)
 - [x] Full suite run
 
 ## Review
 
 **Files changed**
-- `src/hf_timestd/core/multi_broadcast_fusion.py` — +26 −12 (one block).
-- `tests/test_fusion_leap_second_coast.py` — new, 3 tests.
+- `tests/test_fusion_gnss_vtec_rtp_gate.py` — new, 2 tests. No source change.
 
-**Behaviour change**
-During a leap-second hold the per-broadcast Kalmans coast on their model
-instead of ingesting the 1-second-stepped measurement, so their state is no
-longer corrupted and they resume cleanly once the hold clears. Combined with
-Increment 2 (fusion-level output coast) and S2, a leap second is now handled
-coherently at both layers.
+**What the test pins**
+- RTP mode (`is_rtp_authority=True`): a fresh GNSS-VTEC reading far from the
+  modelled TEC leaves every measurement's `d_clock_ms` untouched; the block
+  still runs (modes tagged `+GNSS_VALIDATED`), so the assertion is not vacuous.
+- Fusion mode (`is_rtp_authority=False`): the same discrepancy DOES correct
+  `d_clock_ms` (modes tagged `+GNSS_TEC`) — the contrast that makes the RTP
+  assertion meaningful.
 
 **Verification**
-- `python -m py_compile`: OK.
-- New suite `test_fusion_leap_second_coast.py`: 3/3 — a converged Kalman is
-  not pulled by a +1000 ms stepped measurement during the hold; the filter
-  resumes normal tracking after the hold clears; an uninitialised filter
-  coasts to (0.0, 100 ms σ).
-- Full repo suite: 1614 passed, 9 subtests passed (1611 + 3 new). One
+- New suite: 2/2 pass (verified the RTP/Fusion split directly:
+  RTP `[2,2,2]→[2,2,2]`; Fusion `[2,2,2]→[5.27,3.45,2.36]`).
+- Full repo suite: 1616 passed, 9 subtests passed (1614 + 2 new). One
   pre-existing unrelated `test_l2_clickhouse_wire` failure, deselected.
-
-**Note** — of the agreed sub-decisions, S1 (redefine LOCKED as "≥2 broadcasts
-whose per-broadcast Kalmans are converged, sustained ≥3 cycles") was not
-implemented: Increment 2 deliberately kept the existing WLS-branch convergence
-criterion (`kalman_converged`). That refinement overlaps finding M-M13 and is
-not part of the dual-Kalman rework as scoped.
