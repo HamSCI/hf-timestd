@@ -3533,7 +3533,7 @@ class MultiBroadcastFusion:
                             # TEC is physically reasonable (1-200 TECU) and well-fit
                             logger.info(
                                 f"TEC Solved for {station}: {tec_result.tec_u:.1f} TECU "
-                                f"(R2={tec_result.confidence:.2f}), "
+                                f"(conf={tec_result.confidence:.2f}), "
                                 f"t_vacuum={tec_result.t_vacuum_error_ms:.3f}ms"
                             )
 
@@ -3609,12 +3609,12 @@ class MultiBroadcastFusion:
                                 )
                         elif tec_result.confidence > 0.9:
                             # TEC fit is good but value is unrealistic (e.g., 0.0 TECU)
-                            logger.warning(f"TEC unrealistic for {station}: {tec_result.tec_u:.1f} TECU (R2={tec_result.confidence:.2f}) - not applying correction")
+                            logger.warning(f"TEC unrealistic for {station}: {tec_result.tec_u:.1f} TECU (conf={tec_result.confidence:.2f}) - not applying correction")
                             for m in station_meas:
                                 m.propagation_mode = 'TEC_UNREALISTIC'
                         else:
                             # TEC fit is poor - reduce confidence slightly
-                            logger.warning(f"TEC poor fit for {station}: R2={tec_result.confidence:.2f} (Needs >0.9)")
+                            logger.warning(f"TEC poor fit for {station}: conf={tec_result.confidence:.2f} (Needs >0.9)")
                             for m in station_meas:
                                 m.confidence = max(0.5, m.confidence * 0.95)
                                 m.propagation_mode = 'TEC_POOR_FIT'

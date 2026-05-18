@@ -1,34 +1,32 @@
-# P-C1 / P-C2 — physics-service coupling & ionogram-calibration crash
+# P-H1/H2/H5/H6 — tec_estimator.py
 
-## Outcome — both already remediated
-Both Critical physics findings were already fixed by commit `c9117b3`
-("Tier-1 remediation"), verified by inspection + git blame:
+## Findings & fixes
+- **P-H1** (docstring honesty): added an "Operational status — NOT an
+  operational product" section — group-delay TEC across the WWV/CHU/BPM
+  frequency spans is at/below the timing noise floor; `tec_u` is research-grade,
+  consumers must gate on `confidence`.
+- **P-H2** (confidence): `confidence` was `r²` — near 1 even on a noise-driven
+  slope. Now slope detectability `1 − σ_slope/slope` (clamped 0..1): `_fit_wls`
+  returns `σ_slope` (polyfit covariance for N>2; analytic from the two points'
+  variances for N=2). New `TECResult.tec_uncertainty_tecu` (1σ of `tec_u`).
+  3 stale `R2=` log labels in `multi_broadcast_fusion.py` → `conf=`.
+- **P-H5** (negative slope): already fixed (retained with confidence 0 per
+  contract CR-2) — guarded by a regression test, no code change.
+- **P-H6** (frequency validation): each `frequency_hz` is checked finite and in
+  1–60 MHz before reaching `1/f²`; invalid measurements skipped; `None` if <2
+  valid remain.
 
-**P-C1** — `systemd/timestd-physics.service` now has `Wants=` (not `Requires=`)
-on `timestd-l2-calibration.service`, `Type=simple` (not `notify`), and the
-`ExecStartPre` chown is scoped to the physics-owned `phase2/fusion` and
-`phase2/science` subdirs (not the whole `phase2` tree). All three carry
-explanatory comments referencing `METROLOGY_PHYSICS_SPLIT.md`. A systemd unit
-file is config, not unit-testable in any meaningful way — verified by
-inspection, no test.
-
-**P-C2** — `IonosphericModel.update_calibration_from_ionogram` now calls
-`get_layer_heights(timestamp=, latitude=, longitude=)` by keyword (real
-signature), reads `base_heights.hmF2` (correct field), computes `loc_key`
-inline, and stores into `self._calibration_data` (the real attribute). The
-three nonexistent-identifier references and the swapped args are gone.
-
-## Task — done
-The P-C2 finding explicitly asked for "a unit test exercising the path" — that
-was the only thing missing. Added `tests/test_ionospheric_ionogram_calibration.py`
-(2 tests). No source change.
+## Behavioural note
+`confidence` is now honestly low (group-delay TEC is below the noise floor),
+so `multi_broadcast_fusion`'s HF-TEC-correction gate (`confidence > 0.5/0.9`)
+fires far less — correct (it was applying noise-derived corrections). Live
+impact is limited: that block is already cross-check-only in RTP mode (M-H14).
 
 ## Review
-- Files: new `tests/test_ionospheric_ionogram_calibration.py` (2 tests).
-- New tests: `update_calibration_from_ionogram` runs without crashing and
-  stores a correct anchor (offset = measured − model-predicted hmF2, clamped
-  ±150 km; `get_calibration_stats` reflects it); an extreme measured height
-  clamps the offset to ±150 km. Verified live: a first call produced
-  predicted hmF2 212.1 km, offset +107.9 km, one stored entry.
-- Full repo suite: 1630 passed, 9 subtests passed (1628 + 2 new). One
-  pre-existing unrelated `test_l2_clickhouse_wire` failure, deselected.
+- Files: `tec_estimator.py`, `multi_broadcast_fusion.py` (3 log labels);
+  new `tests/test_tec_estimator_confidence.py` (6 tests).
+- New suite 6/6: clean strong signal → high confidence; pure noise →
+  confidence ~0 averaged over 40 realisations (r²-based would average ~1);
+  `tec_uncertainty_tecu` populated; invalid frequency skipped / all-invalid →
+  None; negative slope retained with confidence 0.
+- Full repo suite: 1636 passed, 9 subtests passed (1630 + 6 new).

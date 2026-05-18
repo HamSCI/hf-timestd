@@ -34,6 +34,19 @@ Units:
     f: Hz
     T: seconds
     TEC: electrons / m² (TECU = 10^16 el/m2)
+
+Operational status — NOT an operational product:
+-------------------------------------------------
+Group-delay TEC across the WWV/WWVH/CHU/BPM frequency spans is at or below the
+timing noise floor. The 1/f² delay difference between, say, 5 and 15 MHz for a
+realistic TEC is comparable to — or smaller than — the per-measurement timing
+uncertainty, so the fitted slope is rarely detectable above noise. ``tec_u`` is
+therefore a caveated, research-grade estimate, NOT an operational deliverable.
+``confidence`` reports slope detectability (slope / σ_slope) and is honestly ~0
+for most epochs; ``tec_uncertainty_tecu`` carries the 1σ slope-derived
+uncertainty. Per PHYSICS_CONTRACT §1/§4 and METROLOGY_PHYSICS_SPLIT, claiming
+group-delay TEC is operational is a contract failure condition — consumers
+must treat ``tec_u`` as advisory and gate on ``confidence``.
 """
 
 import numpy as np
@@ -50,10 +63,14 @@ C_LIGHT = 299792458.0
 K_IONOSPHERE = 40.3 / C_LIGHT  # seconds * Hz² * m² / electrons
 TECU_SCALE = 1e16              # 1 TECU = 10^16 el/m²
 
-# Confidence caps
-MAX_CONFIDENCE_N2 = 0.3        # N=2 has zero residual DOF — cap confidence
 OUTLIER_SIGMA = 3.0            # Reject measurements beyond this many σ
 MAX_OUTLIER_ITERATIONS = 3     # Maximum outlier rejection passes
+
+# HF-band sanity bounds for input frequencies (P-H6): covers WWV 2.5 MHz
+# through 25 MHz with margin; rejects 0 / NaN / Inf and absurd values before
+# they reach the 1/f² term.
+HF_BAND_MIN_HZ = 1.0e6
+HF_BAND_MAX_HZ = 60.0e6
 
 
 @dataclass
@@ -68,7 +85,8 @@ class TECResult:
     group_delay_ms: Dict[float, float]  # Calculated delay per frequency (MHz)
 
     # Quality Metrics
-    confidence: float               # 0.0 - 1.0
+    confidence: float               # 0.0 - 1.0  (slope detectability, slope/σ)
+    tec_uncertainty_tecu: float     # 1σ uncertainty of tec_u (from slope σ)
     residuals_ms: float             # RMS calculation error
     n_frequencies: int              # Number of points used
     propagation_mode: str = 'UNKNOWN'  # Dominant mode or 'MIXED'
@@ -129,6 +147,16 @@ class TECEstimator:
 
         for m in measurements:
             f = m['frequency_hz']
+            # P-H6: reject a non-finite or out-of-band frequency before it
+            # reaches the 1/f² term — a 0 / NaN / Inf frequency would poison
+            # the whole polyfit.
+            if not (np.isfinite(f) and HF_BAND_MIN_HZ <= f <= HF_BAND_MAX_HZ):
+                logger.warning(
+                    f"{station}: skipping measurement with invalid "
+                    f"frequency_hz={f!r} (must be finite and within "
+                    f"{HF_BAND_MIN_HZ/1e6:.0f}-{HF_BAND_MAX_HZ/1e6:.0f} MHz)"
+                )
+                continue
             t = m['toa_ms'] / 1000.0  # Convert ms to seconds
             u_ms = m.get('uncertainty_ms', 1.0)
 
@@ -150,6 +178,13 @@ class TECEstimator:
             freqs.append(f)
             toas.append(t)
             weights.append(w)
+
+        # P-H6: too few measurements survived frequency validation.
+        if len(freqs) < 2:
+            logger.warning(
+                f"{station}: fewer than 2 valid-frequency measurements"
+            )
+            return None
 
         freqs = np.array(freqs)
         toas = np.array(toas)
@@ -179,7 +214,7 @@ class TECEstimator:
             if result is None:
                 return None
 
-            m_slope, c_intercept, r2, rms_ms, y_pred = result
+            m_slope, c_intercept, sigma_slope, rms_ms, y_pred = result
 
             # Outlier rejection: only if N > 2 and not last iteration
             # Use MAD (Median Absolute Deviation) instead of RMS for robustness:
@@ -231,14 +266,27 @@ class TECEstimator:
         tec = m_slope / K_IONOSPHERE
         tec_u = tec / TECU_SCALE
         t_vacuum_ms = c_intercept * 1000.0
+        n_active = int(mask.sum())
 
-        # Confidence metric
-        n_active = mask.sum()
-        if n_active <= 2:
-            # N=2: zero residual DOF, R² is always 1.0 — cap confidence
-            confidence = min(MAX_CONFIDENCE_N2, r2) if m_slope > 0 else 0.0
+        # 1σ uncertainty of the TEC estimate, propagated from the slope σ.
+        tec_uncertainty_tecu = (
+            sigma_slope / K_IONOSPHERE / TECU_SCALE
+            if np.isfinite(sigma_slope) else float('nan')
+        )
+
+        # Confidence = slope detectability (P-H2):
+        #   confidence = 1 - σ_slope/slope,  clamped to [0, 1]
+        # → ~0 once σ_slope approaches or exceeds the slope. r² is NOT used —
+        # it measures fit-to-a-line, which sits near 1 even when the slope is
+        # pure noise. Group-delay TEC for these stations is at/below the noise
+        # floor, so this is honestly ~0 for most epochs (see module docstring).
+        if m_slope > 0 and np.isfinite(sigma_slope):
+            if sigma_slope <= 0.0:
+                confidence = 1.0  # zero residual scatter — slope fully determined
+            else:
+                confidence = max(0.0, min(1.0, 1.0 - sigma_slope / m_slope))
         else:
-            confidence = max(0.0, min(1.0, r2)) if m_slope > 0 else 0.0
+            confidence = 0.0  # negative/zero slope, or σ_slope undetermined
 
         # Penalize confidence if many outliers were rejected
         if n_rejected > 0:
@@ -272,6 +320,7 @@ class TECEstimator:
             t_vacuum_error_ms=t_vacuum_ms,
             group_delay_ms=group_delays_ms,
             confidence=confidence,
+            tec_uncertainty_tecu=tec_uncertainty_tecu,
             residuals_ms=rms_ms,
             n_frequencies=n_active,
             n_rejected=n_rejected,
@@ -284,31 +333,35 @@ class TECEstimator:
         Weighted least squares fit: y = m*x + c.
 
         Returns:
-            (slope, intercept, r2, rms_residual_ms, y_predicted) or None on failure.
+            (slope, intercept, sigma_slope, rms_residual_ms, y_predicted)
+            or None on failure. sigma_slope is the 1σ uncertainty of the
+            fitted slope — from the polyfit covariance for N>2, propagated
+            analytically from the two points' variances for N=2.
         """
         try:
             poly_weights = np.sqrt(weights)
 
             if len(x) > 2:
                 p, cov = np.polyfit(x, y, 1, w=poly_weights, cov=True)
+                sigma_slope = float(np.sqrt(abs(cov[0, 0])))
             else:
                 p = np.polyfit(x, y, 1, w=poly_weights, cov=False)
+                # N=2: an exact fit with zero residual DOF — the slope
+                # uncertainty comes from the two measurements' variances
+                # (1/weight), not from (non-existent) residual scatter.
+                dx = abs(x[1] - x[0])
+                if dx > 0:
+                    var_sum = 1.0 / weights[0] + 1.0 / weights[1]
+                    sigma_slope = float(np.sqrt(var_sum) / dx)
+                else:
+                    sigma_slope = float('inf')
 
             m = p[0]
             c = p[1]
-
             y_pred = m * x + c
-            ss_res = np.sum(weights * (y - y_pred) ** 2)
-            ss_tot = np.sum(weights * (y - np.average(y, weights=weights)) ** 2)
-
-            if ss_tot < 1e-20:
-                r2 = 0.0
-            else:
-                r2 = max(0.0, min(1.0, 1.0 - (ss_res / ss_tot)))
-
             rms_residual_ms = float(np.sqrt(np.mean((y - y_pred) ** 2))) * 1000.0
 
-            return m, c, r2, rms_residual_ms, y_pred
+            return m, c, sigma_slope, rms_residual_ms, y_pred
 
         except Exception as e:
             logger.error(f"TEC WLS fit failed for {station}: {e}")
