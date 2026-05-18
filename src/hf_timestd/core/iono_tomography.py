@@ -62,6 +62,10 @@ F_SHELL_BOTTOM = 150.0
 F_SHELL_TOP = 500.0
 F_SHELL_CENTER = 300.0
 
+# Below this posterior-vs-prior variance reduction for the E-layer, the
+# E/F split is treated as prior-dominated rather than a measurement (P-H11).
+PRIOR_DOMINATED_VR_THRESHOLD = 0.5
+
 
 @dataclass
 class TomographyResult:
@@ -82,7 +86,14 @@ class TomographyResult:
     rms_residual_tecu: float    # RMS fit residual
     condition_number: float     # Matrix condition (higher = less stable)
     confidence: float           # 0-1 overall confidence
-    
+
+    # E/F-split identifiability (P-H11): how much the data sharpened each
+    # layer relative to its prior.  Near 0 => the value is essentially the
+    # prior, not a measurement.
+    variance_reduction_e: float = 0.0   # 1 - Var_posterior(E)/Var_prior(E)
+    variance_reduction_f: float = 0.0   # 1 - Var_posterior(F)/Var_prior(F)
+    prior_dominated: bool = True        # True => data does not constrain the split
+
     # Per-path diagnostics
     path_residuals: Dict[str, float] = field(default_factory=dict)
     
@@ -254,13 +265,39 @@ class IonoTomography:
             key = f"{path.station}_{path.frequency_mhz:.0f}"
             path_residuals[key] = float(residuals[i])
         
-        # Confidence based on fit quality and data quantity
-        # Higher confidence with more paths, lower residuals, better conditioning
+        # Posterior-vs-prior variance reduction for the E/F split (P-H11).
+        # The E- and F-shell thin-shell obliquity factors are nearly
+        # proportional across the available elevations, so AᵀWA is almost
+        # singular in the E/F-split direction and the MAP estimate collapses
+        # onto the prior. The posterior covariance (AᵀWA + Λ)⁻¹ versus the
+        # prior covariance Λ⁻¹ quantifies how much the data actually
+        # sharpened each layer.
+        Lambda = np.diag([lambda_e, lambda_f])
+        AtWA = A.T @ (W[:, np.newaxis] * A)
+        try:
+            cov_post = np.linalg.inv(AtWA + Lambda)
+            var_reduction_e = float(np.clip(1.0 - cov_post[0, 0] * lambda_e, 0.0, 1.0))
+            var_reduction_f = float(np.clip(1.0 - cov_post[1, 1] * lambda_f, 0.0, 1.0))
+        except np.linalg.LinAlgError:
+            var_reduction_e = 0.0
+            var_reduction_f = 0.0
+        prior_dominated = var_reduction_e < PRIOR_DOMINATED_VR_THRESHOLD
+        if prior_dominated:
+            logger.debug(
+                f"Tomography E/F split is prior-dominated (E-layer variance "
+                f"reduction {var_reduction_e:.0%}): tec_e_tecu={tec_e:.1f} "
+                f"reflects the prior, not the data"
+            )
+
+        # Confidence based on fit quality and data quantity. Higher confidence
+        # with more paths, lower residuals, better conditioning, and a
+        # data-constrained (not prior-dominated) E/F split.
         conf_paths = min(1.0, len(valid_paths) / 6.0)  # 6+ paths for full confidence
         conf_residual = max(0.0, 1.0 - rms_residual / 5.0)  # 5 TECU residual = 0 confidence
         conf_cond = max(0.0, 1.0 - math.log10(max(1, cond)) / 4.0)  # cond > 10000 = 0
-        confidence = conf_paths * conf_residual * conf_cond
-        
+        conf_split = var_reduction_e  # 0 => the reported E/F split is the prior
+        confidence = conf_paths * conf_residual * conf_cond * conf_split
+
         # E/F ratio
         tec_total = tec_e + tec_f
         e_f_ratio = tec_e / max(0.01, tec_f)
@@ -276,6 +313,9 @@ class IonoTomography:
             rms_residual_tecu=rms_residual,
             condition_number=cond,
             confidence=confidence,
+            variance_reduction_e=var_reduction_e,
+            variance_reduction_f=var_reduction_f,
+            prior_dominated=prior_dominated,
             path_residuals=path_residuals,
             is_daytime=is_daytime,
             solar_elevation_deg=solar_elevation_deg,
