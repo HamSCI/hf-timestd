@@ -510,11 +510,16 @@ class PhysicsFusionService:
             result = self.tec_estimator.estimate_tec(observations, station, minute_timestamp)
             
             if result:
+                # CR-2 (settled 2026-05-17, DATA_CONTRACT.md): a negative or
+                # out-of-range tec_u is RETAINED, not discarded. Group-delay
+                # TEC is below the noise floor, so a negative estimate is a
+                # normal noisy realisation; discarding on value censors the
+                # estimator and biases aggregates high. Flag it, keep it.
                 if not (0.0 < result.tec_u <= 200.0):
                     logger.warning(
-                        f"TEC out of bounds for {station}: {result.tec_u:.2f} TECU - skipping"
+                        f"TEC out of nominal range for {station}: "
+                        f"{result.tec_u:.2f} TECU — retained, flagged MARGINAL"
                     )
-                    continue
 
                 result.propagation_mode = dominant_mode
                 tec_estimates[(station, dominant_mode)] = result
@@ -527,9 +532,16 @@ class PhysicsFusionService:
 
         # 3. E/F Layer Tomography
         tomo_result = None
-        if len(tec_estimates) >= 2:
+        # Tomography is a bounded inverse problem; feed it only physically
+        # plausible slant TEC. Negative / out-of-range values (retained in
+        # tec_estimates per CR-2, DATA_CONTRACT.md) are excluded here — a
+        # consumption-time guard, not a record-level rejection.
+        physical_tec = {
+            k: v for k, v in tec_estimates.items() if 0.0 < v.tec_u <= 200.0
+        }
+        if len(physical_tec) >= 2:
             try:
-                paths = self.tomography.build_paths_from_tec_results(tec_estimates)
+                paths = self.tomography.build_paths_from_tec_results(physical_tec)
                 if len(paths) >= 2:
                     tomo_result = self.tomography.solve(paths)
                     if tomo_result:
@@ -748,7 +760,10 @@ class PhysicsFusionService:
                 'residuals_ms': float(result.residuals_ms),
                 # Format frequencies as comma-separated list
                 'frequencies_mhz': ",".join([f"{f:.2f}" for f in result.group_delay_ms.keys()]),
-                'quality_flag': 'GOOD' if result.confidence > 0.8 else 'MARGINAL',
+                'quality_flag': (
+                    'GOOD' if result.confidence > 0.8
+                    and 0.0 <= result.tec_u <= 200.0 else 'MARGINAL'
+                ),
                 'validation_flag': 'UNVALIDATED',
                 'processing_version': '5.0.0'
             }

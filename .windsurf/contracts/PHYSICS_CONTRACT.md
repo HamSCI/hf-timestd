@@ -1,8 +1,9 @@
 # PHYSICS CONTRACT — hf-timestd
 
-**Version:** 1.0.0
-**Last Updated:** 2026-02-23
+**Version:** 1.1.0
+**Last Updated:** 2026-05-17
 **Status:** Active — evolves with implementation
+**Last refresh:** 2026-05-17 — reconciled against code. Factual drift corrected in place; clauses the code does not yet meet are listed in §5 Known Deviations. See `docs/CODE_REVIEW_2026-05-17_METROLOGY_PHYSICS.md`.
 
 ---
 
@@ -27,7 +28,7 @@ Ensure the physics pipeline (Phase 3) produces **scientifically valid ionospheri
 | Per-tick dTEC time series | ✅ Operational | ~55/min/station | Full 1-second resolution |
 | Differential carrier-phase TEC | ✅ Operational | Per minute | Multi-freq pairs, all GOOD quality |
 | All-arrivals (multipath) | ✅ Operational | ~374/min (CHU 7.85) | Includes secondary arrivals |
-| Integrated dTEC (`dtec_mean_tecu`) | ⚠️ Unanchored | Per minute | Relative only (is_anchored always False) |
+| Integrated dTEC (`dtec_mean_tecu`) | ⚠️ Anchored when reference available | Per minute | GNSS-VTEC anchoring is implemented (group-delay TEC as fallback anchor); `is_anchored` is True when a reference is applied, otherwise the value is relative-only |
 | Group-delay TEC (`tec_tecu`) | ❌ Below noise floor | ~11.7K | 71% confidence < 0.5; model-limited |
 | VTEC (`vtec_tecu`) | ❌ All NaN | 0 | Depends on group-delay TEC |
 | `tof_kalman_ms` | ❌ Deprecated | 0 | Dead schema field, all NaN |
@@ -105,7 +106,7 @@ These are **not ionospheric** — they are L1 propagation model systematic error
 - Uses solar zenith angle → Chapman foF2 → oblique MUF → mode validation
 - Modes above oblique MUF are **physically impossible** — hard reject, not soft penalty
 - SNR gate: measurements below 12 dB are likely noise
-- Negative TEC slope forced to zero (unphysical)
+- Negative TEC estimates are **retained as-is** — not clamped to zero, not discarded. True TEC is non-negative, but a negative *estimate* is an expected noisy realization (group-delay TEC is below the noise floor); censoring or clamping on sign biases aggregates high. Records are filtered by the SNR and MUF gates above, never by TEC sign. (Settled 2026-05-17 — see `DATA_CONTRACT.md` CR-2.)
 
 ### Dependencies
 
@@ -127,8 +128,8 @@ Schema: `l3_dtec_v1.json`
 |-------|------|-------|-------------|
 | `dtec_rate_tecu_per_s` | float64 | TECU/s | Mean dTEC/dt over the minute |
 | `dtec_mean_tecu` | float64 | TECU | Integrated dTEC (relative if unanchored) |
-| `is_anchored` | bool | — | True if anchored to group-delay TEC (always False currently) |
-| `anchor_status` | string | — | `ANCHORED`, `ANCHOR_LOW_CONF`, or `NO_ANCHOR` |
+| `is_anchored` | bool | — | True when the series is anchored to an absolute TEC reference (GNSS VTEC, or group-delay TEC as fallback) |
+| `anchor_status` | string | — | `ANCHORED_GNSS`, `ANCHORED_GROUP_DELAY`, `ANCHOR_LOW_CONF`, or `NO_ANCHOR` |
 | `unwrap_quality` | float64 | 0–1 | Phase unwrapping quality metric |
 | `n_phase_jumps` | int | — | Number of detected phase discontinuities |
 
@@ -178,3 +179,21 @@ HFPropagationModel.predict(station, frequency, utc_time) → {
 - **Writing duplicate records** — physics service must maintain `_processed_minutes` set to prevent re-processing
 - **Full table scan of large HDF5 files** — `DataProductReader.read_time_range()` loads entire dataset; use direct tail reads for real-time consumers
 - **Overstating capabilities in HamSCI abstract** — public claims must be validated against live system data
+
+---
+
+## 5. Known Deviations (current code vs. this contract)
+
+Recorded 2026-05-17 from the code review (`docs/CODE_REVIEW_2026-05-17_METROLOGY_PHYSICS.md`). These are points where the **current code does not yet meet the contract above**. The contract states the intended design; this section is the honest gap list. Each item should be resolved by either fixing the code or — if the clause itself is wrong — amending the clause.
+
+| # | Contract clause | Current code reality | Review ref |
+|---|-----------------|----------------------|------------|
+| D1 | §2/§4 — `PhysicsPropagationModel` is deprecated, must not be used by new code | Still exported from `core/__init__.py` `__all__` (line 262) with no runtime `DeprecationWarning`, keeping it discoverable | P-H12 |
+| D2 | §2 (Reanalysis) — negative TEC retained as-is, never discarded or clamped | **Resolved 2026-05-17.** `tec_estimator.py`, `physics_fusion_service.py`, and `ionospheric_reanalysis.py` now retain negative / out-of-range TEC (flagged MARGINAL, confidence 0) instead of returning `None`; tomography input is guarded at the consumption site. Tests `test_negative_slope_retained` updated | P-H5 |
+| D3 | §4 — TEC fit window must not span mode transitions | `physics_fusion_service` median-collapses observations across modes within a minute; `ionospheric_reanalysis` collapses an entire hour into a single TEC fit | P-H26 |
+| D4 | §4 — elevation angle must not be hardcoded at 30° | `iono_tomography.build_paths_from_tec_results` defaults elevation to 30° (and distance to 1500 km) when per-path geometry is absent | P-M9 |
+| D5 | §4 — physics service must maintain `_processed_minutes` to prevent duplicate records | `_processed_minutes` is an in-memory set, not persisted; on restart the 30-minute lookback reprocesses minutes whose L3 records already exist | P-H25 |
+| D6 | §4 — no full table scans of large HDF5 files | `physics_fusion_service._read_l2_slice` / `_read_tick_phase_minute` and `physics_service` still call `read_time_range` over whole datasets; only `_read_gnss_vtec` was converted to a bounded tail read | P-H28, P-M21 |
+| D7 | `METROLOGY_PHYSICS_SPLIT.md` — physics must never be in the real-time metrology critical path | `timestd-physics.service` is `Type=notify` with `Requires=timestd-l2-calibration.service` (a hard dependency on a metrology service) and an `ExecStartPre` `chown -R` over the whole `phase2` tree, including live L2 metrology files | P-C1 |
+
+**Note on `tof_kalman_ms`:** verified still accurate — the field is always NaN in production and consumers (`physics_fusion_service._read_l2_slice`) read it with an immediate NaN-fallback to `clock_offset_ms`. This is correct deprecated-field handling and is **not** a deviation.

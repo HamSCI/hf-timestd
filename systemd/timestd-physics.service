@@ -2,11 +2,17 @@
 Description=HF-Timestd Physics Service (L2 Interpretation)
 Documentation=https://github.com/mijahauan/hf-timestd
 After=timestd-l2-calibration.service
-Requires=timestd-l2-calibration.service
+# Soft dependency only (was Requires=): physics is an asynchronous/batch
+# pipeline and must never be torn down or gated by a metrology service.
+# See docs/design/METROLOGY_PHYSICS_SPLIT.md.
+Wants=timestd-l2-calibration.service
 OnFailure=timestd-alert@%n.service
 
 [Service]
-Type=notify
+# Type=simple (not notify): physics startup must neither gate, nor be gated
+# by, anything in the metrology path. The service still pets the systemd
+# watchdog via WATCHDOG= notifications (WatchdogSec below).
+Type=simple
 User=timestd
 Group=timestd
 
@@ -23,12 +29,15 @@ ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.core.physics_fusion_serv
     --data-root /var/lib/timestd \
     --output /var/lib/timestd/phase2/fusion
 
-# Ensure directories exist and have correct permissions.
-# The full phase2 chown also repairs any root-owned L2 channel files
-# that result from manual sudo operations or metrology running as root.
+# Ensure physics-owned directories exist and have correct permissions.
+# The chown is scoped to physics outputs (fusion, science) ONLY — chowning
+# the whole phase2 tree would touch live L2 metrology channel files and can
+# race the metrology SWMR writers. Physics must not write into, or modify,
+# the metrology path (docs/design/METROLOGY_PHYSICS_SPLIT.md).
 ExecStartPre=+/bin/mkdir -p /var/lib/timestd/phase2/fusion
 ExecStartPre=+/bin/mkdir -p /var/lib/timestd/phase2/science
-ExecStartPre=+/usr/bin/chown -R timestd:timestd /var/lib/timestd/phase2
+ExecStartPre=+/usr/bin/chown -R timestd:timestd /var/lib/timestd/phase2/fusion
+ExecStartPre=+/usr/bin/chown -R timestd:timestd /var/lib/timestd/phase2/science
 
 # Resource limits - yield to radiod which handles real-time USB/FFT
 Nice=5

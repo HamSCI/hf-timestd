@@ -22,16 +22,25 @@ class TestTECEstimatorDiagnostics(unittest.TestCase):
         self.assertAlmostEqual(result.tec_u, 0.0, delta=0.01)
         self.assertAlmostEqual(result.confidence, 0.0)
 
-    def test_negative_slope_returns_none(self):
-        """Negative slope (higher freq arrives later) should return None."""
-        # 5 MHz: 1000ms, 10 MHz: 1010ms — unphysical
+    def test_negative_slope_retained(self):
+        """Negative slope is RETAINED with zero confidence, not rejected.
+
+        CR-2 (settled 2026-05-17, see DATA_CONTRACT.md): a negative TEC
+        estimate is a normal noisy realisation for a noise-dominated signal;
+        discarding it censors the estimator and biases aggregates high.
+        """
+        # 5 MHz: 1000ms, 10 MHz: 1010ms — higher freq arrives later, so the
+        # 1/f² slope (hence the TEC estimate) is negative.
         measurements = [
             {'frequency_hz': 5e6, 'toa_ms': 1000.0, 'uncertainty_ms': 0.1},
             {'frequency_hz': 10e6, 'toa_ms': 1010.0, 'uncertainty_ms': 0.1},
         ]
         with self.assertLogs('hf_timestd.core.tec_estimator', level='WARNING'):
             result = self.estimator.estimate_tec(measurements, "TEST", 0.0)
-        self.assertIsNone(result, "Negative slope should return None, not a result")
+        self.assertIsNotNone(result, "Negative slope must be retained, not discarded")
+        self.assertLess(result.tec_u, 0.0, "Negative slope should yield negative tec_u")
+        self.assertEqual(result.confidence, 0.0,
+                         "Negative-slope result must carry zero confidence")
 
     def test_n2_confidence_capped(self):
         """With N=2 frequencies, confidence must be capped at 0.3."""

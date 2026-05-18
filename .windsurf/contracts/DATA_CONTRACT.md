@@ -1,8 +1,9 @@
 # DATA CONTRACT — hf-timestd
 
-**Version:** 1.0.0
-**Last Updated:** 2026-02-23
+**Version:** 1.1.0
+**Last Updated:** 2026-05-17
 **Status:** Active — evolves with implementation
+**Last refresh:** 2026-05-17 — reconciled against code. Factual drift corrected in place; clauses the code does not yet meet are listed in §5 Known Deviations. See `docs/CODE_REVIEW_2026-05-17_METROLOGY_PHYSICS.md`.
 
 ---
 
@@ -13,8 +14,8 @@ Ensure all data flowing through the hf-timestd pipeline is **semantically correc
 ### Performance Objectives
 
 - **Zero data loss** in Phase 1 (Core Recorder): every RTP sample is archived or accounted for as a gap
-- **Schema-validated writes** for all HDF5 products: every record passes its JSON schema and the 7 consistency rules (CR-1 through CR-7) defined in `data_dictionary.json`
-- **Crash-safe HDF5**: open-write-close per measurement cycle; no dirty flags on unclean shutdown
+- **Schema-validated writes** for all data products: every record is validated against its JSON schema at write time. The 7 consistency rules (CR-1 through CR-7) are *defined* in `data_dictionary.json` but are not currently enforced in the write path — see §5 D1
+- **Crash-safe HDF5**: SWMR model — writers keep the daily file open and flush per write; `h5clear -s` resets stale SWMR flags on the next open after an unclean shutdown
 - **Latency**: Phase 2 metrology products written within 90 seconds of raw buffer availability; Phase 3 fusion within 120 seconds
 
 ### Deliverable Products
@@ -59,27 +60,39 @@ Ensure all data flowing through the hf-timestd pipeline is **semantically correc
 - The `DataProductWriter` validates records against schemas at write time
 - Schema versions must be bumped when fields are added, removed, or semantics change
 
+### Storage Backends
+
+An HDF5 → SQLite migration is in progress. Producers obtain a writer via `make_data_product_writer(...)` and use one API regardless of backend. Three configurations, driven by the `[storage]` config section (`write_hdf5`, `write_sqlite`):
+
+- `write_hdf5=true, write_sqlite=false` → `DataProductWriter` (HDF5; current default)
+- `write_hdf5=false, write_sqlite=true` → `SqliteDataProductWriter`
+- `write_hdf5=true, write_sqlite=true` → `DualWriter` wrapping both (canary)
+
+`DualWriter` validates a row once against the JSON schema, then dispatches the already-validated row to both backends so they never see different inputs. The HDF5 conventions and file structure below describe the HDF5 backend specifically.
+
 ### HDF5 Conventions
 
-- **All** `h5py.File()` calls must use `locking=False`
-- `os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"` must be set **before** `import h5py` in any module
-- No SWMR mode — crash safety via open-write-close pattern
+- **SWMR model** (v6.10+): writers create the daily file with `libver='latest'`, pre-create all datasets, set `swmr_mode=True`, and keep the handle open — flushing after each write; readers open with `swmr=True, libver='latest'`
+- On every open of an existing file, `h5clear -s` is run to reset stale SWMR consistency flags left by an unclean shutdown
 - Batch writes preferred over per-record writes (see tick_phase HDF5 heap corruption fix)
 - Daily file naming: `{date}_{product_name}.h5`
+- A legacy `locking=False` open remains in `multi_broadcast_fusion.py`; the SWMR model does not require it
 
 ### Consistency Rules (CR-1 through CR-7)
 
-These are enforced at write time by `DataProductWriter`:
+These are **defined** in `data_dictionary.json`. As of 2026-05-17 they are documented but not enforced in the `io/` write path — the writers perform JSON-schema validation only (see §5 D1):
 
 | Rule | Formula | Severity |
 |------|---------|----------|
 | CR-1 | `abs(clock_offset_ms - (raw_arrival_time_ms - propagation_delay_ms)) < 0.001` | ERROR |
-| CR-2 | `tec_tecu > 0` | ERROR |
+| CR-2 | `tec_tecu > 0` | WARNING |
 | CR-3 | `0 < tec_tecu <= 200` | WARNING |
 | CR-4 | `vtec_tecu <= tec_tecu or isnan(vtec_tecu)` | WARNING |
 | CR-5 | `if is_anchored then anchor_tec_tecu > 0 and isfinite(anchor_tec_tecu)` | ERROR |
 | CR-6 | `propagation_delay_ms > 0` | ERROR |
 | CR-7 | `raw_arrival_time_ms >= light_travel_time_ms` | ERROR |
+
+**CR-2 is intentionally WARNING, not ERROR (settled 2026-05-17).** True TEC is non-negative, but a negative `tec_tecu` *estimate* is a normal noisy realization — group-delay TEC is below the noise floor for WWV/WWVH/CHU/BPM (see the `tec_tecu` `noise_floor_analysis` in `data_dictionary.json`). Rejecting or clamping records on TEC sign censors the estimator and biases every downstream aggregate (mean TEC, climatology) high, worst when true TEC is genuinely low. Negative `tec_tecu` must be **retained as-is** and flagged MARGINAL; aggregation must use the value with its uncertainty, never by discarding. Once `tec_uncertainty_tecu` exists (Physics Contract / review P-H2), significance should be judged value-vs-uncertainty rather than by sign.
 
 ### Raw Buffer Format
 
@@ -105,7 +118,7 @@ These are enforced at write time by `DataProductWriter`:
 - `minute_boundary_utc` is an **integer Unix epoch** (seconds since 1970), NOT an ISO string
 - `tof_kalman_ms` is **deprecated** (all NaN) — marked `deprecated=true` in L2 schema
 - `tec_tecu` is **below noise floor** in production — use `dtec_rate_tecu_per_s` instead
-- `vtec_tecu` is **55% valid but noise-dominated** — geometrically correct but sTEC unreliable (2026-02-24 audit)
+- `vtec_tecu` is **all NaN in production** — it derives from group-delay TEC, which is below the noise floor (consistent with the `data_dictionary.json` entry and the Physics Contract)
 
 ---
 
@@ -155,11 +168,23 @@ phase2/{CHANNEL}/metrology/{date}_metrology_measurements.h5
 
 - **Writing a record that violates any CR-ERROR rule** — record must be rejected, not silently written
 - **Using a field name not defined in the data dictionary** in a new schema or calculation
-- **Opening HDF5 without `locking=False`** — causes errno=11 file lock contention across services
-- **Setting `HDF5_USE_FILE_LOCKING` after `import h5py`** — env var has no effect after library init
+- **Creating datasets after `swmr_mode=True` is set** — SWMR forbids structural changes once the flag is on; all datasets must be pre-created
+- **Failing to run `h5clear -s` when opening a file left dirty by an unclean shutdown** — readers then cannot open it
 - **Per-record HDF5 writes for high-frequency products** (>10 writes/min) — causes heap corruption; must use batch writes
 - **Truncating or overwriting daily HDF5 files on service restart** — files must be append-only
 - **Dropping raw IQ samples without logging a gap** — violates Phase 1 completeness guarantee
 - **Misinterpreting `clock_offset_ms` as a UTC clock offset** — it contains propagation model error (up to 76 ms for CHU)
 - **Using `tof_kalman_ms` in any calculation** — field is deprecated and all NaN
 - **Failing to bump schema version when changing field semantics**
+
+---
+
+## 5. Known Deviations (current code vs. this contract)
+
+Recorded 2026-05-17 from the code review (`docs/CODE_REVIEW_2026-05-17_METROLOGY_PHYSICS.md`). These are points where the **current code does not yet meet the contract above**. The contract states the intended design; this section is the honest gap list. Each item should be resolved by either fixing the code or — if the clause itself is wrong — amending the clause.
+
+| # | Contract clause | Current code reality | Notes |
+|---|-----------------|----------------------|-------|
+| D1 | §1/§2 — the 7 consistency rules (CR-1…CR-7) are enforced at write time by `DataProductWriter` | The `io/` writers (`hdf5_writer.py`, `sqlite_writer.py`, `dual_writer.py`) validate records against JSON schemas only; none reference `consistency_rules`/CR. The rules exist as data in `data_dictionary.json` but are not wired into the write path | Either implement a CR checker in the writer/`DualWriter`, or amend §1/§2 to "defined, advisory" |
+| D2 | §4 — no per-record HDF5 writes for high-frequency products (>10/min) | `metrology_service.py` still writes `all_arrivals` and `detection_attempts` one record at a time; only `tick_phase` uses batch writes | Code review ref M-M18 |
+| D3 | §2 CR-2 / Physics Contract §2 — negative TEC handling | **Resolved 2026-05-17 (contract + code).** CR-2 downgraded ERROR→WARNING (flag, never reject); Physics Contract "force to zero" clause removed; `tec_estimator.py`, `physics_fusion_service.py`, and `ionospheric_reanalysis.py` updated to retain negative / out-of-range TEC (flagged MARGINAL, confidence 0). Tomography guards its own input at the consumption site. Tests `test_negative_slope_retained` updated | Review ref P-H5 |

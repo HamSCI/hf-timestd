@@ -1038,8 +1038,8 @@ class IonoDataService:
             
             return (meas.hmF2_km, meas.foF2_MHz, weight)
     
+    @staticmethod
     def _climatological_fallback(
-        self,
         lat: float,
         lon: float,
         utc_time: datetime

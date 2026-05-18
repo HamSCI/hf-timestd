@@ -543,13 +543,17 @@ class IonosphericReanalysis:
         if result is None:
             return None
 
-        # Additional validation: reject clearly unphysical TEC
-        if result.tec_u < 0 or result.tec_u > 200:
+        # CR-2 (settled 2026-05-17, see DATA_CONTRACT.md): a negative or
+        # out-of-range tec_u is RETAINED, not discarded — group-delay TEC is
+        # below the noise floor, so a negative estimate is a normal noisy
+        # realisation, and censoring on value biases aggregates high. The
+        # record is kept and flagged MARGINAL via tec_in_range below.
+        tec_in_range = 0.0 <= result.tec_u <= 200.0
+        if not tec_in_range:
             logger.debug(
-                f"TEC rejected for {station}: {result.tec_u:.1f} TECU "
-                f"(out of physical range)"
+                f"TEC out of nominal range for {station}: {result.tec_u:.1f} "
+                f"TECU — retained, flagged MARGINAL"
             )
-            return None
 
         # Determine dominant mode from valid measurements
         mode_counts = Counter(m.validated_mode for m in valid)
@@ -564,7 +568,10 @@ class IonosphericReanalysis:
             'residuals_ms': float(result.residuals_ms),
             'frequencies_mhz': ','.join(f"{f:.2f}" for f in freq_list),
             'propagation_mode': dominant_mode,
-            'quality_flag': 'GOOD' if result.confidence > 0.8 and len(freq_list) >= 3 else 'MARGINAL',
+            'quality_flag': (
+                'GOOD' if result.confidence > 0.8 and len(freq_list) >= 3
+                and tec_in_range else 'MARGINAL'
+            ),
         }
 
     def process_hour(self, hour_start: datetime) -> Dict[str, Any]:

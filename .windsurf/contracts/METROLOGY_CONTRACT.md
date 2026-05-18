@@ -1,8 +1,9 @@
 # METROLOGY CONTRACT — hf-timestd
 
-**Version:** 1.0.0
-**Last Updated:** 2026-02-23
+**Version:** 1.1.0
+**Last Updated:** 2026-05-17
 **Status:** Active — evolves with implementation
+**Last refresh:** 2026-05-17 — reconciled against code. Factual drift corrected in place; clauses the code does not yet meet are listed in §5 Known Deviations. See `docs/CODE_REVIEW_2026-05-17_METROLOGY_PHYSICS.md`.
 
 ---
 
@@ -15,7 +16,7 @@ Ensure the metrology pipeline (Phase 2) extracts **accurate, traceable, uncertai
 - **Tick detection rate**: ≥50 ticks/minute/station at ≥10 dB SNR (57 max for WWV/WWVH)
 - **Ensemble timing uncertainty**: ±0.008 ms (CHU at 20+ dB), ±0.5–2 ms (WWV/WWVH typical)
 - **Doppler extraction**: meaningful fit requires ≥5 ticks spanning ≥5 seconds
-- **False positive rate**: <1% after physics validation gate (arrival_matrix ±15 ms)
+- **False positive rate**: <1% after physics validation gate (arrival_matrix; nominally ±15 ms — note per-station uncertainty floors widen this in practice, see §5 D2)
 - **Bootstrap convergence**: ACQUIRING → LOCKED within ~2 minutes (with NTP)
 - **Processing latency**: raw buffer → L1/L2 HDF5 within 90 seconds
 - **Station discrimination accuracy**: >70% correct on shared frequencies (2.5, 5, 10, 15 MHz)
@@ -64,9 +65,9 @@ Ensure the metrology pipeline (Phase 2) extracts **accurate, traceable, uncertai
 
 ### Search Window Constraints
 
-- Search window formula: `max(50, min(100, tone_duration_sec * 625))` ms
+- Search window: primary path is **adaptive**, derived from the `ArrivalPatternMatrix` per-broadcast 3σ uncertainty; the formula `max(50, min(100, tone_duration_sec * 625))` ms is the fallback when no adaptive estimate is available
 - Noise exclusion zone = full template length (not half)
-- Physics validation gate: arrival_matrix ±15 ms — **do not widen or remove**
+- Physics validation gate: arrival_matrix ±15 ms nominal — **do not widen or remove** (currently widened per-station via uncertainty floors; see §5 D2)
 - Cross-frequency gate: MIN_FREQ_ADVANTAGE_DB = 3.0 dB (rejects 1000↔1200 Hz cross-response)
 
 ### Station-Specific Handling
@@ -80,11 +81,13 @@ Ensure the metrology pipeline (Phase 2) extracts **accurate, traceable, uncertai
 
 ### Kalman Filter ("Steel Ruler")
 
-| Parameter | Value | Rationale |
-|-----------|-------|-----------|
-| Q (Offset) | 0.01 ms | Allows tracking real measurements |
-| Q (Drift) | 1e-12 ms/min | GPSDO does not wander |
-| R (Measurement) | 30.0 ms | Rejects ionospheric turbulence |
+Values below are the L3 fusion Kalman (`multi_broadcast_fusion._kalman_update`). The per-broadcast `BroadcastKalmanFilter` carries its own separate `q_tof`/`q_doppler` per station.
+
+| Parameter | Value (current code) | Rationale |
+|-----------|----------------------|-----------|
+| Q (Offset) | 0.01 ms²/min | Allows tracking real measurements |
+| Q (Drift) | 1e-8 (ms/min)²/min | GPSDO drift is negligible — **value lacks a documented derivation; see §5** |
+| R (Measurement) | adaptive: `measurement_uncertainty²` | Rejects ionospheric turbulence (was a flat 30.0 ms in the prior contract) |
 | Drift clamping | 0.0 after convergence | GPSDO prevents drift accumulation |
 
 ### Dual Kalman Architecture
@@ -98,7 +101,7 @@ Ensure the metrology pipeline (Phase 2) extracts **accurate, traceable, uncertai
 
 - `ka9q-python` for RTP reception and channel management
 - `numpy`, `scipy` for DSP (matched filtering, correlation, bandpass)
-- `h5py` for HDF5 output (with `locking=False`)
+- `h5py` for HDF5 output — SWMR model (writers keep the daily file open with `swmr_mode=True` and flush; readers open `swmr=True`, `libver='latest'`)
 - `ArrivalPatternMatrix` for physics-based expected arrival predictions
 - `HFPropagationModel` for frequency-dependent delay predictions
 - `IonoDataService` for real-time ionospheric parameters
@@ -109,7 +112,7 @@ Ensure the metrology pipeline (Phase 2) extracts **accurate, traceable, uncertai
 
 ### Tick Timing HDF5 Record
 
-Schema: `l2_tick_timing_v1.json` (schema_version 2.0.0, processing_version 5.0.0)
+Schema: `l2_tick_timing_v1.json` (`schema_version` 2.0.0; `processing_version` is a free-form software-version string, not pinned by the schema)
 
 | Field | Type | Units | Description |
 |-------|------|-------|-------------|
@@ -145,7 +148,7 @@ Individual components are recorded in the L3 fusion HDF5.
 
 ## 4. Failure Conditions
 
-- **Using any module other than `TickEdgeDetector` to write `tick_timing` HDF5** — `TickMatchedFilter` is legacy; the A/B decoder comparison feature was removed
+- **Using any module other than `TickEdgeDetector` to write `tick_timing` HDF5** — `TickEdgeDetector` is the intended sole timing source. (Note: as of 2026-05-17 `TickMatchedFilter` is still instantiated and run, and the A/B decoder-comparison machinery has *not* been removed — see §5 D1.)
 - **Window-relative time in IQ mixer** — causes ~1.7 rad phase jumps; must use buffer-relative time (`t_abs = start_second + adjusted_start/sample_rate + arange(n)/sample_rate`)
 - **Widening or removing the physics validation gate** (±15 ms from arrival_matrix) — this catches remaining noise false positives after search window capping
 - **Shared Kalman state between TSL1 and TSL2** — defeats the dual-feed architecture; L2 ionospheric correction is discarded
@@ -157,3 +160,20 @@ Individual components are recorded in the L3 fusion HDF5.
 - **Processing BPM UT1 minutes (25–29, 55–59) as UTC** — 100 ms ticks encode UT1, not UTC
 - **Silent exception swallowing in HDF5 reads** — must log at WARNING, not DEBUG; causes invisible data starvation
 - **Tests failing**: `test_carrier_phase_continuity` σ > 0.3 rad, or any regression in `tests/`
+
+---
+
+## 5. Known Deviations (current code vs. this contract)
+
+Recorded 2026-05-17 from the code review (`docs/CODE_REVIEW_2026-05-17_METROLOGY_PHYSICS.md`). These are points where the **current code does not yet meet the contract above**. The contract states the intended design; this section is the honest gap list. Each item should be resolved by either fixing the code or — if the clause itself is wrong — amending the clause.
+
+| # | Contract clause | Current code reality | Review ref |
+|---|-----------------|----------------------|------------|
+| D1 | §1/§4 — `TickEdgeDetector` is the sole timing module; A/B comparison removed | `metrology_engine.py` still constructs four `TickMatchedFilter` instances and calls `process_minute` every minute; the A/B comparison machinery and `l2_decoder_comparison_v1.json` schema still exist | M-H2 |
+| D2 | §1/§2/§4 — physics validation gate ±15 ms, "do not widen" | `ArrivalPatternMatrix` applies per-station 3σ uncertainty floors (`STATION_MIN_UNCERTAINTY_3SIGMA_MS`: CHU 100 ms, BPM 50 ms) that widen the effective gate well beyond ±15 ms | review §2 S1, §3 |
+| D3 | §2/§4 — TSL1 and TSL2 must have independent Kalman state | The per-broadcast Kalmans and convergence/drift state are shared and mutated twice per cycle (the L1-only then L2 `fuse()` calls); the two feeds are statistically coupled | M-C1 |
+| D4 | §4 — must advance `last_chrony_d_clock` on rejected updates | `last_chrony_d_clock` is advanced, but the paired `last_chrony_update_time` is updated only on success — the two references desynchronise, defeating the 5-minute recovery reset | M-C2 |
+| D5 | `METROLOGY_PHYSICS_SPLIT.md` action item 1 — gate → likelihood weight | `ArrivalPatternMatrix.validate_detection()` is still a binary `(is_valid, confidence, reason)` gate; no `[0,1]` likelihood-weight method exists | review §6 item 7 |
+| D6 | §4 — no per-record HDF5 writes for high-cadence products | `tick_phase` uses batch writes (compliant), but `all_arrivals` and `detection_attempts` are still written one record at a time | M-M18 |
+
+**Open question for the next contract revision:** the §2 Kalman `Q` values have no documented derivation, and `Q (Drift)` was `1e-12` in the prior contract but is `1e-8` in code (10⁴× larger). The table above now reflects the code; the *correct* value must be established (measurement-based) and the table re-pinned.

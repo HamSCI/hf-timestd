@@ -654,9 +654,14 @@ class MultiBroadcastFusion:
         # dynamics. This is physically justified because the ionosphere has
         # temporal continuity - it cannot teleport.
         from .broadcast_kalman_filter import BroadcastKalmanFilter
+        # Per-broadcast Kalman banks, keyed "{feed}:{broadcast_id}". The L1 and
+        # L2 chrony feeds get INDEPENDENT filter instances per broadcast so the
+        # two SHM feeds carry genuinely uncorrelated estimates — the dual-feed
+        # cross-check is meaningless if they share filter state.
         self.broadcast_kalmans: Dict[str, BroadcastKalmanFilter] = {}
         self.broadcast_kalman_state_dir = self.data_root / 'state' / 'broadcast_kalmans'
-        self.broadcast_kalman_state_dir.mkdir(parents=True, exist_ok=True)
+        for _feed in ('l1', 'l2'):
+            (self.broadcast_kalman_state_dir / _feed).mkdir(parents=True, exist_ok=True)
         self._load_broadcast_kalman_states()
         
         # Initialize HF Propagation Model (for GNSS VTEC integration + mode scoring)
@@ -1116,54 +1121,58 @@ class MultiBroadcastFusion:
         """
         from .broadcast_kalman_filter import BroadcastKalmanFilter
         
-        # Scan for existing state files
-        if self.broadcast_kalman_state_dir.exists():
-            state_files = list(self.broadcast_kalman_state_dir.glob('*_kalman_state.json'))
-            loaded_count = 0
-            
-            for state_file in state_files:
+        # Each feed (l1, l2) has its own state subdirectory so the two banks
+        # persist independently across restarts.
+        loaded_count = 0
+        for feed in ('l1', 'l2'):
+            feed_dir = self.broadcast_kalman_state_dir / feed
+            if not feed_dir.exists():
+                continue
+            for state_file in feed_dir.glob('*_kalman_state.json'):
                 try:
                     with open(state_file) as f:
                         state_data = json.load(f)
-                    
+
                     broadcast_id = state_data.get('broadcast_id')
                     station = state_data.get('station')
                     frequency_mhz = state_data.get('frequency_mhz')
-                    
+
                     if broadcast_id and station and frequency_mhz:
-                        # Create filter and load state
                         kalman = BroadcastKalmanFilter(broadcast_id, station, frequency_mhz)
-                        if kalman.load_state(self.broadcast_kalman_state_dir):
-                            self.broadcast_kalmans[broadcast_id] = kalman
+                        if kalman.load_state(feed_dir):
+                            self.broadcast_kalmans[f"{feed}:{broadcast_id}"] = kalman
                             loaded_count += 1
                 except Exception as e:
                     logger.warning(f"Failed to load Kalman state from {state_file}: {e}")
-            
-            if loaded_count > 0:
-                logger.info(f"Loaded {loaded_count} per-broadcast Kalman filter states")
+
+        if loaded_count > 0:
+            logger.info(f"Loaded {loaded_count} per-broadcast Kalman filter states (l1+l2 banks)")
         else:
             logger.info("No per-broadcast Kalman states found - will initialize on first measurements")
     
-    def _get_or_create_broadcast_kalman(self, broadcast_id: str, station: str, frequency_mhz: float):
+    def _get_or_create_broadcast_kalman(self, broadcast_id: str, station: str,
+                                        frequency_mhz: float, feed: str):
         """
-        Get existing Kalman filter for broadcast or create new one.
-        
+        Get the existing per-broadcast Kalman filter, or create one.
+
         Args:
             broadcast_id: Unique broadcast identifier (e.g., "WWV_10000")
             station: Station name (WWV, WWVH, CHU, BPM)
             frequency_mhz: Frequency in MHz
-            
+            feed: 'l1' or 'l2' — selects the independent per-feed bank
+
         Returns:
-            BroadcastKalmanFilter instance
+            BroadcastKalmanFilter instance (one per (feed, broadcast))
         """
-        if broadcast_id not in self.broadcast_kalmans:
+        key = f"{feed}:{broadcast_id}"
+        if key not in self.broadcast_kalmans:
             from .broadcast_kalman_filter import BroadcastKalmanFilter
-            self.broadcast_kalmans[broadcast_id] = BroadcastKalmanFilter(
+            self.broadcast_kalmans[key] = BroadcastKalmanFilter(
                 broadcast_id, station, frequency_mhz
             )
-            logger.info(f"Created new Kalman filter for {broadcast_id}")
-        
-        return self.broadcast_kalmans[broadcast_id]
+            logger.info(f"Created new Kalman filter for {broadcast_id} ({feed} feed)")
+
+        return self.broadcast_kalmans[key]
     
     def _save_broadcast_kalman_states(self):
         """
@@ -1172,28 +1181,32 @@ class MultiBroadcastFusion:
         Called periodically and on shutdown to persist state.
         """
         saved_count = 0
-        for broadcast_id, kalman in self.broadcast_kalmans.items():
+        for key, kalman in self.broadcast_kalmans.items():
             try:
-                kalman.save_state(self.broadcast_kalman_state_dir)
+                # key is "{feed}:{broadcast_id}" — persist into the feed subdir
+                feed = key.split(':', 1)[0]
+                kalman.save_state(self.broadcast_kalman_state_dir / feed)
                 saved_count += 1
             except Exception as e:
-                logger.warning(f"Failed to save Kalman state for {broadcast_id}: {e}")
+                logger.warning(f"Failed to save Kalman state for {key}: {e}")
         
         if saved_count > 0:
             logger.debug(f"Saved {saved_count} per-broadcast Kalman filter states")
     
-    def _apply_broadcast_kalmans(self, measurements: List['BroadcastMeasurement']) -> List['BroadcastMeasurement']:
+    def _apply_broadcast_kalmans(self, measurements: List['BroadcastMeasurement'],
+                                 feed: str) -> List['BroadcastMeasurement']:
         """
         Apply per-broadcast Kalman filtering to measurements.
-        
+
         This is the core of the v6.0 hierarchical architecture:
         - Each broadcast's d_clock is filtered by its own Kalman
         - The Kalman tracks ionospheric path dynamics (ToF)
         - Glitches are rejected, real dynamics are preserved
-        
+
         Args:
             measurements: Raw measurements from L1/L2
-            
+            feed: 'l1' or 'l2' — selects the independent per-feed Kalman bank
+
         Returns:
             Measurements with Kalman-filtered d_clock values and uncertainties
         """
@@ -1203,9 +1216,9 @@ class MultiBroadcastFusion:
             # Construct broadcast ID
             broadcast_id = f"{m.station}_{int(m.frequency_mhz * 1000)}"
             
-            # Get or create Kalman filter for this broadcast
+            # Get or create the Kalman filter for this broadcast on this feed
             kalman = self._get_or_create_broadcast_kalman(
-                broadcast_id, m.station, m.frequency_mhz
+                broadcast_id, m.station, m.frequency_mhz, feed
             )
             
             # Update Kalman with measurement
@@ -3379,7 +3392,9 @@ class MultiBroadcastFusion:
         # Each broadcast's d_clock is filtered by its own Kalman filter.
         # This rejects detection glitches while preserving real ionospheric dynamics.
         with self._phase("kalman_apply"):
-            measurements = self._apply_broadcast_kalmans(measurements)
+            measurements = self._apply_broadcast_kalmans(
+                measurements, feed='l1' if force_l1_only else 'l2'
+            )
         
         # Filter out NaN measurements immediately (tone not detected)
         # CRITICAL FIX (2026-01-08): Leverage GPSDO stability during detection gaps
@@ -3681,21 +3696,37 @@ class MultiBroadcastFusion:
                         
                         # Store original for logging
                         original_d_clock = m.d_clock_ms
-                        
-                        # Apply correction only if significant (> 0.1 ms)
-                        if abs(delta_iono_ms) > 0.1:
+
+                        # In RTP mode (GPS+PPS authority) D_clock is already
+                        # pinned to ~50 us. Applying a model-derived TEC
+                        # correction there would inject ionospheric model noise
+                        # into a reference more accurate than the model — so
+                        # GNSS VTEC is used only as an independent cross-check,
+                        # never as a D_clock correction. The correction applies
+                        # only in Fusion mode (no GPS+PPS), where HF is the
+                        # primary timing source. See METROLOGY_PHYSICS_SPLIT.md.
+                        if self.is_rtp_authority:
+                            m.propagation_mode = f"{prediction.primary_mode}+GNSS_VALIDATED"
+                            m.confidence = min(1.0, m.confidence * 1.1)
+                            logger.debug(
+                                f"  {m.station} {m.frequency_mhz}MHz: GNSS TEC "
+                                f"cross-check only (RTP mode — ΔTEC={tec_diff:+.1f} TECU, "
+                                f"Δiono={delta_iono_ms:+.3f}ms NOT applied to D_clock)"
+                            )
+                        elif abs(delta_iono_ms) > 0.1:
+                            # Fusion mode, significant correction — apply it
                             m.d_clock_ms = original_d_clock + delta_iono_ms
                             m.propagation_mode = f"{prediction.primary_mode}+GNSS_TEC"
                             m.confidence = min(1.0, m.confidence * 1.2)  # Boost confidence
                             corrections_applied += 1
-                            
+
                             logger.debug(
                                 f"  {m.station} {m.frequency_mhz}MHz: TEC correction "
                                 f"model={model_tec:.1f} gnss={vtec_tecu:.1f} ΔTEC={tec_diff:+.1f} TECU, "
                                 f"Δiono={delta_iono_ms:+.3f}ms, D_clock {original_d_clock:.3f}->{m.d_clock_ms:.3f}ms"
                             )
                         else:
-                            # Small correction - just validate
+                            # Fusion mode, correction below threshold — validate only
                             m.propagation_mode = f"{prediction.primary_mode}+GNSS_VALIDATED"
                             m.confidence = min(1.0, m.confidence * 1.1)
                             logger.debug(
@@ -5132,9 +5163,10 @@ def run_fusion_service(
     EMPTY_CYCLE_ERROR_THRESHOLD = 15   # Error after 15 consecutive empty cycles (~2 min at 8s interval)
     last_successful_fusion_time = time.time()
     
-    # Track chrony updates for discontinuity filtering
+    # Track chrony updates for discontinuity filtering. last_chrony_d_clock is
+    # advanced every cycle (see the "always advance" block in the feed loop),
+    # so the discontinuity reference can never go stale.
     last_chrony_d_clock = None
-    last_chrony_update_time = None
 
     # SHM reconnection state — retry every 30s if initial connect failed
     _shm_reconnect_interval = 30.0
@@ -5398,15 +5430,14 @@ def run_fusion_service(
                     # and ionospheric variations while still protecting against major errors
                     discontinuity_ok = True
                     
-                    # Reset discontinuity check if no update for >5 minutes (allows recovery)
-                    if last_chrony_update_time is not None:
-                        time_since_update = time.time() - last_chrony_update_time
-                        if time_since_update > 300:  # 5 minutes
-                            logger.info(
-                                f"Chrony feed: Resetting discontinuity check after {time_since_update:.0f}s "
-                                f"without updates (allows recovery from stuck state)"
-                            )
-                            last_chrony_d_clock = None
+                    # No time-based recovery reset is needed: last_chrony_d_clock
+                    # is advanced unconditionally every cycle by the "always
+                    # advance" block below, so the discontinuity reference can
+                    # never latch on a stale value (M-C2 fix, 2026-05-17). The
+                    # prior reset keyed off last_chrony_update_time, which only
+                    # advanced on a *successful* write — desynchronising the two
+                    # references and causing both spurious resets and missed
+                    # recovery.
                     
                     if last_chrony_d_clock is not None:
                         delta = abs(result.d_clock_fused_ms - last_chrony_d_clock)
@@ -5493,13 +5524,9 @@ def run_fusion_service(
                                 else:
                                     logger.warning("Chrony SHM L2 write failed")
                             
-                            # Update last value and timestamp for discontinuity check (use L2 as primary)
-                            if result_l2:
-                                last_chrony_d_clock = result_l2.d_clock_fused_ms
-                                last_chrony_update_time = time.time()
-                            elif result_l1:
-                                last_chrony_d_clock = result_l1.d_clock_fused_ms
-                                last_chrony_update_time = time.time()
+                            # (the discontinuity reference last_chrony_d_clock is
+                            # advanced unconditionally by the "always advance"
+                            # block below — no per-success update is needed here)
                                 
                         except Exception as e:
                             logger.error(f"Chrony SHM update exception: {e}")

@@ -111,7 +111,12 @@ class TECEstimator:
             timestamp: Unix timestamp
 
         Returns:
-            TECResult if successful (needs at least 2 frequencies), else None
+            TECResult if a fit was obtained (needs at least 2 frequencies),
+            else None. A negative ``tec_u`` IS returned (with confidence 0.0):
+            negative TEC is a noisy estimate of a near-zero quantity and is
+            retained, not rejected — see CR-2 in DATA_CONTRACT.md. None is
+            returned only for genuine fit failure (too few frequencies,
+            insufficient frequency diversity, or a singular fit).
         """
         # Need at least 2 distinct frequencies to solve 2 unknowns
         if len(measurements) < 2:
@@ -204,18 +209,24 @@ class TECEstimator:
                         continue  # Re-fit without outliers
             break  # No outliers found or last iteration
 
-        # Negative slope = unphysical (lower freq arrives LATER than higher)
-        # This indicates mode misidentification or severe noise — reject entirely
+        # Negative slope means the TEC ESTIMATE is negative (lower freq appears
+        # to arrive earlier than higher). True TEC is non-negative, but a
+        # negative estimate is a normal noisy realisation — group-delay TEC is
+        # below the noise floor for these stations. Per CR-2 (settled
+        # 2026-05-17, see DATA_CONTRACT.md) the record is RETAINED, not
+        # rejected: discarding on sign censors the estimator and biases every
+        # downstream aggregate high. Confidence is forced to 0.0 below (via the
+        # ``m_slope > 0`` guards), so the result is flagged, not trusted.
         if m_slope < 0:
             logger.warning(
                 f"Negative TEC slope for {station}: m={m_slope:.2e} — "
-                f"rejecting (mode mixing or noise). "
+                f"retaining with confidence 0 (noise-dominated: mode mixing or "
+                f"sub-noise-floor signal). "
                 f"Inputs: " + ", ".join(
                     [f"{f/1e6:.1f}MHz->{t*1000:.3f}ms"
                      for f, t in zip(freqs[mask], toas[mask])]
                 )
             )
-            return None
 
         tec = m_slope / K_IONOSPHERE
         tec_u = tec / TECU_SCALE

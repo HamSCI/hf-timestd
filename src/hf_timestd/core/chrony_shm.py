@@ -281,6 +281,13 @@ class ChronySHM:
             #   even count = write complete    (chrony can safely use data)
             # We increment twice: once before packing (odd) and once after writing
             # (even), so chrony never reads a partially-updated struct.
+            #
+            # Normalize to an even base first: a prior mid-update failure may
+            # have left self.count odd. Without this, `count += 1` would make
+            # it even ("write complete") while a write is in progress —
+            # inverting the protocol so chronyd ignores the refclock forever.
+            if self.count % 2 == 1:
+                self.count += 1
             self.count += 1  # now odd: write in progress
 
             # Split timestamps into seconds and microseconds
@@ -386,6 +393,26 @@ class ChronySHM:
             logger.error(f"Failed to update Chrony SHM: {e}")
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
+            # Restore the sequence-lock invariant: when update() returns, the
+            # count MUST be even (write-complete) in both memory and the SHM
+            # segment. A mid-update exception can leave it odd; if the segment
+            # is left odd, chronyd treats every later sample as "write in
+            # progress" and ignores the refclock until the next clean write.
+            # The struct-body write is a single memcpy-class operation, so
+            # forcing the count even exposes either the new sample or the
+            # previous valid one — never a torn struct.
+            try:
+                if self.count % 2 == 1:
+                    self.count += 1
+                even_count = struct.pack('@i', self.count)
+                if self._use_sysv:
+                    self.shm.write(even_count, 4)
+                else:
+                    self.shm_map.seek(4)
+                    self.shm_map.write(even_count)
+                    self.shm_map.flush()
+            except Exception as repair_err:
+                logger.error(f"ChronySHM sequence-count repair failed: {repair_err}")
             return False
     
     def disconnect(self):
