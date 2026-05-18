@@ -457,6 +457,40 @@ class IonosphericModel:
         
         return lat_mid, lon_mid
     
+    def _find_ionex_file(self, timestamp: datetime) -> Optional[Path]:
+        """
+        Locate the IONEX GIM file for the exact UTC date of `timestamp`.
+
+        IONEX GIMs are daily products, so the file must match both the year
+        and the day-of-year (P-H17). Globbing on the year alone returned
+        whichever same-year file happened to be downloaded most recently —
+        almost never the right day. Supports the modern
+        (IGS0OPSFIN_YYYYDDD0000_..._GIM.INX.gz) and legacy (igsgDDD0.YYi.Z)
+        filename patterns.
+        """
+        if not self.ionex_dir.exists():
+            return None
+
+        yyyy = timestamp.strftime('%Y')
+        yy = timestamp.strftime('%y')
+        ddd = f"{timestamp.timetuple().tm_yday:03d}"
+
+        # Modern: ...YYYYDDD0000...   Legacy: ...DDD0.YYi...
+        patterns = (
+            f"*{yyyy}{ddd}*",
+            f"*{ddd}0.{yy}i*",
+            f"*{ddd}0.{yy}I*",
+        )
+        matches = sorted({
+            f for pat in patterns for f in self.ionex_dir.glob(pat)
+        })
+        if not matches:
+            return None
+
+        # The same day may have several products (final vs rapid, or a
+        # re-download); take the most recently written.
+        return max(matches, key=lambda p: p.stat().st_mtime)
+
     def get_ionex_vtec(
         self,
         lat: float,
@@ -477,24 +511,15 @@ class IonosphericModel:
         Returns:
             (vtec_tecu, source_file) or None if unavailable
         """
-        if not self.ionex_dir.exists():
-            logger.debug(f"IONEX directory does not exist: {self.ionex_dir}")
+        # Find the IONEX file for this exact UTC date (P-H17 — year+day-of-year,
+        # not year alone).
+        ionex_file = self._find_ionex_file(timestamp)
+        if ionex_file is None:
+            logger.debug(
+                f"No IONEX file for {timestamp.strftime('%Y-%m-%d')} "
+                f"in {self.ionex_dir}"
+            )
             return None
-        
-        # Find IONEX file for this date
-        date_str = timestamp.strftime('%Y%m%d')
-        
-        # Try to find matching IONEX file
-        # Modern format: IGS0OPSFIN_YYYYDDD0000_01D_02H_GIM.INX.gz
-        # Legacy format: igsgDDD0.YYi.Z
-        ionex_files = list(self.ionex_dir.glob(f"*{date_str[:4]}*"))
-        
-        if not ionex_files:
-            logger.debug(f"No IONEX files found for date {date_str}")
-            return None
-        
-        # Use the most recent file (in case multiple exist)
-        ionex_file = max(ionex_files, key=lambda p: p.stat().st_mtime)
         
         # Check cache
         cache_key = str(ionex_file)
