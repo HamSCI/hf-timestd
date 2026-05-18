@@ -64,6 +64,7 @@ import math
 import os
 import time
 import threading
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Tuple, List, NamedTuple
@@ -489,9 +490,14 @@ class IonoDataService:
             if len(urls_to_try) >= 6:
                 break
         
-        # S3 fallback
-        s3_prefix = f"v1.2/wfs.{cycle_date}"
-        urls_to_try.append(f"{WAMIPE_S3_BASE_URL}/{s3_prefix}/")
+        # S3 fallback — list the prefix and append the latest ipe05 .nc.
+        # The bucket is virtual-hosted, so a bucket *listing* needs the
+        # ?list-type=2&prefix= query; the original code appended a path
+        # ending in '/', which S3 serves as a (missing) object whose XML
+        # body was then fed to the NetCDF parser (P-H19).
+        s3_nc_url = self._resolve_s3_latest_nc(f"v1.2/wfs.{cycle_date}")
+        if s3_nc_url is not None:
+            urls_to_try.append(s3_nc_url)
         
         grid = None
         for url in urls_to_try:
@@ -526,20 +532,59 @@ class IonoDataService:
             else:
                 logger.warning("No WAM-IPE data available (network and cache both failed)")
     
+    def _resolve_s3_latest_nc(self, s3_prefix: str) -> Optional[str]:
+        """Resolve the WAM-IPE S3 fallback prefix to the URL of the most
+        recent ipe05 NetCDF object.
+
+        The S3 bucket is virtual-hosted; a bucket *listing* requires the
+        ``?list-type=2&prefix=`` query and returns a ``ListBucketResult``
+        XML document.  Requesting ``{prefix}/`` directly (the original
+        bug, P-H19) makes S3 serve a missing-object error whose XML body
+        was then handed to the NetCDF parser.  Returns ``None`` when the
+        listing is unavailable or contains no ``.nc`` object.
+        """
+        if _requests is None:
+            return None
+        requests = _requests
+        list_url = (f"{WAMIPE_S3_BASE_URL}/"
+                    f"?list-type=2&prefix={s3_prefix}/")
+        try:
+            resp = requests.get(list_url, timeout=15)
+            if resp.status_code != 200:
+                return None
+            root = ET.fromstring(resp.content)
+        except (requests.RequestException, ET.ParseError) as e:
+            logger.debug(f"WAM-IPE S3 prefix listing failed "
+                         f"({s3_prefix}): {e}")
+            return None
+        # <Contents><Key>…</Key>; the ListBucketResult document is
+        # namespaced, so match the element by local name.
+        nc_keys = sorted(
+            el.text for el in root.iter()
+            if el.tag.rsplit('}', 1)[-1] == 'Key'
+            and el.text and el.text.endswith('.nc')
+        )
+        if not nc_keys:
+            return None
+        # ipe05 object keys embed the cycle timestamp, so the
+        # lexically-greatest key is the most recent grid.
+        return f"{WAMIPE_S3_BASE_URL}/{nc_keys[-1]}"
+
     def _download_and_parse_wamipe(self, url: str) -> Optional[IonoGrid]:
         """Download a WAM-IPE NetCDF file and parse into IonoGrid."""
         if _requests is None:
             return None
         requests = _requests
-        
+
         try:
             resp = requests.get(url, timeout=30, stream=True)
             if resp.status_code != 200:
                 return None
-            
-            # Check content type - skip HTML directory listings
-            content_type = resp.headers.get('content-type', '')
-            if 'html' in content_type.lower():
+
+            # Skip HTML directory listings and XML (an S3 listing or
+            # error document) — neither is ever NetCDF (P-H19).
+            content_type = resp.headers.get('content-type', '').lower()
+            if 'html' in content_type or 'xml' in content_type:
                 return None
             
             data = resp.content
@@ -796,34 +841,67 @@ class IonoDataService:
             if resp.status_code != 200:
                 return None
             
-            # Parse simple text response
-            # Format varies, but typically: timestamp, foF2, hmF2, confidence
-            lines = resp.text.strip().split('\n')
-            if len(lines) < 2:
+            # GIRO DIDBase fast-char response: '#'-prefixed comment lines
+            # (one of which names the columns) then whitespace-delimited
+            # data rows.  Parse foF2/hmF2 by *column name* from that
+            # header — a swapped or inserted column otherwise silently
+            # corrupts hmF2, which is blended into the propagation
+            # geometry at weight up to 1.0 (P-H20).  Fall back to the
+            # documented positional layout only when no header is present,
+            # and range-validate the result against ionospheric physics
+            # either way.
+            header_cols = None
+            data_lines = []
+            for line in resp.text.splitlines():
+                s = line.strip()
+                if not s:
+                    continue
+                if s.startswith('#'):
+                    toks = s.lstrip('#').split()
+                    if 'foF2' in toks and 'hmF2' in toks:
+                        header_cols = toks
+                else:
+                    data_lines.append(s)
+            if not data_lines:
                 return None
-            
-            # Take the most recent measurement (last line)
-            last_line = lines[-1].strip()
-            parts = last_line.split()
-            
-            if len(parts) >= 3:
-                try:
-                    foF2 = float(parts[-3]) if len(parts) >= 3 else 0.0
-                    hmF2 = float(parts[-2]) if len(parts) >= 2 else 0.0
-                    conf = float(parts[-1]) if len(parts) >= 1 else 0.0
-                    
-                    if foF2 > 0 and hmF2 > 50:
-                        return GiroMeasurement(
-                            station_code=station_code,
-                            timestamp=now,
-                            foF2_MHz=foF2,
-                            hmF2_km=hmF2,
-                            confidence=min(1.0, conf / 100.0)
-                        )
-                except (ValueError, IndexError):
-                    pass
-            
-            return None
+
+            # Most recent measurement = last data row.
+            parts = data_lines[-1].split()
+            try:
+                if header_cols is not None:
+                    foF2 = float(parts[header_cols.index('foF2')])
+                    hmF2 = float(parts[header_cols.index('hmF2')])
+                    conf = 0.0
+                    for cs_name in ('CS', 'Confidence', 'confidence'):
+                        if cs_name in header_cols:
+                            conf = float(parts[header_cols.index(cs_name)])
+                            break
+                else:
+                    # No header — documented positional layout
+                    # (timestamp, foF2, hmF2, confidence).
+                    foF2 = float(parts[-3])
+                    hmF2 = float(parts[-2])
+                    conf = float(parts[-1])
+            except (ValueError, IndexError):
+                return None
+
+            # Range-validate: a corrupted column (a QD letter, a
+            # confidence score, a timestamp field) will not fall inside
+            # both physical ranges — foF2 0.5–30 MHz, hmF2 100–600 km.
+            if not (0.5 <= foF2 <= 30.0 and 100.0 <= hmF2 <= 600.0):
+                logger.debug(
+                    f"GIRO {station_code}: parsed foF2={foF2} MHz / "
+                    f"hmF2={hmF2} km out of physical range — rejected"
+                )
+                return None
+
+            return GiroMeasurement(
+                station_code=station_code,
+                timestamp=now,
+                foF2_MHz=foF2,
+                hmF2_km=hmF2,
+                confidence=min(1.0, max(0.0, conf) / 100.0),
+            )
             
         except Exception as e:
             logger.debug(f"Caught exception: {e}")
@@ -860,10 +938,33 @@ class IonoDataService:
         # Start with WAM-IPE grid interpolation
         with self._grid_lock:
             grid = self._current_grid
-        
-        if grid is not None and grid.is_valid():
+
+        # A grid older than WAMIPE_CACHE_MAX_AGE_S must not be served as
+        # current data: if the background fetch stalls, an hours-old grid
+        # was otherwise returned tagged source="wamipe" at full
+        # confidence (P-H22).  Treat a stale grid as unusable and fall
+        # back to the climatological model.
+        grid_age_s = None
+        if grid is not None and grid.timestamp is not None:
+            gts = grid.timestamp
+            if gts.tzinfo is None:
+                gts = gts.replace(tzinfo=timezone.utc)
+            ref = utc_time if utc_time.tzinfo is not None \
+                else utc_time.replace(tzinfo=timezone.utc)
+            grid_age_s = (ref - gts).total_seconds()
+
+        grid_stale = (
+            grid_age_s is not None and grid_age_s > WAMIPE_CACHE_MAX_AGE_S
+        )
+        if grid is not None and grid.is_valid() and not grid_stale:
             point = grid.interpolate(lat, lon)
         else:
+            if grid_stale:
+                logger.debug(
+                    f"WAM-IPE grid stale ({grid_age_s / 3600.0:.1f} h old, "
+                    f"max {WAMIPE_CACHE_MAX_AGE_S / 3600.0:.1f} h) — "
+                    f"using climatological fallback"
+                )
             # Fallback to climatological defaults
             point = self._climatological_fallback(lat, lon, utc_time)
         
