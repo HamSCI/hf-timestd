@@ -380,6 +380,7 @@ class L2CalibrationService:
                 continue
 
             last_ts = 0.0
+            parse_failures = 0
             for h5_path in reversed(h5_files):
                 try:
                     with h5py.File(str(h5_path), 'r', swmr=True) as f:
@@ -398,10 +399,24 @@ class L2CalibrationService:
                             break
                         if last_ts > 0:
                             break
-                except Exception:
+                except Exception as exc:  # noqa: BLE001
+                    # M-H22: do NOT swallow silently. A corrupt L2 file left
+                    # last_ts=0, and an unseedable channel then reprocesses its
+                    # whole lookback window — a storm with no logged cause.
+                    parse_failures += 1
+                    logger.warning(
+                        f"Startup seed: could not read L2 file {h5_path.name} "
+                        f"for channel {channel}: {exc} — trying the next-oldest file"
+                    )
                     continue
 
             if last_ts <= 0:
+                if parse_failures:
+                    logger.warning(
+                        f"Startup seed: no readable L2 file for channel {channel} "
+                        f"({parse_failures} failed to parse) — cursor stays at 0, so the "
+                        f"next cycle reprocesses the full lookback window"
+                    )
                 continue
 
             # Seed the cursor so _process_channel skips already-done work

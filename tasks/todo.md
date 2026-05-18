@@ -1,47 +1,36 @@
-# M-H19 / M-H20 — BroadcastKalmanFilter innovation & timing
+# M-H22 — L2 startup seed swallows parse errors silently
 
-## Findings
-- **M-H19** — `update()` fed `detect_mode_transition` and `_adaptive_process_noise`
-  the residual `measurement - state[0]` computed BEFORE the predict step. The
-  true innovation (post-predict) differs by doppler·dt, so the filter's
-  defences keyed off the wrong residual.
-- **M-H20** — "time since the last mode transition" was tracked two ways: an
-  update-counter (`time_since_mode_change`, incremented +1.0/update) feeding
-  the adaptive Q and search window, and a wall-clock timestamp
-  (`last_mode_transition_time`) feeding `is_converged()`. `load_state` restored
-  neither, so a restarted filter believed its last transition was ~10000 s ago
-  and could flip "converged" immediately.
+## Finding
+`L2CalibrationService._seed_last_processed` reads the newest L2 output file
+per channel to resume from the last calibrated minute. A bare
+`except Exception: continue` swallowed every per-file error. If a channel's
+files all failed to parse, `last_ts` stayed 0, the cursor stayed at 0, and the
+next cycle silently reprocessed the entire lookback window — a 24-hour
+reprocessing storm with no logged cause.
 
 ## Fix
-- **M-H19**: predict the state first, derive ONE innovation post-predict, feed
-  it to mode detection, the adaptive Q, and the measurement update. The
-  covariance predict is deferred until the adaptive Q is known (it depends only
-  on the post-predict innovation).
-- **M-H20**: drop the `time_since_mode_change` update-counter; one wall-clock
-  base, `last_mode_transition_time`, with all "minutes since" derived via the
-  new `_minutes_since_mode_change()` helper; persist `last_mode_transition_time`
-  in save/load_state (legacy state files without the key keep the stable
-  default).
+- Per-file: on a parse exception, log at WARNING (file name, channel, the
+  exception) before falling back to the next-oldest file.
+- Channel-level: if a channel ends up with no readable file (`last_ts <= 0`)
+  *because* of parse failures, log a WARNING naming the consequence (cursor
+  stays at 0 → full-window reprocess). The exception is still caught broadly
+  (`# noqa: BLE001`) — any file problem is a fallback, not a crash — it is
+  just no longer silent.
 
-Scope: `src/hf_timestd/core/broadcast_kalman_filter.py` only. +51 −33.
+Scope: `src/hf_timestd/core/l2_calibration_service.py` — `_seed_last_processed`
+only. +16 -1.
 
 ## Tasks — done
-- [x] Reorder `update()`: state-predict → one innovation → defences → covariance
-      predict → measurement update
-- [x] Replace `time_since_mode_change` with `_minutes_since_mode_change()`;
-      thread through `_adaptive_process_noise`, `get_search_window`, `is_converged`
-- [x] Persist/restore `last_mode_transition_time` in save/load_state
-- [x] Tests: `tests/test_broadcast_kalman_timing.py` (3)
+- [x] Log per-file parse failures at WARNING; track `parse_failures`
+- [x] Log the channel-level "unseedable → reprocess storm" consequence
+- [x] Tests: `tests/test_l2_seed_logging.py` (2)
 - [x] Full suite run
 
 ## Review
-- Files: `broadcast_kalman_filter.py` (+51 −33); new
-  `tests/test_broadcast_kalman_timing.py` (3 tests).
-- New suite 3/3: the defences see the post-predict innovation (3.0 ms, not the
-  pre-predict 5.0 ms, for a doppler=2 case); `time_since_mode_change` attr is
-  gone; a restarted filter restores a recent transition and therefore does NOT
-  immediately self-declare converged.
-- The known-flaky `test_restart_stability` (root cause M-H20) passed 8/8
-  consecutive runs after the fix.
-- Full repo suite: 1622 passed, 9 subtests passed (1619 + 3 new). One
+- Files: `l2_calibration_service.py` (+16 -1); new
+  `tests/test_l2_seed_logging.py` (2 tests).
+- New suite 2/2: a corrupt L2 file produces both the per-file and the
+  channel-level WARNING (and the cursor is visibly left at 0); a valid L2 file
+  seeds the cursor with no WARNING.
+- Full repo suite: 1624 passed, 9 subtests passed (1622 + 2 new). One
   pre-existing unrelated `test_l2_clickhouse_wire` failure, deselected.
