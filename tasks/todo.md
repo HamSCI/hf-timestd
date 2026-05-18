@@ -1,58 +1,55 @@
-# M-H15 — fusion uncertainty discards the holdover/WLS term
+# S3 — per-broadcast Kalman coast during a leap-second hold
 
 ## Goal
-`fuse()` computes a per-cycle `uncertainty` in the LOCKED/holdover branch, then
-~140 lines later `uncertainty = measurement_uncertainty` overwrites it with the
-static a-priori RSS budget. Consequences:
-- Holdover uncertainty growth never reaches Chrony — a dropout looks as certain
-  as a live lock.
-- The Increment 3 WLS uncertainty was inert on the reported value.
+During a CHU-FSK-detected TAI-UTC change (`_fsk_leap_second_hold`), every
+measurement is stepped by ~1 s. Increment 2 routed that into the fusion-level
+holdover coast, but `_apply_broadcast_kalmans` still ran a full `update()` on
+the stepped measurement — corrupting each per-broadcast Kalman's state.
 
-Scope: `src/hf_timestd/core/multi_broadcast_fusion.py` only — one block.
+S3: coast the per-broadcast Kalmans (`predict()`, not `update()`) for the
+duration of the hold.
+
+Scope: `src/hf_timestd/core/multi_broadcast_fusion.py` — `_apply_broadcast_kalmans` only.
 
 ## Fix
-Replace the overwrite with an RSS combination:
-
-    uncertainty = sqrt(branch_uncertainty²        # WLS (locked) or holdover term
-                       + systematic² + propagation² + rtp_jitter²
-                       + tone_detection² + multipath²)
-
-The branch term supersedes the crude `statistical_uncertainty` inside
-`measurement_uncertainty` (RSS-ing both would double-count). `measurement_uncertainty`
-itself is untouched — still used as the holdover clamp reference and the
-holdover-reason log. The dead `DISCRIMINATION_SUSPECT` block (confirmed dead:
-`consistency_flag` is only ever 'CROSS_STATION_DISAGREE'/'OK') is left alone.
-
-This also completes Increment 3: the WLS uncertainty now reaches the reported
-`uncertainty_ms` on a LOCKED cycle.
+`_apply_broadcast_kalmans` reads `self._fsk_leap_second_hold` once; per
+measurement, when the hold is active it calls `kalman.predict()` (advance the
+motion model, grow covariance) instead of `kalman.update(d_clock, snr)`.
+`predict()` already guards the uninitialised case (returns 0.0, 100 ms σ → the
+broadcast gets ~zero fusion weight). The hold is brief (~1 cycle), so a single
+`predict(dt=1.0)` per cycle is the correct coast.
 
 ## Tasks — all done
-- [x] git branch `mh15-holdover-uncertainty` off `dual-kalman-increment-3`
-- [x] Replace the `uncertainty = measurement_uncertainty` overwrite with the
-      RSS combination; refloor; honest comment
-- [x] Tests: `tests/test_fusion_holdover_uncertainty.py` (2)
+- [x] git branch `s3-leap-second-coast` off `metrology-physics-review-remediation`
+- [x] `_apply_broadcast_kalmans`: predict() vs update() branch on the hold;
+      docstring updated
+- [x] Tests: `tests/test_fusion_leap_second_coast.py` (3)
 - [x] Full suite run
 
 ## Review
 
 **Files changed**
-- `src/hf_timestd/core/multi_broadcast_fusion.py` — +21 −5 (one block).
-- `tests/test_fusion_holdover_uncertainty.py` — new, 2 tests.
+- `src/hf_timestd/core/multi_broadcast_fusion.py` — +26 −12 (one block).
+- `tests/test_fusion_leap_second_coast.py` — new, 3 tests.
 
 **Behaviour change**
-- Holdover: reported `uncertainty_ms` now grows with dropout duration
-  (verified: 1 min → 6.2 ms, 60 min → 6.2 ms, 600 min → 6.9 ms,
-  6000 min → 14.6 ms; pre-fix all four were identical).
-- LOCKED: reported `uncertainty_ms` is now RSS(WLS uncertainty, systematic,
-  propagation, jitter, tone, multipath) — the Increment 3 WLS term is no
-  longer discarded. The reported value is slightly different from before
-  (the WLS term replaces the crude std/√n statistical term).
-- `FusedResult.statistical_uncertainty_ms` is unchanged — still the crude
-  weighted-std diagnostic ("Measurement scatter"), as its schema documents.
+During a leap-second hold the per-broadcast Kalmans coast on their model
+instead of ingesting the 1-second-stepped measurement, so their state is no
+longer corrupted and they resume cleanly once the hold clears. Combined with
+Increment 2 (fusion-level output coast) and S2, a leap second is now handled
+coherently at both layers.
 
 **Verification**
 - `python -m py_compile`: OK.
-- New suite `test_fusion_holdover_uncertainty.py`: 2/2 — holdover uncertainty
-  monotonically grows with dropout duration; finite & positive.
-- Full repo suite: 1611 passed, 9 subtests passed (1609 + 2 new). One
+- New suite `test_fusion_leap_second_coast.py`: 3/3 — a converged Kalman is
+  not pulled by a +1000 ms stepped measurement during the hold; the filter
+  resumes normal tracking after the hold clears; an uninitialised filter
+  coasts to (0.0, 100 ms σ).
+- Full repo suite: 1614 passed, 9 subtests passed (1611 + 3 new). One
   pre-existing unrelated `test_l2_clickhouse_wire` failure, deselected.
+
+**Note** — of the agreed sub-decisions, S1 (redefine LOCKED as "≥2 broadcasts
+whose per-broadcast Kalmans are converged, sustained ≥3 cycles") was not
+implemented: Increment 2 deliberately kept the existing WLS-branch convergence
+criterion (`kalman_converged`). That refinement overlaps finding M-M13 and is
+not part of the dual-Kalman rework as scoped.

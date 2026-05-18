@@ -1138,6 +1138,13 @@ class MultiBroadcastFusion:
         - The Kalman tracks ionospheric path dynamics (ToF)
         - Glitches are rejected, real dynamics are preserved
 
+        Leap-second hold (S3): when a CHU-FSK-detected TAI-UTC change is in
+        effect, every measurement is stepped by ~1 s. Feeding that to the
+        per-broadcast Kalmans would corrupt their state, so the filters coast
+        — predict() (advance the motion model) instead of update() (incorporate
+        the measurement) — until the hold clears. The fusion layer separately
+        coasts its output on the last LOCKED value.
+
         Args:
             measurements: Raw measurements from L1/L2
             feed: 'l1' or 'l2' — selects the independent per-feed Kalman bank
@@ -1146,25 +1153,32 @@ class MultiBroadcastFusion:
             Measurements with Kalman-filtered d_clock values and uncertainties
         """
         filtered_measurements = []
-        
+
+        # S3: coast every per-broadcast Kalman through a leap-second hold rather
+        # than updating it with the 1-second-stepped measurement.
+        leap_second_hold = getattr(self, '_fsk_leap_second_hold', False)
+
         for m in measurements:
             # Construct broadcast ID
             broadcast_id = f"{m.station}_{int(m.frequency_mhz * 1000)}"
-            
+
             # Get or create the Kalman filter for this broadcast on this feed
             kalman = self._get_or_create_broadcast_kalman(
                 broadcast_id, m.station, m.frequency_mhz, feed
             )
-            
-            # Update Kalman with measurement
+
             # Note: We're filtering d_clock directly, which includes both
             # ionospheric path and clock offset. The TEC estimator will
             # later separate these.
             snr_db = getattr(m, 'snr_db', 10.0)  # Default SNR if not available
-            
-            filtered_d_clock, kalman_uncertainty = kalman.update(
-                m.d_clock_ms, snr_db
-            )
+
+            if leap_second_hold:
+                # Coast: advance the filter's model, ignore the stepped value.
+                filtered_d_clock, kalman_uncertainty = kalman.predict()
+            else:
+                filtered_d_clock, kalman_uncertainty = kalman.update(
+                    m.d_clock_ms, snr_db
+                )
             
             # Create new measurement with filtered values
             # We preserve the original measurement but update d_clock and uncertainty
