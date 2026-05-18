@@ -76,10 +76,12 @@ class CarrierTECResult:
 
     # Quality
     n_points: int = 0
-    sigma_dtec_tecu: float = 0.0       # Noise floor estimate
+    sigma_dtec_tecu: float = 0.0       # 1σ of integrated dTEC at end of run
+                                       # (random-walk √N growth); NaN if unknown
     mean_snr_db: float = 0.0
-    unwrap_quality: float = 1.0        # 1.0 = clean, <1.0 = ambiguous unwrapping
-    n_phase_jumps: int = 0             # Number of inter-sample |Δφ| > π/2 steps
+    unwrap_quality: float = 1.0        # unwrap-RISK score (not proof); see compute_dtec
+    n_phase_jumps: int = 0             # inter-sample steps near the π unwrap boundary
+    n_cycle_slips: int = 0             # detected cycle slips (phase-rate spikes)
 
 
 class CarrierTECEstimator:
@@ -137,10 +139,15 @@ class CarrierTECEstimator:
         # Unwrap phase for continuity
         phase_unwrapped = np.unwrap(carrier_phase_rad)
 
-        # P3-A: Phase unwrapping quality check.
-        # If any inter-sample raw phase step |Δφ_raw| > π/2, np.unwrap may have
-        # chosen the wrong 2π branch.  Count such steps and compute a quality
-        # score.  Caller can gate on unwrap_quality < threshold.
+        # P3-A: Phase-unwrap RISK indicator (P-H3).
+        # This does NOT detect wrong-branch unwrapping — that is impossible
+        # from an already-sampled phase series: a true inter-tick step >π
+        # aliases to a small wrapped diff, so the failure is invisible here.
+        # What it measures is RISK — post-unwrap steps whose magnitude
+        # approaches the π Nyquist boundary. A high count means the cadence is
+        # marginal for the observed Doppler and the integrated dTEC may be
+        # aliased. Genuine detection would need an independent IQ frequency
+        # estimate. Callers gate on unwrap_quality as a risk score, not proof.
         dphi_raw = np.diff(carrier_phase_rad)
         # Wrap raw differences to (-π, π] to measure the true step size
         dphi_raw_wrapped = (dphi_raw + np.pi) % (2 * np.pi) - np.pi
@@ -174,9 +181,14 @@ class CarrierTECEstimator:
         
         # Threshold: > 5 Hz/s acceleration is almost certainly a cycle slip for ionospheric HF
         slip_mask = np.abs(d2phi) > 5.0
-        if np.any(slip_mask):
-            logger.debug(f"Detected {np.sum(slip_mask)} cycle slips for {station}/{channel} at {frequency_mhz}MHz")
-            doppler_hz[slip_mask] = 0.0 # Freeze dTEC rate during the slip
+        n_cycle_slips = int(np.sum(slip_mask))
+        if n_cycle_slips > 0:
+            logger.debug(f"Detected {n_cycle_slips} cycle slips for {station}/{channel} at {frequency_mhz}MHz")
+            # Hold the dTEC rate flat through the slip — the spurious
+            # integer-cycle jump must not be integrated. This is a coast, not
+            # a measurement: n_cycle_slips is surfaced on the result (P-H4) so
+            # consumers can down-weight or segment a slip-contaminated series.
+            doppler_hz[slip_mask] = 0.0
 
         # Midpoint epochs for the derivative
         mid_epochs = (epochs[:-1] + epochs[1:]) / 2.0
@@ -212,8 +224,14 @@ class CarrierTECEstimator:
             anchor_tec = anchor_tec_tecu
             anchor_ep = anchor_epoch
 
-        # Noise floor estimate: std of detrended dTEC over short windows
-        sigma = self._estimate_noise_floor(mid_epochs, dtec_tecu)
+        # Uncertainty of the integrated dTEC (P-H7). Integrated dTEC is a
+        # random-walk cumulative sum, so its 1σ grows as √N with the number of
+        # integration steps. _estimate_noise_floor gives the per-tick dTEC
+        # noise (NaN when it cannot be estimated); propagate it to the
+        # end-of-integration uncertainty. NaN propagates — an unknown noise
+        # floor yields an unknown (NaN) σ, never a spurious 0.0.
+        sigma_floor = self._estimate_noise_floor(mid_epochs, dtec_tecu)
+        sigma = float(sigma_floor * np.sqrt(max(len(mid_epochs), 1)))
 
         return CarrierTECResult(
             station=station,
@@ -232,6 +250,7 @@ class CarrierTECEstimator:
             mean_snr_db=0.0,  # Caller should set this
             unwrap_quality=unwrap_quality,
             n_phase_jumps=n_jumps,
+            n_cycle_slips=n_cycle_slips,
         )
 
     def compute_dtec_from_records(
@@ -353,17 +372,20 @@ class CarrierTECEstimator:
         window_seconds: float = 60.0
     ) -> float:
         """
-        Estimate dTEC noise floor from detrended short windows.
+        Estimate the per-tick dTEC noise floor from detrended short windows.
 
-        Uses the median absolute deviation of detrended segments as a
-        robust noise estimator.
+        Uses the median absolute deviation of detrended segments as a robust
+        noise estimator. Returns NaN — not 0.0 — when the noise floor cannot
+        be estimated (too few points, non-positive cadence, no usable
+        windows): an unknown noise floor must read as unknown, not perfect
+        (P-H7). The caller propagates NaN through to sigma_dtec_tecu.
         """
         if len(epochs) < 10:
-            return 0.0
+            return float('nan')
 
         median_dt = float(np.median(np.diff(epochs)))
         if median_dt <= 0:
-            return 0.0
+            return float('nan')
 
         window_samples = max(5, int(window_seconds / median_dt))
         mad_values = []
@@ -385,7 +407,7 @@ class CarrierTECEstimator:
             mad_values.append(mad)
 
         if not mad_values:
-            return 0.0
+            return float('nan')
 
         # Convert MAD to sigma: sigma ≈ 1.4826 × MAD
         return float(np.median(mad_values)) * 1.4826
