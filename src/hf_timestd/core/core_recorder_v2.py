@@ -318,6 +318,10 @@ class CoreRecorderV2:
         self._t6_drift_flag_sustained: bool = False
         self._t6_drift_flag_anchor_discontinuity: bool = False
         self._t6_drift_anchor_residual_samples: Optional[int] = None
+        # Consecutive polls on which the anchor residual has breached
+        # T6_ANCHOR_DISCONTINUITY_SAMPLES — the persistence gate that
+        # keeps reading noise from triggering a re-capture (Signal A).
+        self._t6_drift_residual_breach_count: int = 0
         self._t6_drift_last_check_wall: Optional[float] = None
         self._t6_drift_anchor_gps_ns: Optional[int] = None
         self._t6_drift_anchor_rtp_timesnap: Optional[int] = None
@@ -1167,14 +1171,32 @@ class CoreRecorderV2:
     # Signal A (anchor consistency).  At each poll, we project the
     # captured anchor's (gps_time, rtp_timesnap) forward by the elapsed
     # gps_time and compare to radiod's freshly-reported rtp_timesnap.
-    # In healthy operation the residual is bounded by the sample-clock
-    # quantization plus radiod's status-emit jitter — single-digit
-    # samples.  A residual above this threshold means either radiod
-    # restarted (RTP counter discontinuity) or the host clock took an
-    # unannounced step large enough to invalidate the anchor.  1000
-    # samples ≈ 42 ms at 24 kHz: well above any legitimate drift,
-    # well below the multi-second discontinuity from a real restart.
+    # A residual above this threshold means either radiod restarted
+    # (RTP counter discontinuity) or the host clock took an unannounced
+    # step large enough to invalidate the anchor.  1000 samples ≈ 10 ms
+    # at 96 kHz.
+    #
+    # TSL3 anchor-churn fix (2026-05-18, docs/TIMING-PIPELINE-WIRING.md
+    # §10.3): a *single* discover_channels reading is far noisier than
+    # this threshold — measured noise floor ≈ ±400 samples, with
+    # intermittent outliers of tens of thousands of samples (radiod
+    # status-emit jitter / a stale status packet caught in the listen
+    # window).  Acting on one such reading re-captured the anchor every
+    # ~minute — exactly the "periodic refresh" §10.3 identifies as wrong
+    # (it re-injects chrony's slew + reading noise into Δ).  So the
+    # *residual* check raises the flag only after the threshold is
+    # breached on T6_ANCHOR_DISCONTINUITY_POLLS *consecutive* polls: a
+    # genuine radiod restart / clock step is a permanent discontinuity
+    # that breaches every poll, while a noise outlier is transient and
+    # resets the counter.  The anchor then stays frozen (the §10.3
+    # design) in normal operation.  (The counter-rollback check below is
+    # an unambiguous namespace change and still fires immediately.)
     T6_ANCHOR_DISCONTINUITY_SAMPLES = 1000
+    # Consecutive breaching polls (at the 5 s poll cadence) required
+    # before the residual check flags a discontinuity.  5 → 25 s of
+    # sustained breach: a real restart/clock-step clears that trivially,
+    # a run of independent noise outliers effectively never does.
+    T6_ANCHOR_DISCONTINUITY_POLLS = 5
     # Signal B (sustained Δ breach).  Δ = chrony's view of TSL3 offset.
     # In settled operation |Δ| stays sub-µs.  A sustained breach of
     # 1 ms for ≥ 60 s indicates the anchor has lost validity or the
@@ -1560,15 +1582,36 @@ class CoreRecorderV2:
         residual_samples = actual_rtp_delta - expected_rtp_delta
         self._t6_drift_anchor_residual_samples = residual_samples
 
+        # Persistence gate (TSL3 anchor-churn fix — see
+        # T6_ANCHOR_DISCONTINUITY_POLLS).  A single discover_channels
+        # reading carries hundreds of samples of noise with intermittent
+        # outliers of tens of thousands; a genuine radiod restart / clock
+        # step is a *permanent* discontinuity that breaches every poll.
+        # Flag only after the residual has breached the threshold on
+        # T6_ANCHOR_DISCONTINUITY_POLLS consecutive polls — a lone noisy
+        # reading is ignored and the anchor stays frozen.
         if abs(residual_samples) > self.T6_ANCHOR_DISCONTINUITY_SAMPLES:
-            if not self._t6_drift_flag_anchor_discontinuity:
+            self._t6_drift_residual_breach_count += 1
+            if (self._t6_drift_residual_breach_count
+                    >= self.T6_ANCHOR_DISCONTINUITY_POLLS
+                    and not self._t6_drift_flag_anchor_discontinuity):
                 logger.warning(
                     f"T6 drift monitor: anchor discontinuity raised "
-                    f"(residual={residual_samples} samples, "
-                    f"threshold={self.T6_ANCHOR_DISCONTINUITY_SAMPLES} samples, "
-                    f"elapsed_gps={elapsed_gps_ns/1e9:.1f}s)"
+                    f"(residual={residual_samples} samples > "
+                    f"{self.T6_ANCHOR_DISCONTINUITY_SAMPLES} on "
+                    f"{self._t6_drift_residual_breach_count} consecutive "
+                    f"polls, elapsed_gps={elapsed_gps_ns/1e9:.1f}s)"
                 )
-            self._t6_drift_flag_anchor_discontinuity = True
+                self._t6_drift_flag_anchor_discontinuity = True
+        else:
+            if self._t6_drift_residual_breach_count > 0:
+                logger.debug(
+                    "T6 drift monitor: anchor residual back within "
+                    "threshold after %d consecutive breach(es) — transient "
+                    "noise, anchor held",
+                    self._t6_drift_residual_breach_count,
+                )
+            self._t6_drift_residual_breach_count = 0
 
     def _t6_check_delta_breach(self, delta_ns: int) -> None:
         """Layer 2 Signal B — track sustained |Δ| > threshold.
@@ -1772,6 +1815,7 @@ class CoreRecorderV2:
         self._t6_drift_flag_sustained = False
         self._t6_drift_first_breach_wall = None
         self._t6_drift_anchor_residual_samples = 0
+        self._t6_drift_residual_breach_count = 0
 
         # Accounting.
         self._t6_recapture_count += 1
@@ -2255,6 +2299,10 @@ class CoreRecorderV2:
                         'sustained_breach': self._t6_drift_flag_sustained,
                         'anchor_discontinuity': self._t6_drift_flag_anchor_discontinuity,
                         'anchor_residual_samples': self._t6_drift_anchor_residual_samples,
+                        # Consecutive residual breaches — the persistence
+                        # gate's counter (flags only at
+                        # T6_ANCHOR_DISCONTINUITY_POLLS).
+                        'residual_breach_count': self._t6_drift_residual_breach_count,
                         'breach_duration_sec': (
                             round(time.monotonic() - self._t6_drift_first_breach_wall, 1)
                             if self._t6_drift_first_breach_wall is not None else None
