@@ -11,7 +11,9 @@ Covers:
 - Confidence gating (MIN_CONFIDENCE_FOR_VALIDATION)
 - Bias bound (MAX_TEC_DIFFERENCE_TECU)
 - Timestamp parsing (ISO8601 string, Unix epoch, datetime)
-- IPP location calculation (midpoint heuristic)
+- IPP location (great-circle midpoint, P-H9)
+- Slant->vertical obliquity mapping before comparison (P-H9)
+- Non-physical elevation gating
 - Station coordinate lookup (case-insensitive, unknown returns None)
 - validate_batch wiring per-station IPP geometry into validate_tec_measurement
 """
@@ -23,6 +25,12 @@ import numpy as np
 import pytest
 
 from hf_timestd.core.tec_validator import TECValidator
+from hf_timestd.core.tec_geometry import calculate_midpoint, convert_slant_to_vertical
+
+
+# A nominal mid-sky elevation for direct validate_tec_measurement() calls
+# whose assertions are about flag transitions, not the bias magnitude.
+NOMINAL_ELEV = 45.0
 
 
 # =============================================================================
@@ -104,27 +112,40 @@ class TestStationLookup:
 
 
 # =============================================================================
-# IPP location
+# IPP location — great-circle midpoint (P-H9)
 # =============================================================================
 
 
 class TestIPPLocation:
     def test_midpoint_of_collinear_points(self, validator):
+        # Two points on the same meridian: the meridian is a great circle, so
+        # the great-circle midpoint is the plain latitude average.
         ipp_lat, ipp_lon = validator.calculate_ipp_location(
             tx_lat=40.0, tx_lon=-100.0,
             rx_lat=20.0, rx_lon=-100.0,
         )
-        # Simple arithmetic mean (the implementation is the simplified midpoint)
         assert ipp_lat == pytest.approx(30.0)
         assert ipp_lon == pytest.approx(-100.0)
 
-    def test_midpoint_in_both_dimensions(self, validator):
+    def test_midpoint_matches_great_circle_helper(self, validator):
         ipp_lat, ipp_lon = validator.calculate_ipp_location(
             tx_lat=40.0, tx_lon=-100.0,
             rx_lat=30.0, rx_lon=-90.0,
         )
-        assert ipp_lat == pytest.approx(35.0)
-        assert ipp_lon == pytest.approx(-95.0)
+        gc_lat, gc_lon = calculate_midpoint(40.0, -100.0, 30.0, -90.0)
+        assert ipp_lat == pytest.approx(gc_lat)
+        assert ipp_lon == pytest.approx(gc_lon)
+
+    def test_ipp_is_great_circle_not_cartesian(self, validator):
+        # Two 60°N points 120° of longitude apart: the great-circle path bows
+        # poleward, so the IPP latitude exceeds 60° — the Cartesian lat/lon
+        # mean (the pre-P-H9 behaviour) would wrongly give exactly 60°N.
+        ipp_lat, ipp_lon = validator.calculate_ipp_location(
+            tx_lat=60.0, tx_lon=-150.0,
+            rx_lat=60.0, rx_lon=-30.0,
+        )
+        assert ipp_lat > 60.5
+        assert ipp_lon == pytest.approx(-90.0)
 
 
 # =============================================================================
@@ -137,14 +158,14 @@ class TestValidateTECMeasurement:
         with patch('hf_timestd.core.ionospheric_model.IonosphericModel',
                    side_effect=RuntimeError("boom")):
             v = TECValidator()
-        result = v.validate_tec_measurement(_measurement(), 40.0, -100.0)
+        result = v.validate_tec_measurement(_measurement(), 40.0, -100.0, NOMINAL_ELEV)
         assert result['validation_flag'] == TECValidator.FLAG_VTEC_UNAVAILABLE
         assert result['vtec_tecu'] is None
         assert result['tec_bias_tecu'] is None
 
     def test_low_confidence_skips_validation(self, validator):
         result = validator.validate_tec_measurement(
-            _measurement(confidence=0.4), 40.0, -100.0)
+            _measurement(confidence=0.4), 40.0, -100.0, NOMINAL_ELEV)
         assert result['validation_flag'] == TECValidator.FLAG_UNVALIDATED
         # Iono model must not have been consulted
         validator.iono_model.get_ionex_vtec.assert_not_called()
@@ -153,14 +174,14 @@ class TestValidateTECMeasurement:
         # Exactly the threshold should be allowed (0.5 is not < 0.5)
         validator.iono_model.get_ionex_vtec.return_value = (20.0, '/some/file')
         result = validator.validate_tec_measurement(
-            _measurement(confidence=0.5), 40.0, -100.0)
+            _measurement(confidence=0.5), 40.0, -100.0, NOMINAL_ELEV)
         assert result['validation_flag'] == TECValidator.FLAG_VALIDATED
 
     def test_iso8601_timestamp_with_z(self, validator):
         validator.iono_model.get_ionex_vtec.return_value = (22.0, '/f')
         result = validator.validate_tec_measurement(
             _measurement(timestamp_utc='2026-04-26T12:00:00Z'),
-            40.0, -100.0)
+            40.0, -100.0, NOMINAL_ELEV)
         assert result['validation_flag'] == TECValidator.FLAG_VALIDATED
         # The model was called with a parsed datetime
         _, kwargs = validator.iono_model.get_ionex_vtec.call_args
@@ -170,69 +191,122 @@ class TestValidateTECMeasurement:
         validator.iono_model.get_ionex_vtec.return_value = (22.0, '/f')
         ts = 1745667600  # arbitrary epoch
         result = validator.validate_tec_measurement(
-            _measurement(timestamp_utc=ts), 40.0, -100.0)
+            _measurement(timestamp_utc=ts), 40.0, -100.0, NOMINAL_ELEV)
         assert result['validation_flag'] == TECValidator.FLAG_VALIDATED
 
     def test_datetime_passthrough(self, validator):
         validator.iono_model.get_ionex_vtec.return_value = (22.0, '/f')
         dt = datetime(2026, 4, 26, 12, 0, tzinfo=timezone.utc)
         result = validator.validate_tec_measurement(
-            _measurement(timestamp_utc=dt), 40.0, -100.0)
+            _measurement(timestamp_utc=dt), 40.0, -100.0, NOMINAL_ELEV)
         assert result['validation_flag'] == TECValidator.FLAG_VALIDATED
 
     def test_unparseable_timestamp_returns_failed(self, validator):
         result = validator.validate_tec_measurement(
-            _measurement(timestamp_utc='not-a-date'), 40.0, -100.0)
+            _measurement(timestamp_utc='not-a-date'), 40.0, -100.0, NOMINAL_ELEV)
         assert result['validation_flag'] == TECValidator.FLAG_VALIDATION_FAILED
 
     @pytest.mark.parametrize("bad_value", [None, float('nan'), float('inf')])
     def test_invalid_hf_tec_returns_failed(self, validator, bad_value):
         result = validator.validate_tec_measurement(
-            _measurement(tec_tecu=bad_value), 40.0, -100.0)
+            _measurement(tec_tecu=bad_value), 40.0, -100.0, NOMINAL_ELEV)
         assert result['validation_flag'] == TECValidator.FLAG_VALIDATION_FAILED
+
+    @pytest.mark.parametrize("bad_elev", [0.0, -5.0, float('nan'), float('inf')])
+    def test_nonphysical_elevation_returns_failed(self, validator, bad_elev):
+        # No single-hop obliquity mapping exists for a non-positive or
+        # non-finite elevation; the measurement cannot be validated.
+        validator.iono_model.get_ionex_vtec.return_value = (20.0, '/f')
+        result = validator.validate_tec_measurement(
+            _measurement(), 40.0, -100.0, bad_elev)
+        assert result['validation_flag'] == TECValidator.FLAG_VALIDATION_FAILED
+        validator.iono_model.get_ionex_vtec.assert_not_called()
 
     def test_ionex_returns_none_marks_vtec_unavailable(self, validator):
         validator.iono_model.get_ionex_vtec.return_value = None
-        result = validator.validate_tec_measurement(_measurement(), 40.0, -100.0)
+        result = validator.validate_tec_measurement(
+            _measurement(), 40.0, -100.0, NOMINAL_ELEV)
         assert result['validation_flag'] == TECValidator.FLAG_VTEC_UNAVAILABLE
         assert result['vtec_tecu'] is None
 
     @pytest.mark.parametrize("bad_vtec", [0.5, 1.0, 500.0, 1000.0])
     def test_out_of_range_vtec_marks_failed(self, validator, bad_vtec):
         validator.iono_model.get_ionex_vtec.return_value = (bad_vtec, '/f')
-        result = validator.validate_tec_measurement(_measurement(), 40.0, -100.0)
+        result = validator.validate_tec_measurement(
+            _measurement(), 40.0, -100.0, NOMINAL_ELEV)
         assert result['validation_flag'] == TECValidator.FLAG_VALIDATION_FAILED
 
     def test_excessive_bias_marks_failed_but_records_values(self, validator):
-        # HF=25, GPS=200 → bias=-175 TECU, beyond the 50 TECU bound
+        # HF slant=25 -> vertical ~18.6; GPS=200 -> bias well beyond 50 TECU.
         validator.iono_model.get_ionex_vtec.return_value = (200.0, '/f')
         result = validator.validate_tec_measurement(
-            _measurement(tec_tecu=25.0), 40.0, -100.0)
+            _measurement(tec_tecu=25.0), 40.0, -100.0, NOMINAL_ELEV)
         assert result['validation_flag'] == TECValidator.FLAG_VALIDATION_FAILED
-        # Even on failure-by-bias, the raw HF/GPS comparison is preserved so
-        # downstream telemetry can flag the magnitude of the disagreement.
+        # Even on failure-by-bias, the vertical-vs-vertical comparison is
+        # preserved so downstream telemetry can flag the disagreement.
+        hf_vtec, _ = convert_slant_to_vertical(25.0, NOMINAL_ELEV)
         assert result['vtec_tecu'] == pytest.approx(200.0)
-        assert result['tec_bias_tecu'] == pytest.approx(-175.0)
+        assert result['tec_bias_tecu'] == pytest.approx(hf_vtec - 200.0)
 
     def test_ionex_exception_marks_failed(self, validator):
         validator.iono_model.get_ionex_vtec.side_effect = RuntimeError("net error")
-        result = validator.validate_tec_measurement(_measurement(), 40.0, -100.0)
+        result = validator.validate_tec_measurement(
+            _measurement(), 40.0, -100.0, NOMINAL_ELEV)
         assert result['validation_flag'] == TECValidator.FLAG_VALIDATION_FAILED
 
     def test_successful_validation_records_bias(self, validator):
         validator.iono_model.get_ionex_vtec.return_value = (22.0, '/f')
         result = validator.validate_tec_measurement(
-            _measurement(tec_tecu=25.0), 40.0, -100.0)
+            _measurement(tec_tecu=25.0), 40.0, -100.0, NOMINAL_ELEV)
         assert result['validation_flag'] == TECValidator.FLAG_VALIDATED
+        hf_vtec, _ = convert_slant_to_vertical(25.0, NOMINAL_ELEV)
         assert result['vtec_tecu'] == pytest.approx(22.0)
-        assert result['tec_bias_tecu'] == pytest.approx(3.0)
+        assert result['hf_vtec_tecu'] == pytest.approx(hf_vtec)
+        assert result['tec_bias_tecu'] == pytest.approx(hf_vtec - 22.0)
 
     def test_negative_bias_when_hf_below_gps(self, validator):
         validator.iono_model.get_ionex_vtec.return_value = (40.0, '/f')
         result = validator.validate_tec_measurement(
-            _measurement(tec_tecu=20.0), 40.0, -100.0)
+            _measurement(tec_tecu=20.0), 40.0, -100.0, NOMINAL_ELEV)
         assert result['validation_flag'] == TECValidator.FLAG_VALIDATED
-        assert result['tec_bias_tecu'] == pytest.approx(-20.0)
+        hf_vtec, _ = convert_slant_to_vertical(20.0, NOMINAL_ELEV)
+        assert result['tec_bias_tecu'] == pytest.approx(hf_vtec - 40.0)
+        assert result['tec_bias_tecu'] < 0.0
+
+
+# =============================================================================
+# Obliquity correction — slant -> vertical before comparison (P-H9)
+# =============================================================================
+
+
+class TestObliquityCorrection:
+    def test_hf_slant_is_mapped_to_vertical_before_comparison(self, validator):
+        # At low elevation a slant TEC sits well above the vertical GPS VTEC
+        # purely from path geometry. Pre-P-H9 (raw slant minus vertical) this
+        # looked like a large bias; the obliquity mapping removes it.
+        validator.iono_model.get_ionex_vtec.return_value = (20.0, '/f')
+        elevation = 15.0  # low elevation -> large obliquity factor
+        result = validator.validate_tec_measurement(
+            _measurement(tec_tecu=50.0), 40.0, -100.0, elevation)
+
+        hf_vtec, M = convert_slant_to_vertical(50.0, elevation)
+        assert M > 1.0
+        assert result['obliquity_factor'] == pytest.approx(M)
+        assert result['hf_vtec_tecu'] == pytest.approx(hf_vtec)
+        # Vertical TEC is smaller than the slant TEC it was mapped from.
+        assert result['hf_vtec_tecu'] < 50.0
+        # The reported bias is vertical-vs-vertical, far smaller than the
+        # raw slant-vs-vertical difference (50 - 20 = 30 TECU).
+        assert result['tec_bias_tecu'] == pytest.approx(hf_vtec - 20.0)
+        assert abs(result['tec_bias_tecu']) < 30.0
+
+    def test_obliquity_factor_grows_as_elevation_drops(self, validator):
+        validator.iono_model.get_ionex_vtec.return_value = (20.0, '/f')
+        high = validator.validate_tec_measurement(
+            _measurement(), 40.0, -100.0, 80.0)
+        low = validator.validate_tec_measurement(
+            _measurement(), 40.0, -100.0, 10.0)
+        assert low['obliquity_factor'] > high['obliquity_factor'] > 1.0
 
 
 # =============================================================================
@@ -250,17 +324,17 @@ class TestValidateBatch:
         # No iono lookup for unknown stations
         validator.iono_model.get_ionex_vtec.assert_not_called()
 
-    def test_known_station_uses_midpoint_ipp(self, validator):
+    def test_known_station_uses_great_circle_ipp(self, validator):
         validator.iono_model.get_ionex_vtec.return_value = (20.0, '/f')
         # WWV is in Fort Collins (40.678, -105.038)
         rx_lat, rx_lon = 30.0, -85.0
         measurements = [_measurement(station='WWV')]
         validator.validate_batch(measurements, rx_lat, rx_lon)
 
-        # The IPP passed to get_ionex_vtec should equal the midpoint
+        # The IPP passed to get_ionex_vtec is the great-circle midpoint.
         wwv_lat, wwv_lon = 40.678, -105.038
-        expected_lat = (wwv_lat + rx_lat) / 2.0
-        expected_lon = (wwv_lon + rx_lon) / 2.0
+        expected_lat, expected_lon = calculate_midpoint(
+            wwv_lat, wwv_lon, rx_lat, rx_lon)
 
         _, kwargs = validator.iono_model.get_ionex_vtec.call_args
         assert kwargs['lat'] == pytest.approx(expected_lat)
@@ -277,6 +351,8 @@ class TestValidateBatch:
         assert 'validation_flag' in result[0]
         assert 'tec_bias_tecu' in result[0]
         assert 'vtec_tecu' in result[0]
+        assert 'hf_vtec_tecu' in result[0]
+        assert 'obliquity_factor' in result[0]
 
     def test_batch_length_matches_input(self, validator):
         validator.iono_model.get_ionex_vtec.return_value = (20.0, '/f')
