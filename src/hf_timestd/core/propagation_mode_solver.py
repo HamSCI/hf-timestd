@@ -480,7 +480,7 @@ class PropagationModeSolver:
                     propagation_delay_ms=arr.geometric_delay_ms,
                     ionospheric_delay_ms=arr.iono_delay_ms,
                     total_delay_ms=arr.delay_ms,
-                    delay_uncertainty_ms=arr.uncertainty_ms,
+                    delay_uncertainty_ms=arr.uncertainty_1sigma_ms,
                     viable=arr.is_feasible,
                     model_confidence=prediction.model_confidence,
                 ))

@@ -125,7 +125,7 @@ class TestHFPropagationModel:
             if arrival.is_feasible:
                 assert arrival.delay_ms > 0
                 assert arrival.path_length_km > 0
-                assert arrival.uncertainty_ms > 0
+                assert arrival.uncertainty_1sigma_ms > 0
             else:
                 # Infeasible modes should have zero delay
                 assert arrival.delay_ms == 0.0
@@ -136,9 +136,9 @@ class TestHFPropagationModel:
         pred = self.model.predict('WWV', 10.0, utc_time)
         
         # With parametric fallback, uncertainty should be moderate
-        assert pred.primary_uncertainty_ms > 0
+        assert pred.primary_uncertainty_1sigma_ms > 0
         # Parametric should give higher uncertainty than WAM-IPE would
-        assert pred.primary_uncertainty_ms > 1.0
+        assert pred.primary_uncertainty_1sigma_ms > 1.0
     
     def test_differential_delay(self):
         """Differential delay between frequencies should be consistent with TEC."""

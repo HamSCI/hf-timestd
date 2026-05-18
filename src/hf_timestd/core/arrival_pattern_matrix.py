@@ -974,7 +974,7 @@ class ArrivalPatternMatrix:
                         data_source=prediction.data_source,
                         model_confidence=prediction.model_confidence,
                         distance_km=distance_km,
-                        model_uncertainty_ms=prediction.primary_uncertainty_ms,
+                        model_uncertainty_ms=prediction.primary_uncertainty_3sigma_ms,
                         is_primary=True
                     )
                     continue
@@ -993,7 +993,7 @@ class ArrivalPatternMatrix:
                     
                     # Adaptive uncertainty: use model's uncertainty estimate,
                     # but respect the dynamic window tracking
-                    model_3sigma_ms = mode_arrival.uncertainty_ms * 3.0
+                    model_3sigma_ms = mode_arrival.uncertainty_3sigma_ms
                     
                     self._add_arrival_to_matrix(
                         matrix=matrix,

@@ -457,7 +457,7 @@ class MetrologyEngine:
                     return (
                         prediction.primary_delay_ms,
                         prediction.distance_km,
-                        prediction.primary_uncertainty_ms  # Already 1-sigma
+                        prediction.primary_uncertainty_1sigma_ms  # explicit 1-sigma (P-H13)
                     )
             except Exception as e:
                 logger.debug(f"HFPropagationModel fallback failed: {e}")

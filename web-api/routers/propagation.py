@@ -275,7 +275,7 @@ async def get_model_prediction(
             'distance_km': prediction.distance_km,
             'primary_delay_ms': prediction.primary_delay_ms,
             'primary_mode': prediction.primary_mode,
-            'primary_uncertainty_ms': prediction.primary_uncertainty_ms,
+            'primary_uncertainty_ms': prediction.primary_uncertainty_1sigma_ms,
             'data_source': prediction.data_source,
             'model_confidence': prediction.model_confidence,
             'iono_params': {
@@ -333,7 +333,7 @@ async def get_all_station_predictions(
                     'frequency_mhz': freq,
                     'primary_delay_ms': round(pred.primary_delay_ms, 3),
                     'primary_mode': pred.primary_mode,
-                    'uncertainty_ms': round(pred.primary_uncertainty_ms, 3),
+                    'uncertainty_ms': round(pred.primary_uncertainty_1sigma_ms, 3),
                     'data_source': pred.data_source,
                     'model_confidence': round(pred.model_confidence, 3),
                 })

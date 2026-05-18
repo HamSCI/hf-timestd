@@ -132,12 +132,19 @@ class ModeArrival:
     reflection_height_km: float    # Ionospheric reflection height
     elevation_angle_deg: float     # Launch elevation angle
     is_feasible: bool              # Whether this mode is physically possible
-    uncertainty_ms: float          # 1-sigma uncertainty estimate
-    
+    uncertainty_1sigma_ms: float   # 1-sigma uncertainty estimate (P-H13)
+
     # Diagnostics
     slant_tec_tecu: float = 0.0   # Slant TEC along path
     foF2_MHz: float = 0.0         # F2 critical frequency (for MUF check)
     muf_MHz: float = 0.0          # Maximum usable frequency for this mode
+
+    @property
+    def uncertainty_3sigma_ms(self) -> float:
+        """3-sigma uncertainty — the convention used by the arrival-window
+        schema and the propagation-contract tier table (P-H13). Always
+        exactly 3x the 1-sigma estimate."""
+        return 3.0 * self.uncertainty_1sigma_ms
 
 
 @dataclass
@@ -154,12 +161,19 @@ class PropagationPrediction:
     # Best (most likely) arrival
     primary_delay_ms: float = 0.0
     primary_mode: str = ""
-    primary_uncertainty_ms: float = 15.0
-    
+    primary_uncertainty_1sigma_ms: float = 5.0   # 1-sigma (P-H13)
+
     # Model metadata
     data_source: str = "fallback"  # "wamipe", "wamipe+giro", "iri", "fallback"
     model_confidence: float = 0.0  # 0-1
-    
+
+    @property
+    def primary_uncertainty_3sigma_ms(self) -> float:
+        """3-sigma uncertainty of the primary arrival — the schema /
+        propagation-contract convention (P-H13). Always exactly 3x the
+        1-sigma value."""
+        return 3.0 * self.primary_uncertainty_1sigma_ms
+
     def get_feasible_arrivals(self) -> List[ModeArrival]:
         """Get all feasible arrivals sorted by delay."""
         return sorted(
@@ -350,13 +364,15 @@ class HFPropagationModel:
             primary = feasible[0]
             prediction.primary_delay_ms = primary.delay_ms
             prediction.primary_mode = primary.mode.label
-            prediction.primary_uncertainty_ms = primary.uncertainty_ms
+            prediction.primary_uncertainty_1sigma_ms = primary.uncertainty_1sigma_ms
         else:
             # No feasible mode — use vacuum fallback
             vacuum_delay = distance_km / C_LIGHT_KM_MS
             prediction.primary_delay_ms = vacuum_delay * 1.15  # 15% overhead
             prediction.primary_mode = "vacuum_fallback"
-            prediction.primary_uncertainty_ms = 15.0
+            # "No model" 1-sigma; the 3-sigma property then gives 15.0 ms,
+            # the value this fallback historically reported (P-H13).
+            prediction.primary_uncertainty_1sigma_ms = 5.0
         
         # Cache
         self._cache[cache_key] = prediction
@@ -550,7 +566,7 @@ class HFPropagationModel:
                 reflection_height_km=reflection_height,
                 elevation_angle_deg=0.0,
                 is_feasible=False,
-                uncertainty_ms=0.0,
+                uncertainty_1sigma_ms=0.0,
             )
         
         # Compute elevation angle
@@ -601,7 +617,7 @@ class HFPropagationModel:
                 reflection_height_km=reflection_height,
                 elevation_angle_deg=elevation_deg,
                 is_feasible=False,
-                uncertainty_ms=0.0,
+                uncertainty_1sigma_ms=0.0,
                 muf_MHz=muf,
                 foF2_MHz=foF2,
             )
@@ -633,8 +649,8 @@ class HFPropagationModel:
         
         total_delay_ms = geometric_delay_ms + iono_delay_ms
         
-        # Uncertainty estimate
-        uncertainty_ms = self._estimate_uncertainty(
+        # Uncertainty estimate (1-sigma)
+        uncertainty_1sigma_ms = self._estimate_uncertainty(
             mode=mode,
             iono_params=iono_params,
             frequency_mhz=frequency_mhz,
@@ -650,7 +666,7 @@ class HFPropagationModel:
             reflection_height_km=reflection_height,
             elevation_angle_deg=elevation_deg,
             is_feasible=True,
-            uncertainty_ms=uncertainty_ms,
+            uncertainty_1sigma_ms=uncertainty_1sigma_ms,
             slant_tec_tecu=iono_params.get('TEC_TECU', 0.0),
             foF2_MHz=foF2,
             muf_MHz=muf,
