@@ -103,6 +103,7 @@ REVISION HISTORY
 
 import logging
 import math
+import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Tuple
 from dataclasses import dataclass
@@ -111,6 +112,8 @@ from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
+
+from hf_timestd.core.ionex_parser import IONEXParser
 
 try:
     import xarray as xr  # type: ignore
@@ -267,7 +270,7 @@ class IonosphericModel:
         
         # IONEX support for global VTEC maps
         self.ionex_dir = Path(ionex_dir) if ionex_dir else Path('/var/lib/timestd/ionex')
-        self._ionex_cache: Dict[str, 'IONEXParser'] = {}  # Cache parsed IONEX files
+        self._ionex_cache: Dict[str, Tuple[IONEXParser, float]] = {}  # (parser, cached_at)
         self._ionex_cache_max_age = 86400  # 24 hours
         
         # Statistics
@@ -521,47 +524,31 @@ class IonosphericModel:
             )
             return None
         
-        # Check cache
+        # Check the parsed-IONEX cache, honouring _ionex_cache_max_age (P-H18).
+        # An IONEX file on disk can be replaced by a re-download with corrected
+        # data, so a cached parser older than max_age is treated as stale.
         cache_key = str(ionex_file)
-        if cache_key in self._ionex_cache:
-            parser = self._ionex_cache[cache_key]
+        cached = self._ionex_cache.get(cache_key)
+        if cached is not None and (time.time() - cached[1]) < self._ionex_cache_max_age:
+            parser = cached[0]
             self.stats['ionex_cache_hits'] += 1
         else:
-            # Parse IONEX file
+            # Parse the IONEX file. IONEXParser is imported once at module
+            # load (P-H18); the old code re-exec'd scripts/ionex_integration.py
+            # on every cache miss, which also broke under a wheel install.
             try:
-                # Import IONEXParser from ionex_integration script
-                # Path: src/hf_timestd/core/ionospheric_model.py -> scripts/ionex_integration.py
-                import sys
-                import importlib.util
-                
-                # Get project root (3 levels up from this file)
-                project_root = Path(__file__).parent.parent.parent.parent
-                ionex_script_path = project_root / "scripts" / "ionex_integration.py"
-                
-                if not ionex_script_path.exists():
-                    logger.warning(f"IONEX integration script not found: {ionex_script_path}")
-                    return None
-                
-                spec = importlib.util.spec_from_file_location(
-                    "ionex_integration",
-                    ionex_script_path
-                )
-                ionex_module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(ionex_module)
-                
-                parser = ionex_module.IONEXParser(ionex_file)
-                self._ionex_cache[cache_key] = parser
+                parser = IONEXParser(ionex_file)
+                self._ionex_cache[cache_key] = (parser, time.time())
                 self.stats['ionex_calls'] += 1
-                
+
                 # Limit cache size
                 if len(self._ionex_cache) > 7:  # Keep last week
                     oldest_key = next(iter(self._ionex_cache))
                     del self._ionex_cache[oldest_key]
-                    
             except Exception as e:
                 logger.warning(f"Failed to parse IONEX file {ionex_file}: {e}")
                 return None
-        
+
         # Interpolate VTEC
         try:
             vtec = parser.interpolate(lat, lon, timestamp)
