@@ -15,7 +15,8 @@ import logging
 # Add parent directory to path for hf_timestd imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'src'))
 
-from hf_timestd.io.hdf5_reader import DataProductReader
+from hf_timestd.io import make_data_product_reader
+from config import config
 
 logger = logging.getLogger(__name__)
 
@@ -132,11 +133,12 @@ class HealthService:
                     continue
                 
                 # Try to read recent L2 timing data
-                reader = DataProductReader(
+                reader = make_data_product_reader(
                     data_dir=channel_dir,
                     product_level='L2',
                     product_name='timing_measurements',
-                    channel=channel_name
+                    channel=channel_name,
+                    storage_config=config.storage
                 )
                 
                 # Get last hour of data

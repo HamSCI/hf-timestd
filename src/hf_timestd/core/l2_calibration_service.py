@@ -32,8 +32,7 @@ from ..models.measurement import (
     QualityFlag,
     DiscriminationMethod
 )
-from ..io import make_data_product_writer
-from ..io.hdf5_reader import DataProductReader
+from ..io import make_data_product_writer, make_data_product_reader
 from .wwv_constants import STATION_LOCATIONS
 
 logger = logging.getLogger(__name__)
@@ -114,17 +113,18 @@ class L2CalibrationService:
                 self.prop_solver = None
 
         # Initialize readers and writers per channel
-        self.l1_readers: Dict[str, DataProductReader] = {}
+        self.l1_readers: Dict[str, Any] = {}
         self.l2_writers: Dict[str, Any] = {}
 
         for channel in channels:
             # L1 reader
             l1_dir = self.data_root / "phase2" / channel / "metrology"
-            self.l1_readers[channel] = DataProductReader(
+            self.l1_readers[channel] = make_data_product_reader(
                 data_dir=l1_dir,
                 product_level='L1',
                 product_name='metrology_measurements',
-                channel=channel
+                channel=channel,
+                storage_config=self._storage_config,
             )
             
             # L2 writer

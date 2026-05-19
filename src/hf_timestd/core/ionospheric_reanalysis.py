@@ -51,7 +51,7 @@ from hf_timestd.core.wwv_constants import (
     WWV_FREQUENCIES, WWVH_FREQUENCIES, CHU_FREQUENCIES, BPM_FREQUENCIES,
     ANCHOR_SNR_HIGH,
 )
-from hf_timestd.io import DataProductReader, make_data_product_writer
+from hf_timestd.io import make_data_product_writer, make_data_product_reader
 
 logging.basicConfig(
     level=logging.INFO,
@@ -357,12 +357,13 @@ class IonosphericReanalysis:
                 channel_dir = self.phase2_dir / channel
                 reader_dir = channel_dir / 'clock_offset' if (channel_dir / 'clock_offset').exists() else channel_dir
 
-                reader = DataProductReader(
+                reader = make_data_product_reader(
                     data_dir=reader_dir,
                     product_level='L2',
                     product_name='timing_measurements',
                     channel=channel,
-                    use_registry=False
+                    use_registry=False,
+                    storage_config=self._storage_config,
                 )
 
                 items = reader.read_time_range(start=start_iso, end=end_iso)

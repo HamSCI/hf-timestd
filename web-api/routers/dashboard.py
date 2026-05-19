@@ -16,7 +16,7 @@ from fastapi import APIRouter, HTTPException, Query
 from services.propagation_service import PropagationService
 from hf_timestd.core.solar_zenith_calculator import calculate_midpoint, solar_position
 from hf_timestd.models.broadcast import BroadcastRegistry, ReceiverLocation
-from hf_timestd.io.hdf5_reader import DataProductReader
+from hf_timestd.io import make_data_product_reader
 from config import config
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
@@ -163,18 +163,19 @@ async def get_24h_broadcast_data(
                 continue
             
             try:
-                reader = DataProductReader(
+                reader = make_data_product_reader(
                     data_dir=channel_dir,
                     product_level='L2',
                     product_name='timing_measurements',
-                    channel=channel_dir.name
+                    channel=channel_dir.name,
+                    storage_config=config.storage
                 )
-                
+
                 measurements = reader.read_time_range(
                     start=start_time.isoformat() + 'Z',
                     end=end_time.isoformat() + 'Z'
                 )
-                
+
                 # Aggregate measurements by broadcast and time interval
                 for m in measurements:
                     station = m.get('station', 'UNKNOWN')
@@ -214,11 +215,12 @@ async def get_24h_broadcast_data(
                 continue
             
             try:
-                tick_reader = DataProductReader(
+                tick_reader = make_data_product_reader(
                     data_dir=channel_dir,
                     product_level='L2',
                     product_name='tick_timing',
-                    channel=channel_dir.name
+                    channel=channel_dir.name,
+                    storage_config=config.storage
                 )
                 
                 tick_measurements = tick_reader.read_time_range(
@@ -407,13 +409,14 @@ async def get_24h_timing_error(
                 continue
             
             try:
-                reader = DataProductReader(
+                reader = make_data_product_reader(
                     data_dir=channel_dir,
                     product_level='L2',
                     product_name='timing_measurements',
-                    channel=channel_dir.name
+                    channel=channel_dir.name,
+                    storage_config=config.storage
                 )
-                
+
                 measurements = reader.read_time_range(
                     start=start_time.isoformat() + 'Z',
                     end=end_time.isoformat() + 'Z'
@@ -510,11 +513,12 @@ async def get_24h_doppler(
             
             try:
                 # Try L1 data which has doppler_hz field
-                reader = DataProductReader(
+                reader = make_data_product_reader(
                     data_dir=channel_dir,
                     product_level='L1',
                     product_name='broadcast_measurements',
-                    channel=channel_dir.name
+                    channel=channel_dir.name,
+                    storage_config=config.storage
                 )
                 
                 measurements = reader.read_time_range(

@@ -10,11 +10,14 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 import logging
 
+from config import config
+
 logger = logging.getLogger(__name__)
 
 # Import DataProductReader for HDF5 access
 try:
     from hf_timestd.io.hdf5_reader import DataProductReader
+    from hf_timestd.io import make_data_product_reader
     HDF5_READER_AVAILABLE = True
 except ImportError:
     HDF5_READER_AVAILABLE = False
@@ -50,11 +53,12 @@ class TECService:
         
         if self._reader is None and self.tec_dir.exists():
             try:
-                self._reader = DataProductReader(
+                self._reader = make_data_product_reader(
                     data_dir=self.tec_dir,
                     product_level='L3',
                     product_name='tec',
-                    channel='AGGREGATED'
+                    channel='AGGREGATED',
+                    storage_config=config.storage
                 )
             except Exception as e:
                 logger.error(f"Failed to initialize TEC reader: {e}")

@@ -9,7 +9,8 @@ from collections import Counter
 import logging
 import re
 
-from hf_timestd.io.hdf5_reader import DataProductReader
+from hf_timestd.io import make_data_product_reader
+from config import config
 
 logger = logging.getLogger(__name__)
 
@@ -138,13 +139,14 @@ class PropagationService:
                 
                 # DataProductReader automatically resolves subdirectory via registry
                 try:
-                    reader = DataProductReader(
+                    reader = make_data_product_reader(
                         data_dir=channel_dir,
                         product_level='L2',
                         product_name='timing_measurements',
-                        channel=channel_dir.name
+                        channel=channel_dir.name,
+                        storage_config=config.storage
                     )
-                    
+
                     measurements = reader.read_time_range(
                         start=start_time.isoformat() + 'Z',
                         end=end_time.isoformat() + 'Z'
@@ -278,12 +280,13 @@ class PropagationService:
             if not reanalysis_dir.exists():
                 return None
 
-            reader = DataProductReader(
+            reader = make_data_product_reader(
                 data_dir=reanalysis_dir,
                 product_level='L3C',
                 product_name='propagation_stats',
                 channel='REANALYSIS',
-                use_registry=False
+                use_registry=False,
+                storage_config=config.storage
             )
 
             records = reader.read_time_range(
@@ -371,11 +374,12 @@ class PropagationService:
                 # file is found, then filter by minute_boundary_utc.
                 snr_lookup: Dict[tuple, float] = {}
                 try:
-                    tp_reader = DataProductReader(
+                    tp_reader = make_data_product_reader(
                         data_dir=channel_dir,
                         product_level='L2',
                         product_name='tick_phase',
-                        channel=channel_dir.name
+                        channel=channel_dir.name,
+                        storage_config=config.storage
                     )
                     # Use day-boundary ISO strings so read_time_range opens
                     # every daily file that overlaps the query window.
@@ -409,11 +413,12 @@ class PropagationService:
                 doppler_lookup: Dict[tuple, float] = {}
                 mode_lookup: Dict[tuple, str] = {}
                 try:
-                    co_reader = DataProductReader(
+                    co_reader = make_data_product_reader(
                         data_dir=channel_dir,
                         product_level='L2',
                         product_name='timing_measurements',
-                        channel=channel_dir.name
+                        channel=channel_dir.name,
+                        storage_config=config.storage
                     )
                     co_records = co_reader.read_time_range(
                         start=start_iso, end=end_iso
@@ -435,11 +440,12 @@ class PropagationService:
                 # --- Read tick_timing (primary: d_clock_ms + record enumeration) ---
                 tick_records = []
                 try:
-                    reader = DataProductReader(
+                    reader = make_data_product_reader(
                         data_dir=channel_dir,
                         product_level='L2',
                         product_name='tick_timing',
-                        channel=channel_dir.name
+                        channel=channel_dir.name,
+                        storage_config=config.storage
                     )
                     tick_records = reader.read_time_range(
                         start=start_iso, end=end_iso
@@ -476,11 +482,12 @@ class PropagationService:
                 else:
                     # Fallback: timing_measurements for channels without tick_timing
                     try:
-                        reader = DataProductReader(
+                        reader = make_data_product_reader(
                             data_dir=channel_dir,
                             product_level='L2',
                             product_name='timing_measurements',
-                            channel=channel_dir.name
+                            channel=channel_dir.name,
+                            storage_config=config.storage
                         )
                         fb_records = reader.read_time_range(
                             start=start_iso, end=end_iso
@@ -557,11 +564,12 @@ class PropagationService:
                 return None
             
             # Try to read aggregated TEC data
-            reader = DataProductReader(
+            reader = make_data_product_reader(
                 data_dir=self.tec_dir,
                 product_level='L3',
                 product_name='tec',
-                channel='AGGREGATED'
+                channel='AGGREGATED',
+                storage_config=config.storage
             )
             
             measurements = reader.read_time_range(

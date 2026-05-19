@@ -51,7 +51,10 @@ from hf_timestd.core.tec_estimator import TECEstimator, TECResult
 from hf_timestd.core.carrier_tec import CarrierTECEstimator
 from hf_timestd.core.iono_tomography import IonoTomography, RayPath
 from hf_timestd.core.vtec_mapper import VTECMapper, IPPMeasurement
-from hf_timestd.io import DataProductReader, DataProductWriter, make_data_product_writer
+from hf_timestd.io import (
+    DataProductReader, DataProductWriter,
+    make_data_product_writer, make_data_product_reader,
+)
 
 # Systemd watchdog support
 try:
@@ -238,12 +241,13 @@ class PhysicsFusionService:
         else:
             reader_dir = channel_dir
 
-        reader = DataProductReader(
+        reader = make_data_product_reader(
             data_dir=reader_dir,
             product_level='L2',
             product_name='timing_measurements',
             channel=channel,
-            use_registry=False
+            use_registry=False,
+            storage_config=self._storage_config,
         )
         self._reader_cache[channel] = reader
         return reader
@@ -798,12 +802,13 @@ class PhysicsFusionService:
             return None
 
         try:
-            reader = DataProductReader(
+            reader = make_data_product_reader(
                 data_dir=tp_dir,
                 product_level='L2',
                 product_name='tick_phase',
                 channel=channel,
-                use_registry=False
+                use_registry=False,
+                storage_config=self._storage_config,
             )
             self._tick_phase_reader_cache[channel] = reader
             return reader

@@ -1,41 +1,43 @@
 # HDF5 → SQLite migration — cutover in progress
 
 ## Context
-Phase 1 (parallel writers) is live on bee1: `[storage] write_sqlite =
-true` since 2026-05-15, `timestd-sqlite-parity` timer green. The
-cutover is being driven to completion so the new TID L3 detector
-(remediation P-H29) can be built SQLite-native rather than against
-HDF5.
+Driving the HDF5→SQLite cutover to completion so the new TID L3
+detector (remediation P-H29) can be built SQLite-native. Phase 1
+(dual-write canary) has been live on bee1 since 2026-05-15.
 
-## Done
-### Phase 2 reader foundation — committed 08097cc
-- `io/sqlite_reader.py`: `SqliteDataProductReader` + `make_data_product_reader`.
-- `[storage] read_sqlite` knob; `tests/unit/test_sqlite_reader.py` (21 tests).
-- Live-verified vs HDF5 on bee1 `timestd.db`.
+## Done & committed (2026-05-19)
+- `08097cc` — Phase 2 reader foundation: `io/sqlite_reader.py`
+  (`SqliteDataProductReader` + `make_data_product_reader`),
+  `[storage] read_sqlite` knob, `tests/unit/test_sqlite_reader.py`.
+- `4e9b0d0` — every producer routed through `make_data_product_writer`
+  (`l2_calibration`, `physics_fusion`, `ionospheric_reanalysis`,
+  `live_vtec`); `storage_config` plumbed from `[storage]`.
 
-### Extend dual-write to all producers — this session
-Converted every remaining `DataProductWriter` producer to
-`make_data_product_writer` with `[storage]` config plumbed in
-(`storage_config=None` default → HDF5-only, behaviour-preserving):
-- [x] `l2_calibration_service.py` — `L2_timing_measurements`
-- [x] `physics_fusion_service.py` — `L3_physics/tec/dtec/dtec_timeseries/dtec_diff`
-- [x] `ionospheric_reanalysis.py` — `L3C_propagation_stats`, `L3_tec` (REANALYZED)
-- [x] `scripts/live_vtec.py` — `L3_gnss_vtec`
-With the deployed bee1 config (`write_sqlite=true`) these dual-write
-once the services are redeployed + restarted.
+## Done this session — consumer wiring
+Every `DataProductReader` consumer routed through
+`make_data_product_reader` with `storage_config` from `[storage]`
+(default → HDF5, behaviour-preserving):
+- [x] `multi_broadcast_fusion.py` — 5 reader sites (the h5py-leak hot path)
+- [x] `physics_fusion_service.py` — 2 sites
+- [x] `ionospheric_reanalysis.py` — 1 site
+- [x] `l2_calibration_service.py` — 1 site (l1 readers)
+- [x] web-api — `config.py` exposes `config.storage`; 10 files /
+      20 sites converted (dashboard router + 9 services)
 
 ## Remaining
-1. Wire consumers (`multi_broadcast_fusion.py`, web-api services,
-   `l2_calibration`/`physics_fusion`/`reanalysis` readers) through
-   `make_data_product_reader`. Pure plumbing — factory defaults to
-   HDF5, no behaviour change.
-2. Deploy; let dual-write run; verify parity for the newly-covered
-   products (extend `parity_check_all.sh` beyond the metrology set).
-3. Flip `[storage] read_sqlite=true` after a clean parity window;
+1. Deploy; let dual-write run; verify parity for the newly-covered
+   products (extend `parity_check_all.sh` past the metrology set).
+2. Flip `[storage] read_sqlite=true` after a clean parity window,
    then `write_hdf5=false` (Phase 3).
-4. Phase 4: remove HDF5 writer/reader code paths + h5py.
-5. Resume the metrology/physics remediation at P-H29 (TID detector),
-   built SQLite-native via the factories.
+   - NOTE: web-api loads `config/timestd-config.toml` (the repo file,
+     NOT `/etc/hf-timestd/...`), which currently has no `[storage]`
+     section → `config.storage == {}`. Add `[storage]` there for the
+     flip to reach web-api.
+   - The fusion h5py leak is only actually fixed once fusion reads
+     SQLite via a long-lived connection — currently it still builds a
+     reader per cycle. Address in the flip/perf step.
+3. Phase 4: remove HDF5 writer/reader paths + h5py.
+4. Resume remediation at P-H29 (TID detector), built SQLite-native.
 
 ## Review
 (updated per commit)

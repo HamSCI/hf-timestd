@@ -52,6 +52,9 @@ class Config:
         self.recorder = self.config.get('recorder', {})
         self.web_ui = self.config.get('web_ui', {})
         self.gnss_vtec = self.config.get('gnss_vtec', {})
+        # [storage] backend selection (HDF5→SQLite migration) — passed to
+        # make_data_product_reader so web-api reads follow read_sqlite.
+        self.storage = self.config.get('storage', {})
         
         # Determine data root based on mode
         mode = self.recorder.get('mode', 'production')

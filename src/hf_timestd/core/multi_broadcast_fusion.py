@@ -243,9 +243,11 @@ logger = logging.getLogger(__name__)
 # has no effect on HDF5 ≥ 1.14.
 os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 
-# HDF5 I/O for reading L1A and L2 data products
+# Data-product I/O for reading L1A and L2 products. The reader backend
+# (HDF5 / SQLite) is selected per-call by make_data_product_reader from
+# the [storage] config — see docs/HDF5-TO-SQLITE-MIGRATION.md.
 try:
-    from hf_timestd.io import DataProductReader
+    from hf_timestd.io import make_data_product_reader
     HDF5_AVAILABLE = True
 except ImportError:
     HDF5_AVAILABLE = False
@@ -577,7 +579,8 @@ class MultiBroadcastFusion:
         receiver_lon: Optional[float] = None,
         sample_rate: Optional[int] = None,
         timing_authority_level: str = 'L5',
-        is_rtp_authority: bool = True
+        is_rtp_authority: bool = True,
+        storage_config: Optional[Dict] = None
     ):
         """
         Initialize multi-broadcast fusion engine.
@@ -606,6 +609,9 @@ class MultiBroadcastFusion:
             self.timing_authority_level = 'L5'
         self.is_rtp_authority = is_rtp_authority
         self.phase2_dir = self.data_root / 'phase2'
+        # [storage] config for make_data_product_reader (HDF5→SQLite
+        # migration). None → HDF5-only, preserving today's behaviour.
+        self._storage_config = storage_config or {}
         self.calibration: Dict[str, BroadcastCalibration] = {}
         self.calibration_update_count = 0  # Track updates for auto-save
         self.calibration_trust_level = 1.0  # Trust level from loaded calibration (1.0 = full trust)
@@ -1398,11 +1404,12 @@ class MultiBroadcastFusion:
             
             try:
                 # Initialize HDF5 reader for L2 timing measurements
-                reader = DataProductReader(
+                reader = make_data_product_reader(
                     data_dir=channel_dir,
                     product_level='L2',  # CRITICAL FIX: Read L2 timing_measurements from analytics
                     product_name='timing_measurements',  # Correct schema name
-                    channel=channel
+                    channel=channel,
+                    storage_config=self._storage_config,
                 )
                 
                 # Read measurements with quality filtering
@@ -1515,11 +1522,12 @@ class MultiBroadcastFusion:
                 continue
             
             try:
-                reader = DataProductReader(
+                reader = make_data_product_reader(
                     data_dir=channel_dir,
                     product_level='L2',
                     product_name='tick_timing',
-                    channel=channel
+                    channel=channel,
+                    storage_config=self._storage_config,
                 )
                 
                 tick_measurements = reader.read_time_range(start=start_iso, end=end_iso)
@@ -1596,11 +1604,12 @@ class MultiBroadcastFusion:
                 continue
             
             try:
-                reader = DataProductReader(
+                reader = make_data_product_reader(
                     data_dir=channel_dir,
                     product_level='L2',
                     product_name='chu_fsk',
-                    channel=channel
+                    channel=channel,
+                    storage_config=self._storage_config,
                 )
                 
                 fsk_measurements = reader.read_time_range(start=start_iso, end=end_iso)
@@ -1797,11 +1806,12 @@ class MultiBroadcastFusion:
                 continue
 
             try:
-                reader = DataProductReader(
+                reader = make_data_product_reader(
                     data_dir=channel_dir,
                     product_level='L1',
                     product_name='metrology_measurements',
-                    channel=channel
+                    channel=channel,
+                    storage_config=self._storage_config,
                 )
                 
                 # Filter locally to avoid reader complexity, or rely on reader if optimized
@@ -1861,11 +1871,12 @@ class MultiBroadcastFusion:
                 continue
 
             try:
-                reader = DataProductReader(
+                reader = make_data_product_reader(
                     data_dir=channel_dir,
                     product_level='L2',
                     product_name='timing_measurements',
-                    channel=channel
+                    channel=channel,
+                    storage_config=self._storage_config,
                 )
                 
                 measurements = reader.read_time_range(
@@ -4598,13 +4609,16 @@ def run_fusion_service(
             quality diagnostics.  Consumed by wd-ka9q-record to align wav
             start times.
     """
-    # Determine timing authority from config (same logic as bootstrap gate below)
+    # Determine timing authority + [storage] backend selection from config
+    # (same logic as bootstrap gate below)
     _is_rtp_authority = True
+    _storage_config = {}
     try:
         import toml as _toml_fs
         _cfg_path = Path('/etc/hf-timestd/timestd-config.toml')
         if _cfg_path.exists():
             _cfg_fs = _toml_fs.load(_cfg_path)
+            _storage_config = _cfg_fs.get('storage', {}) or {}
             _auth = _cfg_fs.get('timing', {}).get('authority', 'rtp')
             _is_rtp_authority = (_auth == 'rtp')
             logger.info(f"[FUSION] Timing authority: {_auth} → is_rtp_authority={_is_rtp_authority}")
@@ -4616,7 +4630,8 @@ def run_fusion_service(
         receiver_lat=receiver_lat,
         receiver_lon=receiver_lon,
         timing_authority_level=timing_authority_level,
-        is_rtp_authority=_is_rtp_authority
+        is_rtp_authority=_is_rtp_authority,
+        storage_config=_storage_config
     )
     
     # Initialize dual Chrony SHM outputs if enabled

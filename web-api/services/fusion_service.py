@@ -13,7 +13,8 @@ import logging
 # Add parent directory to path for hf_timestd imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'src'))
 
-from hf_timestd.io.hdf5_reader import DataProductReader
+from hf_timestd.io import make_data_product_reader
+from config import config
 
 logger = logging.getLogger(__name__)
 
@@ -29,11 +30,12 @@ class FusionService:
             fusion_dir: Path to fusion data directory
         """
         self.fusion_dir = Path(fusion_dir)
-        self.reader = DataProductReader(
+        self.reader = make_data_product_reader(
             data_dir=self.fusion_dir,
             product_level='L3',
             product_name='fusion_timing',
-            channel='fusion'
+            channel='fusion',
+            storage_config=config.storage
         )
     
     def get_latest(self) -> Optional[Dict[str, Any]]:

@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import logging
 
-from hf_timestd.io.hdf5_reader import DataProductReader
+from hf_timestd.io import make_data_product_reader
+from config import config
 
 # Import core stability functions - try from installed package first,
 # fall back to local implementation if not available
@@ -53,11 +54,12 @@ class StabilityService:
         self.fusion_dir = self.data_root / 'phase2' / 'fusion'
         
         # Initialize reader for fusion data
-        self.reader = DataProductReader(
+        self.reader = make_data_product_reader(
             data_dir=self.fusion_dir,
             product_level='L3',
             product_name='fusion_timing',
-            channel='fusion'
+            channel='fusion',
+            storage_config=config.storage
         )
     
     def compute_stability_metrics(
