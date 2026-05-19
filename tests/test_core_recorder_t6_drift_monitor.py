@@ -4,9 +4,11 @@ Two independent signals are checked:
 
 * **Signal A — anchor consistency.**  At each poll the captured anchor
   ``(gps_time, rtp_timesnap)`` is projected forward by elapsed gps_time and
-  compared to radiod's freshly reported rtp_timesnap.  A residual above
-  ``T6_ANCHOR_DISCONTINUITY_SAMPLES`` (or any counter rollback) raises
-  ``_t6_drift_flag_anchor_discontinuity``.
+  compared to radiod's freshly reported rtp_timesnap.  A counter rollback
+  raises ``_t6_drift_flag_anchor_discontinuity`` immediately; a large
+  *residual* raises it only after breaching the threshold on
+  ``T6_ANCHOR_DISCONTINUITY_POLLS`` consecutive polls (the persistence gate
+  — a lone noisy reading must not trigger a re-capture).
 
 * **Signal B — sustained Δ breach.**  When ``|Δ| > T6_DRIFT_HARD_THRESHOLD_NS``
   for at least ``T6_DRIFT_SUSTAINED_SEC`` continuous seconds,
@@ -42,6 +44,7 @@ def _bare_recorder(sample_rate: int = 24000) -> CoreRecorderV2:
     cr._t6_drift_flag_sustained = False
     cr._t6_drift_flag_anchor_discontinuity = False
     cr._t6_drift_anchor_residual_samples = None
+    cr._t6_drift_residual_breach_count = 0
     cr._t6_drift_last_check_wall = None
     cr._t6_drift_anchor_gps_ns = None
     cr._t6_drift_anchor_rtp_timesnap = None
@@ -69,22 +72,69 @@ class TestAnchorConsistency(unittest.TestCase):
         self.assertFalse(cr._t6_drift_flag_anchor_discontinuity)
         self.assertEqual(cr._t6_drift_anchor_residual_samples, 50)
 
-    def test_large_positive_residual_raises_flag(self):
+    def test_single_large_residual_does_not_raise_flag(self):
+        """The dominant failure mode: a lone noisy reading must NOT raise
+        the flag — that was what re-captured the anchor every minute."""
         cr = _bare_recorder(sample_rate=24000)
-        cr._t6_check_anchor_consistency(0, 0)
-        # 1 s elapsed expects 24_000 samples; deliver 30_000 → +6000 residual.
-        cr._t6_check_anchor_consistency(1_000_000_000, 30_000)
-        self.assertTrue(cr._t6_drift_flag_anchor_discontinuity)
-        self.assertEqual(cr._t6_drift_anchor_residual_samples, 6000)
+        cr._t6_check_anchor_consistency(0, 0)  # seed
+        # 1 s elapsed expects 24_000 samples; deliver 34_000 → +10_000.
+        cr._t6_check_anchor_consistency(1_000_000_000, 34_000)
+        self.assertFalse(cr._t6_drift_flag_anchor_discontinuity)
+        self.assertEqual(cr._t6_drift_anchor_residual_samples, 10_000)
+        self.assertEqual(cr._t6_drift_residual_breach_count, 1)
 
-    def test_large_negative_residual_raises_flag(self):
-        """A jump in the OTHER direction — rtp progressed less than gps_time
-        implies — is just as much a discontinuity."""
+    def test_sustained_residual_raises_flag_after_N_polls(self):
+        """A genuine discontinuity — a fixed offset present on every poll —
+        raises the flag, but only on the Nth consecutive breaching poll."""
         cr = _bare_recorder(sample_rate=24000)
-        cr._t6_check_anchor_consistency(0, 0)
-        cr._t6_check_anchor_consistency(1_000_000_000, 18_000)
+        cr._t6_check_anchor_consistency(0, 0)  # seed
+        n = CoreRecorderV2.T6_ANCHOR_DISCONTINUITY_POLLS
+        # Each poll carries a fixed +10_000-sample offset (radiod restart
+        # / clock step): rtp = elapsed×rate + 10_000.
+        for k in range(1, n):
+            cr._t6_check_anchor_consistency(
+                k * 1_000_000_000, k * 24_000 + 10_000,
+            )
+            self.assertFalse(
+                cr._t6_drift_flag_anchor_discontinuity,
+                f"must not flag before {n} consecutive breaches (k={k})",
+            )
+            self.assertEqual(cr._t6_drift_residual_breach_count, k)
+        cr._t6_check_anchor_consistency(n * 1_000_000_000, n * 24_000 + 10_000)
         self.assertTrue(cr._t6_drift_flag_anchor_discontinuity)
-        self.assertEqual(cr._t6_drift_anchor_residual_samples, -6000)
+        self.assertEqual(cr._t6_drift_anchor_residual_samples, 10_000)
+
+    def test_sustained_negative_residual_also_raises_flag(self):
+        """A sustained residual in the other direction is just as much a
+        discontinuity once it persists."""
+        cr = _bare_recorder(sample_rate=24000)
+        cr._t6_check_anchor_consistency(0, 0)  # seed
+        n = CoreRecorderV2.T6_ANCHOR_DISCONTINUITY_POLLS
+        for k in range(1, n + 1):
+            cr._t6_check_anchor_consistency(
+                k * 1_000_000_000, k * 24_000 - 10_000,
+            )
+        self.assertTrue(cr._t6_drift_flag_anchor_discontinuity)
+        self.assertEqual(cr._t6_drift_anchor_residual_samples, -10_000)
+
+    def test_isolated_outliers_never_raise_flag(self):
+        """Outlier readings interleaved with clean ones — the real noise
+        pattern — must never reach the persistence threshold; each clean
+        reading resets the counter."""
+        cr = _bare_recorder(sample_rate=24000)
+        cr._t6_check_anchor_consistency(0, 0)  # seed
+        for k in range(1, 40, 2):
+            # an outlier (~+80_000 ≈ a stale status packet)
+            cr._t6_check_anchor_consistency(
+                k * 1_000_000_000, k * 24_000 + 80_000,
+            )
+            self.assertEqual(cr._t6_drift_residual_breach_count, 1)
+            # a clean reading immediately after — counter resets
+            cr._t6_check_anchor_consistency(
+                (k + 1) * 1_000_000_000, (k + 1) * 24_000,
+            )
+            self.assertEqual(cr._t6_drift_residual_breach_count, 0)
+        self.assertFalse(cr._t6_drift_flag_anchor_discontinuity)
 
     def test_gps_rollback_raises_flag(self):
         """radiod restart resets gps_time to a smaller value.  Rollback is
