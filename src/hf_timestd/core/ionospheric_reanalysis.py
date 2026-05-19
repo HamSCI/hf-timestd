@@ -107,8 +107,9 @@ class ReanalyzedMeasurement:
     snr_db: float
     original_mode: str
     original_n_hops: int
-    raw_arrival_time_ms: float
+    raw_arrival_time_ms: float    # absolute ToA — geometry-dominated
     propagation_delay_ms: float
+    clock_offset_ms: float        # D_clock = raw_arrival - propagation_delay
     confidence: float
     quality_flag: str
 
@@ -365,6 +366,20 @@ class IonosphericReanalysis:
         n_hops = m.get('n_hops', 0) or 0
         raw_toa = m.get('raw_arrival_time_ms')
         prop_delay = m.get('propagation_delay_ms', 0) or 0
+        # D_clock = clock_offset_ms is the geometry-removed timing residual
+        # (L2 schema: clock_offset_ms = raw_arrival_time_ms -
+        # propagation_delay_ms — measurement.py).  The TEC fit must use
+        # this, NOT raw_arrival_time_ms whose intercept is dominated by
+        # geometric delay (P-H27).  Prefer the L2 field; derive it if the
+        # producer did not populate it.
+        clock_offset = m.get('clock_offset_ms')
+        if clock_offset is None or (isinstance(clock_offset, float)
+                                    and math.isnan(clock_offset)):
+            clock_offset = (
+                raw_toa - prop_delay
+                if raw_toa is not None and not math.isnan(raw_toa)
+                else float('nan')
+            )
         confidence = m.get('confidence', 0) or 0
         quality_flag = m.get('quality_flag', 'MARGINAL')
         tone_detected = m.get('tone_detected', False)
@@ -462,6 +477,7 @@ class IonosphericReanalysis:
             original_n_hops=n_hops,
             raw_arrival_time_ms=raw_toa,
             propagation_delay_ms=prop_delay,
+            clock_offset_ms=clock_offset,
             confidence=confidence,
             quality_flag=quality_flag,
             solar_elevation_deg=round(solar_elev, 2),
@@ -483,7 +499,7 @@ class IonosphericReanalysis:
         Re-estimate TEC using D_clock values from high-SNR, physics-validated
         measurements.
 
-        Strategy: Use D_clock (raw_arrival_time_ms) directly. D_clock already
+        Strategy: Use D_clock (clock_offset_ms) directly. D_clock already
         has the geometric propagation delay removed per-mode, so any residual
         1/f² pattern across frequencies IS the ionospheric dispersion signal.
 
@@ -508,11 +524,15 @@ class IonosphericReanalysis:
         if len(valid) < 2:
             return None
 
-        # Group by frequency, take median D_clock per frequency
+        # Group by frequency, take median D_clock per frequency.  D_clock
+        # is clock_offset_ms (geometry removed) — NOT raw_arrival_time_ms,
+        # whose intercept is dominated by geometric delay (P-H27).
         by_freq: Dict[float, List[float]] = defaultdict(list)
         for m in valid:
+            if m.clock_offset_ms is None or math.isnan(m.clock_offset_ms):
+                continue
             key = round(m.frequency_mhz, 1)
-            by_freq[key].append(m.raw_arrival_time_ms)
+            by_freq[key].append(m.clock_offset_ms)
 
         if len(by_freq) < 2:
             return None
