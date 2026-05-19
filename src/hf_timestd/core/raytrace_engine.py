@@ -475,46 +475,8 @@ class RaytraceEngine:
                  iono['irreg_grid']),
             )
 
-            for i, ray_dict in enumerate(ray_list):
-                labels = np.asarray(ray_dict.get('ray_label', []))
-                if len(labels) == 0:
-                    continue
-                ground_ranges = np.asarray(ray_dict.get('ground_range', []))
-                group_ranges  = np.asarray(ray_dict.get('group_range',  []))
-                apogees       = np.asarray(ray_dict.get('apogee',       []))
-                if len(ground_ranges) == 0:
-                    continue
-
-                # hop-0 group/ground ratio is always correctly extracted.
-                # Use it to estimate total group path for any hop count.
-                gnd0 = float(ground_ranges[0])
-                grp0 = float(group_ranges[0]) if len(group_ranges) > 0 else 0.0
-                apex0 = float(apogees[0]) if len(apogees) > 0 else 0.0
-                if gnd0 > 0 and not math.isnan(grp0) and grp0 > 0:
-                    grp_factor = grp0 / gnd0
-                else:
-                    grp_factor = 1.02  # typical ionospheric slowing
-
-                for k in range(len(ground_ranges)):
-                    if int(labels[k]) != 1:
-                        continue  # this hop did not complete cleanly
-                    total_gnd = float(ground_ranges[k])
-                    if math.isnan(total_gnd):
-                        continue
-                    if abs(total_gnd - target_range_km) > tolerance_km:
-                        continue  # ray doesn't land near the receiver
-                    # Estimate total group path from hop-0 ratio
-                    total_grp = total_gnd * grp_factor
-                    delay_ms  = (total_grp / _C_KM_S) * 1000.0
-                    result.modes.append(RayMode(
-                        n_hops=k + 1,
-                        group_delay_ms=delay_ms,
-                        launch_elev_deg=float(elevs[i]),
-                        ground_range_km=total_gnd,
-                        apogee_km=apex0,
-                        confidence=1.0,
-                        ray_label=1,
-                    ))
+            result.modes.extend(self._modes_from_ray_list(
+                ray_list, elevs, target_range_km, tolerance_km))
 
         except TimeoutError:
             logger.warning("RaytraceEngine: raytrace_2d timed out for "
@@ -540,6 +502,63 @@ class RaytraceEngine:
         result.modes = sorted(by_hop.values(), key=lambda m: m.n_hops)
 
         return result
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _modes_from_ray_list(ray_list, elevs, target_range_km,
+                             tolerance_km) -> List[RayMode]:
+        """Convert PHaRLAP raytrace_2d per-elevation ray dicts to RayModes.
+
+        raytrace_2d returns per-hop arrays: index k is the (k+1)-hop ray,
+        ``ground_range[k]`` / ``group_range[k]`` are the cumulative
+        ground / group path after k+1 hops, and ``apogee[k]`` is that
+        hop's apogee.  The per-hop group range and apogee are used
+        *directly* — the previous code extrapolated every hop count from
+        the hop-0 group/ground ratio and reused the hop-0 apogee, an
+        approximation of an approximation on what is meant to be the
+        authoritative ray-traced path (P-H24).  The arrays must agree in
+        length for index k to mean the same hop across all of them; a ray
+        whose arrays disagree is skipped rather than mis-indexed.
+        """
+        modes: List[RayMode] = []
+        for i, ray_dict in enumerate(ray_list):
+            labels = np.asarray(ray_dict.get('ray_label', []))
+            if len(labels) == 0:
+                continue
+            ground_ranges = np.asarray(ray_dict.get('ground_range', []))
+            group_ranges = np.asarray(ray_dict.get('group_range', []))
+            apogees = np.asarray(ray_dict.get('apogee', []))
+            if len(ground_ranges) == 0:
+                continue
+            if not (len(group_ranges) == len(ground_ranges)
+                    and len(apogees) == len(ground_ranges)
+                    and len(labels) == len(ground_ranges)):
+                logger.warning(
+                    "RaytraceEngine: inconsistent PHaRLAP per-hop array "
+                    "lengths (ground=%d group=%d apogee=%d label=%d) — "
+                    "skipping ray", len(ground_ranges), len(group_ranges),
+                    len(apogees), len(labels))
+                continue
+            for k in range(len(ground_ranges)):
+                if int(labels[k]) != 1:
+                    continue  # this hop did not complete cleanly
+                total_gnd = float(ground_ranges[k])
+                total_grp = float(group_ranges[k])
+                if (math.isnan(total_gnd) or math.isnan(total_grp)
+                        or total_grp <= 0.0):
+                    continue
+                if abs(total_gnd - target_range_km) > tolerance_km:
+                    continue  # ray doesn't land near the receiver
+                modes.append(RayMode(
+                    n_hops=k + 1,
+                    group_delay_ms=(total_grp / _C_KM_S) * 1000.0,
+                    launch_elev_deg=float(elevs[i]),
+                    ground_range_km=total_gnd,
+                    apogee_km=float(apogees[k]),
+                    confidence=1.0,
+                    ray_label=1,
+                ))
+        return modes
 
     # ------------------------------------------------------------------
     def _geometric_fallback(self, station: str, frequency_mhz: float,
