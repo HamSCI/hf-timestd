@@ -15,8 +15,12 @@ Usage:
         [--hdf5-dir /var/lib/timestd/phase2] \\
         [--sqlite-db /var/lib/timestd/phase2/timestd.db]
 
-Exits 0 if the two backends agree on row count and field values,
-1 otherwise. Prints a summary that lists field-level mismatches.
+Exit codes:
+    0  the two backends agree on row count and field values
+    1  a real divergence was found (prints field-level mismatches)
+    2  an error reading one of the backends
+    3  the SQLite table does not exist yet — the product is not being
+       dual-written (expected before its producer is deployed)
 """
 
 from __future__ import annotations
@@ -32,6 +36,13 @@ from typing import Any, Dict, List, Optional, Tuple
 # store IEEE 754 doubles faithfully, so exact equality is reasonable.
 # Bump if a real cross-backend rounding difference shows up.
 FLOAT_TOL = 0.0
+
+
+class _SqliteTableMissing(Exception):
+    """The SQLite table for the product does not exist yet — i.e. the
+    product is not being dual-written. Distinct from a real divergence:
+    before a producer is deployed with dual-write this is the expected
+    pending state, so main() reports it separately (exit code 3)."""
 
 
 def parse_args() -> argparse.Namespace:
@@ -51,6 +62,16 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("/var/lib/timestd/phase2/timestd.db"),
         help="Path to the SQLite database",
+    )
+    p.add_argument(
+        "--hdf5-data-dir",
+        type=Path,
+        default=None,
+        help="Explicit HDF5 product directory, used directly as the "
+             "DataProductReader data_dir (use_registry=False). Needed for "
+             "L3 products whose .h5 files do NOT live under "
+             "{hdf5-dir}/{channel}/ (e.g. phase2/science/tec). When "
+             "omitted, the channel/registry resolution is used.",
     )
     p.add_argument("--verbose", action="store_true", help="Print per-row diff details")
     return p.parse_args()
@@ -76,23 +97,37 @@ def _time_window(args: argparse.Namespace) -> Tuple[str, str]:
 
 
 def read_hdf5(args: argparse.Namespace, start_iso: str, end_iso: str) -> List[Dict[str, Any]]:
-    """Use DataProductReader to read N hours of data from the HDF5 archive."""
+    """Use DataProductReader to read N hours of data from the HDF5 archive.
+
+    With ``--hdf5-data-dir`` the directory is used verbatim
+    (use_registry=False); otherwise the product directory is resolved
+    from ``{hdf5-dir}/{channel}/`` via DataProductRegistry.
+    """
     from hf_timestd.io import DataProductReader
     from hf_timestd.data_product_registry import DataProductRegistry
 
-    channel_dir = args.hdf5_dir / args.channel
-    data_dir = DataProductRegistry.get_data_dir(
-        channel_dir=channel_dir,
-        product_level=args.level,
-        product_name=args.product,
-        create=False,
-    )
-    reader = DataProductReader(
-        data_dir=data_dir,
-        product_level=args.level,
-        product_name=args.product,
-        channel=args.channel,
-    )
+    if args.hdf5_data_dir is not None:
+        reader = DataProductReader(
+            data_dir=args.hdf5_data_dir,
+            product_level=args.level,
+            product_name=args.product,
+            channel=args.channel,
+            use_registry=False,
+        )
+    else:
+        channel_dir = args.hdf5_dir / args.channel
+        data_dir = DataProductRegistry.get_data_dir(
+            channel_dir=channel_dir,
+            product_level=args.level,
+            product_name=args.product,
+            create=False,
+        )
+        reader = DataProductReader(
+            data_dir=data_dir,
+            product_level=args.level,
+            product_name=args.product,
+            channel=args.channel,
+        )
     return reader.read_time_range(start=start_iso, end=end_iso)
 
 
@@ -103,6 +138,12 @@ def read_sqlite(args: argparse.Namespace, start_iso: str, end_iso: str) -> List[
     conn = sqlite3.connect(f"file:{args.sqlite_db}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     try:
+        present = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).fetchone()
+        if present is None:
+            raise _SqliteTableMissing(table)
         rows = conn.execute(
             f"SELECT * FROM {table} "
             f"WHERE channel = ? AND timestamp_utc BETWEEN ? AND ? "
@@ -249,6 +290,14 @@ def main() -> int:
         return 2
     try:
         sql_rows = read_sqlite(args, start_iso, end_iso)
+    except _SqliteTableMissing as e:
+        print(f"Channel:    {args.channel}")
+        print(f"Product:    {args.level}_{args.product}")
+        print(
+            f"PENDING — SQLite table {e} does not exist yet "
+            f"(product not dual-written; deploy the producer, then re-check)."
+        )
+        return 3
     except Exception as e:
         print(f"ERROR reading SQLite: {e}", file=sys.stderr)
         return 2
