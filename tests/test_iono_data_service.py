@@ -16,7 +16,8 @@ import pytest
 
 from hf_timestd.core import iono_data_service
 from hf_timestd.core.iono_data_service import (
-    IonoDataService, IonoGrid, WAMIPE_S3_BASE_URL, WAMIPE_CACHE_MAX_AGE_S,
+    IonoDataService, IonoGrid, GiroStation, GiroMeasurement,
+    WAMIPE_S3_BASE_URL, WAMIPE_CACHE_MAX_AGE_S,
 )
 
 
@@ -150,6 +151,117 @@ def test_stale_grid_falls_back_to_climatology(service):
     service._current_grid = _grid(age_s=WAMIPE_CACHE_MAX_AGE_S + 600.0)
     point = service.get_iono_params(35.0, -95.0)
     assert 'wamipe' not in point.source
+
+
+# --- P-M16 — temporal interpolation across the previous/current grids -----
+
+def _uniform_grid(ts: datetime, hmF2: float, NmF2: float, TEC: float) -> IonoGrid:
+    """A grid with spatially uniform fields, so interpolate() returns the
+    constant and a test can isolate the *temporal* blend."""
+    return IonoGrid(
+        timestamp=ts, source='wamipe',
+        lats=np.array([30.0, 40.0]), lons=np.array([-100.0, -90.0]),
+        hmF2=np.full((2, 2), hmF2), NmF2=np.full((2, 2), NmF2),
+        TEC=np.full((2, 2), TEC),
+    )
+
+
+def test_temporal_interpolation_blends_grids(service):
+    """A query time between the two grids' valid times blends them."""
+    now = datetime.now(timezone.utc)
+    t_prev = now - timedelta(minutes=10)
+    t_curr = now - timedelta(minutes=2)
+    service._previous_grid = _uniform_grid(t_prev, 300.0, 1.0e12, 18.0)
+    service._current_grid = _uniform_grid(t_curr, 320.0, 1.4e12, 26.0)
+
+    # Query exactly midway between the two valid times → halfway blend.
+    q = t_prev + (t_curr - t_prev) / 2
+    point = service.get_iono_params(35.0, -95.0, q)
+    assert point.hmF2_km == pytest.approx(310.0)
+    assert point.TEC_TECU == pytest.approx(22.0)
+
+
+def test_temporal_interpolation_clamps_after_window(service):
+    """A query after the current grid's valid time uses the current grid
+    unchanged — the blend never extrapolates."""
+    now = datetime.now(timezone.utc)
+    service._previous_grid = _uniform_grid(
+        now - timedelta(minutes=10), 300.0, 1.0e12, 18.0)
+    service._current_grid = _uniform_grid(
+        now - timedelta(minutes=2), 320.0, 1.4e12, 26.0)
+
+    point = service.get_iono_params(35.0, -95.0, now)  # after t_curr
+    assert point.hmF2_km == pytest.approx(320.0)
+
+
+# --- P-M16 — grid validation: ascending coords, finite physical fields ----
+
+def test_validate_grid_normalises_descending_latitude(service):
+    """NetCDF latitude stored north-to-south is reordered to strictly
+    ascending, with the field arrays reordered to match."""
+    grid = IonoGrid(
+        timestamp=datetime.now(timezone.utc), source='wamipe',
+        lats=np.array([40.0, 30.0]),                       # descending
+        lons=np.array([-100.0, -90.0]),
+        hmF2=np.array([[310.0, 311.0], [320.0, 321.0]]),   # row 0 = lat 40
+        NmF2=np.full((2, 2), 1e12), TEC=np.full((2, 2), 20.0),
+    )
+    v = service._validate_grid(grid)
+    assert v is not None
+    assert list(v.lats) == [30.0, 40.0]
+    # The row for lat=30 must carry lat=40's original neighbour values.
+    assert list(v.hmF2[0]) == [320.0, 321.0]
+    assert list(v.hmF2[1]) == [310.0, 311.0]
+
+
+def test_validate_grid_replaces_fill_values(service):
+    """NaN / sentinel fill cells are replaced with the field median."""
+    hmF2 = np.full((2, 2), 300.0)
+    hmF2[0, 0] = np.nan
+    hmF2[1, 1] = 9.99e36                  # classic NetCDF fill sentinel
+    grid = IonoGrid(
+        timestamp=datetime.now(timezone.utc), source='wamipe',
+        lats=np.array([30.0, 40.0]), lons=np.array([-100.0, -90.0]),
+        hmF2=hmF2, NmF2=np.full((2, 2), 1e12), TEC=np.full((2, 2), 20.0),
+    )
+    v = service._validate_grid(grid)
+    assert v is not None
+    assert np.all(np.isfinite(v.hmF2))
+    assert np.all((v.hmF2 >= 100.0) & (v.hmF2 <= 600.0))
+
+
+def test_validate_grid_rejects_all_bad_field(service):
+    """A field with no valid cell at all rejects the whole grid."""
+    grid = IonoGrid(
+        timestamp=datetime.now(timezone.utc), source='wamipe',
+        lats=np.array([30.0, 40.0]), lons=np.array([-100.0, -90.0]),
+        hmF2=np.full((2, 2), np.nan), NmF2=np.full((2, 2), 1e12),
+        TEC=np.full((2, 2), 20.0),
+    )
+    assert service._validate_grid(grid) is None
+
+
+# --- P-M16 — GIRO correction uses great-circle km distance ----------------
+
+def test_giro_correction_is_dateline_safe(service):
+    """Great-circle distance: a GIRO station 2° away across the ±180°
+    dateline is near (~222 km), not the 358° the old degree-Euclidean
+    distance computed — so its correction is applied at near-full weight."""
+    now = datetime.now(timezone.utc)
+    service._giro_stations = [
+        GiroStation(code='XYZ', name='Dateline', latitude=0.0, longitude=-179.0)
+    ]
+    service._giro_measurements = {
+        'XYZ': GiroMeasurement(
+            station_code='XYZ', timestamp=now,
+            foF2_MHz=9.0, hmF2_km=320.0, confidence=1.0,
+        )
+    }
+    corr = service._get_giro_correction(0.0, 179.0, now)
+    assert corr is not None
+    hmF2, foF2, weight = corr
+    assert hmF2 == pytest.approx(320.0)
+    assert weight > 0.8  # ~222 km away → near full weight
 
 
 if __name__ == '__main__':

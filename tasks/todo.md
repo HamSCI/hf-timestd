@@ -19,8 +19,9 @@ commit. Source: `docs/CODE_REVIEW_2026-05-17_METROLOGY_PHYSICS.md`.
       delay differences a shared mode (geometric cancels); `predict()`
       cache gains an `enable_cache` flag + documented monotonic-time
       assumption.
-- [ ] P-M16 `iono_data_service` — temporal interpolation; grid validation;
-      great-circle GIRO distance
+- [x] **P-M16** `iono_data_service` — temporal interpolation between the
+      previous/current WAM-IPE grids; grid validation (ascending coords,
+      finite physical fields); great-circle km GIRO distance.
 - [ ] P-M17 `raytrace_engine` — R12 from solar feed; `spawn`; vectorise
 - [ ] P-M20 `physics_fusion_service` — `_timed_write` thread leak
 - [ ] P-M21 `physics_fusion_service` — full-table-scan reads → tail-read
