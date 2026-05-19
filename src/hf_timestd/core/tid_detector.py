@@ -83,6 +83,13 @@ _FILTER_ORDER = 3
 # ``_cross_correlate``.
 _LAG_TIE_TOL = 0.05
 
+# Minimum pierce-point separation (km) for a TDOA pair to provide spatial
+# information (P-M26). Same-station / same-receiver paths share the
+# great-circle midpoint regardless of frequency, so pairs whose pierce
+# points are closer than this contribute degenerate (≈0, ≈0, ≈0) rows
+# to the least-squares design matrix and are dropped.
+_MIN_PIERCE_SEPARATION_KM = 10.0
+
 
 @dataclass
 class TIDEvent:
@@ -463,7 +470,11 @@ class TIDDetector:
             direction_deg=direction_deg,
             correlation_coefficient=best_correlation,
             n_paths_correlated=len(correlated_paths),
-            confidence=min(1.0, best_correlation * 1.2),
+            # Significance-based confidence (P-M26 — replaces an ad-hoc
+            # ``best_correlation × 1.2``). 1 − p maps a Bonferroni-adjusted
+            # p-value to [0, 1]: at the detector's α threshold (p = α) the
+            # confidence is 1 − α, falling toward 0 as p approaches 1.
+            confidence=max(0.0, min(1.0, 1.0 - significance_p)),
             significance_p=significance_p,
             leading_path=leading_path,
             lagging_path=lagging_path,
@@ -789,20 +800,61 @@ class TIDDetector:
         x = d_lon * R * math.cos(ref_lat_rad)
         return x, y
 
+    @staticmethod
+    def _great_circle_km(lat1: float, lon1: float,
+                         lat2: float, lon2: float) -> float:
+        """Haversine great-circle distance in km."""
+        lat1r, lat2r = math.radians(lat1), math.radians(lat2)
+        dlat = math.radians(lat2 - lat1)
+        dlon = math.radians(lon2 - lon1)
+        a = (math.sin(dlat / 2) ** 2
+             + math.cos(lat1r) * math.cos(lat2r) * math.sin(dlon / 2) ** 2)
+        return EARTH_RADIUS_KM * 2 * math.asin(math.sqrt(a))
+
+    @staticmethod
+    def _bearing_deg(lat1: float, lon1: float,
+                     lat2: float, lon2: float) -> float:
+        """Initial great-circle bearing from (lat1, lon1) to (lat2, lon2),
+        degrees in [0, 360)."""
+        lat1r, lat2r = math.radians(lat1), math.radians(lat2)
+        dlon = math.radians(lon2 - lon1)
+        return math.degrees(math.atan2(
+            math.sin(dlon) * math.cos(lat2r),
+            math.cos(lat1r) * math.sin(lat2r)
+            - math.sin(lat1r) * math.cos(lat2r) * math.cos(dlon),
+        )) % 360.0
+
     def _solve_tdoa_velocity(
         self,
         correlated_paths: List[Tuple[str, float]],
         aligned_series: Dict[Tuple[str, float], np.ndarray],
         masks: Optional[Dict[Tuple[str, float], np.ndarray]] = None,
     ) -> Tuple[Optional[float], Optional[float]]:
+        """
+        Solve the planar TDOA system for TID slowness, returning
+        ``(velocity_m_s, azimuth_deg)`` or ``(None, None)``.
+
+        For each pair of correlated paths the lag-vs-baseline relation
+        ``[dx, dy] · s = dt`` constrains the 2-D slowness ``s``; the
+        least-squares solution gives velocity (1/‖s‖) and azimuth.
+
+        P-M26 — robustness fixes:
+
+        * Pairs whose pierce-point baseline is shorter than
+          ``_MIN_PIERCE_SEPARATION_KM`` provide no spatial information
+          and are dropped — paths sharing a station collapse to the same
+          great-circle midpoint regardless of frequency, so they would
+          otherwise contribute degenerate ``(≈0, ≈0, ≈0)`` rows to the
+          design matrix.
+        * ``np.linalg.lstsq``'s rank output is used: if the kept pairs
+          do not span the plane (rank < 2 — pierce points collinear or
+          coincident) the solve is ill-posed and ``None`` is returned
+          rather than a confident-looking but meaningless velocity.
+        """
         import itertools
-        import math
 
         if len(correlated_paths) < 3:
             return None, None
-
-        A = []
-        B = []
 
         points = []
         for p in correlated_paths:
@@ -811,35 +863,50 @@ class TIDDetector:
             x, y = self._get_enu_coords(lat, lon)
             points.append((x, y))
 
+        A = []
+        B = []
         for i, j in itertools.combinations(range(len(correlated_paths)), 2):
+            dx = points[i][0] - points[j][0]
+            dy = points[i][1] - points[j][1]
+            if (dx * dx + dy * dy) < _MIN_PIERCE_SEPARATION_KM ** 2:
+                continue  # degenerate baseline (same station / coincident pierce points)
+
             p1, p2 = correlated_paths[i], correlated_paths[j]
             m1 = masks.get(p1) if masks else None
             m2 = masks.get(p2) if masks else None
-            corr, lag_samples, _ = self._cross_correlate(
+            _corr, lag_samples, _ = self._cross_correlate(
                 aligned_series[p1], aligned_series[p2], m1, m2)
-
             dt_seconds = lag_samples * self.sample_interval_seconds
-
-            dx = points[i][0] - points[j][0]
-            dy = points[i][1] - points[j][1]
 
             A.append([dx, dy])
             B.append(dt_seconds)
+
+        if len(A) < 2:
+            # Fewer informative baselines than unknowns — under-determined.
+            return None, None
 
         A = np.array(A)
         B = np.array(B)
 
         try:
-            sol, _, _, _ = np.linalg.lstsq(A, B, rcond=None)
+            sol, _residuals, rank, _sv = np.linalg.lstsq(A, B, rcond=None)
+            if rank < 2:
+                # Pierce points effectively collinear — the slowness
+                # direction perpendicular to the line is unconstrained.
+                logger.debug(
+                    "TDOA slowness rank-deficient (rank=%d, %d baselines) — "
+                    "pierce points collinear; rejecting", rank, len(A))
+                return None, None
             sx, sy = sol
-
-            v_km_s = 1.0 / np.sqrt(sx**2 + sy**2)
+            slowness_mag = math.sqrt(sx * sx + sy * sy)
+            if slowness_mag <= 0:
+                return None, None
+            v_km_s = 1.0 / slowness_mag
             az_rad = math.atan2(sx, sy)
-            az_deg = (math.degrees(az_rad)) % 360
-
+            az_deg = math.degrees(az_rad) % 360.0
             return v_km_s * 1000.0, az_deg
         except Exception as e:
-            logger.debug(f"Caught exception: {e}")
+            logger.debug(f"TDOA lstsq failed: {e}")
             return None, None
 
     def _estimate_tid_velocity(
@@ -847,52 +914,53 @@ class TIDDetector:
         path_pair: Tuple[Tuple[str, float], Tuple[str, float]],
         lag_minutes: float
     ) -> float:
-        """Estimate TID velocity from path geometry and lag."""
+        """
+        Two-path TID velocity fallback when the 3+ path TDOA solve was
+        unavailable.
+
+        Velocity = distance / time, with distance taken as the great-circle
+        distance between the two paths' ionospheric pierce points (P-M26 —
+        replaces a heuristic ``2·h·sin(Δaz/2)`` that conflated path-azimuth
+        difference with pierce-point separation). Returns 0.0 when the lag
+        is non-positive or when the two paths share a pierce point (same
+        station, multi-freq) — in that case the 2-path geometry carries no
+        spatial information and the velocity is undefined.
+        """
         if lag_minutes <= 0:
             return 0.0
 
         path1, path2 = path_pair
-
-        # Get path midpoints (approximate ionospheric pierce points)
-        # For simplicity, use path azimuths to estimate separation
-        az1 = self._path_azimuths.get(path1, 0)
-        az2 = self._path_azimuths.get(path2, 0)
-
-        # Angular separation
-        delta_az = abs(az1 - az2)
-        if delta_az > 180:
-            delta_az = 360 - delta_az
-
-        # Approximate separation at ionospheric height (~300 km)
-        # This is a rough estimate - proper calculation needs pierce point geometry
-        iono_height_km = 300.0
-        separation_km = 2 * iono_height_km * np.sin(np.radians(delta_az / 2))
-
-        # Velocity = distance / time
-        velocity_m_s = (separation_km * 1000) / (lag_minutes * 60)
-
-        return velocity_m_s
+        lat1, lon1 = self._compute_pierce_point(path1[0])
+        lat2, lon2 = self._compute_pierce_point(path2[0])
+        separation_km = self._great_circle_km(lat1, lon1, lat2, lon2)
+        if separation_km < _MIN_PIERCE_SEPARATION_KM:
+            return 0.0
+        return (separation_km * 1000.0) / (lag_minutes * 60.0)
 
     def _estimate_tid_direction(
         self,
         path_pair: Tuple[Tuple[str, float], Tuple[str, float]],
         lag: int
     ) -> float:
-        """Estimate TID propagation direction from which path leads."""
+        """
+        Two-path TID propagation direction fallback.
+
+        Returns the great-circle bearing from the leading path's pierce
+        point to the lagging path's pierce point — the direction the
+        wavefront is travelling between the two observation points
+        (P-M26). The old fallback returned the leading path's TX→RX
+        azimuth, which is unrelated to the TID's propagation direction.
+        Returns 0.0 when the two paths share a pierce point.
+        """
         path1, path2 = path_pair
-
-        az1 = self._path_azimuths.get(path1, 0)
-        az2 = self._path_azimuths.get(path2, 0)
-
-        # TID travels from leading path toward lagging path
-        if lag > 0:
-            # path1 leads, TID coming from az1 direction
-            direction = az1
-        else:
-            # path2 leads
-            direction = az2
-
-        return direction
+        lat1, lon1 = self._compute_pierce_point(path1[0])
+        lat2, lon2 = self._compute_pierce_point(path2[0])
+        if self._great_circle_km(lat1, lon1, lat2, lon2) < _MIN_PIERCE_SEPARATION_KM:
+            return 0.0
+        # lag > 0 → path1 leads; TID propagates from pierce1 toward pierce2.
+        if lag >= 0:
+            return self._bearing_deg(lat1, lon1, lat2, lon2)
+        return self._bearing_deg(lat2, lon2, lat1, lon1)
 
     def _estimate_period(self, series: np.ndarray) -> float:
         """Estimate dominant period from autocorrelation."""

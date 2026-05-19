@@ -38,8 +38,12 @@ commit. Source: `docs/CODE_REVIEW_2026-05-17_METROLOGY_PHYSICS.md`.
       idempotent via `_existing_l3c_keys`/`_existing_tec_keys`.
       Also: S2 follow-on — removed flat-Earth `hop_elevation_angle`,
       routed callers through `hop_geometry`.
-- [ ] P-M25 `physics_service` — MOOT, module deleted by P-H28; verify only
-- [ ] P-M26 `tid_detector` — TDOA solver geometry/conditioning/confidence
+- [x] **P-M25** — verified moot; `physics_service.py` was deleted by
+      `75b8217` (P-H28). No code change.
+- [x] **P-M26** `tid_detector` — TDOA solver drops degenerate baselines
+      and checks lstsq rank; 2-path fallback uses real pierce-point
+      great-circle geometry; event confidence is `1 − significance_p`
+      (was the ad-hoc `best_correlation × 1.2`).
 
 ## Then
 M-M (§3.3; M-M29 already done), Low (§3.4, §4.4), docs (§5), P-H29 (TID

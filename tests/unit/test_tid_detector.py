@@ -466,17 +466,35 @@ class TestEstimateTIDVelocity:
 
 
 class TestEstimateTIDDirection:
-    def test_direction_follows_leading_path(self, detector):
-        detector._path_azimuths[('WWV', 10.0)] = 270.0
-        detector._path_azimuths[('CHU', 7.85)] = 60.0
-        d_pos = detector._estimate_tid_direction(
-            (('WWV', 10.0), ('CHU', 7.85)), lag=5)
-        # path1 leads (positive lag)
-        assert d_pos == 270.0
-        d_neg = detector._estimate_tid_direction(
-            (('WWV', 10.0), ('CHU', 7.85)), lag=-5)
-        # path2 leads
-        assert d_neg == 60.0
+    def test_direction_is_pierce_to_pierce_bearing(self, detector):
+        """P-M26: direction is the great-circle bearing from the leading
+        pierce point to the lagging pierce point — not the leading path's
+        TX→RX azimuth (the old, unphysical fallback)."""
+        pair = (('WWV', 10.0), ('CHU', 7.85))
+        lat1, lon1 = detector._compute_pierce_point('WWV')
+        lat2, lon2 = detector._compute_pierce_point('CHU')
+
+        d_pos = detector._estimate_tid_direction(pair, lag=5)
+        d_neg = detector._estimate_tid_direction(pair, lag=-5)
+
+        # Forward (lag>0): bearing from leading (WWV) → lagging (CHU).
+        assert d_pos == pytest.approx(
+            detector._bearing_deg(lat1, lon1, lat2, lon2)
+        )
+        # Reversed (lag<0): bearing from leading (CHU) → lagging (WWV).
+        # The two are anti-parallel within meridian-convergence tolerance
+        # (great-circle initial bearings are not exact 180° reciprocals).
+        assert d_neg == pytest.approx(
+            detector._bearing_deg(lat2, lon2, lat1, lon1)
+        )
+        assert 0.0 <= d_pos < 360.0
+        assert 0.0 <= d_neg < 360.0
+
+    def test_direction_zero_for_same_station_pair(self, detector):
+        """Same-station paths share a pierce point — direction is
+        undefined and returns 0.0."""
+        pair = (('WWV', 10.0), ('WWV', 15.0))
+        assert detector._estimate_tid_direction(pair, lag=5) == 0.0
 
 
 # =============================================================================
@@ -569,6 +587,57 @@ class TestSolveTDOAVelocity:
         assert az is not None
         assert v > 0
         assert 0 <= az < 360
+
+    def test_skips_degenerate_same_station_baselines(self, detector):
+        """P-M26: three paths from the SAME station share a pierce point
+        — every baseline is ~0 km and provides no spatial information.
+        The solve must report (None, None) rather than produce a
+        confident-looking velocity off zero-dx, zero-dy rows."""
+        n = 60
+        period_samples = 12
+        for shift, (station, freq) in zip(
+                [0, 4, 8],
+                [('WWV', 10.0), ('WWV', 15.0), ('WWV', 20.0)]):
+            for i in range(n):
+                ts = i * 60.0
+                val = math.sin(2 * math.pi * (i - shift) / period_samples)
+                detector.add_residual(PathResidual(
+                    timestamp=ts, station=station, frequency_mhz=freq,
+                    residual_ms=val))
+        aligned, masks = detector._align_residuals(
+            list(detector._residual_buffers.keys()))
+        v, az = detector._solve_tdoa_velocity(
+            correlated_paths=list(detector._residual_buffers.keys()),
+            aligned_series=aligned,
+            masks=masks,
+        )
+        assert v is None
+        assert az is None
+
+
+class TestSignificanceBasedConfidence:
+    def test_event_confidence_equals_one_minus_p(self, detector):
+        """P-M26: the event's confidence is 1 − significance_p (was the
+        ad-hoc ``best_correlation × 1.2``)."""
+        n = 60
+        period_samples = 12
+        shift = 5
+        for i in range(n):
+            ts = i * 60.0
+            base = math.sin(2 * math.pi * i / period_samples)
+            detector.add_residual(PathResidual(
+                timestamp=ts, station='WWV', frequency_mhz=10.0,
+                residual_ms=base))
+            shifted = math.sin(2 * math.pi * (i - shift) / period_samples)
+            detector.add_residual(PathResidual(
+                timestamp=ts, station='CHU', frequency_mhz=7.85,
+                residual_ms=shifted))
+
+        ev = detector.detect_tid()
+        assert ev is not None
+        assert ev.confidence == pytest.approx(
+            max(0.0, min(1.0, 1.0 - ev.significance_p))
+        )
 
 
 # =============================================================================
