@@ -764,24 +764,10 @@ class TickEdgeDetector:
         confidence = n_factor * snr_factor * clean_factor
         
         # --- Doppler from carrier phase slope ---
-        # Fit unwrapped phase vs time across the minute.
-        # Slope (rad/s) / (2π) = Doppler frequency shift (Hz).
         doppler_hz = None
         doppler_uncertainty_hz = None
         if iq_samples is not None and n_detected >= 5:
-            phase_times = np.array([t.sec_in_minute for t in detected_ticks], dtype=float)
-            phase_vals = np.array([t.carrier_phase_rad for t in detected_ticks])
-            phase_unwrapped = np.unwrap(phase_vals)
-            
-            if len(phase_times) >= 5 and (phase_times[-1] - phase_times[0]) > 5.0:
-                try:
-                    coeffs, cov = np.polyfit(phase_times, phase_unwrapped, 1, cov=True)
-                    slope_rad_per_sec = coeffs[0]
-                    doppler_hz = slope_rad_per_sec / (2.0 * np.pi)
-                    slope_std = np.sqrt(cov[0, 0])
-                    doppler_uncertainty_hz = slope_std / (2.0 * np.pi)
-                except (np.linalg.LinAlgError, ValueError):
-                    pass
+            doppler_hz, doppler_uncertainty_hz = self._estimate_doppler(detected_ticks)
         
         dop_str = f", doppler={doppler_hz:+.4f}Hz" if doppler_hz is not None else ""
         logger.info(f"{station}: Tick MF ensemble: {n_detected}/{len(ticks)} ticks, "
@@ -816,3 +802,95 @@ class TickEdgeDetector:
         half = cumweight[-1] / 2.0
         idx = int(np.searchsorted(cumweight, half))
         return float(sorted_vals[min(idx, len(sorted_vals) - 1)])
+
+    @staticmethod
+    def _estimate_doppler(
+        detected_ticks: List[TickDetection],
+    ) -> Tuple[Optional[float], Optional[float]]:
+        """
+        Estimate Doppler (Hz) from carrier-phase slope across the minute.
+
+        Fits φ(t) = 2π·f_D·t + φ₀ in absolute UTC time, SNR-weighted, with
+        a slip-safe two-step unwrap that survives missing ticks. Returns
+        ``(doppler_hz, doppler_uncertainty_hz)``; either is ``None`` when
+        too little usable data exists.
+
+        Why not ``np.unwrap`` over ``sec_in_minute``?  np.unwrap's ±π
+        adjacency rule is per-sample, not per-second, so a missing tick
+        (Δt = 2 s) plus a real Doppler |f| > 0.25 Hz already exceeds ±π
+        and is misclassified as a 2π slip. We instead seed the rate from
+        Δt ≤ 1.5 s pairs only — where the wrap is unambiguous for the
+        ±0.5 Hz band that survives 1-Hz sampling — then unwrap the full
+        series against that seed line.
+
+        Why SNR weighting?  Matched-filter phase σ ∝ 1/SNR_amp, so a
+        15 dB tick has 1/8 the phase variance of a 3 dB tick.
+        ``np.polyfit`` treats its ``w`` argument as 1/σ, so weights are
+        the amplitude SNR (10^(SNR_dB/20)).
+
+        Intrinsic limit (cannot be lifted at 1-Hz sampling): the
+        adjacent-tick wrap resolves Doppler only within ±0.5 Hz. The
+        residual baseband Doppler seen *after* the minute-marker carrier
+        lock comfortably fits this band; bulk-channel Doppler is already
+        absorbed by the lock.
+        """
+        if len(detected_ticks) < 5:
+            return None, None
+
+        t_abs = np.array([t.utc_second for t in detected_ticks], dtype=float)
+        phase_raw = np.array([t.carrier_phase_rad for t in detected_ticks], dtype=float)
+        snr_db = np.array([t.corr_snr_db for t in detected_ticks], dtype=float)
+
+        # Drop non-finite phases / SNRs (e.g. ticks that bypassed IQ extraction).
+        finite = np.isfinite(phase_raw) & np.isfinite(snr_db)
+        if finite.sum() < 5:
+            return None, None
+        t_abs = t_abs[finite]
+        phase_raw = phase_raw[finite]
+        snr_db = snr_db[finite]
+
+        if (t_abs[-1] - t_abs[0]) <= 5.0:
+            return None, None
+
+        t_rel = t_abs - t_abs[0]
+        snr_amp = 10.0 ** (snr_db / 20.0)
+
+        # Step 1: seed the rate from short-gap pairs only. Adjacent 1-sec
+        # ticks wrap to (-π, π] unambiguously for |f_D| < 0.5 Hz.
+        dt = np.diff(t_rel)
+        dphi = np.diff(phase_raw)
+        dphi_wrapped = (dphi + np.pi) % (2.0 * np.pi) - np.pi
+        short_gap = dt <= 1.5
+        if short_gap.sum() < 3:
+            return None, None
+
+        # Weight each pair by its weaker tick (limiting-noise principle).
+        pair_w = np.minimum(snr_amp[:-1], snr_amp[1:])[short_gap]
+        rate_seed = float(np.average(
+            dphi_wrapped[short_gap] / dt[short_gap],
+            weights=pair_w,
+        ))
+
+        # Step 2: unwrap by subtracting the seed line and wrapping the
+        # residual into (-π, π]. Slip-safe whenever the true rate lies
+        # within ±π/dt_max of the seed — guaranteed because the seed is
+        # itself the wrapped 1-sec-pair mean.
+        predicted = rate_seed * t_rel
+        residual = (phase_raw - predicted + np.pi) % (2.0 * np.pi) - np.pi
+        phase_unwrapped = predicted + residual
+
+        # Step 3: SNR-weighted linear fit. np.polyfit's `w` is 1/σ-style;
+        # phase σ ∝ 1/SNR_amp, so w ∝ SNR_amp.
+        try:
+            coeffs, cov = np.polyfit(
+                t_rel, phase_unwrapped, 1, w=snr_amp, cov=True
+            )
+        except (np.linalg.LinAlgError, ValueError):
+            return None, None
+
+        slope_rad_per_sec = float(coeffs[0])
+        slope_std = float(np.sqrt(cov[0, 0]))
+        return (
+            slope_rad_per_sec / (2.0 * np.pi),
+            slope_std / (2.0 * np.pi),
+        )
