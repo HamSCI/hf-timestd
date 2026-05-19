@@ -30,6 +30,7 @@ from hf_timestd.core.tid_detector import (
     PathResidual,
     TIDDetector,
     TIDEvent,
+    _MIN_OVERLAP,
 )
 
 
@@ -194,14 +195,13 @@ class TestGeometryHelpers:
 
 
 class TestCrossCorrelate:
-    def test_identical_series_at_lag_zero_below_min_lag_returns_zero(self, detector):
-        # min_lag_minutes=1 with 60s sample interval → exclude lag 0
-        s = np.array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], dtype=float)
-        corr, lag = detector._cross_correlate(s, s)
-        # Identical → strongest peak at lag 0, but min_lag excludes it →
-        # secondary peak (correlation < 1.0)
-        assert lag != 0
-        assert 0.0 <= corr <= 1.0
+    def test_short_series_yields_no_trustworthy_lag(self, detector):
+        # 10 samples: lag 0 is excluded by min_lag, and every non-zero lag has
+        # an overlap below _MIN_OVERLAP — no coefficient is trusted (P-H31/33).
+        s = np.arange(1, 11, dtype=float)
+        corr, lag, overlap = detector._cross_correlate(s, s)
+        assert corr == pytest.approx(0.0)
+        assert overlap == 0
 
     def test_lag_recovers_known_shift(self):
         # No exclusion zone — set min_lag_minutes=0 with default 60s interval
@@ -214,16 +214,50 @@ class TestCrossCorrelate:
         shift = 5
         s2 = np.roll(s1, shift)
         # Trim wrap-around region so we're correlating clean signal
-        corr, lag = det._cross_correlate(s1[:n - shift], s2[shift:])
+        corr, lag, overlap = det._cross_correlate(s1[:n - shift], s2[shift:])
         assert corr > 0.95
+        assert overlap >= _MIN_OVERLAP
 
     def test_orthogonal_series_low_correlation(self, detector):
         np.random.seed(0)
         s1 = np.random.randn(200)
         s2 = np.random.randn(200)
-        corr, _ = detector._cross_correlate(s1, s2)
+        corr, _, _ = detector._cross_correlate(s1, s2)
         # Random data → modest correlation
         assert corr < 0.5
+
+    def test_cross_correlate_unbiased_at_nonzero_lag(self):
+        # P-H31: with per-lag overlap normalisation the coefficient is a true
+        # Pearson r — 1.0 for perfectly-correlated linear segments even at
+        # large lag. The old np.correlate()/len(s1) was biased low by a
+        # factor (n-|lag|)/n and would report well below 1.0 here.
+        det = TIDDetector(receiver_lat=40.0, receiver_lon=-100.0,
+                          min_lag_minutes=5.0)  # forces a non-zero winning lag
+        line = np.arange(40, dtype=float)
+        corr, lag, overlap = det._cross_correlate(line, line)
+        assert corr == pytest.approx(1.0, abs=1e-6)
+        assert abs(lag) >= 5
+
+    def test_masked_samples_excluded(self):
+        # P-H33: samples marked invalid in the mask must not contribute.
+        det = TIDDetector(receiver_lat=40.0, receiver_lon=-100.0,
+                          min_lag_minutes=0.0)
+        rng = np.random.default_rng(7)
+        n = 80
+        # A smooth, non-periodic random walk — no coincidental clean lag the
+        # un-masked correlation could exploit to dodge the corruption.
+        s1 = np.cumsum(rng.standard_normal(n))
+        s2 = s1.copy()
+        s2[30:45] = 500.0  # gross corruption
+        mask = np.ones(n, dtype=bool)
+        mask[30:45] = False
+        corr_masked, _, _ = det._cross_correlate(
+            s1, s2, np.ones(n, bool), mask)
+        corr_unmasked, _, _ = det._cross_correlate(s1, s2)
+        # Masking the corruption out restores the underlying r≈1; leaving it
+        # in degrades every lag's coefficient.
+        assert corr_masked > 0.95
+        assert corr_unmasked < corr_masked
 
 
 # =============================================================================
@@ -263,11 +297,40 @@ class TestAlignResiduals:
         _fill_buffer(detector, 'CHU', 7.85, n=30)
         out = detector._align_residuals([('WWV', 10.0), ('CHU', 7.85)])
         assert out is not None
-        for arr in out.values():
+        aligned, masks = out
+        for arr in aligned.values():
             # Detrended → near-zero linear slope and near-zero mean
             slope, _ = np.polyfit(np.arange(len(arr)), arr, 1)
             assert abs(slope) < 1e-9
             assert abs(arr.mean()) < 1e-9
+        # Gap-free dense buffers → every sample valid in the mask
+        for m in masks.values():
+            assert m.all()
+
+    def test_aligned_residuals_masks_long_gap(self, detector):
+        # P-H33: a path with a long gap in its timestamps must have the
+        # interpolated grid samples flagged invalid.
+        # WWV: dense 40-sample stream.
+        for i in range(40):
+            detector.add_residual(PathResidual(
+                timestamp=i * 60.0, station='WWV',
+                frequency_mhz=10.0, residual_ms=0.0))
+        # CHU: samples 0..9 and 30..39 — a 20-minute hole in the middle,
+        # far wider than the 5-minute max_gap default.
+        for i in list(range(10)) + list(range(30, 40)):
+            detector.add_residual(PathResidual(
+                timestamp=i * 60.0, station='CHU',
+                frequency_mhz=7.85, residual_ms=0.0))
+        out = detector._align_residuals([('WWV', 10.0), ('CHU', 7.85)])
+        assert out is not None
+        aligned, masks = out
+        # Dense path → fully valid; gapped path → partly masked.
+        assert masks[('WWV', 10.0)].all()
+        assert not masks[('CHU', 7.85)].all()
+        # The masked-out region sits in the middle (the gap), not the ends.
+        chu_mask = masks[('CHU', 7.85)]
+        assert chu_mask[0] and chu_mask[-1]
+        assert not chu_mask[len(chu_mask) // 2]
 
 
 # =============================================================================
@@ -303,6 +366,84 @@ class TestEstimatePeriod:
 # =============================================================================
 # Velocity / direction estimation
 # =============================================================================
+
+
+# =============================================================================
+# Band-pass filtering (P-H30)
+# =============================================================================
+
+
+class TestBandpass:
+    def test_bandpass_rejects_out_of_band_keeps_in_band(self, detector):
+        # P-H30: a slow drift far below the TID band is suppressed; an
+        # oscillation inside the band (period 30 min) survives.
+        n = 200
+        x = np.arange(n)
+        slow = np.sin(2 * np.pi * x / 300)      # 300-min period — diurnal-ish
+        out_slow = detector._bandpass_filter(slow)
+        assert out_slow is not None
+        assert np.std(out_slow) < 0.2 * np.std(slow)
+
+        inband = np.sin(2 * np.pi * x / 30)     # 30-min period — mid TID band
+        out_in = detector._bandpass_filter(inband)
+        assert out_in is not None
+        assert np.std(out_in) > 0.5 * np.std(inband)
+
+    def test_bandpass_returns_none_for_short_series(self, detector):
+        # Too short for a zero-phase filter of the configured order.
+        assert detector._bandpass_filter(np.arange(8, dtype=float)) is None
+
+    def test_detect_tid_ignores_shared_slow_drift(self, detector):
+        # P-H30: two paths carrying ONLY a large, identical slow drift (well
+        # below the TID band) would cross-correlate perfectly without the
+        # band-pass and be flagged as a TID. After band-passing there is no
+        # in-band signal → no detection.
+        n = 110
+        for i in range(n):
+            ts = i * 60.0
+            drift = 3.0 * math.sin(2 * math.pi * i / 300)  # 300-min period
+            detector.add_residual(PathResidual(
+                timestamp=ts, station='WWV', frequency_mhz=10.0,
+                residual_ms=drift))
+            detector.add_residual(PathResidual(
+                timestamp=ts, station='CHU', frequency_mhz=7.85,
+                residual_ms=drift))
+        assert detector.detect_tid() is None
+
+
+# =============================================================================
+# Statistical significance / false-alarm control (P-H32)
+# =============================================================================
+
+
+class TestSignificance:
+    def test_pvalue_too_few_cycles_not_significant(self):
+        # n_eff ≤ 2 (fewer than ~2 cycles observed) → cannot support the test.
+        assert TIDDetector._correlation_pvalue(0.99, 2.0, 1) == 1.0
+
+    def test_pvalue_strong_correlation_many_cycles_significant(self):
+        p = TIDDetector._correlation_pvalue(0.95, 20.0, 1)
+        assert p < 0.01
+
+    def test_pvalue_bonferroni_scales_with_n_tests(self):
+        # Correcting for more comparisons makes the same r less significant.
+        p1 = TIDDetector._correlation_pvalue(0.8, 20.0, 1)
+        p10 = TIDDetector._correlation_pvalue(0.8, 20.0, 10)
+        assert p10 == pytest.approx(min(1.0, 10 * p1), rel=1e-6)
+
+    def test_no_detection_from_many_noise_paths(self):
+        # P-H32: the detector takes the max correlation over every path pair.
+        # With 4 noise paths (6 pairs) the inflated "best" must not pass the
+        # Bonferroni-corrected significance gate.
+        det = TIDDetector(receiver_lat=40.0, receiver_lon=-100.0)
+        rng = np.random.default_rng(20260519)
+        for station, freq in [('WWV', 10.0), ('WWVH', 15.0),
+                               ('CHU', 7.85), ('BPM', 5.0)]:
+            for i in range(100):
+                det.add_residual(PathResidual(
+                    timestamp=i * 60.0, station=station, frequency_mhz=freq,
+                    residual_ms=float(rng.standard_normal())))
+        assert det.detect_tid() is None
 
 
 class TestEstimateTIDVelocity:
@@ -417,10 +558,12 @@ class TestSolveTDOAVelocity:
                 detector.add_residual(PathResidual(
                     timestamp=ts, station=station, frequency_mhz=freq,
                     residual_ms=val))
-        aligned = detector._align_residuals(list(detector._residual_buffers.keys()))
+        aligned, masks = detector._align_residuals(
+            list(detector._residual_buffers.keys()))
         v, az = detector._solve_tdoa_velocity(
             correlated_paths=list(detector._residual_buffers.keys()),
             aligned_series=aligned,
+            masks=masks,
         )
         assert v is not None
         assert az is not None
