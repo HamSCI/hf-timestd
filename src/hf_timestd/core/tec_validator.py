@@ -27,6 +27,7 @@ from hf_timestd.core.tec_geometry import (
     calculate_midpoint,
     convert_slant_to_vertical,
 )
+from hf_timestd.core.wwv_constants import STATION_LOCATIONS
 
 logger = logging.getLogger(__name__)
 
@@ -179,8 +180,11 @@ class TECValidator:
 
             gps_vtec, source_file = ionex_result
 
-            # Sanity check on VTEC value
-            if not (1.0 < gps_vtec < 500.0):
+            # Sanity check on VTEC value. The floor is 0.1 TECU, not 1.0
+            # (P-M7): deep-night ionospheric VTEC genuinely drops below
+            # 1 TECU, and the old 1.0 floor rejected those valid low-TEC
+            # samples as out-of-range.
+            if not (0.1 <= gps_vtec < 500.0):
                 logger.warning(f"GPS VTEC out of range: {gps_vtec:.2f} TECU")
                 validation_fields['validation_flag'] = self.FLAG_VALIDATION_FAILED
                 return validation_fields
@@ -206,9 +210,14 @@ class TECValidator:
             validation_fields['vtec_tecu'] = float(gps_vtec)
             validation_fields['tec_bias_tecu'] = float(tec_bias)
 
-        except Exception as e:
-            logger.warning(f"TEC validation failed: {e}")
-            validation_fields['validation_flag'] = self.FLAG_VALIDATION_FAILED
+        except (OSError, ValueError) as e:
+            # IONEX read/parse failure (a missing or corrupt file) — the GPS
+            # VTEC is genuinely unavailable, so validation could not run.
+            # P-M7: flag VTEC_UNAVAILABLE, not VALIDATION_FAILED, and catch
+            # only IO/parse errors — a real bug now propagates instead of
+            # being silently recorded as a failed validation.
+            logger.warning(f"IONEX VTEC unavailable for validation: {e}")
+            validation_fields['validation_flag'] = self.FLAG_VTEC_UNAVAILABLE
 
         return validation_fields
 
@@ -251,16 +260,17 @@ class TECValidator:
 
         Returns:
             (latitude, longitude) in degrees or None if unknown
-        """
-        # Station coordinates (approximate)
-        STATION_COORDS = {
-            'WWV': (40.678, -105.038),      # Fort Collins, CO
-            'WWVH': (21.987, -159.763),     # Kauai, HI
-            'CHU': (45.295, -75.752),       # Ottawa, ON
-            'BPM': (31.207, 121.200),       # Shanghai, China
-        }
 
-        return STATION_COORDS.get(station.upper())
+        Coordinates come from the single source of truth,
+        wwv_constants.STATION_LOCATIONS (P-M6). The local copy this replaced
+        had BPM at 31.207°N, 121.200°E — Shanghai — ~1100 km from the real
+        Pucheng transmitter, which silently corrupted every BPM HF-path
+        geometry computed for validation.
+        """
+        loc = STATION_LOCATIONS.get(station.upper())
+        if loc is None:
+            return None
+        return (loc['lat'], loc['lon'])
 
     def validate_batch(
         self,

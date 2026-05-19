@@ -9,17 +9,15 @@ and calculating ionospheric pierce points (midpoints).
 import math
 from typing import Tuple, Dict
 
+from hf_timestd.core.wwv_constants import STATION_LOCATIONS as STATIONS
+
 # Physical constants
 EARTH_RADIUS_KM = 6371.0
 DEFAULT_IONO_HEIGHT_KM = 350.0
 
-# Station locations (from wwv_constants.py)
-STATIONS = {
-    'WWV': {'lat': 40.678, 'lon': -105.039, 'name': 'WWV Fort Collins, CO'},
-    'WWVH': {'lat': 21.987, 'lon': -159.763, 'name': 'WWVH Kauai, HI'},
-    'CHU': {'lat': 45.295, 'lon': -75.753, 'name': 'CHU Ottawa, ON'},
-    'BPM': {'lat': 34.457, 'lon': 109.550, 'name': 'BPM Pucheng, China'}
-}
+# Station locations: the single source of truth is wwv_constants.STATION_LOCATIONS
+# (P-M6). A local copy here had drifted — BPM sat at 34.457°N, ~55 km from the
+# real Pucheng transmitter — so it is now imported, not duplicated.
 
 
 def calculate_midpoint(lat1: float, lon1: float, lat2: float, lon2: float) -> Tuple[float, float]:

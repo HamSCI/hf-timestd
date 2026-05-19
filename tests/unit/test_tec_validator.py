@@ -229,12 +229,23 @@ class TestValidateTECMeasurement:
         assert result['validation_flag'] == TECValidator.FLAG_VTEC_UNAVAILABLE
         assert result['vtec_tecu'] is None
 
-    @pytest.mark.parametrize("bad_vtec", [0.5, 1.0, 500.0, 1000.0])
+    @pytest.mark.parametrize("bad_vtec", [0.05, 500.0, 1000.0])
     def test_out_of_range_vtec_marks_failed(self, validator, bad_vtec):
+        # Out of range: below the 0.1 TECU floor, or at/above the 500 cap.
         validator.iono_model.get_ionex_vtec.return_value = (bad_vtec, '/f')
         result = validator.validate_tec_measurement(
             _measurement(), 40.0, -100.0, NOMINAL_ELEV)
         assert result['validation_flag'] == TECValidator.FLAG_VALIDATION_FAILED
+
+    @pytest.mark.parametrize("low_vtec", [0.1, 0.5])
+    def test_low_night_vtec_within_floor_is_accepted(self, validator, low_vtec):
+        # P-M7: deep-night VTEC below 1 TECU is physically valid — the 0.1
+        # floor must not reject it (the old 1.0 floor did). Reaching a
+        # non-FAILED flag proves the range check passed.
+        validator.iono_model.get_ionex_vtec.return_value = (low_vtec, '/f')
+        result = validator.validate_tec_measurement(
+            _measurement(), 40.0, -100.0, NOMINAL_ELEV)
+        assert result['validation_flag'] == TECValidator.FLAG_VALIDATED
 
     def test_excessive_bias_marks_failed_but_records_values(self, validator):
         # HF slant=25 -> vertical ~18.6; GPS=200 -> bias well beyond 50 TECU.
@@ -248,11 +259,22 @@ class TestValidateTECMeasurement:
         assert result['vtec_tecu'] == pytest.approx(200.0)
         assert result['tec_bias_tecu'] == pytest.approx(hf_vtec - 200.0)
 
-    def test_ionex_exception_marks_failed(self, validator):
-        validator.iono_model.get_ionex_vtec.side_effect = RuntimeError("net error")
+    def test_ionex_io_error_marks_vtec_unavailable(self, validator):
+        # P-M7: a missing/corrupt IONEX file (OSError/ValueError) means the
+        # GPS VTEC is genuinely unavailable — flag VTEC_UNAVAILABLE, not
+        # VALIDATION_FAILED (validation could not run; it did not fail).
+        validator.iono_model.get_ionex_vtec.side_effect = OSError("ionex missing")
         result = validator.validate_tec_measurement(
             _measurement(), 40.0, -100.0, NOMINAL_ELEV)
-        assert result['validation_flag'] == TECValidator.FLAG_VALIDATION_FAILED
+        assert result['validation_flag'] == TECValidator.FLAG_VTEC_UNAVAILABLE
+
+    def test_unexpected_ionex_error_propagates(self, validator):
+        # P-M7: only IO/parse errors are caught. An unexpected error is a
+        # real bug and must surface, not be masked as a failed validation.
+        validator.iono_model.get_ionex_vtec.side_effect = RuntimeError("bug")
+        with pytest.raises(RuntimeError):
+            validator.validate_tec_measurement(
+                _measurement(), 40.0, -100.0, NOMINAL_ELEV)
 
     def test_successful_validation_records_bias(self, validator):
         validator.iono_model.get_ionex_vtec.return_value = (22.0, '/f')
@@ -326,13 +348,13 @@ class TestValidateBatch:
 
     def test_known_station_uses_great_circle_ipp(self, validator):
         validator.iono_model.get_ionex_vtec.return_value = (20.0, '/f')
-        # WWV is in Fort Collins (40.678, -105.038)
         rx_lat, rx_lon = 30.0, -85.0
         measurements = [_measurement(station='WWV')]
         validator.validate_batch(measurements, rx_lat, rx_lon)
 
-        # The IPP passed to get_ionex_vtec is the great-circle midpoint.
-        wwv_lat, wwv_lon = 40.678, -105.038
+        # The IPP passed to get_ionex_vtec is the great-circle midpoint of
+        # the WWV->RX path, using the validator's own canonical coordinates.
+        wwv_lat, wwv_lon = validator.get_station_location('WWV')
         expected_lat, expected_lon = calculate_midpoint(
             wwv_lat, wwv_lon, rx_lat, rx_lon)
 
