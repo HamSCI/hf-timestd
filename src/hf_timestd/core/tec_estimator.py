@@ -144,6 +144,7 @@ class TECEstimator:
         freqs = []
         toas = []
         weights = []
+        uncerts = []  # raw timing uncertainty (seconds) — outlier-σ floor (P-M1)
 
         for m in measurements:
             f = m['frequency_hz']
@@ -178,6 +179,7 @@ class TECEstimator:
             freqs.append(f)
             toas.append(t)
             weights.append(w)
+            uncerts.append(max(u_ms, 0.1) / 1000.0)
 
         # P-H6: too few measurements survived frequency validation.
         if len(freqs) < 2:
@@ -189,6 +191,7 @@ class TECEstimator:
         freqs = np.array(freqs)
         toas = np.array(toas)
         weights = np.array(weights)
+        uncerts = np.array(uncerts)
 
         # Check for frequency diversity (prevent singular matrix if freq is same)
         if np.std(freqs) < 1000.0:  # Less than 1kHz spread
@@ -216,33 +219,42 @@ class TECEstimator:
 
             m_slope, c_intercept, sigma_slope, rms_ms, y_pred = result
 
-            # Outlier rejection: only if N > 2 and not last iteration
-            # Use MAD (Median Absolute Deviation) instead of RMS for robustness:
-            # a single outlier inflates RMS, making itself harder to detect.
-            # MAD is resistant to up to 50% contamination.
-            if active > 2 and iteration < MAX_OUTLIER_ITERATIONS:
+            # Outlier rejection (P-M1): only with N ≥ 4 and not on the last
+            # iteration. At N ≤ 3 a 2-parameter line fit leaves ≤ 1 residual
+            # DOF, so MAD cannot tell a real outlier from ordinary scatter —
+            # and rejecting there can collapse the fit below 2 points. We drop
+            # at most ONE point (the worst) per pass, then re-fit, so a single
+            # bad measurement cannot drag a good one out with it. MAD's
+            # 50%-breakdown property is a distribution-estimation result; for
+            # a handful of regression residuals it is only a robust scatter
+            # estimate, not contamination-proof.
+            if active > 3 and iteration < MAX_OUTLIER_ITERATIONS:
                 residuals = np.abs(y - y_pred)
                 mad = float(np.median(residuals))
-                # Convert MAD to sigma-equivalent: σ ≈ 1.4826 × MAD
-                sigma_est = max(1e-15, mad * 1.4826)
+                # σ ≈ 1.4826 × MAD, floored against the measurement noise:
+                # residual scatter below the timing uncertainty is not
+                # evidence of an outlier, so a lucky near-zero MAD must not
+                # make every point look discrepant.
+                u_floor = float(np.median(uncerts[mask]))
+                sigma_est = max(mad * 1.4826, u_floor)
                 if sigma_est > 0:
-                    outlier_mask_local = residuals > OUTLIER_SIGMA * sigma_est
-                    if np.any(outlier_mask_local):
-                        # Map back to full mask
+                    threshold = OUTLIER_SIGMA * sigma_est
+                    worst_local = int(np.argmax(residuals))
+                    if residuals[worst_local] > threshold:
                         active_indices = np.where(mask)[0]
-                        for local_idx in np.where(outlier_mask_local)[0]:
-                            global_idx = active_indices[local_idx]
-                            mask[global_idx] = False
-                            n_rejected += 1
-                            f_rej = freqs[global_idx] / 1e6
-                            logger.info(
-                                f"TEC outlier rejected for {station}: "
-                                f"{f_rej:.1f} MHz, residual={residuals[local_idx]*1000:.2f}ms "
-                                f"(>{OUTLIER_SIGMA}σ={OUTLIER_SIGMA * sigma_est * 1000:.2f}ms)"
-                            )
+                        global_idx = active_indices[worst_local]
+                        mask[global_idx] = False
+                        n_rejected += 1
+                        f_rej = freqs[global_idx] / 1e6
+                        logger.info(
+                            f"TEC outlier rejected for {station}: "
+                            f"{f_rej:.1f} MHz, "
+                            f"residual={residuals[worst_local]*1000:.2f}ms "
+                            f"(>{OUTLIER_SIGMA}σ={threshold*1000:.2f}ms)"
+                        )
                         rejection_reason = 'outlier_3sigma'
-                        continue  # Re-fit without outliers
-            break  # No outliers found or last iteration
+                        continue  # Re-fit without the worst outlier
+            break  # No outlier found or last iteration
 
         # Negative slope means the TEC ESTIMATE is negative (lower freq appears
         # to arrive earlier than higher). True TEC is non-negative, but a
@@ -363,7 +375,11 @@ class TECEstimator:
 
             return m, c, sigma_slope, rms_residual_ms, y_pred
 
-        except Exception as e:
+        except (np.linalg.LinAlgError, ValueError) as e:
+            # The fit genuinely could not be done (singular system, NaN/Inf
+            # input, degenerate shapes). P-M2: catch only these — a bare
+            # `except Exception` here would swallow real bugs (typos,
+            # attribute errors) as a silent None.
             logger.error(f"TEC WLS fit failed for {station}: {e}")
             return None
 

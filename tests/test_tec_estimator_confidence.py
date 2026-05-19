@@ -86,6 +86,44 @@ class TestFrequencyValidation(unittest.TestCase):
         self.assertIsNone(TECEstimator().estimate_tec(meas, "WWV", 0.0))
 
 
+class TestOutlierRejection(unittest.TestCase):
+    """P-M1: MAD outlier rejection must not degenerate at small N."""
+
+    def test_n3_with_outlier_does_not_collapse(self) -> None:
+        # 3 points, one a gross outlier. Outlier rejection is skipped at
+        # N <= 3 — a 2-parameter line fit there has <= 1 residual DOF, so MAD
+        # cannot tell an outlier from scatter, and rejecting could drop the
+        # fit below 2 points. The estimate must still be returned.
+        meas = _measurements(20.0, freqs=[5e6, 10e6, 15e6], noise_ms=0.0)
+        meas[1]['toa_ms'] += 5.0  # gross outlier
+        r = TECEstimator().estimate_tec(meas, "WWV", 0.0)
+        self.assertIsNotNone(r)
+        self.assertEqual(r.n_rejected, 0)      # no rejection attempted at N=3
+        self.assertEqual(r.n_frequencies, 3)
+
+    def test_outlier_rejected_one_per_pass(self) -> None:
+        # 6 points, one a gross outlier with a large stated uncertainty so the
+        # weighted fit is not dragged toward it (which would mask it). Exactly
+        # one point is rejected — the worst — and the re-fit on the clean
+        # remainder finds no more.
+        meas = _measurements(20.0, noise_ms=0.0)
+        meas[3]['toa_ms'] += 5.0
+        meas[3]['uncertainty_ms'] = 5.0   # low weight → does not drag the fit
+        r = TECEstimator().estimate_tec(meas, "WWV", 0.0)
+        self.assertIsNotNone(r)
+        self.assertEqual(r.n_rejected, 1)
+        self.assertEqual(r.n_frequencies, 5)
+
+    def test_measurement_noise_scatter_not_rejected(self) -> None:
+        # P-M1 σ-floor: scatter at the measurement-uncertainty level is not
+        # evidence of an outlier — nothing should be rejected.
+        meas = _measurements(20.0, freqs=_FREQS[:5], noise_ms=0.8, u_ms=1.0,
+                             seed=4)
+        r = TECEstimator().estimate_tec(meas, "WWV", 0.0)
+        self.assertIsNotNone(r)
+        self.assertEqual(r.n_rejected, 0)
+
+
 class TestNegativeSlopeRetained(unittest.TestCase):
 
     def test_negative_slope_retained_with_zero_confidence(self) -> None:
