@@ -1,43 +1,56 @@
-# HDF5 → SQLite migration — cutover in progress
+# HDF5 → SQLite cutover — status & flip runbook
 
-## Context
-Driving the HDF5→SQLite cutover to completion so the new TID L3
-detector (remediation P-H29) can be built SQLite-native. Phase 1
-(dual-write canary) has been live on bee1 since 2026-05-15.
+## Code: done & committed (branch metrology-physics-review-remediation)
+- `08097cc` reader foundation — `SqliteDataProductReader` + `make_data_product_reader`
+- `4e9b0d0` all producers → `make_data_product_writer`
+- `c13a2d8` all consumers → `make_data_product_reader`
+- `5518968` parity tooling covers every product (+`--hdf5-data-dir`, exit-3 PENDING)
+- repo `config/timestd-config.toml` gained a `[storage]` section (web-api)
 
-## Done & committed (2026-05-19)
-- `08097cc` — Phase 2 reader foundation: `io/sqlite_reader.py`
-  (`SqliteDataProductReader` + `make_data_product_reader`),
-  `[storage] read_sqlite` knob, `tests/unit/test_sqlite_reader.py`.
-- `4e9b0d0` — every producer routed through `make_data_product_writer`
-  (`l2_calibration`, `physics_fusion`, `ionospheric_reanalysis`,
-  `live_vtec`); `storage_config` plumbed from `[storage]`.
+The whole data path is backend-agnostic; behaviour is HDF5 until
+`[storage]` flips.
 
-## Done this session — consumer wiring
-Every `DataProductReader` consumer routed through
-`make_data_product_reader` with `storage_config` from `[storage]`
-(default → HDF5, behaviour-preserving):
-- [x] `multi_broadcast_fusion.py` — 5 reader sites (the h5py-leak hot path)
-- [x] `physics_fusion_service.py` — 2 sites
-- [x] `ionospheric_reanalysis.py` — 1 site
-- [x] `l2_calibration_service.py` — 1 site (l1 readers)
-- [x] web-api — `config.py` exposes `config.storage`; 10 files /
-      20 sites converted (dashboard router + 9 services)
+## Live state on bee1 (via `scripts/parity_check_all.sh`)
+- metrology 6 products — dual-write, parity OK
+- L3 physics / tec / dtec / dtec_timeseries / dtec_diff — dual-write,
+  parity OK (physics_fusion already redeployed with the new code)
+- L3C propagation_stats, L3_tec REANALYZED — dual-write (reanalysis)
+- **L2_timing_measurements — PENDING.** `timestd-l2-calibration` is
+  still on pre-cutover code (last restart 2026-05-18 15:06); it is not
+  dual-writing yet.
 
-## Remaining
-1. Deploy; let dual-write run; verify parity for the newly-covered
-   products (extend `parity_check_all.sh` past the metrology set).
-2. Flip `[storage] read_sqlite=true` after a clean parity window,
-   then `write_hdf5=false` (Phase 3).
-   - NOTE: web-api loads `config/timestd-config.toml` (the repo file,
-     NOT `/etc/hf-timestd/...`), which currently has no `[storage]`
-     section → `config.storage == {}`. Add `[storage]` there for the
-     flip to reach web-api.
-   - The fusion h5py leak is only actually fixed once fusion reads
-     SQLite via a long-lived connection — currently it still builds a
-     reader per cycle. Address in the flip/perf step.
-3. Phase 4: remove HDF5 writer/reader paths + h5py.
-4. Resume remediation at P-H29 (TID detector), built SQLite-native.
+## The flip — blocked on one thing
+Flipping `read_sqlite=true` now would point fusion at a missing
+`L2_timing_measurements` table → fusion gets no L2 timing → chrony
+TSL2 loses its discipline source. Do NOT flip until:
+
+1. **Restart `timestd-l2-calibration`** — it then picks up the
+   committed code (editable install) and dual-writes
+   `L2_timing_measurements`.
+2. **Parity window.** Run `bash scripts/parity_check_all.sh` (ideally
+   `CHANNELS="CHU_3330 CHU_7850 CHU_14670 SHARED_2500 SHARED_5000
+   SHARED_10000 SHARED_15000 WWV_20000 WWV_25000" bash
+   scripts/parity_check_all.sh` for a full sweep). All products must
+   read OK/SKIP — zero PENDING, zero FAIL — sustained over the chosen
+   window (doc suggests ~3 days; at minimum several clean 6-hourly
+   `timestd-sqlite-parity` runs).
+3. **Flip reads:**
+   - `/etc/hf-timestd/timestd-config.toml` `[storage]`: add
+     `read_sqlite = true` (deployed config has write_* but not yet
+     read_sqlite).
+   - `config/timestd-config.toml` `[storage]`: `read_sqlite = true`
+     (web-api).
+   - Restart consumers: `timestd-fusion`, `timestd-l2-calibration`,
+     physics-fusion, web-api.
+4. Watch chrony (TSL2) + the parity timer for ~a day.
+5. Phase 3b: `write_hdf5 = false`. Phase 4: delete HDF5 writer/reader
+   paths + drop h5py.
+
+## Next
+Resume the metrology/physics remediation at P-H29 — the TID L3
+detector, built SQLite-native via the factories.
 
 ## Review
-(updated per commit)
+SQLite cutover code is complete and committed; the flip is an
+operational step gated on the l2-calibration restart + a parity
+window (see above). No production behaviour changed by these commits.

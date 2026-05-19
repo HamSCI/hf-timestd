@@ -141,6 +141,18 @@ file_output = true
 [monitoring]
 enable_metrics = true
 
+[storage]
+# HDF5 -> SQLite migration storage selection (see
+# docs/HDF5-TO-SQLITE-MIGRATION.md). The web-api loads THIS file, so
+# read_sqlite here governs whether the dashboard reads from SQLite.
+# Core services (metrology, fusion, l2-calibration, ...) read
+# /etc/hf-timestd/timestd-config.toml instead — flip both for a full
+# cutover. Defaults below preserve HDF5-only behaviour.
+write_hdf5 = true
+write_sqlite = false
+read_sqlite = false
+sqlite_path = "/var/lib/timestd/phase2/timestd.db"
+
 [web_ui]
 port = 8000
 refresh_interval = 60
