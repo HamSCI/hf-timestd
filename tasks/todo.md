@@ -1,61 +1,40 @@
-# S2 — Consolidate HF hop geometry onto one spherical module
+# Metrology/physics remediation — P-M batch
 
-Branch: `metrology-physics-review-remediation` (HEAD `c8ea76b`).
-Resolves review items **S2, M-M29, P-M12, P-M18, P-M19**.
-(P-H8 `tec_geometry` elevation and P-H15 `propagation_model` MUF were
-already made spherical in `74024e3` / `ef24c62`.)
+Branch `metrology-physics-review-remediation`. One finding/cluster per
+commit. Source: `docs/CODE_REVIEW_2026-05-17_METROLOGY_PHYSICS.md`.
 
-## Problem
-Hop geometry is reimplemented in ≥4 places with two conventions:
-- spherical (correct): `arrival_pattern_matrix._spherical_hop_path`,
-  `propagation_model._evaluate_mode`
-- flat-Earth (wrong, several % long-path error):
-  `propagation_mode_solver._hop_geometry` (M-M29),
-  `propagation_engine._estimate_geometric` (P-M19),
-  `ionospheric_model.update_calibration` flat-triangle inverse (P-M12),
-  `raytrace_engine._geometric_fallback` straight-line (P-M18)
+## Done this session
+- [x] **S2** (`0fac1d2`) — hop geometry consolidated onto
+      `core/hop_geometry.py`; resolves M-M29, P-M12, P-M18, P-M19.
+      (P-H8, P-H15 found already-done in `74024e3` / `ef24c62`.)
+- [x] **P-M11** — `ionospheric_model` IRI cache: wall-clock TTL removed
+      (a slot-keyed hit is always valid for the deterministic model),
+      eviction made genuinely LRU, `_calculate_cache_ttl` /
+      `_cache_ttl_seconds` deleted. P-M11's `_extract_scalar` half was
+      already done in `c9117b3`. Tests: `test_ionospheric_iri_cache.py`.
 
-## Plan
-- [x] 1. New `core/hop_geometry.py` — spherical law-of-cosines:
-      `HopGeometry` dataclass, `hop_geometry()`, `height_from_path()`
-      (inverse), `max_single_hop_distance_km()`, `n_hops_for_distance()`.
-- [x] 2. `arrival_pattern_matrix._spherical_hop_path` → delegate to
-      module (numerically identical — pure de-dup).
-- [x] 3. `propagation_model._evaluate_mode` → module for
-      slant/path/elevation + `max_single_hop_distance_km`
-      (numerically identical).
-- [x] 4. `propagation_mode_solver._hop_geometry` (M-M29) → spherical
-      via module (behaviour change: flat→spherical).
-- [x] 5. `propagation_engine._estimate_geometric` (P-M19) → spherical
-      via module; thread `frequency_hz` through; replace the
-      frequency-blind ×1.03 with a proper 40.3/f² group-delay term.
-- [x] 6. `ionospheric_model.update_calibration` (P-M12) → `height_from_path`
-      for both implied and predicted heights (one shared geometry).
-- [x] 7. `raytrace_engine._geometric_fallback` (P-M18) → real spherical
-      hop slant path + launch elevation + apogee.
-- [x] 8. `tests/unit/test_hop_geometry.py`; update CHANGELOG; full suite.
+## Remaining P-M (clean, one commit each)
+- [ ] P-M13 `propagation_model` — IRI tier hard-codes `TEC_TECU = 20.0`
+- [ ] P-M14 `propagation_model` — `compute_differential_delay` attributes
+      a 1F-vs-2F geometric path difference entirely to TEC
+- [ ] P-M15 `propagation_model` — `predict()` cache evicts oldest-by-
+      simulated-time; thrashes during reanalysis
+- [ ] P-M16 `iono_data_service` — temporal interpolation; grid validation;
+      great-circle GIRO distance
+- [ ] P-M17 `raytrace_engine` — R12 from solar feed; `spawn`; vectorise
+- [ ] P-M20 `physics_fusion_service` — `_timed_write` thread leak
+- [ ] P-M21 `physics_fusion_service` — full-table-scan reads → tail-read
+- [ ] P-M22 `physics_fusion_service` — F2 virtual height hard-coded 300 km
+- [ ] P-M23 `ionospheric_reanalysis` — foE formula; Es geometry; per-path MUF
+- [ ] P-M24 `ionospheric_reanalysis` — `process_hour` not idempotent
+- [ ] P-M25 `physics_service` — MOOT, module deleted by P-H28; verify only
+- [ ] P-M26 `tid_detector` — TDOA solver geometry/conditioning/confidence
 
-## Review
-S2 complete. One spherical hop-geometry module (`core/hop_geometry.py`);
-all six call sites delegate to it. The two already-spherical sites
-(`arrival_pattern_matrix`, `propagation_model`) are numerically
-unchanged; the four flat-Earth sites (`propagation_mode_solver` M-M29,
-`propagation_engine` P-M19, `ionospheric_model.update_calibration`
-P-M12, `raytrace_engine._geometric_fallback` P-M18) now agree with
-them. P-M19 also gained a proper 40.3/f² ionospheric term in place of
-the frequency-blind ×1.03.
+## Then
+M-M (§3.3; M-M29 already done), Low (§3.4, §4.4), docs (§5), P-H29 (TID
+L3 wire-in, deferred).
 
-Verification: 51 new `test_hop_geometry` tests (forward, exact
-round-trip inverse, flat-Earth limit, divergence, validation); full
-suite green except the two known time-of-day flakes
-(`test_geometric_prediction`, `test_fusion_gnss_vtec_rtp_gate`) —
-`test_geometric_prediction` confirmed to fail identically on the
-pre-change tree, so not a regression. New files black-clean.
-
-`uv.lock` was left untouched — a `ka9q-python` spec drift surfaced by
-`uv run` is unrelated to S2 and excluded from the commit.
-
-## Next
-Resume the clean P-M items: P-M11 (`ionospheric_model` IRI cache TTL —
-P-M11's `_extract_scalar` half already done in `c9117b3`), then
-P-M13–P-M17, P-M20–P-M26.
+## Workflow
+`uv run --frozen --extra dev pytest tests/` — `--frozen` keeps uv.lock
+pinned. Known time-of-day flakes (deselect / not regressions):
+`test_geometric_prediction`, `test_fusion_gnss_vtec_rtp_gate`.

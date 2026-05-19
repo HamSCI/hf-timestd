@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### IRI layer-height cache — no wall-clock TTL (review P-M11)
+
+- **The bug.** `IonosphericModel._get_iri_heights` caches IRI results under a key (`_location_key`) that already encodes the query's rounded lat/lon and 5-minute slot — and IRI is a deterministic empirical model, so the cached value *is* the exact answer for that slot. On top of that the code ran an "adaptive" wall-clock TTL: `_calculate_cache_ttl` returned 300 s (night) or 1800 s (day) from the query hour, and a hit was discarded and recomputed once `datetime.now() − cached.timestamp` exceeded it. That TTL could never be right — in live operation a slot is only queried during its own ~5-minute window (then the key changes), so the TTL only ever fired a needless recompute at the window's tail; under reanalysis the query time and the wall clock are unrelated, so the TTL was simply incoherent.
+- **The fix.** The TTL is removed — a cache hit on the slot-keyed cache is always valid. `_calculate_cache_ttl` and the dead `_cache_ttl_seconds` attribute are deleted. Eviction is now genuinely LRU: `_get_iri_heights` calls `move_to_end` on every hit so `popitem(last=False)` drops the least-recently-used entry (the cache-store comment had long claimed LRU while the lookup path never did the `move_to_end`, making it FIFO). `iri_cache_hits` is no longer double-counted on a stale-then-rejected entry.
+- **P-M11's other half** — `_estimate_vertical_tec` calling `self._extract_scalar` on the wrong class — was already fixed in `c9117b3`.
+- **Tests** — `tests/unit/test_ionospheric_iri_cache.py`: same-slot hit, an artificially aged entry still served (fails on the pre-fix TTL code), distinct slots each compute once, LRU eviction keeps a touched entry.
+
 ### Hop geometry consolidated onto one spherical module (review S2; M-M29, P-M12, P-M18, P-M19)
 
 - **The problem.** HF skywave hop geometry — slant path length, launch elevation, and the inverse height-from-path — was reimplemented in four places with two incompatible conventions: a spherical law-of-cosines model in `arrival_pattern_matrix._spherical_hop_path` and `propagation_model._evaluate_mode`, and a flat-Earth triangle in `propagation_mode_solver._hop_geometry`, `propagation_engine._estimate_geometric` and the `ionospheric_model` height-calibration inverse. The same path produced different delays depending on which module asked — for a ~7000 km WWVH route the flat triangle understates the slant path by ~1.9% (≈140 km, ≈0.46 ms of geometric delay), and that delay fed `back_calculate_emission_time`.

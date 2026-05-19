@@ -262,12 +262,18 @@ class IonosphericModel:
         # boundaries (the date-based key prevents reuse of yesterday's
         # entries but they never get evicted). With ~10-20 IRI queries per
         # fusion cycle × ~7 cycles/min, growth was ~5000 entries/hour at
-        # ~300 bytes each — a known contributor to the fusion memory
-        # leak. FIFO eviction at a generous cap (5000 ~= 1 day at typical
-        # query rate) keeps in-window reuse healthy while bounding RSS.
+        # ~300 bytes each — a known contributor to the fusion memory leak.
+        # LRU eviction at a generous cap (5000 ~= 1 day at typical query
+        # rate) keeps in-window reuse healthy while bounding RSS.
+        #
+        # No TTL (P-M11): the key already encodes the query's 5-minute
+        # slot, and IRI is deterministic for a fixed (slot, lat, lon), so
+        # a cache hit is the exact value for that slot — it never goes
+        # stale. The previous wall-clock TTL only forced needless
+        # recomputes, and was incoherent under reanalysis, where the query
+        # time and wall-clock time are unrelated.
         self._iri_cache: 'OrderedDict[str, LayerHeights]' = OrderedDict()
         self._iri_cache_max_size = 5000
-        self._cache_ttl_seconds = 300  # 5 minute cache
         
         # IONEX support for global VTEC maps
         self.ionex_dir = Path(ionex_dir) if ionex_dir else Path('/var/lib/timestd/ionex')
@@ -564,37 +570,6 @@ class IonosphericModel:
             return None
     
     
-    def _calculate_cache_ttl(self, timestamp: datetime, latitude: float) -> float:
-        """
-        Calculate adaptive cache TTL based on ionospheric conditions.
-        
-        Ionosphere is more stable during daytime quiet conditions (longer TTL acceptable),
-        but more variable at night and during disturbed conditions (shorter TTL needed).
-        
-        Args:
-            timestamp: UTC timestamp
-            latitude: Geographic latitude in degrees
-            
-        Returns:
-            Cache TTL in seconds
-        """
-        # Calculate local solar time (approximate)
-        # For more accuracy, could use longitude, but hour-level precision is sufficient
-        hour = timestamp.hour
-        
-        # Daytime (06:00-18:00 UTC, approximate): longer TTL (ionosphere more stable)
-        # Nighttime: shorter TTL (more variable, especially near sunrise/sunset)
-        if 6 <= hour < 18:
-            base_ttl = 1800  # 30 minutes daytime
-        else:
-            base_ttl = 300   # 5 minutes nighttime
-        
-        # Future enhancement: reduce TTL during disturbed conditions
-        # if hasattr(self, 'ap') and self.ap and self.ap > 30:  # Disturbed
-        #     base_ttl = min(base_ttl, 300)
-        
-        return base_ttl
-    
     def _get_iri_heights(
         self,
         timestamp: datetime,
@@ -609,16 +584,14 @@ class IonosphericModel:
         if not self._iri_available or self._iri_module is None:
             return None
         
-        # Check cache first
+        # Check cache first. The key encodes the query's 5-minute slot and
+        # IRI is deterministic per (slot, lat, lon), so any hit is valid —
+        # no staleness check (P-M11). move_to_end keeps eviction LRU.
         cache_key = self._location_key(latitude, longitude, timestamp)
         if cache_key in self._iri_cache:
             self.stats['iri_cache_hits'] += 1
-            cached = self._iri_cache[cache_key]
-            # Verify cache not stale (using adaptive TTL)
-            age_seconds = (datetime.now(timezone.utc) - cached.timestamp).total_seconds()
-            cache_ttl = self._calculate_cache_ttl(timestamp, latitude)
-            if age_seconds < cache_ttl:
-                return cached
+            self._iri_cache.move_to_end(cache_key)
+            return self._iri_cache[cache_key]
         
         try:
             self.stats['iri_calls'] += 1
@@ -661,10 +634,9 @@ class IonosphericModel:
                 foF2=foF2 if foF2 is not None and 1.0 < foF2 < 30.0 else None
             )
             
-            # Cache result with FIFO eviction at _iri_cache_max_size.
-            # OrderedDict.move_to_end on lookup + popitem(last=False) gives
-            # us LRU-with-cap; combined with the per-entry TTL check above
-            # the working set stays compact across long-running fusion.
+            # Cache result with LRU eviction at _iri_cache_max_size:
+            # move_to_end on every lookup hit + popitem(last=False) here
+            # keeps the working set compact across long-running fusion.
             self._iri_cache[cache_key] = heights
             if len(self._iri_cache) > self._iri_cache_max_size:
                 self._iri_cache.popitem(last=False)
