@@ -80,6 +80,49 @@ class TestEFSplitIdentifiability(unittest.TestCase):
         self.assertFalse(r.is_daytime)
         self.assertTrue(r.prior_dominated)
 
+    def test_solve_reports_converged_for_a_normal_fit(self):
+        # P-M10: a well-posed solve converges and says so.
+        paths = [_path(10, 28), _path(25, 22), _path(40, 18), _path(55, 15)]
+        r = IonoTomography().solve(paths, solar_elevation_deg=45.0)
+        self.assertIsNotNone(r)
+        self.assertTrue(r.converged)
+
+
+class TestSingleHopRestriction(unittest.TestCase):
+    """P-M9: the E/F tomography uses only single-hop paths."""
+
+    def test_all_multihop_paths_rejected(self):
+        # Every path is multi-hop — none samples a single ionospheric
+        # column, so the two-shell solve cannot run.
+        paths = [_path(7, 30, n_hops=2), _path(15, 26, n_hops=2),
+                 _path(30, 20, n_hops=3), _path(45, 16, n_hops=2)]
+        self.assertIsNone(
+            IonoTomography().solve(paths, solar_elevation_deg=45.0))
+
+    def test_multihop_paths_excluded_from_the_solve(self):
+        # Two single-hop + two multi-hop, all with wide elevation spread.
+        # The solve runs on the single-hop pair only.
+        paths = [_path(10, 28, n_hops=1), _path(50, 16, n_hops=1),
+                 _path(8, 40, n_hops=2), _path(30, 30, n_hops=3)]
+        r = IonoTomography().solve(paths, solar_elevation_deg=45.0)
+        self.assertIsNotNone(r)
+        self.assertEqual(r.n_paths, 2)
+
+
+class TestGeometryNotFabricated(unittest.TestCase):
+    """P-M9: build_paths_from_tec_results must not invent geometry."""
+
+    def test_paths_skipped_when_no_propagation_prediction(self):
+        # No propagation predictions → no real elevation/hop geometry → the
+        # path is skipped, not given a fabricated 30°/1-hop default.
+        tec_results = {
+            'WWV': {'tec_tecu': 20.0, 'confidence': 0.9,
+                    'frequencies_mhz': '10.0,15.0'},
+        }
+        paths = IonoTomography().build_paths_from_tec_results(
+            tec_results, propagation_predictions=None)
+        self.assertEqual(paths, [])
+
 
 if __name__ == '__main__':
     unittest.main()
