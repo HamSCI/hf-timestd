@@ -141,20 +141,60 @@ class TestHFPropagationModel:
         assert pred.primary_uncertainty_1sigma_ms > 1.0
     
     def test_differential_delay(self):
-        """Differential delay between frequencies should be consistent with TEC."""
+        """Differential delay between two frequencies, differenced on a
+        mode shared by both (P-M14): the geometric delay cancels, leaving
+        the dispersive 1/f² term, which inverts to slant TEC."""
         utc_time = datetime(2026, 3, 15, 18, 0, 0, tzinfo=timezone.utc)
-        
+
         diff_ms, implied_tec = self.model.compute_differential_delay(
             'WWV', 5.0, 10.0, utc_time
         )
-        
-        # Differential delay should be positive (5 MHz has more delay than 10 MHz)
-        # due to 1/f² ionospheric term
+
+        # 5 MHz has more ionospheric delay than 10 MHz (delay ∝ 1/f²).
         assert diff_ms > 0
-        
-        # Implied TEC should be reasonable (1-100 TECU)
-        assert 0 < implied_tec < 200
-    
+
+        # The inversion yields slant TEC integrated along the whole
+        # (multi-hop) ray path — several times the vertical TEC.
+        assert 0 < implied_tec < 500
+
+    def test_differential_delay_differences_a_shared_mode(self):
+        """P-M14: the differential is one shared mode's ionospheric-delay
+        difference (the geometric delay having cancelled), never a
+        cross-mode total-delay difference that would smuggle a 1F-vs-2F
+        geometric step into the implied TEC."""
+        utc_time = datetime(2026, 3, 15, 18, 0, 0, tzinfo=timezone.utc)
+        diff_ms, _ = self.model.compute_differential_delay(
+            'WWV', 5.0, 10.0, utc_time
+        )
+
+        p5 = self.model.predict('WWV', 5.0, utc_time)
+        p10 = self.model.predict('WWV', 10.0, utc_time)
+        m5 = {a.mode.label: a for a in p5.arrivals if a.is_feasible}
+        m10 = {a.mode.label: a for a in p10.arrivals if a.is_feasible}
+        shared = set(m5) & set(m10)
+        assert shared, "test precondition: a feasible mode shared by both"
+
+        # diff_ms must equal some shared mode's pure ionospheric
+        # differential — proof the geometric delay cancelled exactly.
+        per_mode_iono_diff = [
+            m5[lbl].iono_delay_ms - m10[lbl].iono_delay_ms for lbl in shared
+        ]
+        assert any(
+            diff_ms == pytest.approx(v, abs=1e-9) for v in per_mode_iono_diff
+        )
+
+    def test_differential_delay_is_frequency_pair_independent(self):
+        """The implied slant TEC is a property of the ray path, not of
+        the frequency pair used to probe it — different pairs agree."""
+        utc_time = datetime(2026, 3, 15, 18, 0, 0, tzinfo=timezone.utc)
+        _, tec_5_10 = self.model.compute_differential_delay(
+            'WWV', 5.0, 10.0, utc_time
+        )
+        _, tec_10_20 = self.model.compute_differential_delay(
+            'WWV', 10.0, 20.0, utc_time
+        )
+        assert tec_5_10 == pytest.approx(tec_10_20, rel=0.05)
+
     def test_self_consistency(self):
         """Self-consistency check should pass for model-generated delays."""
         utc_time = datetime(2026, 3, 15, 18, 0, 0, tzinfo=timezone.utc)

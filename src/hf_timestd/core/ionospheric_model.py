@@ -183,6 +183,12 @@ class LayerHeights:
     # failures of 5–18 ms.
     foF2: Optional[float] = None
 
+    # Vertical TEC (TECU) — IRI-2020 outputs this directly. Surfaced so the
+    # propagation model's IRI tier uses real TEC instead of a fixed 20 TECU
+    # placeholder (P-M13). None when the providing tier (parametric/static)
+    # or the IRI build did not supply it.
+    tec_tecu: Optional[float] = None
+
 
 @dataclass
 class CalibrationEntry:
@@ -605,15 +611,18 @@ class IonosphericModel:
                 glon=longitude
             )
             
-            # Extract peak heights + foF2 from IRI output. IRI returns
-            # hmF2, hmF1, hmE as single values; foF2 is the F2 critical
-            # frequency in MHz, needed by HFPropagationModel for the MUF
-            # check (omitting it left the propagation model on a hardcoded
-            # 8.0 MHz default).
+            # Extract peak heights + foF2 + TEC from IRI output. IRI
+            # returns hmF2, hmF1, hmE as single values; foF2 is the F2
+            # critical frequency in MHz, needed by HFPropagationModel for
+            # the MUF check (omitting it left the propagation model on a
+            # hardcoded 8.0 MHz default); TEC is the vertical TEC in TECU,
+            # surfaced so the propagation model's IRI tier uses real TEC
+            # rather than a fixed placeholder (P-M13).
             hmF2 = self._extract_scalar(result.get('hmF2'), DEFAULT_F2_LAYER_HEIGHT_KM)
             hmF1 = self._extract_scalar(result.get('hmF1'), DEFAULT_F1_LAYER_HEIGHT_KM)
             hmE = self._extract_scalar(result.get('hmE'), DEFAULT_E_LAYER_HEIGHT_KM)
             foF2 = self._extract_scalar(result.get('foF2'), None)
+            tec_tecu = self._extract_scalar(result.get('TEC'), None)
 
             # Sanity check on values
             if not (150 < hmF2 < 500):
@@ -631,7 +640,8 @@ class IonosphericModel:
                 timestamp=datetime.now(timezone.utc),
                 location=(latitude, longitude),
                 hmF2_uncertainty_km=25.0 if self._iri_version == "2020" else 28.0,  # IRI-2020 slightly better
-                foF2=foF2 if foF2 is not None and 1.0 < foF2 < 30.0 else None
+                foF2=foF2 if foF2 is not None and 1.0 < foF2 < 30.0 else None,
+                tec_tecu=tec_tecu if tec_tecu is not None and 1.0 < tec_tecu < 500.0 else None,
             )
             
             # Cache result with LRU eviction at _iri_cache_max_size:
@@ -820,6 +830,8 @@ class IonosphericModel:
         logger.debug(f"Calibration applied: {heights.hmF2:.1f} km + {weighted_offset:+.1f} km "
                     f"= {calibrated_hmF2:.1f} km (from {len(recent)} measurements)")
         
+        # Calibration adjusts only the F2 height; foF2 and TEC are carried
+        # through unchanged (a height calibration says nothing about them).
         return LayerHeights(
             hmE=heights.hmE,
             hmF1=heights.hmF1,
@@ -830,7 +842,9 @@ class IonosphericModel:
             hmF2_uncertainty_km=max(15.0, heights.hmF2_uncertainty_km - 10.0),  # Reduced uncertainty
             calibration_offset_km=weighted_offset,
             f107=heights.f107,
-            ap=heights.ap
+            ap=heights.ap,
+            foF2=heights.foF2,
+            tec_tecu=heights.tec_tecu,
         )
     
     def get_layer_heights(

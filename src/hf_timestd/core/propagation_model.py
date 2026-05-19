@@ -223,19 +223,26 @@ class HFPropagationModel:
         self,
         receiver_lat: float,
         receiver_lon: float,
-        enable_realtime: bool = True
+        enable_realtime: bool = True,
+        enable_cache: bool = True
     ):
         """
         Initialize the propagation model.
-        
+
         Args:
             receiver_lat: Receiver latitude (degrees)
             receiver_lon: Receiver longitude (degrees)
             enable_realtime: Whether to use real-time ionospheric data
+            enable_cache: Whether to cache predictions. The cache's
+                eviction assumes ``utc_time`` advances monotonically
+                (see ``predict``); reanalysis that re-walks or jumps
+                around archived time should pass ``enable_cache=False``
+                (P-M15).
         """
         self.receiver_lat = receiver_lat
         self.receiver_lon = receiver_lon
         self.enable_realtime = enable_realtime
+        self._enable_cache = enable_cache
         
         # Station locations (canonical source: wwv_constants)
         from .wwv_constants import STATION_LOCATIONS as _SL
@@ -256,7 +263,10 @@ class HFPropagationModel:
         # IRI model reference (lazy init)
         self._iri_model = None
         
-        # Cache of recent predictions
+        # Cache of recent predictions, keyed by (station, freq, time-bucket).
+        # Eviction (in predict()) drops the lowest time-bucket, which is the
+        # least-recently-used ONLY while utc_time advances monotonically —
+        # see the note there. Disabled via enable_cache=False.
         self._cache: Dict[Tuple[str, float, int], PropagationPrediction] = {}
         self._cache_ttl_s = 60  # Cache predictions for 1 minute
         
@@ -317,9 +327,9 @@ class HFPropagationModel:
         if modes is None:
             modes = PROPAGATION_MODES
         
-        # Check cache
+        # Check cache (skipped when enable_cache=False — see __init__).
         cache_key = (station, frequency_mhz, int(utc_time.timestamp()) // self._cache_ttl_s)
-        if cache_key in self._cache:
+        if self._enable_cache and cache_key in self._cache:
             return self._cache[cache_key]
         
         distance_km = self.distances.get(station, 0.0)
@@ -381,14 +391,19 @@ class HFPropagationModel:
             # the value this fallback historically reported (P-H13).
             prediction.primary_uncertainty_1sigma_ms = 5.0
         
-        # Cache
-        self._cache[cache_key] = prediction
-        # Evict old entries
-        if len(self._cache) > 1000:
-            oldest = sorted(self._cache.keys(), key=lambda k: k[2])[:500]
-            for k in oldest:
-                del self._cache[k]
-        
+        # Cache. Eviction drops the 500 lowest cache-key time buckets —
+        # the least-recently-used set ONLY while utc_time advances
+        # monotonically (live operation, or a single forward reanalysis
+        # pass). A caller that re-walks or jumps around archived time must
+        # construct the model with enable_cache=False (P-M15), or it will
+        # evict buckets it is about to request again.
+        if self._enable_cache:
+            self._cache[cache_key] = prediction
+            if len(self._cache) > 1000:
+                oldest = sorted(self._cache.keys(), key=lambda k: k[2])[:500]
+                for k in oldest:
+                    del self._cache[k]
+
         return prediction
     
     def predict_all_modes(
@@ -450,12 +465,21 @@ class HFPropagationModel:
                     longitude=lon
                 )
                 if heights is not None:
+                    # TEC: IRI-2020 outputs vertical TEC, and IonosphericModel
+                    # now surfaces it on LayerHeights (P-M13) — no longer a
+                    # fixed 20 TECU placeholder. Fall back to the parametric
+                    # TEC only when this IRI build did not supply one.
+                    tec_tecu = heights.tec_tecu
+                    if tec_tecu is None:
+                        tec_tecu = self._parametric_iono(
+                            lat, lon, utc_time
+                        ).get('TEC_TECU', 20.0)
                     return {
                         'hmF2_km': heights.hmF2,
                         'hmE_km': heights.hmE,
                         'NmF2_m3': 1.24e10 * (heights.foF2 ** 2) if hasattr(heights, 'foF2') and heights.foF2 else 1e12,
                         'foF2_MHz': heights.foF2 if hasattr(heights, 'foF2') and heights.foF2 else 8.0,
-                        'TEC_TECU': 20.0,  # IRI doesn't directly give TEC here
+                        'TEC_TECU': tec_tecu,
                         'source': 'iri',
                         'confidence': 0.5,
                     }
@@ -919,38 +943,66 @@ class HFPropagationModel:
         utc_time: Optional[datetime] = None
     ) -> Tuple[float, float]:
         """
-        Compute differential group delay between two frequencies.
-        
-        This is a key observable for TEC estimation:
-            Δτ = τ(f1) - τ(f2) = 40.3 * sTEC * (1/f1² - 1/f2²) / c
-        
+        Differential group delay between two frequencies, on a shared mode.
+
+        For one fixed propagation mode the delay splits into a geometric
+        part (frequency-independent — the slant path is fixed by geometry,
+        not frequency) and a dispersive ionospheric part ∝ 1/f². The
+        differential of two frequencies on the *same* mode therefore
+        isolates the dispersive term, a key observable for TEC:
+
+            Δτ = τ(f1) − τ(f2) = K · sTEC · (1/f1² − 1/f2²) / c
+
+        which inverts to the slant TEC along the (multi-hop) ray path.
+
+        P-M14: this previously differenced the two frequencies' *primary*
+        modes, which can differ (e.g. 1F at one frequency, 2F at the other,
+        via MUF gating). A 1F-vs-2F step is a large *geometric* path
+        difference with nothing to do with TEC; folding it into the
+        inversion produced a meaningless "implied TEC". The fix differences
+        a mode feasible at *both* frequencies, so the geometric delay
+        cancels exactly and only the dispersive term remains.
+
         Args:
             station: Station name
             freq1_mhz: First frequency (MHz)
             freq2_mhz: Second frequency (MHz)
             utc_time: UTC time
-            
+
         Returns:
-            Tuple of (differential_delay_ms, implied_tec_tecu)
+            (differential_delay_ms, implied_slant_tec_tecu) — the slant TEC
+            integrated along the whole ray path. Both 0.0 when the two
+            frequencies share no feasible mode (the differential TEC is
+            then undefined, not contaminated).
         """
         pred1 = self.predict(station, freq1_mhz, utc_time)
         pred2 = self.predict(station, freq2_mhz, utc_time)
-        
-        diff_ms = pred1.primary_delay_ms - pred2.primary_delay_ms
-        
-        # Implied TEC from differential delay
-        # Δτ = K * sTEC * (1/f1² - 1/f2²) / c
-        # sTEC = Δτ * c / (K * (1/f1² - 1/f2²))
+
+        # Difference a mode the two frequencies have in common. Same mode →
+        # identical geometry → the geometric delay cancels exactly, leaving
+        # the dispersive ionospheric term. The lowest-delay shared mode is
+        # the dominant common path.
+        modes1 = {a.mode.label: a for a in pred1.arrivals if a.is_feasible}
+        modes2 = {a.mode.label: a for a in pred2.arrivals if a.is_feasible}
+        shared = set(modes1) & set(modes2)
+        if not shared:
+            return 0.0, 0.0
+
+        label = min(shared, key=lambda lbl: modes1[lbl].delay_ms)
+        diff_ms = modes1[label].delay_ms - modes2[label].delay_ms
+
+        # Invert the dispersion relation for slant TEC along the path.
+        # Δτ = K · sTEC · (1/f1² − 1/f2²) / c  →  sTEC = Δτ·c / (K·Δ(1/f²))
         f1_hz = freq1_mhz * 1e6
         f2_hz = freq2_mhz * 1e6
         freq_factor = 1.0 / f1_hz**2 - 1.0 / f2_hz**2
-        
+
         if abs(freq_factor) > 0:
             stec_el_m2 = (diff_ms / 1000.0) * C_LIGHT_M_S / (K_GROUP_DELAY * freq_factor)
             implied_tec_tecu = stec_el_m2 / 1e16
         else:
             implied_tec_tecu = 0.0
-        
+
         return diff_ms, implied_tec_tecu
     
     def self_consistency_check(

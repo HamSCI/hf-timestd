@@ -14,11 +14,11 @@ commit. Source: `docs/CODE_REVIEW_2026-05-17_METROLOGY_PHYSICS.md`.
       already done in `c9117b3`. Tests: `test_ionospheric_iri_cache.py`.
 
 ## Remaining P-M (clean, one commit each)
-- [ ] P-M13 `propagation_model` — IRI tier hard-codes `TEC_TECU = 20.0`
-- [ ] P-M14 `propagation_model` — `compute_differential_delay` attributes
-      a 1F-vs-2F geometric path difference entirely to TEC
-- [ ] P-M15 `propagation_model` — `predict()` cache evicts oldest-by-
-      simulated-time; thrashes during reanalysis
+- [x] **P-M13/P-M14/P-M15** `propagation_model` cluster — IRI tier uses
+      real IRI TEC (surfaced on `LayerHeights.tec_tecu`); differential
+      delay differences a shared mode (geometric cancels); `predict()`
+      cache gains an `enable_cache` flag + documented monotonic-time
+      assumption.
 - [ ] P-M16 `iono_data_service` — temporal interpolation; grid validation;
       great-circle GIRO distance
 - [ ] P-M17 `raytrace_engine` — R12 from solar feed; `spawn`; vectorise
