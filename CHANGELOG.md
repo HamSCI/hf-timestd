@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Correlation-peak SNR consolidated onto one canonical definition (review S4; M-M1, M-M3)
+
+- **The bug.** Three modules computed correlation-peak SNR three incompatible ways. `tick_edge_detector` used `peak/median(envelope)` — under-reports SNR by ~1.4 dB on a Rayleigh envelope (M-M1). `tick_matched_filter._correlate_tick_iq` used `peak/std(envelope)` — over-reports by ~3.7 dB on a Rayleigh envelope (M-M3). `tick_matched_filter._correlate_tick_am` used `peak/std(signed_correlation)` — already canonical for signed Gaussian noise, but its `noise_std == 0` branch returned a 40 dB sentinel that let artefacts pass downstream 8 dB gates (M-M3). The contract's "≥ 10 dB SNR" target was therefore ambiguous and the three sites disagreed by 1–5 dB.
+- **The canonical.** New `core/snr.py` with two estimators that both report the same physical quantity — `20·log10(|peak|/σ)`, where σ is the underlying noise std:
+  - `peak_snr_db_envelope` for Rayleigh envelopes (modulus of zero-mean complex Gaussian, e.g. a complex-IQ matched-filter output): `σ̂ = median(envelope) / √(2·ln 2)` — robust against outliers contaminating the noise region.
+  - `peak_snr_db_signed` for zero-mean signed Gaussian noise (e.g. the real AM-demodulated correlation): `σ̂ = std(samples)`.
+  Both return `float('nan')` when σ̂ cannot be estimated, so callers can treat the SNR as unknown rather than accept a misleading sentinel.
+- **Migrations.** `tick_edge_detector` (M-M1) and `tick_matched_filter._correlate_tick_iq` (M-M3) now call `peak_snr_db_envelope`; `tick_matched_filter._correlate_tick_am` calls `peak_snr_db_signed` (numerically identical to the old `std` formula — the 40 dB sentinel is the substantive change). `metrology_engine`'s correlation-SNR sites carry the same M-M1 bug and will migrate when its M-M cluster lands.
+- **Downstream impact.** Reported tick-edge SNRs rise by ~1.4 dB and matched-filter envelope SNRs fall by ~3.7 dB; downstream thresholds in `consensus_combiner`, `ionospheric_reanalysis`, `bpm_discriminator`, `broadcast_kalman_filter` and `multi_station_detector` were tuned against the inconsistent mix and may want re-validation — but no operational behaviour was *measurably* wrong, only ambiguous, and re-tuning is left for follow-up validation work.
+- **Tests** — `tests/unit/test_snr.py` (σ̂ recovery from synthetic Rayleigh noise, dB-ratio analytical match, NaN-on-degenerate, outlier-robustness of the median estimator). `test_carrier_phase_continuity`'s previously-unseeded `np.random.randn` was seeded — the new (stricter, correct) Rayleigh σ̂ exposed an existing test-order fragility.
+
 ### tid_detector — distinct pierce points, conditioning check, real-geometry 2-path fallback, significance-based confidence (review P-M25, P-M26)
 
 - **P-M25 — `physics_service.py` already deleted.** Verified: the module was removed in `75b8217` (P-H28). No code change needed; the finding is moot. Recording this here so the next remediation pass does not re-investigate.

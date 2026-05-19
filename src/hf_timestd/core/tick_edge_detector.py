@@ -60,6 +60,8 @@ from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Tuple, Set
 from scipy.signal import butter, sosfiltfilt, correlate
 
+from .snr import peak_snr_db_envelope
+
 logger = logging.getLogger(__name__)
 
 
@@ -616,13 +618,14 @@ class TickEdgeDetector:
                 corr_env[min(len(corr_env), peak_idx + exclusion):]
             ])
             
-            if len(noise_region) > 5:
-                noise_median = float(np.median(noise_region))
-                noise_floor = max(noise_median, 1e-10)
-            else:
-                noise_floor = max(float(np.median(corr_env)) * 0.5, 1e-10)
-            
-            corr_snr_db = 20 * np.log10(peak_val / noise_floor)
+            # SNR via the shared canonical (Rayleigh envelope branch):
+            # σ̂ = median(noise)/1.1774, then 20·log10(peak/σ̂) — replaces
+            # a raw peak/median(noise) ratio that under-reported SNR by
+            # ~1.4 dB (review items S4 + M-M1).
+            noise_envelope = noise_region if len(noise_region) > 5 else corr_env
+            corr_snr_db = peak_snr_db_envelope(peak_val, noise_envelope)
+            if not np.isfinite(corr_snr_db):
+                corr_snr_db = 0.0
             
             # Sub-sample parabolic interpolation
             sub_offset = 0.0

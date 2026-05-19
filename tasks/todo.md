@@ -1,53 +1,55 @@
-# Metrology/physics remediation — P-M batch
+# Metrology/physics remediation — M-M batch
 
-Branch `metrology-physics-review-remediation`. One finding/cluster per
-commit. Source: `docs/CODE_REVIEW_2026-05-17_METROLOGY_PHYSICS.md`.
+Branch `metrology-physics-review-remediation`. P-M1–P-M26 all done. Now
+on **M-M (metrology-Medium)** findings, 11 file-clusters.
 
-## Done this session
-- [x] **S2** (`0fac1d2`) — hop geometry consolidated onto
-      `core/hop_geometry.py`; resolves M-M29, P-M12, P-M18, P-M19.
-      (P-H8, P-H15 found already-done in `74024e3` / `ef24c62`.)
-- [x] **P-M11** — `ionospheric_model` IRI cache: wall-clock TTL removed
-      (a slot-keyed hit is always valid for the deterministic model),
-      eviction made genuinely LRU, `_calculate_cache_ttl` /
-      `_cache_ttl_seconds` deleted. P-M11's `_extract_scalar` half was
-      already done in `c9117b3`. Tests: `test_ionospheric_iri_cache.py`.
+## Done this session (M-M)
+- [x] **S4 + M-M1 + M-M3** — canonical correlation-peak SNR: new
+      `core/snr.py` with `peak_snr_db_envelope` (Rayleigh) and
+      `peak_snr_db_signed` (Gaussian); `tick_edge_detector` and
+      `tick_matched_filter._correlate_tick_iq` migrated to the envelope
+      branch; `tick_matched_filter._correlate_tick_am` migrated to the
+      signed branch (replaces the 40 dB sentinel with NaN). The
+      `metrology_engine` correlation-SNR sites will migrate when its
+      M-M cluster lands.
 
-## Remaining P-M (clean, one commit each)
-- [x] **P-M13/P-M14/P-M15** `propagation_model` cluster — IRI tier uses
-      real IRI TEC (surfaced on `LayerHeights.tec_tecu`); differential
-      delay differences a shared mode (geometric cancels); `predict()`
-      cache gains an `enable_cache` flag + documented monotonic-time
-      assumption.
-- [x] **P-M16** `iono_data_service` — temporal interpolation between the
-      previous/current WAM-IPE grids; grid validation (ascending coords,
-      finite physical fields); great-circle km GIRO distance.
-- [x] **P-M17** `raytrace_engine` — `r12_idx = -1` (IRI sources the
-      date-appropriate sunspot index from its own files); raytrace
-      subprocess uses `spawn` not `fork` (`_raytrace_worker` lifted to
-      module level); IRI Ne-profile range interpolation vectorised.
-- [x] **P-M20/P-M21/P-M22** `physics_fusion_service` cluster — per-writer
-      write lock (`_run_timed_write`) so a timed-out write neither races
-      the next nor leaks threads (P-M20); F2 reflection height sourced
-      from the ionospheric model + shared spherical elevation (P-M22).
-      P-M21 (full-table-scan reads) resolved by the SQLite cutover —
-      `SqliteDataProductReader.read_time_range` is an indexed range query.
-- [x] **P-M23/P-M24** `ionospheric_reanalysis` cluster — ITU-R foE
-      formula (was 0.3·foF2 / 0.5 MHz); Es relabel gated on hop
-      geometry; per-station MUF (was one global MUF); `process_hour`
-      idempotent via `_existing_l3c_keys`/`_existing_tec_keys`.
-      Also: S2 follow-on — removed flat-Earth `hop_elevation_angle`,
-      routed callers through `hop_geometry`.
-- [x] **P-M25** — verified moot; `physics_service.py` was deleted by
-      `75b8217` (P-H28). No code change.
-- [x] **P-M26** `tid_detector` — TDOA solver drops degenerate baselines
-      and checks lstsq rank; 2-path fallback uses real pierce-point
-      great-circle geometry; event confidence is `1 − significance_p`
-      (was the ad-hoc `best_correlation × 1.2`).
+## Remaining M-M clusters (one commit each)
+- [ ] **M-M2** `tick_edge_detector` — Doppler polyfit unweighted +
+      cycle-slip-risky unwrap.
+- [ ] **M-M4** `buffer_timing` — GPS_LEAP_SECONDS captured once at import.
+- [ ] **M-M5/M-M6/M-M7/M-M8 + S4-finish** `metrology_engine` — vacuum
+      fallback `×1.15`; minute_number from untrusted system_time;
+      synthetic edge round-trip truncates mid_sec; ±800 ms multipath
+      suppression; migrate correlation SNR to `peak_snr_db_envelope`.
+- [ ] **M-M9/M-M10/M-M11/M-M12/M-M13** `multi_broadcast_fusion` — key
+      formatter; dead `gpsdo_locked` guard; leap-second Kalman hold
+      length; >5 ms D_clock jump not damped; dual convergence definitions.
+- [ ] **M-M14/M-M15** `broadcast_kalman_filter` — Joseph-form covariance
+      update; NaN/Inf guard on entrypoint.
+- [ ] **M-M16/M-M17** `chrony_shm` — `_connect_sysv` recreates a segment
+      chronyd may be attached to; failed `update()` does not clear
+      `.connected`.
+- [ ] **M-M18/M-M19/M-M20** `metrology_service` — per-record
+      `all_arrivals`/`detection_attempts` heap risk; DEBUG-not-WARNING
+      log; `_cleanup_processed_set` horizon uses `time.time()` while
+      minutes are keyed by ring `head_utc`.
+- [ ] **M-M21/M-M22/M-M23** `l2_calibration_service` — vacuum-only
+      geometric-fallback `propagation_delay_ms`; `k=2.0 / dof=10`
+      mis-labelled as 95 %; uncertainty components un-sourced.
+- [ ] **M-M24/M-M25/M-M26/M-M27/M-M28** `arrival_pattern_matrix` —
+      `int()` truncation in sample conversions; `contains_sample` /
+      `deviation_sigma` disagreement; `max_search_sample` clamp;
+      RTP-mode gate on TEC correction; virtual-vs-true hmF2 semantics.
+- [ ] **M-M30/M-M31/M-M32/M-M33/M-M34/M-M35** `propagation_mode_solver` —
+      Tier-2 MUF check; `back_calculate_emission_time` fallback;
+      E-layer ×0.5 fudge; `identify_mode` metric mismatch; dead FSS
+      branch; circular `second_aligned` boost.
+
+(M-M29 done by S2 — `propagation_mode_solver._hop_geometry` now uses
+spherical `hop_geometry`.)
 
 ## Then
-M-M (§3.3; M-M29 already done), Low (§3.4, §4.4), docs (§5), P-H29 (TID
-L3 wire-in, deferred).
+Low (§3.4, §4.4); documentation (§5); P-H29 (TID L3 wire-in, deferred).
 
 ## Workflow
 `uv run --frozen --extra dev pytest tests/` — `--frozen` keeps uv.lock
