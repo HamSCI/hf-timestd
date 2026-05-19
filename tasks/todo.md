@@ -22,7 +22,10 @@ commit. Source: `docs/CODE_REVIEW_2026-05-17_METROLOGY_PHYSICS.md`.
 - [x] **P-M16** `iono_data_service` — temporal interpolation between the
       previous/current WAM-IPE grids; grid validation (ascending coords,
       finite physical fields); great-circle km GIRO distance.
-- [ ] P-M17 `raytrace_engine` — R12 from solar feed; `spawn`; vectorise
+- [x] **P-M17** `raytrace_engine` — `r12_idx = -1` (IRI sources the
+      date-appropriate sunspot index from its own files); raytrace
+      subprocess uses `spawn` not `fork` (`_raytrace_worker` lifted to
+      module level); IRI Ne-profile range interpolation vectorised.
 - [ ] P-M20 `physics_fusion_service` — `_timed_write` thread leak
 - [ ] P-M21 `physics_fusion_service` — full-table-scan reads → tail-read
 - [ ] P-M22 `physics_fusion_service` — F2 virtual height hard-coded 300 km

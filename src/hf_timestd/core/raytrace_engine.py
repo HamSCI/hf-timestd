@@ -114,25 +114,44 @@ _try_import_pylap()
 RAYTRACE_TIMEOUT_S = 120  # Max wall-clock seconds per raytrace_2d call
 
 
-def _raytrace_with_timeout(raytrace_func, args, timeout_s=RAYTRACE_TIMEOUT_S):
-    """Run raytrace_2d in a forked subprocess with hard timeout.
+def _raytrace_worker(queue, fn_args):
+    """
+    Subprocess entry point for one ``raytrace_2d`` call.
+
+    Module-level (not a closure) and resolving the raytrace function from
+    the module global, so nothing unpicklable has to cross the ``spawn``
+    boundary — only ``fn_args``, which are numpy arrays and scalars.
+    """
+    try:
+        if _pylap_raytrace_2d is None:
+            queue.put(('err', 'pylap.raytrace_2d unavailable in subprocess'))
+            return
+        result = _pylap_raytrace_2d(*fn_args)
+        queue.put(('ok', result))
+    except Exception as exc:
+        queue.put(('err', str(exc)))
+
+
+def _raytrace_with_timeout(args, timeout_s=RAYTRACE_TIMEOUT_S):
+    """Run raytrace_2d in a subprocess with a hard timeout.
 
     PHaRLAP's Fortran ODE solver can enter runaway loops for certain
     frequency/ionosphere combinations (e.g. above-MUF at night).  A hung
-    C-extension call cannot be interrupted by Python signals, so we fork
-    a child process and kill it if it exceeds the deadline.
+    C-extension call cannot be interrupted by Python signals, so the call
+    runs in a child process that is killed if it exceeds the deadline.
+
+    The child uses the ``spawn`` start method (P-M17).  The timestd
+    services are multi-threaded, and forking a multi-threaded process
+    copies locked mutexes into the child while only the forking thread
+    survives there — a classic deadlock hazard.  ``spawn`` starts a clean
+    interpreter; the child re-imports this module, so ``_try_import_pylap``
+    repopulates ``_pylap_raytrace_2d`` and ``_raytrace_worker`` resolves
+    it locally rather than receiving it (unpicklable) over the boundary.
     """
-    ctx = mp.get_context('fork')
+    ctx = mp.get_context('spawn')
     q = ctx.Queue(maxsize=1)
 
-    def _worker(queue, fn, fn_args):
-        try:
-            result = fn(*fn_args)
-            queue.put(('ok', result))
-        except Exception as exc:
-            queue.put(('err', str(exc)))
-
-    proc = ctx.Process(target=_worker, args=(q, raytrace_func, args),
+    proc = ctx.Process(target=_raytrace_worker, args=(q, args),
                        daemon=True)
     proc.start()
     proc.join(timeout=timeout_s)
@@ -236,6 +255,31 @@ def _gc_bearing(lat1: float, lon1: float,
     )) % 360.0
 
 
+def _interp_profiles_to_columns(
+    profiles_arr: np.ndarray,
+    sample_km: np.ndarray,
+    range_km: np.ndarray,
+) -> np.ndarray:
+    """
+    Linearly interpolate per-height Ne profiles onto a range grid.
+
+    Vectorised across all heights at once (P-M17 — replaces a per-height
+    ``np.interp`` loop).  ``profiles_arr`` is ``(n_heights, n_samples)``,
+    the profiles sampled at the ascending x-grid ``sample_km``; the result
+    is ``(n_heights, n_ranges)`` at the query points ``range_km``.  Range
+    values outside the sample span clamp to the end profile, matching
+    ``np.interp``'s flat extrapolation.
+    """
+    n_samp = sample_km.shape[0]
+    hi = np.clip(np.searchsorted(sample_km, range_km, side='right'),
+                 1, n_samp - 1)
+    lo = hi - 1
+    x0 = sample_km[lo]
+    x1 = sample_km[hi]
+    w = np.clip((range_km - x0) / (x1 - x0), 0.0, 1.0)   # (n_ranges,)
+    return profiles_arr[:, lo] * (1.0 - w) + profiles_arr[:, hi] * w
+
+
 def _build_iri_grid(tx_lat: float, tx_lon: float,
                     rx_lat: float, rx_lon: float,
                     utc: datetime,
@@ -282,7 +326,13 @@ def _build_iri_grid(tx_lat: float, tx_lon: float,
         n_ranges = int(grid_max_km / range_inc_km) + 1
 
         brg = _gc_bearing(tx_lat, tx_lon, rx_lat, rx_lon)
-        r12_idx = 100.0  # moderate solar activity
+        # R12 = -1 tells IRI to read the date-appropriate 12-month smoothed
+        # sunspot index from its own ig_rz.dat / apf107.dat files, instead
+        # of a fixed value that ignores the solar cycle entirely (P-M17).
+        # The codebase has no separate solar-index feed; IRI's bundled,
+        # date-indexed files are the authoritative source and cover
+        # historical dates as well as near-future predictions.
+        r12_idx = -1.0
         ut_list = [utc.year, utc.month, utc.day,
                    utc.hour, utc.minute]
 
@@ -332,12 +382,9 @@ def _build_iri_grid(tx_lat: float, tx_lon: float,
         else:
             range_km = np.arange(n_ranges) * range_inc_km
             profiles_arr = np.column_stack(sample_profiles)  # (n_heights, n_samp)
-            sample_km = np.array(sample_dists)
-            # np.interp operates per-height row; vectorise with apply_along_axis
-            iono_en_grid = np.zeros((n_heights, n_ranges), dtype=np.float64)
-            for h in range(n_heights):
-                iono_en_grid[h, :] = np.interp(range_km, sample_km,
-                                               profiles_arr[h, :])
+            sample_km = np.asarray(sample_dists, dtype=np.float64)
+            iono_en_grid = _interp_profiles_to_columns(
+                profiles_arr, sample_km, range_km)
 
         iono_en_grid_5 = np.zeros_like(iono_en_grid)  # Doppler shift not needed
         collision_grid = np.zeros_like(iono_en_grid)
@@ -470,7 +517,6 @@ class RaytraceEngine:
             # that occurs when raytrace_2d is invoked multiple times per process.
             # Wrapped in subprocess timeout to kill runaway ODE solver loops.
             ray_list, _rpath, _rstate = _raytrace_with_timeout(
-                _pylap_raytrace_2d,
                 (tx_lat, tx_lon,
                  elevs, bearing_deg, freqs, max_hops,
                  tol, 0,   # irreg_flag=0

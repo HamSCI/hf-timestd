@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### raytrace_engine — date-driven R12, spawn subprocess, vectorised IRI interpolation (review P-M17)
+
+- **R12 sourced from IRI's own date-indexed files.** `_build_iri_grid` hard-coded `r12_idx = 100.0` ("moderate solar activity") for every IRI call, ignoring the solar cycle entirely. It now passes `r12_idx = -1.0`, which instructs IRI to read the date-appropriate 12-month smoothed sunspot index from its bundled `ig_rz.dat` / `apf107.dat` files (covering historical dates and near-future predictions). The codebase has no separate solar-index feed; IRI's own files are the authoritative source.
+- **Raytrace subprocess uses `spawn`, not `fork`.** `_raytrace_with_timeout` ran `raytrace_2d` in a `fork`-ed child to enforce a hard timeout. The timestd services are multi-threaded, and forking a multi-threaded process copies locked mutexes into the child — where only the forking thread survives — a deadlock hazard. The child now uses the `spawn` start method; the worker (`_raytrace_worker`) was lifted from a closure to a module-level function and resolves the raytrace function from the module global, so nothing unpicklable crosses the process boundary.
+- **IRI Ne-profile range interpolation vectorised.** `_build_iri_grid` interpolated the sampled electron-density profiles onto the range grid with a Python loop calling `np.interp` once per height (up to 200 iterations). New `_interp_profiles_to_columns` does the bracket-and-blend across all heights at once with array operations — numerically identical to the loop, including `np.interp`'s flat-extrapolation clamp.
+- **Tests** — `tests/unit/test_raytrace_engine_interp.py`: the vectorised interpolation against the per-height `np.interp` reference, clamp behaviour, exactness at sample points, output shape; and `_raytrace_worker` picklability + missing-pylap handling.
+
 ### iono_data_service — temporal grid interpolation, grid validation, dateline-safe GIRO distance (review P-M16)
 
 - **Temporal interpolation across WAM-IPE grids.** `IonoDataService` kept a `_previous_grid` "for temporal interpolation" but never used it — `get_iono_params` served only `_current_grid`, so its output stepped discontinuously every ~5 minutes when a new grid replaced the old one. It now linearly interpolates the previous and current grids in time when the query time falls between their valid times (clamping to the current grid outside that window).
