@@ -91,7 +91,10 @@ class VTECMapResult:
 
     # Quality
     n_ipps: int = 0
-    rms_residual_tecu: float = 0.0
+    rms_residual_tecu: float = 0.0      # in-sample fit residual (optimistic)
+    cv_rms_residual_tecu: float = 0.0   # leave-one-out CV residual — the
+                                        # honest out-of-sample metric (P-M8);
+                                        # NaN if N is too small to cross-validate
     confidence: float = 0.0
     spatial_coverage_km: float = 0.0
     condition_number: float = 0.0   # cond(weighted design matrix); large => clustered IPPs
@@ -231,14 +234,10 @@ class VTECMapper:
         # Weights from uncertainties
         W = 1.0 / np.maximum(uncertainties, 0.1) ** 2
 
-        # Weighted least squares: minimize ||W^(1/2)(A·c - vtec)||²
-        W_sqrt = np.sqrt(W)
-        A_w = A * W_sqrt[:, np.newaxis]
-        b_w = vtecs * W_sqrt
-
         # Conditioning of the weighted design matrix. Clustered IPPs make the
         # polynomial basis nearly collinear; a plain lstsq then oscillates
         # wildly off-cluster while the in-sample RMS still looks good (P-H10).
+        A_w = A * np.sqrt(W)[:, np.newaxis]
         try:
             cond = float(np.linalg.cond(A_w))
         except np.linalg.LinAlgError:
@@ -249,28 +248,34 @@ class VTECMapper:
                 f"IPPs over {coverage_km:.0f} km) - regularised, confidence reduced"
             )
 
-        # Tikhonov (ridge) regularisation: damp the non-constant polynomial
-        # terms that clustered IPPs cannot constrain. The penalty is scaled
-        # per column so it is comparable to each term's own magnitude; the
-        # constant term (column 0) is left unpenalised so the mean VTEC level
-        # is not shrunk toward zero. The augmented system is full column rank,
-        # so it also resolves the rank-deficiency a plain lstsq would hit.
-        col_norms = np.linalg.norm(A_w, axis=0)
-        penalty = RIDGE_LAMBDA * col_norms
-        penalty[0] = 0.0
-        A_aug = np.vstack([A_w, np.diag(penalty)])
-        b_aug = np.concatenate([b_w, np.zeros(A_w.shape[1])])
-
-        try:
-            coeffs, residuals_arr, rank, sv = np.linalg.lstsq(A_aug, b_aug, rcond=None)
-        except np.linalg.LinAlgError as e:
-            logger.warning(f"VTEC polynomial fit failed: {e}")
+        # Primary fit — weighted, ridge-regularised least squares (the solve
+        # lives in _solve_vtec_poly so leave-one-out below refits identically).
+        coeffs = self._solve_vtec_poly(A, vtecs, W)
+        if coeffs is None:
+            logger.warning("VTEC polynomial fit failed")
             return None
 
-        # Compute fit residuals
-        fitted = A @ coeffs
-        residuals = vtecs - fitted
-        rms_residual = float(np.sqrt(np.mean(residuals ** 2)))
+        # In-sample fit residual — kept for reference, but it is optimistic
+        # (the polynomial interpolates its own training points).
+        rms_residual = float(np.sqrt(np.mean((vtecs - A @ coeffs) ** 2)))
+
+        # P-M8: leave-one-out cross-validation. The in-sample residual above
+        # systematically overstates map quality, so `confidence` is based on
+        # an out-of-sample metric instead: refit on N-1 points, predict the
+        # held-out one, and take the RMS of those errors. LOO needs N-1 >=
+        # n_coeffs so each refit stays determined; when it does not, the map
+        # cannot be honestly cross-validated and cv_rms is left NaN.
+        cv_rms = float('nan')
+        if len(measurements) - 1 >= n_coeffs:
+            cv_errors = []
+            for i in range(len(measurements)):
+                hold = np.ones(len(measurements), dtype=bool)
+                hold[i] = False
+                ci = self._solve_vtec_poly(A[hold], vtecs[hold], W[hold])
+                if ci is not None:
+                    cv_errors.append(float(vtecs[i] - A[i] @ ci))
+            if cv_errors:
+                cv_rms = float(np.sqrt(np.mean(np.square(cv_errors))))
 
         # Evaluate on a regular grid; cells outside the convex hull of the
         # IPPs are pure extrapolation and are masked to NaN (P-H10).
@@ -278,9 +283,14 @@ class VTECMapper:
             coeffs, max_degree, center_lat, center_lon, lats, lons
         )
 
-        # Confidence metric
+        # Confidence metric — the residual term uses the cross-validated RMS
+        # when available; if the map was too small to cross-validate, fall
+        # back to the in-sample RMS but halve the term (quality unverified).
         conf_n = min(1.0, len(measurements) / 8.0)
-        conf_residual = max(0.0, 1.0 - rms_residual / 5.0)
+        if math.isfinite(cv_rms):
+            conf_residual = max(0.0, 1.0 - cv_rms / 5.0)
+        else:
+            conf_residual = 0.5 * max(0.0, 1.0 - rms_residual / 5.0)
         conf_coverage = min(1.0, coverage_km / 1000.0)
         if math.isfinite(cond) and cond > 0.0:
             conf_cond = float(np.clip(
@@ -302,6 +312,7 @@ class VTECMapper:
             ipp_measurements=measurements,
             n_ipps=len(measurements),
             rms_residual_tecu=rms_residual,
+            cv_rms_residual_tecu=cv_rms,
             confidence=confidence,
             spatial_coverage_km=coverage_km,
             condition_number=cond,
@@ -344,13 +355,24 @@ class VTECMapper:
                 f.write(f"  6371.0                                                      BASE RADIUS\n")
                 f.write(f"     2                                                        MAP DIMENSION\n")
 
-                # Grid definition
-                lat_min = result.center_lat - self.grid_extent_deg
-                lat_max = result.center_lat + self.grid_extent_deg
-                lon_min = result.center_lon - self.grid_extent_deg
-                lon_max = result.center_lon + self.grid_extent_deg
-                dlat = self.grid_resolution_deg
-                dlon = self.grid_resolution_deg
+                # Grid definition — taken from the ACTUAL evaluated grid
+                # (result.grid_lats / grid_lons) so the bounds declared in the
+                # header always match the data rows written below (P-M8);
+                # recomputing them from center ± extent risked the header
+                # drifting from the data. An empty grid cannot produce a
+                # conformant IONEX file, so refuse rather than emit one.
+                if not (result.grid_lats and result.grid_lons):
+                    logger.warning(
+                        "VTEC map has no evaluated grid — IONEX file not written")
+                    return False
+                lat_min = result.grid_lats[0]
+                lat_max = result.grid_lats[-1]
+                lon_min = result.grid_lons[0]
+                lon_max = result.grid_lons[-1]
+                dlat = (result.grid_lats[1] - result.grid_lats[0]
+                        if len(result.grid_lats) > 1 else self.grid_resolution_deg)
+                dlon = (result.grid_lons[1] - result.grid_lons[0]
+                        if len(result.grid_lons) > 1 else self.grid_resolution_deg)
 
                 f.write(f"  {self.shell_height_km:6.1f}{self.shell_height_km:6.1f}   0.0                                    HGT1 / HGT2 / DHGT\n")
                 f.write(f"   {lat_min:6.1f}{lat_max:6.1f}{dlat:6.1f}                                    LAT1 / LAT2 / DLAT\n")
@@ -440,6 +462,37 @@ class VTECMapper:
         lat = math.degrees(math.atan2(z, math.sqrt(x ** 2 + y ** 2)))
         lon = math.degrees(math.atan2(y, x))
         return lat, lon
+
+    @staticmethod
+    def _solve_vtec_poly(
+        A: np.ndarray, vtecs: np.ndarray, weights: np.ndarray
+    ) -> Optional[np.ndarray]:
+        """
+        Weighted, ridge-regularised least-squares solve for the 2D-polynomial
+        VTEC coefficients. Factored out of generate_map so the primary fit and
+        the leave-one-out refits (P-M8) use an identical procedure.
+
+        Tikhonov (ridge) regularisation damps the non-constant polynomial
+        terms that clustered IPPs cannot constrain: the penalty is scaled per
+        column to each term's own magnitude, the constant term (column 0) is
+        left unpenalised so the mean VTEC level is not shrunk toward zero, and
+        the augmented system is full column rank so it also resolves the
+        rank-deficiency a plain lstsq would hit. Returns None if the solve
+        fails.
+        """
+        w_sqrt = np.sqrt(weights)
+        a_w = A * w_sqrt[:, np.newaxis]
+        b_w = vtecs * w_sqrt
+        col_norms = np.linalg.norm(a_w, axis=0)
+        penalty = RIDGE_LAMBDA * col_norms
+        penalty[0] = 0.0
+        a_aug = np.vstack([a_w, np.diag(penalty)])
+        b_aug = np.concatenate([b_w, np.zeros(a_w.shape[1])])
+        try:
+            coeffs, *_ = np.linalg.lstsq(a_aug, b_aug, rcond=None)
+            return coeffs
+        except np.linalg.LinAlgError:
+            return None
 
     @staticmethod
     def _build_poly_matrix(dlat: np.ndarray, dlon: np.ndarray, degree: int) -> np.ndarray:

@@ -340,6 +340,58 @@ class TestVTECMapper(unittest.TestCase):
             success = mapper.write_ionex(result, Path(f.name))
             self.assertTrue(success)
 
+    # --- P-M8: leave-one-out cross-validation + IONEX grid conformance ---
+
+    def _spread_ipps(self, n):
+        """n IPP measurements spread over a region — a determined fit."""
+        from hf_timestd.core.vtec_mapper import IPPMeasurement
+        out = []
+        for k in range(n):
+            ang = 2 * math.pi * k / n
+            lat = 39.0 + 4.0 * math.cos(ang)
+            lon = -92.0 + 4.0 * math.sin(ang)
+            out.append(IPPMeasurement('WWV', 10.0, lat, lon, 25.0,
+                                      20.0 + 0.3 * k, 1.1, 25.0, 2.0))
+        return out
+
+    def test_cv_rms_nan_when_too_few_ipps(self):
+        """P-M8: with 3 IPPs the fit is exactly determined — leaving one out
+        leaves too few points, so the map cannot be cross-validated and
+        cv_rms_residual_tecu is NaN."""
+        from hf_timestd.core.vtec_mapper import VTECMapper
+        mapper = VTECMapper(grid_extent_deg=5.0, grid_resolution_deg=2.0)
+        result = mapper.generate_map(self._spread_ipps(3), timestamp=1.0)
+        self.assertIsNotNone(result)
+        self.assertTrue(math.isnan(result.cv_rms_residual_tecu))
+
+    def test_cv_rms_finite_with_enough_ipps(self):
+        """P-M8: with enough IPPs the leave-one-out residual is computed —
+        an honest out-of-sample quality metric."""
+        from hf_timestd.core.vtec_mapper import VTECMapper
+        mapper = VTECMapper(grid_extent_deg=6.0, grid_resolution_deg=2.0)
+        result = mapper.generate_map(self._spread_ipps(8), timestamp=1.0)
+        self.assertIsNotNone(result)
+        self.assertTrue(math.isfinite(result.cv_rms_residual_tecu))
+        self.assertGreaterEqual(result.cv_rms_residual_tecu, 0.0)
+
+    def test_ionex_header_grid_matches_data(self):
+        """P-M8: the IONEX header's LAT1/LAT2/DLAT must describe exactly the
+        grid the data rows use — declared from the actual evaluated grid."""
+        import tempfile
+        from hf_timestd.core.vtec_mapper import VTECMapper
+        mapper = VTECMapper(grid_extent_deg=4.0, grid_resolution_deg=2.0)
+        result = mapper.generate_map(self._spread_ipps(6), timestamp=1.0)
+        self.assertIsNotNone(result)
+        with tempfile.NamedTemporaryFile('w+', suffix='.ionex', delete=True) as f:
+            self.assertTrue(mapper.write_ionex(result, Path(f.name)))
+            f.seek(0)
+            text = f.read()
+        lat_line = next(ln for ln in text.splitlines()
+                        if 'LAT1 / LAT2 / DLAT' in ln)
+        lat1, lat2, dlat = (float(x) for x in lat_line.split()[:3])
+        n_declared = round((lat2 - lat1) / dlat) + 1
+        self.assertEqual(n_declared, len(result.grid_lats))
+
     def test_insufficient_ipps(self):
         """Less than 3 IPPs should return None."""
         from hf_timestd.core.vtec_mapper import VTECMapper, IPPMeasurement
