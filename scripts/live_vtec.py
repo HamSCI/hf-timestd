@@ -55,7 +55,7 @@ except ImportError:
 from hf_timestd.core.ubx_parser import UBXParser
 from hf_timestd.core.gnss_tec import GNSSTECAnalyzer
 from hf_timestd.cddis import CDDISDownloader
-from hf_timestd.io import DataProductWriter
+from hf_timestd.io import make_data_product_writer
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -179,12 +179,13 @@ def main():
             output_dir.mkdir(parents=True, exist_ok=True)
             logger.info(f"Created HDF5 output directory: {output_dir}")
             
-            hdf5_writer = DataProductWriter(
+            hdf5_writer = make_data_product_writer(
                 output_dir=output_dir,
                 product_level='L3',
                 product_name='gnss_vtec',
                 channel='GNSS',
-                processing_version='1.0.0'
+                processing_version='1.0.0',
+                storage_config=config.get('storage', {}) or {},
             )
             logger.info(f"✓ HDF5 writer initialized successfully: {output_dir}")
         except ImportError as e:

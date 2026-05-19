@@ -21,7 +21,7 @@ import time
 import signal
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Tuple, Dict, List
+from typing import Any, Optional, Tuple, Dict, List
 import numpy as np
 
 from ..models.measurement import (
@@ -32,7 +32,7 @@ from ..models.measurement import (
     QualityFlag,
     DiscriminationMethod
 )
-from ..io.hdf5_writer import DataProductWriter
+from ..io import make_data_product_writer
 from ..io.hdf5_reader import DataProductReader
 from .wwv_constants import STATION_LOCATIONS
 
@@ -72,6 +72,7 @@ class L2CalibrationService:
         poll_interval: float = 60.0,
         lookback_minutes: int = 10,
         realtime_iono: bool = True,
+        storage_config: Optional[Dict] = None,
     ):
         """
         Initialize L2 calibration service.
@@ -93,7 +94,11 @@ class L2CalibrationService:
         self.poll_interval = poll_interval
         self.lookback_minutes = lookback_minutes
         self.realtime_iono = realtime_iono
-        
+        # [storage] config — drives HDF5 / SQLite / dual-write selection
+        # in make_data_product_writer (HDF5→SQLite migration). None →
+        # HDF5-only, preserving today's behaviour.
+        self._storage_config = storage_config or {}
+
         # Initialize propagation solver (optional — falls back to geometric-only)
         if not _PROP_SOLVER_AVAILABLE:
             logger.warning(
@@ -110,7 +115,7 @@ class L2CalibrationService:
 
         # Initialize readers and writers per channel
         self.l1_readers: Dict[str, DataProductReader] = {}
-        self.l2_writers: Dict[str, DataProductWriter] = {}
+        self.l2_writers: Dict[str, Any] = {}
 
         for channel in channels:
             # L1 reader
@@ -125,12 +130,13 @@ class L2CalibrationService:
             # L2 writer
             l2_dir = self.data_root / "phase2" / channel / "clock_offset"
             l2_dir.mkdir(parents=True, exist_ok=True)
-            self.l2_writers[channel] = DataProductWriter(
+            self.l2_writers[channel] = make_data_product_writer(
                 output_dir=l2_dir,
                 product_level='L2',
                 product_name='timing_measurements',
                 channel=channel,
-                version='v1'
+                version='v1',
+                storage_config=self._storage_config,
             )
         
         # Service state
@@ -821,6 +827,7 @@ def main():
         channels=channels,
         poll_interval=args.poll_interval,
         realtime_iono=bool(realtime_iono),
+        storage_config=cfg.get('storage', {}) or {},
     )
     
     try:

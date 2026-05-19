@@ -51,7 +51,7 @@ from hf_timestd.core.wwv_constants import (
     WWV_FREQUENCIES, WWVH_FREQUENCIES, CHU_FREQUENCIES, BPM_FREQUENCIES,
     ANCHOR_SNR_HIGH,
 )
-from hf_timestd.io import DataProductReader, DataProductWriter
+from hf_timestd.io import DataProductReader, make_data_product_writer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -279,11 +279,16 @@ class IonosphericReanalysis:
     re-estimates TEC with cleaned inputs, and writes L3C propagation stats.
     """
 
-    def __init__(self, data_root: Path, receiver_grid: str = 'EM38ww'):
+    def __init__(self, data_root: Path, receiver_grid: str = 'EM38ww',
+                 storage_config: Optional[Dict] = None):
         self.data_root = Path(data_root)
         self.phase2_dir = self.data_root / 'phase2'
         self.receiver_grid = receiver_grid
         self.rx_lat, self.rx_lon = grid_to_latlon(receiver_grid)
+        # [storage] config — drives HDF5 / SQLite / dual-write selection
+        # in make_data_product_writer (HDF5→SQLite migration). None →
+        # HDF5-only, preserving today's behaviour.
+        self._storage_config = storage_config or {}
 
         # Pre-compute path midpoints and distances
         self.midpoints: Dict[str, Tuple[float, float]] = {}
@@ -299,24 +304,26 @@ class IonosphericReanalysis:
 
         # L3C writer for propagation stats
         self.stats_dir = self.phase2_dir / 'science' / 'propagation_stats'
-        self.stats_writer = DataProductWriter(
+        self.stats_writer = make_data_product_writer(
             output_dir=self.stats_dir,
             product_level='L3C',
             product_name='propagation_stats',
             channel='REANALYSIS',
             processing_version='6.0.0',
-            station_metadata={'description': 'Ionospheric Reanalysis Service'}
+            station_metadata={'description': 'Ionospheric Reanalysis Service'},
+            storage_config=self._storage_config,
         )
 
         # L3A writer for reanalyzed TEC
         self.tec_dir = self.phase2_dir / 'science' / 'tec_reanalyzed'
-        self.tec_writer = DataProductWriter(
+        self.tec_writer = make_data_product_writer(
             output_dir=self.tec_dir,
             product_level='L3',
             product_name='tec',
             channel='REANALYZED',
             processing_version='6.0.0',
-            station_metadata={'description': 'Ionospheric Reanalysis TEC'}
+            station_metadata={'description': 'Ionospheric Reanalysis TEC'},
+            storage_config=self._storage_config,
         )
 
         logger.info(
@@ -951,6 +958,7 @@ def main():
     reanalysis = IonosphericReanalysis(
         data_root=Path(data_root),
         receiver_grid=grid,
+        storage_config=cfg.get('storage', {}) or {},
     )
     reanalysis.run_backfill(hours_back=args.hours)
 

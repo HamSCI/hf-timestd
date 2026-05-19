@@ -51,7 +51,7 @@ from hf_timestd.core.tec_estimator import TECEstimator, TECResult
 from hf_timestd.core.carrier_tec import CarrierTECEstimator
 from hf_timestd.core.iono_tomography import IonoTomography, RayPath
 from hf_timestd.core.vtec_mapper import VTECMapper, IPPMeasurement
-from hf_timestd.io import DataProductReader, DataProductWriter
+from hf_timestd.io import DataProductReader, DataProductWriter, make_data_product_writer
 
 # Systemd watchdog support
 try:
@@ -83,11 +83,16 @@ class PhysicsFusionService:
         receiver_lat: Optional[float] = None,
         receiver_lon: Optional[float] = None,
         gnss_vtec_dir: Optional[Path] = None,
+        storage_config: Optional[Dict] = None,
     ):
         self.data_root = Path(data_root)
         self.output_dir = Path(output_dir)
         self.poll_interval = poll_interval
         self.lookback_minutes = lookback_minutes
+        # [storage] config — drives HDF5 / SQLite / dual-write selection
+        # in make_data_product_writer (HDF5→SQLite migration). None →
+        # HDF5-only, preserving today's behaviour.
+        self._storage_config = storage_config or {}
 
         # GNSS VTEC anchoring: path to HDF5 files written by live_vtec.py
         if gnss_vtec_dir is not None:
@@ -123,37 +128,40 @@ class PhysicsFusionService:
         self.ionex_dir.mkdir(parents=True, exist_ok=True)
         
         # Initialize L3 Writers
-        self.l3_writer = DataProductWriter(
+        self.l3_writer = make_data_product_writer(
             output_dir=self.output_dir,
             product_level='L3',
             product_name='physics',
             channel='global', # Global aggregate
             processing_version='5.0.0',
-            station_metadata={'description': 'Physics-Based Fusion Service v5.0'}
+            station_metadata={'description': 'Physics-Based Fusion Service v5.0'},
+            storage_config=self._storage_config,
         )
         
         # Second writer for individual station TEC records (consumed by Web API)
         # PropagationService looks in phase2/science/tec/AGGREGATED_tec_*.h5
         self.tec_dir = self.data_root / 'phase2' / 'science' / 'tec'
-        self.tec_writer = DataProductWriter(
+        self.tec_writer = make_data_product_writer(
             output_dir=self.tec_dir,
             product_level='L3', # Schema says L3A but product_level is used for schema lookup L3
             product_name='tec',
             channel='AGGREGATED',
             processing_version='5.0.0',
-            station_metadata={'description': 'Physics-Based Fusion TEC Output'}
+            station_metadata={'description': 'Physics-Based Fusion TEC Output'},
+            storage_config=self._storage_config,
         )
         
         # Third writer for carrier-phase dTEC per-minute summary records
         self.dtec_dir = self.data_root / 'phase2' / 'science' / 'dtec'
         self.dtec_dir.mkdir(parents=True, exist_ok=True)
-        self.dtec_writer = DataProductWriter(
+        self.dtec_writer = make_data_product_writer(
             output_dir=self.dtec_dir,
             product_level='L3',
             product_name='dtec',
             channel='AGGREGATED',
             processing_version='5.0.0',
-            station_metadata={'description': 'Carrier-Phase dTEC Output'}
+            station_metadata={'description': 'Carrier-Phase dTEC Output'},
+            storage_config=self._storage_config,
         )
 
         # Fourth writer for full per-tick dTEC time series (P3-B fix)
@@ -162,13 +170,14 @@ class PhysicsFusionService:
         # the summary HDF5 files.
         self.dtec_ts_dir = self.data_root / 'phase2' / 'science' / 'dtec_timeseries'
         self.dtec_ts_dir.mkdir(parents=True, exist_ok=True)
-        self.dtec_ts_writer = DataProductWriter(
+        self.dtec_ts_writer = make_data_product_writer(
             output_dir=self.dtec_ts_dir,
             product_level='L3',
             product_name='dtec_timeseries',
             channel='AGGREGATED',
             processing_version='5.0.0',
-            station_metadata={'description': 'Carrier-Phase dTEC Full Time Series (~1s resolution)'}
+            station_metadata={'description': 'Carrier-Phase dTEC Full Time Series (~1s resolution)'},
+            storage_config=self._storage_config,
         )
 
         # Fifth writer for per-minute differential dTEC frequency-pair records.
@@ -177,13 +186,14 @@ class PhysicsFusionService:
         # across frequencies; elevated RMS flags scintillation or mode changes.
         self.dtec_diff_dir = self.data_root / 'phase2' / 'science' / 'dtec_diff'
         self.dtec_diff_dir.mkdir(parents=True, exist_ok=True)
-        self.dtec_diff_writer = DataProductWriter(
+        self.dtec_diff_writer = make_data_product_writer(
             output_dir=self.dtec_diff_dir,
             product_level='L3',
             product_name='dtec_diff',
             channel='AGGREGATED',
             processing_version='5.0.0',
-            station_metadata={'description': 'Differential dTEC frequency-pair RMS'}
+            station_metadata={'description': 'Differential dTEC frequency-pair RMS'},
+            storage_config=self._storage_config,
         )
         
         # Tick-phase reader cache (separate from clock_offset readers)
@@ -1541,12 +1551,14 @@ if __name__ == '__main__':
     if rx_lat is None or rx_lon is None:
         rx_lat, rx_lon = _load_receiver_coords(args.config)
 
-    # Load GNSS VTEC path from config if available
+    # Load GNSS VTEC path and [storage] config from the config file.
     gnss_vtec_dir = None
+    storage_config = {}
     if tomllib is not None:
         try:
             with open(args.config, 'rb') as _f:
                 _cfg = tomllib.load(_f)
+            storage_config = _cfg.get('storage', {}) or {}
             gnss_cfg = _cfg.get('gnss_vtec', {})
             if gnss_cfg.get('enabled', False):
                 hdf5_rel = gnss_cfg.get('hdf5_path')
@@ -1563,6 +1575,7 @@ if __name__ == '__main__':
         receiver_lat=rx_lat,
         receiver_lon=rx_lon,
         gnss_vtec_dir=gnss_vtec_dir,
+        storage_config=storage_config,
     )
 
     service.run()
