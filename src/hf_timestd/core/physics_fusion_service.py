@@ -421,7 +421,12 @@ class PhysicsFusionService:
                     snr = item.get('snr_db', 0.0)
 
                     freq_mhz = float(item['frequency_mhz'])
-                    raw_by_station_freq[(station, freq_mhz)].append({
+                    # Key the aggregation by mode as well as (station,
+                    # frequency): a mid-minute mode hop otherwise lets the
+                    # median collapse two different geometric regimes into
+                    # one toa, injecting a multi-ms step into the 1/f^2
+                    # TEC fit (P-H26).
+                    raw_by_station_freq[(station, freq_mhz, mode)].append({
                         'toa_ms': toa,
                         'uncertainty_ms': uncertainty,
                         'mode': mode,
@@ -432,29 +437,27 @@ class PhysicsFusionService:
                 logger.warning(f"Failed to read channel {channel}: {e}")
                 continue
         
-        # Median-aggregate per (station, frequency) to produce one measurement
-        # per distinct frequency per station
+        # Median-aggregate per (station, frequency, mode) — one measurement
+        # per distinct frequency *and mode* per station, so the median is
+        # never taken across a mode transition (P-H26).  ``mode`` is the
+        # group key, so there is no separate (and previously disagreeing)
+        # dominant-mode computation here.
         measurements_by_station: Dict[str, List[Dict]] = defaultdict(list)
-        
-        for (station, freq_mhz), obs_list in raw_by_station_freq.items():
+
+        for (station, freq_mhz, mode), obs_list in raw_by_station_freq.items():
             toas = np.array([o['toa_ms'] for o in obs_list])
             median_toa = float(np.median(toas))
             # Use minimum uncertainty (best measurement)
             min_unc = min(o['uncertainty_ms'] for o in obs_list)
             # Best SNR
             best_snr = max(o.get('snr_db', 0.0) for o in obs_list)
-            # Dominant mode: use the mode from the highest-SNR observation.
-            # Mode-by-count is unreliable when different channels disagree;
-            # the highest-SNR measurement is the most trustworthy single source.
-            best_obs = max(obs_list, key=lambda o: o.get('snr_db', 0.0))
-            dominant_mode = best_obs['mode']
-            
+
             measurements_by_station[station].append({
                 'frequency_hz': freq_mhz * 1e6,
                 'toa_ms': median_toa,
                 'uncertainty_ms': min_unc,
                 'snr_db': best_snr,
-                'mode': dominant_mode,
+                'mode': mode,
                 'n_raw': len(obs_list),
             })
         

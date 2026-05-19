@@ -97,6 +97,25 @@ STATION_COORDS = {
     'BPM': BPM_LOCATION,
 }
 
+# TEC fit window (seconds).  The contract forbids mixing propagation
+# conditions within a TEC fit window; a 5-minute window keeps each 1/f^2
+# fit inside one regime (P-H26).
+TEC_FIT_WINDOW_S = 300
+
+
+def _parse_iso_epoch(ts: str) -> Optional[float]:
+    """Parse an ISO-8601 UTC timestamp string to an epoch float, or None."""
+    if not ts:
+        return None
+    try:
+        s = ts[:-1] + '+00:00' if ts.endswith('Z') else ts
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except (ValueError, TypeError):
+        return None
+
 
 @dataclass
 class ReanalyzedMeasurement:
@@ -493,54 +512,78 @@ class IonosphericReanalysis:
         self,
         measurements: List[ReanalyzedMeasurement],
         station: str,
-        timestamp: float
+        hour_ts: float
+    ) -> List[Dict[str, Any]]:
+        """
+        Re-estimate TEC from D_clock, fitting independent ≤5-minute windows
+        across the hour.
+
+        D_clock (clock_offset_ms) already has the geometric propagation
+        delay removed per-mode, so the residual 1/f² pattern across
+        frequencies IS the ionospheric dispersion signal — D_clock values
+        from different modes/frequencies are directly comparable.
+
+        Each fit covers one ``TEC_FIT_WINDOW_S`` window: the hour is never
+        median-collapsed into a single fit, because a mid-hour mode hop
+        would inject a multi-ms geometric step into the 1/f² fit, mixing
+        propagation conditions the contract forbids mixing in a fit
+        window (P-H26).
+
+        Returns one result dict per window that had ≥2 frequencies (each
+        carrying a ``window_start`` epoch); the list is empty when no
+        window qualified.
+        """
+        # Bucket valid, high-SNR measurements for this station into
+        # ≤5-minute windows by measurement time.
+        windows: Dict[int, List[ReanalyzedMeasurement]] = defaultdict(list)
+        for m in measurements:
+            if not (m.station == station
+                    and m.mode_physically_valid
+                    and m.snr_db >= MIN_SNR_TEC_DB
+                    and m.validated_mode != 'REJECTED'):
+                continue
+            m_ts = _parse_iso_epoch(m.timestamp)
+            if m_ts is None:
+                continue
+            win = int((m_ts - hour_ts) // TEC_FIT_WINDOW_S)
+            windows[win].append(m)
+
+        results: List[Dict[str, Any]] = []
+        for win in sorted(windows):
+            window_start = hour_ts + win * TEC_FIT_WINDOW_S
+            res = self._fit_tec_window(windows[win], station, window_start)
+            if res is not None:
+                results.append(res)
+        return results
+
+    def _fit_tec_window(
+        self,
+        valid: List[ReanalyzedMeasurement],
+        station: str,
+        window_start: float
     ) -> Optional[Dict[str, Any]]:
+        """Fit TEC for one ≤5-minute window of valid measurements.
+
+        For each frequency the median D_clock is taken (robust to
+        outliers from mode mis-assignment).  D_clock is clock_offset_ms
+        (geometry removed) — NOT raw_arrival_time_ms, whose intercept is
+        dominated by geometric delay (P-H27).
         """
-        Re-estimate TEC using D_clock values from high-SNR, physics-validated
-        measurements.
-
-        Strategy: Use D_clock (clock_offset_ms) directly. D_clock already
-        has the geometric propagation delay removed per-mode, so any residual
-        1/f² pattern across frequencies IS the ionospheric dispersion signal.
-
-        This avoids the mode-mixing problem: even if 2.5 MHz was assigned "2E"
-        and 5 MHz was assigned "1F2", both D_clock values represent the same
-        thing — timing error after subtracting the mode-specific geometric delay.
-        The ionospheric group delay component was NOT removed (the propagation
-        model uses a fixed approximation), so the 1/f² residual remains.
-
-        For each frequency, we take the MEDIAN D_clock across all valid
-        measurements in the hour (robust to outliers from mode mis-assignment).
-        """
-        # Filter to valid, high-SNR measurements for this station
-        valid = [
-            m for m in measurements
-            if m.station == station
-            and m.mode_physically_valid
-            and m.snr_db >= MIN_SNR_TEC_DB
-            and m.validated_mode != 'REJECTED'
-        ]
-
         if len(valid) < 2:
             return None
 
-        # Group by frequency, take median D_clock per frequency.  D_clock
-        # is clock_offset_ms (geometry removed) — NOT raw_arrival_time_ms,
-        # whose intercept is dominated by geometric delay (P-H27).
         by_freq: Dict[float, List[float]] = defaultdict(list)
         for m in valid:
             if m.clock_offset_ms is None or math.isnan(m.clock_offset_ms):
                 continue
-            key = round(m.frequency_mhz, 1)
-            by_freq[key].append(m.clock_offset_ms)
+            by_freq[round(m.frequency_mhz, 1)].append(m.clock_offset_ms)
 
         if len(by_freq) < 2:
             return None
 
         # Build TEC estimator input using median D_clock per frequency.
-        # We add a large constant offset so all values are positive
-        # (the TEC estimator fits T_obs = T_vacuum + K*TEC/f², and
-        # T_vacuum absorbs the constant offset).
+        # The TEC estimator fits T_obs = T_vacuum + K*TEC/f²; T_vacuum
+        # absorbs the constant offset.
         tec_input = []
         freq_list = []
         for freq_mhz, d_clocks in sorted(by_freq.items()):
@@ -559,7 +602,8 @@ class IonosphericReanalysis:
             })
             freq_list.append(freq_mhz)
 
-        result = self.tec_estimator.estimate_tec(tec_input, station, timestamp)
+        result = self.tec_estimator.estimate_tec(
+            tec_input, station, window_start)
         if result is None:
             return None
 
@@ -581,6 +625,7 @@ class IonosphericReanalysis:
 
         return {
             'station': station,
+            'window_start': window_start,
             'tec_tecu': float(result.tec_u),
             't_vacuum_error_ms': float(result.t_vacuum_error_ms),
             'confidence': float(result.confidence),
@@ -652,18 +697,25 @@ class IonosphericReanalysis:
             key = (m.station, m.frequency_mhz)
             stats_by_broadcast[key].append(m)
 
-        # 4. Re-estimate TEC per station
+        # 4. Re-estimate TEC per station — one fit per ≤5-min window
+        #    (P-H26), so tec_results maps station -> list of window fits.
         hour_ts = hour_start.timestamp()
-        tec_results = {}
+        tec_results: Dict[str, List[Dict[str, Any]]] = {}
         for station in set(m.station for m in reanalyzed):
-            tec = self._estimate_tec_cleaned(reanalyzed, station, hour_ts)
-            if tec:
-                tec_results[station] = tec
-                logger.info(
-                    f"TEC {station}: {tec['tec_tecu']:.1f} TECU "
-                    f"(R²={tec['confidence']:.2f}, n_freq={tec['n_frequencies']}, "
-                    f"mode={tec['propagation_mode']})"
-                )
+            tec_windows = self._estimate_tec_cleaned(
+                reanalyzed, station, hour_ts)
+            if tec_windows:
+                tec_results[station] = tec_windows
+                for tw in tec_windows:
+                    win_hm = datetime.fromtimestamp(
+                        tw['window_start'], tz=timezone.utc
+                    ).strftime('%H:%M')
+                    logger.info(
+                        f"TEC {station} @{win_hm}: {tw['tec_tecu']:.1f} TECU "
+                        f"(R²={tw['confidence']:.2f}, "
+                        f"n_freq={tw['n_frequencies']}, "
+                        f"mode={tw['propagation_mode']})"
+                    )
 
         # 5. Compute MUF from validated modes
         # Only count broadcasts with: validated F-layer mode, SNR >= threshold, n >= threshold
@@ -757,27 +809,34 @@ class IonosphericReanalysis:
             except Exception as e:
                 logger.error(f"Failed to write L3C stats for {station} {freq}: {e}")
 
-        # 7. Write reanalyzed TEC records
-        for station, tec in tec_results.items():
-            record = {
-                'timestamp_utc': ts_iso,
-                'minute_boundary': int(hour_ts),
-                'station': station,
-                'tec_tecu': tec['tec_tecu'],
-                't_vacuum_error_ms': tec['t_vacuum_error_ms'],
-                'confidence': tec['confidence'],
-                'n_frequencies': tec['n_frequencies'],
-                'residuals_ms': tec['residuals_ms'],
-                'frequencies_mhz': tec['frequencies_mhz'],
-                'quality_flag': tec['quality_flag'],
-                'validation_flag': 'UNVALIDATED',
-                'propagation_mode': tec['propagation_mode'],
-                'processing_version': '6.0.0',
-            }
-            try:
-                self.tec_writer.write_measurement(record)
-            except Exception as e:
-                logger.error(f"Failed to write reanalyzed TEC for {station}: {e}")
+        # 7. Write reanalyzed TEC records — one per ≤5-min fit window,
+        #    each stamped with its own window boundary (P-H26).
+        for station, tec_windows in tec_results.items():
+            for tec in tec_windows:
+                win_iso = datetime.fromtimestamp(
+                    tec['window_start'], tz=timezone.utc
+                ).isoformat().replace('+00:00', 'Z')
+                record = {
+                    'timestamp_utc': win_iso,
+                    'minute_boundary': int(tec['window_start']),
+                    'station': station,
+                    'tec_tecu': tec['tec_tecu'],
+                    't_vacuum_error_ms': tec['t_vacuum_error_ms'],
+                    'confidence': tec['confidence'],
+                    'n_frequencies': tec['n_frequencies'],
+                    'residuals_ms': tec['residuals_ms'],
+                    'frequencies_mhz': tec['frequencies_mhz'],
+                    'quality_flag': tec['quality_flag'],
+                    'validation_flag': 'UNVALIDATED',
+                    'propagation_mode': tec['propagation_mode'],
+                    'processing_version': '6.0.0',
+                }
+                try:
+                    self.tec_writer.write_measurement(record)
+                except Exception as e:
+                    logger.error(
+                        f"Failed to write reanalyzed TEC for {station} "
+                        f"@{win_iso}: {e}")
 
         # 8. Summary
         summary = {
@@ -789,7 +848,10 @@ class IonosphericReanalysis:
             'n_reclassified': n_reclassified,
             'muf_estimate_mhz': round(muf_estimate, 2) if muf_estimate else None,
             'muf_confidence': round(muf_confidence, 4) if muf_estimate else None,
-            'tec_stations': {s: round(t['tec_tecu'], 2) for s, t in tec_results.items()},
+            'tec_stations': {
+                s: round(t[-1]['tec_tecu'], 2)  # most-recent window
+                for s, t in tec_results.items()
+            },
             'credible_f_layer': [
                 f"{c['station']} {c['frequency_mhz']:.1f}MHz ({c['dominant_mode']}, "
                 f"SNR={c['avg_snr_db']:.1f}dB, n={c['n_valid']})"
