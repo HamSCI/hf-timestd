@@ -26,9 +26,12 @@ commit. Source: `docs/CODE_REVIEW_2026-05-17_METROLOGY_PHYSICS.md`.
       date-appropriate sunspot index from its own files); raytrace
       subprocess uses `spawn` not `fork` (`_raytrace_worker` lifted to
       module level); IRI Ne-profile range interpolation vectorised.
-- [ ] P-M20 `physics_fusion_service` — `_timed_write` thread leak
-- [ ] P-M21 `physics_fusion_service` — full-table-scan reads → tail-read
-- [ ] P-M22 `physics_fusion_service` — F2 virtual height hard-coded 300 km
+- [x] **P-M20/P-M21/P-M22** `physics_fusion_service` cluster — per-writer
+      write lock (`_run_timed_write`) so a timed-out write neither races
+      the next nor leaks threads (P-M20); F2 reflection height sourced
+      from the ionospheric model + shared spherical elevation (P-M22).
+      P-M21 (full-table-scan reads) resolved by the SQLite cutover —
+      `SqliteDataProductReader.read_time_range` is an indexed range query.
 - [ ] P-M23 `ionospheric_reanalysis` — foE formula; Es geometry; per-path MUF
 - [ ] P-M24 `ionospheric_reanalysis` — `process_hour` not idempotent
 - [ ] P-M25 `physics_service` — MOOT, module deleted by P-H28; verify only

@@ -32,6 +32,7 @@ import math
 import time
 import argparse
 import signal
+import threading
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Set, Tuple
 from collections import defaultdict
@@ -51,6 +52,7 @@ from hf_timestd.core.tec_estimator import TECEstimator, TECResult
 from hf_timestd.core.carrier_tec import CarrierTECEstimator
 from hf_timestd.core.iono_tomography import IonoTomography, RayPath
 from hf_timestd.core.vtec_mapper import VTECMapper, IPPMeasurement
+from hf_timestd.core.hop_geometry import hop_geometry
 from hf_timestd.io import (
     DataProductReader, DataProductWriter,
     make_data_product_writer, make_data_product_reader,
@@ -69,6 +71,10 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Climatological F2 reflection height (km) used only when the ionospheric
+# model is unavailable (P-M22 fallback).
+_F2_FALLBACK_HEIGHT_KM = 300.0
 
 
 class PhysicsFusionService:
@@ -224,7 +230,15 @@ class PhysicsFusionService:
         # service hang until the systemd watchdog kills it.
         self._write_timeout_seconds = 30
         self._write_timeout_count = 0
-        
+        # Per-writer locks (P-M20): keyed by id(writer). A write thread that
+        # timed out keeps holding its writer's lock until it finally returns,
+        # so the next write to that writer skips instead of racing the same
+        # HDF5 handle — bounding orphan write threads to one per writer.
+        self._writer_locks: Dict[int, 'threading.Lock'] = {}
+
+        # Ionospheric model for F2 reflection heights (P-M22), lazily built.
+        self._iono_model = None
+
         logger.info(f"PhysicsFusionService initialized with {len(self.channels)} channels")
 
     def _get_reader(self, channel: str) -> DataProductReader:
@@ -273,28 +287,69 @@ class PhysicsFusionService:
         if SYSTEMD_AVAILABLE:
             systemd_daemon.notify('WATCHDOG=1')
 
-    def _timed_write(self, writer: 'DataProductWriter', record: dict, label: str = '') -> bool:
-        """Write a measurement with a timeout to prevent file-lock hangs.
+    def _writer_lock(self, writer: 'DataProductWriter') -> threading.Lock:
+        """Return the lock guarding a single writer (P-M20).
 
-        Returns True if the write succeeded, False if it timed out or failed.
-        On timeout, logs a warning and increments the timeout counter but does
-        NOT raise — the caller can continue processing the next record.
+        Writers are created once and held for the service lifetime, so
+        ``id(writer)`` is a stable key. The lock serialises every write to
+        that writer — including across ``_timed_write`` and
+        ``_timed_write_batch`` — so a write thread that timed out (and is
+        still holding the HDF5 handle) is never raced by the next write.
         """
-        import threading
+        key = id(writer)
+        lock = self._writer_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            self._writer_locks[key] = lock
+        return lock
+
+    def _run_timed_write(self, writer: 'DataProductWriter',
+                         write_fn, label: str) -> bool:
+        """Run ``write_fn()`` in a daemon thread under a per-writer lock
+        with a timeout. Shared by _timed_write and _timed_write_batch.
+
+        Returns True on success, False on timeout or failure — never
+        raises, so the caller can move on to the next record.
+
+        P-M20: the previous implementation spawned a fresh write thread
+        on every call. When a write timed out, that thread was abandoned
+        while still inside ``write_measurement`` holding the HDF5 handle,
+        and the next call started *another* thread racing the same handle
+        — corrupting the file and leaking a daemon thread per timeout.
+        Now a per-writer lock is taken before the thread starts: if a
+        prior write to this writer is still in flight the call skips
+        outright, so at most one write thread per writer ever exists and
+        the abandoned one finishes (or hangs) alone.
+        """
+        lock = self._writer_lock(writer)
+        if not lock.acquire(blocking=False):
+            self._write_timeout_count += 1
+            logger.warning(
+                f"HDF5 write skipped ({label or 'unknown'}) — a previous "
+                f"write to this product is still in flight; total "
+                f"timeouts/skips: {self._write_timeout_count}"
+            )
+            return False
 
         result = [None]  # [exception_or_None]
 
         def _do_write():
             try:
-                writer.write_measurement(record)
+                write_fn()
             except Exception as e:
                 result[0] = e
+            finally:
+                lock.release()
 
         t = threading.Thread(target=_do_write, daemon=True)
         t.start()
         t.join(timeout=self._write_timeout_seconds)
 
         if t.is_alive():
+            # Orphaned: the thread still holds `lock` and the HDF5 handle.
+            # It releases the lock when the write finally returns; until
+            # then the next write to this writer skips (see above), so the
+            # orphan runs alone — no race, no unbounded thread growth.
             self._write_timeout_count += 1
             logger.warning(
                 f"HDF5 write timed out after {self._write_timeout_seconds}s "
@@ -308,45 +363,27 @@ class PhysicsFusionService:
 
         return True
 
+    def _timed_write(self, writer: 'DataProductWriter', record: dict, label: str = '') -> bool:
+        """Write one measurement under a timeout and a per-writer lock."""
+        return self._run_timed_write(
+            writer, lambda: writer.write_measurement(record), label
+        )
+
     def _timed_write_batch(self, writer: 'DataProductWriter', records: list, label: str = '') -> bool:
         """Write a batch of measurements in a single HDF5 open/close cycle.
 
-        Same timeout semantics as _timed_write but uses
+        Same timeout / per-writer-lock semantics as _timed_write but uses
         write_measurements_batch() — one open/append-N/close instead of N
         open/append-1/close cycles.  Critical for high-frequency products
         like dTEC timeseries (~55 rows/station/min × 9 channels).
         """
         if not records:
             return True
-
-        import threading
-
-        result = [None]
-
-        def _do_write():
-            try:
-                writer.write_measurements_batch(records)
-            except Exception as e:
-                result[0] = e
-
-        t = threading.Thread(target=_do_write, daemon=True)
-        t.start()
-        t.join(timeout=self._write_timeout_seconds)
-
-        if t.is_alive():
-            self._write_timeout_count += 1
-            logger.warning(
-                f"HDF5 batch write timed out after {self._write_timeout_seconds}s "
-                f"({label or 'unknown'}, {len(records)} records), "
-                f"total timeouts: {self._write_timeout_count}"
-            )
-            return False
-
-        if result[0] is not None:
-            logger.error(f"HDF5 batch write failed ({label}, {len(records)} records): {result[0]}")
-            return False
-
-        return True
+        n = len(records)
+        batch_label = f'{label}, {n} records' if label else f'{n} records'
+        return self._run_timed_write(
+            writer, lambda: writer.write_measurements_batch(records), batch_label
+        )
 
     def _discover_channels(self) -> List[str]:
         """Discover available L2 broadcast channels."""
@@ -578,7 +615,8 @@ class PhysicsFusionService:
         # CRITIC_CONTEXT), so ipp_measurements is always empty and vtec_tecu is
         # always NaN.  Log this explicitly rather than silently writing NaN.
         vtec_result = None
-        ipp_measurements = self._build_ipp_measurements(tec_estimates)
+        ipp_measurements = self._build_ipp_measurements(
+            minute_timestamp, tec_estimates)
         vtec_by_station: Dict[str, float] = {}
 
         if not ipp_measurements:
@@ -645,13 +683,43 @@ class PhysicsFusionService:
 
         return l3_ok
 
+    def _get_iono_model(self):
+        """Lazily build the ionospheric model used for F2 reflection
+        heights (P-M22)."""
+        if self._iono_model is None:
+            from hf_timestd.core.ionospheric_model import IonosphericModel
+            self._iono_model = IonosphericModel()
+        return self._iono_model
+
+    def _reflection_height_km(
+        self, minute_timestamp: int, lat: float, lon: float
+    ) -> float:
+        """
+        F2 reflection height (km) at a pierce point, from the ionospheric
+        model (P-M22 — replaces a hardcoded 300 km).
+
+        Falls back to the climatological default if the model is
+        unavailable or returns an out-of-range height.
+        """
+        try:
+            utc = datetime.fromtimestamp(minute_timestamp, tz=timezone.utc)
+            heights = self._get_iono_model().get_layer_heights(
+                timestamp=utc, latitude=lat, longitude=lon
+            )
+            if heights is not None and 150.0 < heights.hmF2 < 600.0:
+                return float(heights.hmF2)
+        except Exception as e:
+            logger.debug(f"hmF2 model lookup failed, using fallback: {e}")
+        return _F2_FALLBACK_HEIGHT_KM
+
     def _build_ipp_measurements(
         self,
+        minute_timestamp: int,
         tec_estimates: Dict[tuple, TECResult],
     ) -> List[IPPMeasurement]:
         """
         Build IPP measurements from TEC estimates for VTEC mapping.
-        
+
         Computes ionospheric pierce points at the great-circle midpoint
         between receiver and transmitter, and converts sTEC to vTEC.
         """
@@ -681,19 +749,19 @@ class PhysicsFusionService:
                 station_lat, station_lon
             )
 
-            # Compute elevation angle geometrically from path distance and
-            # F2 layer height (P1-C fix — replaces hardcoded 30°).
-            # For a 1-hop path: elevation = atan(h / (d/2)) where d is the
-            # great-circle distance and h is the virtual reflection height.
+            # Compute the elevation angle from the path geometry.
             gc_dist_km = self._great_circle_km(
                 self.receiver_lat, self.receiver_lon, station_lat, station_lon
             )
             # n_hops from mode string (e.g. '2F2' -> 2, '1E' -> 1)
             n_hops = max(1, int(''.join(filter(str.isdigit, str(mode)[:2])) or '1'))
-            h_km = 300.0  # F2 virtual height (km) — improved by P2-A later
-            half_hop_km = gc_dist_km / (2 * n_hops)
-            elevation_geometric = math.degrees(math.atan2(h_km, half_hop_km))
-            elevation_geometric = max(5.0, min(85.0, elevation_geometric))
+            # F2 reflection height from the ionospheric model at the pierce
+            # point (P-M22 — replaces a hardcoded 300 km). The elevation
+            # then comes from the shared spherical hop geometry (S2), not a
+            # flat-Earth triangle.
+            h_km = self._reflection_height_km(minute_timestamp, ipp_lat, ipp_lon)
+            geom = hop_geometry(gc_dist_km, h_km, n_hops)
+            elevation_geometric = max(5.0, min(85.0, geom.elevation_deg))
 
             for f_mhz in result.group_delay_ms.keys():
                 elevation = elevation_geometric
