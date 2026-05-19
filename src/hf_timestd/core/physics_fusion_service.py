@@ -1263,6 +1263,48 @@ class PhysicsFusionService:
                     )
                 logger.info("\n".join(info_parts))
 
+    def _seed_processed_minutes_from_l3(self) -> None:
+        """Seed ``_processed_minutes`` from minutes already written to the
+        L3 dtec output (P-H25).
+
+        ``_processed_minutes`` is an in-memory set, so on every restart it
+        is empty; the startup lookback window then reprocesses minutes
+        whose L3 records already exist, producing duplicate TEC/dTEC/L3
+        records (the contract forbids duplicate records).  Reading the
+        ``minute_boundary`` dataset of the recent L3 dtec files back into
+        the set makes the loop's ``target_minute in self._processed_minutes``
+        guard effective across a restart.  The set is pruned to a 12 h
+        window elsewhere, so scanning the few most-recent day files is
+        sufficient.
+        """
+        import h5py
+        dtec_dir = self.data_root / 'phase2' / 'science' / 'dtec'
+        if not dtec_dir.exists():
+            return
+        seeded = 0
+        for l3_path in sorted(
+            dtec_dir.glob('AGGREGATED_dtec_????????.h5'), reverse=True,
+        )[:3]:
+            try:
+                with h5py.File(str(l3_path), 'r', swmr=True) as f:
+                    if 'minute_boundary' not in f or len(f['minute_boundary']) == 0:
+                        continue
+                    for raw in f['minute_boundary'][:]:
+                        # Normalise to a minute-aligned epoch second so the
+                        # value matches the loop's target_minute exactly.
+                        m = int(raw)
+                        m -= m % 60
+                        if m not in self._processed_minutes:
+                            self._processed_minutes.add(m)
+                            seeded += 1
+            except Exception as e:
+                logger.debug(f"L3 seed scan failed for {l3_path}: {e}")
+        if seeded:
+            logger.info(
+                f"Seeded {seeded} already-processed minute(s) from L3 "
+                f"output — restart will not reprocess them"
+            )
+
     def _startup_lookback_minutes(self) -> int:
         """Return how many minutes back to scan on startup.
 
@@ -1370,7 +1412,10 @@ class PhysicsFusionService:
         # On restart after a gap (crash, update, etc.) the standard 5-minute
         # lookback window misses all minutes between the last processed minute
         # and now.  Compute a wider initial window that shrinks to 5 once we
-        # have caught up to real-time.
+        # have caught up to real-time.  Seed _processed_minutes from the L3
+        # output first so the wider window does not reprocess (and duplicate)
+        # minutes already written before the restart (P-H25).
+        self._seed_processed_minutes_from_l3()
         max_lookback = self._startup_lookback_minutes()
         
         while self.running:
