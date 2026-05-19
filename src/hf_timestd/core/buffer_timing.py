@@ -37,8 +37,11 @@ logger = logging.getLogger(__name__)
 # GPS epoch: 1980-01-06 00:00:00 UTC as Unix timestamp
 GPS_EPOCH_UNIX = 315964800
 
-from .leap_second import get_current_gps_leap_seconds
-GPS_LEAP_SECONDS = get_current_gps_leap_seconds()
+# M-M4: resolve the GPS-UTC offset per buffer (keyed off its own GPS time)
+# rather than capturing a module-level constant at import. A multi-week
+# daemon that crossed a leap-second insertion would otherwise carry a 1 s
+# error on every buffer recorded after the boundary.
+from .leap_second import gps_leap_seconds_at_gps_time
 
 BILLION = 1_000_000_000
 
@@ -119,7 +122,9 @@ def resolve_buffer_timing(
     top_gps_ns = metadata.get('gps_time_ns')
     top_rtp_snap = metadata.get('rtp_timesnap')
     if top_gps_ns is not None and top_rtp_snap is not None:
-        gps_utc = top_gps_ns / BILLION + GPS_EPOCH_UNIX - GPS_LEAP_SECONDS
+        top_gps_ns = int(top_gps_ns)
+        leap = gps_leap_seconds_at_gps_time(top_gps_ns)
+        gps_utc = top_gps_ns / BILLION + GPS_EPOCH_UNIX - leap
         delta = _rtp_delta_signed(start_rtp, int(top_rtp_snap))
         sample0_utc = gps_utc + delta / sample_rate
 
@@ -166,11 +171,18 @@ def _rtp_delta_signed(rtp: int, rtp_start: int) -> int:
 
 
 def _gps_snapshot_to_utc(snapshot: Dict) -> Optional[float]:
-    """Convert a GPS_TIME snapshot to Unix UTC seconds."""
+    """Convert a GPS_TIME snapshot to Unix UTC seconds.
+
+    The GPS-UTC offset is looked up against the snapshot's own GPS time,
+    so a snapshot recorded before a leap second uses the pre-insertion
+    offset and one recorded after uses the post-insertion offset — even
+    when both snapshots coexist in the same buffer's metadata.
+    """
     gps_ns = snapshot.get('gps_time_ns')
     if gps_ns is None:
         return None
-    return gps_ns / BILLION + GPS_EPOCH_UNIX - GPS_LEAP_SECONDS
+    gps_ns = int(gps_ns)
+    return gps_ns / BILLION + GPS_EPOCH_UNIX - gps_leap_seconds_at_gps_time(gps_ns)
 
 
 def _from_rtp_gps(

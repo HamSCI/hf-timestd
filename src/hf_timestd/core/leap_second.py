@@ -31,14 +31,143 @@ Usage:
         samples_expected = sample_rate * 61
 """
 
+import bisect
 import logging
+import os
+import threading
 from datetime import datetime, timezone
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 # Compile-time fallback: 18 leap seconds as of 2017 (most recent insertion as of 2026)
 _GPS_LEAP_SECONDS_FALLBACK = 18
+
+# Conversion constants for the leap-second table.
+_LEAP_SECONDS_FILE = "/usr/share/zoneinfo/leap-seconds.list"
+# Seconds from the NTP epoch (1900-01-01) to the Unix epoch (1970-01-01).
+# The first column of leap-seconds.list is an NTP timestamp.
+_NTP_UNIX_OFFSET = 2_208_988_800
+# Unix timestamp of the GPS epoch (1980-01-06 00:00:00 UTC).
+_GPS_EPOCH_UNIX = 315_964_800
+# TAI-UTC offset at the GPS epoch was 19 s, so GPS-UTC = DTAI - 19.
+_TAI_GPS_OFFSET = 19
+_NS_PER_S = 1_000_000_000
+
+# Module cache: path -> (mtime, sorted_thresholds, parallel_offsets).
+# Two parallel tuples are kept so bisect on a list of ints is hot-path cheap.
+_LEAP_TABLE_CACHE: Dict[str, Tuple[float, Tuple[int, ...], Tuple[int, ...]]] = {}
+_LEAP_TABLE_LOCK = threading.Lock()
+
+
+def _parse_leap_seconds_file(path: str) -> Tuple[Tuple[int, ...], Tuple[int, ...]]:
+    """Parse ``leap-seconds.list`` into two parallel sorted tuples.
+
+    Returns ``(gps_thresholds, gps_utc_offsets)`` where
+    ``gps_thresholds[i]`` is the smallest GPS-seconds-since-GPS-epoch at
+    which ``gps_utc_offsets[i]`` (= DTAI − 19) became effective.
+
+    The file's first column is an NTP timestamp of the UTC moment the new
+    DTAI takes effect (i.e. one second after the leap-second insertion).
+    Converting to the GPS counter requires GPS = TAI − 19 and
+    TAI = UTC + DTAI, so the GPS-epoch-relative threshold is
+    ``utc_unix + dtai − 19 − GPS_EPOCH_UNIX``.
+
+    Returns empty tuples if the file is missing or unparseable.
+    """
+    thresholds: list[int] = []
+    offsets: list[int] = []
+    try:
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                try:
+                    utc_ntp = int(parts[0])
+                    dtai = int(parts[1])
+                except ValueError:
+                    continue
+                utc_unix = utc_ntp - _NTP_UNIX_OFFSET
+                gps_threshold = utc_unix + dtai - _TAI_GPS_OFFSET - _GPS_EPOCH_UNIX
+                thresholds.append(gps_threshold)
+                offsets.append(dtai - _TAI_GPS_OFFSET)
+    except OSError:
+        return (), ()
+
+    # Sort by threshold (entries are written in chronological order, but be safe).
+    order = sorted(range(len(thresholds)), key=thresholds.__getitem__)
+    return (
+        tuple(thresholds[i] for i in order),
+        tuple(offsets[i] for i in order),
+    )
+
+
+def _get_leap_table(path: str) -> Tuple[Tuple[int, ...], Tuple[int, ...]]:
+    """Return the cached leap-second table for ``path``, re-parsing on mtime change."""
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        with _LEAP_TABLE_LOCK:
+            _LEAP_TABLE_CACHE.pop(path, None)
+        return (), ()
+
+    with _LEAP_TABLE_LOCK:
+        cached = _LEAP_TABLE_CACHE.get(path)
+        if cached is not None and cached[0] == mtime:
+            return cached[1], cached[2]
+
+    # Parse outside the lock — file I/O shouldn't block other lookups.
+    thresholds, offsets = _parse_leap_seconds_file(path)
+
+    with _LEAP_TABLE_LOCK:
+        _LEAP_TABLE_CACHE[path] = (mtime, thresholds, offsets)
+    return thresholds, offsets
+
+
+def gps_leap_seconds_at_gps_time(
+    gps_time_ns: int,
+    *,
+    path: Optional[str] = None,
+) -> int:
+    """Return the GPS-UTC offset (s) effective at ``gps_time_ns``.
+
+    Looks up the most recent entry in ``/usr/share/zoneinfo/leap-seconds.list``
+    whose effective-from GPS time is ≤ ``gps_time_ns``. The file is
+    mtime-cached, so steady-state lookups are an ``os.stat`` plus a
+    bisect.
+
+    Why per-call (and not captured once at import)?  ``hf-timestd`` is a
+    multi-week daemon. If a leap second is inserted while the process
+    runs, every UTC derived from GPS_TIME after the insertion would
+    silently carry a 1 s error. Keying off the buffer's own GPS time
+    means a leap-second boundary mid-stream picks up the correct offset
+    on each side automatically — and a new ``leap-seconds.list`` shipped
+    by the OS package manager is picked up without a process restart.
+
+    Falls back to :data:`_GPS_LEAP_SECONDS_FALLBACK` (18) when the file
+    is unavailable or the GPS time precedes every entry (pre-1980; not
+    a real use case for this project).
+    """
+    if path is None:
+        # Resolved lazily so tests that monkeypatch ``_LEAP_SECONDS_FILE``
+        # take effect on every call site, including code paths that pass
+        # no ``path=`` argument.
+        path = _LEAP_SECONDS_FILE
+    thresholds, offsets = _get_leap_table(path)
+    if not thresholds:
+        return _GPS_LEAP_SECONDS_FALLBACK
+
+    gps_sec = gps_time_ns / _NS_PER_S
+    idx = bisect.bisect_right(thresholds, gps_sec) - 1
+    if idx < 0:
+        # GPS time predates the table (pre-1972 UTC). Shouldn't happen
+        # in this project; fall back rather than guess.
+        return _GPS_LEAP_SECONDS_FALLBACK
+    return offsets[idx]
 
 
 def get_current_gps_leap_seconds() -> int:
