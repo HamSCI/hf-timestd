@@ -11,11 +11,12 @@ P-H4 — cycle slips were frozen (doppler→0 through the slip) but never counte
 so a slip-contaminated series looked clean. `CarrierTECResult` now carries
 `n_cycle_slips` for consumers to gate on.
 
-P-H7 — integrated dTEC is a random-walk cumulative sum; its 1σ grows as √N
-with the number of integration steps. `_estimate_noise_floor` used to return
-0.0 ("perfect") when it could not estimate the floor — now NaN ("unknown") —
-and `sigma_dtec_tecu` is that per-tick floor propagated to the
-end-of-integration uncertainty (floor·√N), NaN when the floor is unknown.
+P-H7 / P-M3 — `_estimate_noise_floor` returns NaN ("unknown"), never 0.0
+("perfect"), when it cannot estimate the floor. P-M3 then changed the dTEC
+computation to be DIRECT from unwrapped phase rather than a re-integrated
+Doppler rate, so the series is no longer a random-walk cumulative sum:
+`sigma_dtec_tecu` is now the per-sample noise floor itself, constant — there
+is no √N growth to propagate.
 """
 
 import math
@@ -85,8 +86,8 @@ class TestCycleSlipCount(unittest.TestCase):
 
 
 class TestDtecUncertainty(unittest.TestCase):
-    """P-H7: sigma_dtec_tecu is the noise floor propagated by √N; the floor
-    is NaN, never 0.0, when it cannot be estimated."""
+    """P-H7 / P-M3: sigma_dtec_tecu is the per-sample dTEC noise floor —
+    constant, not √N-propagated — and NaN, never 0.0, when indeterminate."""
 
     def test_noise_floor_returns_nan_when_indeterminate(self) -> None:
         floor = CarrierTECEstimator._estimate_noise_floor
@@ -109,8 +110,10 @@ class TestDtecUncertainty(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertTrue(math.isnan(result.sigma_dtec_tecu))
 
-    def test_sigma_is_floor_propagated_by_sqrt_n(self) -> None:
-        """sigma_dtec_tecu == per-tick floor · √N (random-walk growth)."""
+    def test_sigma_is_the_per_sample_noise_floor(self) -> None:
+        """P-M3: dTEC is direct from phase, not a re-integrated random walk —
+        sigma_dtec_tecu is the per-sample noise floor itself, with no √N
+        propagation."""
         rng = np.random.default_rng(42)
         n = 400
         epochs = np.arange(n, dtype=float)
@@ -123,11 +126,12 @@ class TestDtecUncertainty(unittest.TestCase):
             np.asarray(result.epochs), np.asarray(result.dtec_tecu))
         self.assertTrue(math.isfinite(floor))
         self.assertGreater(floor, 0.0)
-        self.assertAlmostEqual(result.sigma_dtec_tecu,
-                               floor * math.sqrt(result.n_points), places=9)
+        self.assertAlmostEqual(result.sigma_dtec_tecu, floor, places=9)
 
-    def test_sigma_grows_with_integration_length(self) -> None:
-        """For one noise process, a longer integration carries a larger 1σ."""
+    def test_sigma_does_not_grow_with_integration_length(self) -> None:
+        """P-M3: per-sample dTEC noise is a property of the measurement, not
+        the record length — a longer record does NOT inflate it. The old
+        re-integration model grew σ as √N (√4 = 2× over this 4× span)."""
         rng = np.random.default_rng(7)
         n = 800
         epochs = np.arange(n, dtype=float)
@@ -139,7 +143,110 @@ class TestDtecUncertainty(unittest.TestCase):
         self.assertIsNotNone(long)
         self.assertTrue(math.isfinite(short.sigma_dtec_tecu))
         self.assertTrue(math.isfinite(long.sigma_dtec_tecu))
-        self.assertGreater(long.sigma_dtec_tecu, short.sigma_dtec_tecu)
+        ratio = long.sigma_dtec_tecu / short.sigma_dtec_tecu
+        self.assertLess(ratio, 1.5)     # nowhere near the old √4 = 2×
+        self.assertGreater(ratio, 0.67)
+
+
+class TestDirectFromPhase(unittest.TestCase):
+    """P-M3: relative TEC is computed directly from unwrapped phase."""
+
+    def test_dtec_series_on_the_sample_grid(self) -> None:
+        # Output is on the carrier-phase sample grid (length N), not the
+        # N-1 midpoint grid the old Doppler-integration produced.
+        epochs = np.arange(60, dtype=float)
+        phase = 0.01 * epochs  # clean ramp, no slips, no gaps
+        result = CarrierTECEstimator().compute_dtec_from_phase(
+            epochs, phase, frequency_mhz=10.0)
+        self.assertIsNotNone(result)
+        self.assertEqual(len(result.epochs), 60)
+        self.assertEqual(len(result.dtec_tecu), 60)
+        self.assertEqual(len(result.dtec_rate_tecu_per_s), 60)
+        self.assertEqual(result.n_points, 60)
+        self.assertEqual(result.n_gaps, 0)
+        # Relative TEC is anchored to 0 at the first sample and, for a clean
+        # monotonic phase ramp, is itself monotonic.
+        dtec = np.asarray(result.dtec_tecu)
+        self.assertAlmostEqual(dtec[0], 0.0, places=12)
+        self.assertTrue(np.all(np.diff(dtec) < 0) or np.all(np.diff(dtec) > 0))
+
+    def test_gap_is_coasted_and_counted(self) -> None:
+        # A >120 s data gap with a large phase step across it: the step is
+        # not a real ionospheric change, so dTEC must coast flat across the
+        # gap and the gap must be counted.
+        epochs = np.concatenate([np.arange(30, dtype=float),
+                                 200.0 + np.arange(30, dtype=float)])
+        phase = 0.01 * np.arange(60, dtype=float)
+        phase[30:] += 50.0  # carrier wound unobserved during the gap
+        result = CarrierTECEstimator().compute_dtec_from_phase(
+            epochs, phase, frequency_mhz=10.0)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.n_gaps, 1)
+        dtec = np.asarray(result.dtec_tecu)
+        # The 50-rad jump across the gap was removed — dTEC steps across the
+        # gap by ~one ordinary sample, not by the 50-rad winding.
+        ordinary_step = abs(dtec[1] - dtec[0])
+        self.assertLess(abs(dtec[30] - dtec[29]), 5.0 * ordinary_step + 1e-9)
+
+
+class TestDifferentialDtec(unittest.TestCase):
+    """P-M4: differential dTEC mean-removes each series first."""
+
+    def test_constant_offset_removed_before_differencing(self) -> None:
+        # Two relative dTEC series with identical variation but different
+        # arbitrary offsets. After mean-removal the differential is ~0 —
+        # without it the series would carry the 5 TECU offset difference.
+        epochs = list(range(20))
+        signal = [math.sin(i / 3.0) for i in range(20)]
+        r1 = CarrierTECResult(
+            station='WWV', channel='a', frequency_mhz=10.0,
+            start_epoch=0.0, end_epoch=19.0, epochs=list(map(float, epochs)),
+            dtec_tecu=[s + 5.0 for s in signal], n_points=20)
+        r2 = CarrierTECResult(
+            station='WWV', channel='b', frequency_mhz=15.0,
+            start_epoch=0.0, end_epoch=19.0, epochs=list(map(float, epochs)),
+            dtec_tecu=list(signal), n_points=20)
+        out = CarrierTECEstimator().compute_differential_dtec(r1, r2)
+        self.assertIsNotNone(out)
+        self.assertLess(max(abs(v) for v in out['dtec_diff_tecu']), 1e-9)
+
+
+class TestAnchoring(unittest.TestCase):
+    """P-M5: anchor epoch-tolerance check and uncertainty propagation."""
+
+    def _phase(self, n=60):
+        epochs = np.arange(n, dtype=float)
+        return epochs, 0.01 * epochs
+
+    def test_anchor_within_tolerance_is_applied(self) -> None:
+        epochs, phase = self._phase()
+        result = CarrierTECEstimator().compute_dtec_from_phase(
+            epochs, phase, frequency_mhz=10.0,
+            anchor_tec_tecu=30.0, anchor_epoch=30.0)
+        self.assertIsNotNone(result)
+        self.assertTrue(result.is_anchored)
+        # The sample nearest the anchor epoch carries the anchor TEC.
+        self.assertAlmostEqual(result.dtec_tecu[30], 30.0, places=6)
+
+    def test_stale_anchor_is_rejected(self) -> None:
+        # Anchor epoch hours away from the data — argmin would still find a
+        # nearest sample; the tolerance check must reject it instead.
+        epochs, phase = self._phase()
+        result = CarrierTECEstimator().compute_dtec_from_phase(
+            epochs, phase, frequency_mhz=10.0,
+            anchor_tec_tecu=30.0, anchor_epoch=10000.0)
+        self.assertIsNotNone(result)
+        self.assertFalse(result.is_anchored)
+
+    def test_anchor_uncertainty_is_stored(self) -> None:
+        epochs, phase = self._phase()
+        result = CarrierTECEstimator().compute_dtec_from_phase(
+            epochs, phase, frequency_mhz=10.0,
+            anchor_tec_tecu=30.0, anchor_epoch=30.0,
+            anchor_uncertainty_tecu=2.5)
+        self.assertIsNotNone(result)
+        self.assertTrue(result.is_anchored)
+        self.assertAlmostEqual(result.anchor_uncertainty_tecu, 2.5, places=9)
 
 
 if __name__ == '__main__':

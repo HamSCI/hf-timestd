@@ -2,8 +2,8 @@
 """
 Carrier-Phase Differential TEC (dTEC) Estimator
 ================================================================================
-Converts carrier phase rate-of-change (Doppler) to dTEC/dt, integrates to get
-relative TEC(t), and anchors to absolute TEC from group-delay estimates.
+Derives relative TEC(t) directly from carrier phase and anchors it to an
+absolute reference (GNSS VTEC).
 
 Physics:
 --------
@@ -13,11 +13,13 @@ Carrier phase measures the PHASE path (integral of refractive index n_φ):
 For the ionosphere, n_φ = 1 - f_p²/(2f²), so:
     φ_iono(t) = -(2π / c) · (40.3 / f) · sTEC(t)
 
-The Doppler shift from changing TEC is:
-    f_D = dφ/dt / (2π) = -(40.3 / (c · f)) · d(sTEC)/dt
+Relative TEC therefore follows DIRECTLY from the unwrapped phase — no
+differentiation or re-integration:
+    ΔsTEC(t) = sTEC(t) - sTEC(t₀) = -(c · f) / (2π · 40.3) · (φ(t) - φ(t₀))
 
-Rearranging:
-    d(sTEC)/dt = -f_D · c · f / 40.3
+(P-M3: an earlier version went phase → Doppler → re-integrate, which
+amplified noise and introduced a half-sample lag. The direct conversion
+above avoids both.)
 
 Note the OPPOSITE sign convention from group delay: increasing TEC causes
 increasing group delay but DECREASING phase delay (phase advance).
@@ -27,13 +29,13 @@ Carrier phase gives ~1000× better temporal resolution than group delay because:
 - Carrier phase: ~55 measurements per minute per frequency (per-tick)
 
 But carrier phase is AMBIGUOUS — it gives only dTEC, not absolute TEC.
-We anchor the integrated dTEC to the group-delay absolute TEC at minute
-boundaries.
+We anchor the relative dTEC to absolute TEC from GNSS VTEC (an independent
+absolute measurement) at minute boundaries.
 
 Integration with existing pipeline:
 ------------------------------------
 Reads: L2/tick_phase HDF5 (carrier_phase_rad, ~55 points/min/station)
-Writes: L3/dtec HDF5 (dTEC time series, anchored to group-delay TEC)
+Writes: L3/dtec HDF5 (dTEC time series, anchored to GNSS VTEC)
 
 ================================================================================
 """
@@ -54,6 +56,11 @@ C_LIGHT = 299792458.0       # m/s
 K_GROUP_DELAY = 40.3        # m³/s² (ionospheric constant)
 TECU_SCALE = 1e16           # 1 TECU = 10^16 el/m²
 
+# A dropout longer than this makes the unwrapped phase across it ambiguous
+# (the carrier may have wound through many cycles unobserved). dTEC coasts
+# flat across such a gap, and the gap is counted onto the result.
+GAP_THRESHOLD_S = 120.0
+
 
 @dataclass
 class CarrierTECResult:
@@ -64,24 +71,29 @@ class CarrierTECResult:
     start_epoch: float
     end_epoch: float
 
-    # Time series
+    # Time series — all on the carrier-phase SAMPLE grid (P-M3); the three
+    # arrays are the same length and index-aligned.
     epochs: List[float] = field(default_factory=list)
-    dtec_tecu: List[float] = field(default_factory=list)  # Relative TEC (integrated dTEC)
-    dtec_rate_tecu_per_s: List[float] = field(default_factory=list)  # dTEC/dt
+    dtec_tecu: List[float] = field(default_factory=list)  # Relative TEC, direct from phase
+    dtec_rate_tecu_per_s: List[float] = field(default_factory=list)  # d(dTEC)/dt
 
     # Anchoring
-    anchor_tec_tecu: float = 0.0       # Absolute TEC from group delay at anchor point
+    anchor_tec_tecu: float = 0.0       # Absolute TEC reference at the anchor point
     anchor_epoch: float = 0.0           # When the anchor was applied
     is_anchored: bool = False
+    anchor_uncertainty_tecu: float = 0.0  # 1σ of the anchor TEC (P-M5);
+                                          # absolute σ = hypot(sigma_dtec, this)
 
     # Quality
     n_points: int = 0
-    sigma_dtec_tecu: float = 0.0       # 1σ of integrated dTEC at end of run
-                                       # (random-walk √N growth); NaN if unknown
+    sigma_dtec_tecu: float = 0.0       # 1σ per-sample dTEC noise (direct from
+                                       # phase, P-M3 — constant, NOT √N growth);
+                                       # NaN if it cannot be estimated
     mean_snr_db: float = 0.0
     unwrap_quality: float = 1.0        # unwrap-RISK score (not proof); see compute_dtec
     n_phase_jumps: int = 0             # inter-sample steps near the π unwrap boundary
     n_cycle_slips: int = 0             # detected cycle slips (phase-rate spikes)
+    n_gaps: int = 0                    # data gaps the series coasted across (P-M3)
 
 
 class CarrierTECEstimator:
@@ -91,13 +103,12 @@ class CarrierTECEstimator:
     Pipeline:
     1. Read carrier_phase_rad time series from L2/tick_phase
     2. Unwrap phase for continuity
-    3. Compute phase rate (Doppler) via finite differences
-    4. Convert Doppler → dTEC/dt using frequency
-    5. Integrate dTEC/dt → relative TEC(t)
-    6. Anchor to absolute TEC from group-delay estimator at minute boundaries
+    3. Convert unwrapped phase DIRECTLY to relative TEC(t) (P-M3)
+    4. Coast flat across detected cycle slips and data gaps
+    5. Anchor to absolute TEC from GNSS VTEC at minute boundaries
 
     The result is a high-temporal-resolution TEC time series with sub-TECU
-    precision, anchored to the absolute scale from group delay.
+    precision, anchored to the absolute scale from GNSS VTEC.
     """
 
     def __init__(self, data_root: Optional[Path] = None):
@@ -112,6 +123,8 @@ class CarrierTECEstimator:
         channel: str = '',
         anchor_tec_tecu: Optional[float] = None,
         anchor_epoch: Optional[float] = None,
+        anchor_uncertainty_tecu: Optional[float] = None,
+        anchor_max_age_seconds: float = 90.0,
     ) -> Optional[CarrierTECResult]:
         """
         Compute dTEC from a carrier phase time series.
@@ -122,8 +135,17 @@ class CarrierTECEstimator:
             frequency_mhz: Carrier frequency in MHz
             station: Station name
             channel: Channel name
-            anchor_tec_tecu: Absolute TEC to anchor to (from group delay)
-            anchor_epoch: Epoch of the anchor point
+            anchor_tec_tecu: Absolute TEC to anchor to. Per PHYSICS_CONTRACT
+                this should be GNSS VTEC — an independent absolute
+                measurement — not the (noisy) group-delay TEC.
+            anchor_epoch: Epoch of the anchor point.
+            anchor_uncertainty_tecu: 1σ uncertainty of the anchor TEC; stored
+                on the result so the absolute-TEC uncertainty can be formed
+                as hypot(sigma_dtec_tecu, anchor_uncertainty_tecu) (P-M5).
+            anchor_max_age_seconds: The anchor is applied only if a sample
+                lies within this many seconds of anchor_epoch; otherwise the
+                series is left unanchored rather than offset to a far-away,
+                meaningless sample (P-M5).
 
         Returns:
             CarrierTECResult with dTEC time series, or None if insufficient data
@@ -133,8 +155,16 @@ class CarrierTECEstimator:
 
         # Sort by time
         sort_idx = np.argsort(epochs)
-        epochs = epochs[sort_idx]
-        carrier_phase_rad = carrier_phase_rad[sort_idx]
+        epochs = np.asarray(epochs, dtype=float)[sort_idx]
+        carrier_phase_rad = np.asarray(carrier_phase_rad, dtype=float)[sort_idx]
+
+        # Drop exact-duplicate timestamps — a strictly increasing grid keeps
+        # the rate derivative and gap detection well-defined.
+        keep = np.concatenate(([True], np.diff(epochs) > 0))
+        epochs = epochs[keep]
+        carrier_phase_rad = carrier_phase_rad[keep]
+        if len(epochs) < 3:
+            return None
 
         # Unwrap phase for continuity
         phase_unwrapped = np.unwrap(carrier_phase_rad)
@@ -160,97 +190,111 @@ class CarrierTECEstimator:
                 f"steps |Δφ|>π/2, quality={unwrap_quality:.2f}"
             )
 
-        # Compute phase rate via finite differences (central where possible)
         dt = np.diff(epochs)
         dphi = np.diff(phase_unwrapped)
 
-        # Filter out zero or negative dt (duplicate timestamps)
-        valid = dt > 0
-        if not np.any(valid):
-            return None
+        # Phase rate (Doppler) — used only to DETECT cycle slips. The dTEC
+        # series itself is derived directly from phase below, not by
+        # re-integrating this rate (P-M3).
+        doppler_hz = -(1.0 / (2.0 * np.pi)) * dphi / dt
 
-        # Doppler: f_D = -(1/2π) · dφ/dt
-        doppler_hz = np.zeros(len(dt))
-        doppler_hz[valid] = -(1.0 / (2.0 * np.pi)) * dphi[valid] / dt[valid]
-
-        # P3-A: Cycle-Slip Detection
-        # Deep fades cause cycle slips, which manifest as massive, brief spikes in phase rate (Doppler).
-        # We detect these by looking at the second derivative (phase acceleration).
+        # Cycle-slip detection: a lost-lock re-acquisition appears as a brief,
+        # large spike in phase acceleration (the time-derivative of Doppler).
+        # > 5 Hz/s is far beyond any real ionospheric rate at HF.
         d2phi = np.zeros_like(doppler_hz)
         d2phi[1:] = np.diff(doppler_hz)
-        
-        # Threshold: > 5 Hz/s acceleration is almost certainly a cycle slip for ionospheric HF
         slip_mask = np.abs(d2phi) > 5.0
         n_cycle_slips = int(np.sum(slip_mask))
+
+        # Gap intervals — long enough that the unwrapped phase across them is
+        # ambiguous.
+        gap_mask = dt > GAP_THRESHOLD_S
+        n_gaps = int(np.sum(gap_mask))
+
+        # P-M3: relative TEC DIRECTLY from the unwrapped phase. Carrier phase
+        # is proportional to TEC (φ_iono = -(2π/c)·(K/f)·sTEC), so
+        #   ΔsTEC(t) = -(c·f)/(2π·K) · (φ(t) − φ(t₀)).
+        # Earlier code differentiated phase to Doppler and re-integrated; that
+        # round-trip amplified noise and added a half-sample lag.
+        # The inter-sample phase step across a cycle slip or a long gap is not
+        # a real ionospheric change, so it is removed — the series coasts
+        # (flat) across it, the direct-from-phase analogue of the old
+        # "hold the Doppler at zero". n_gaps is surfaced on the result so a
+        # gap-spanned series is no longer silently presented as continuous.
+        bad_step = slip_mask | gap_mask
+        phase_corrected = phase_unwrapped.copy()
+        phase_corrected[1:] -= np.cumsum(np.where(bad_step, dphi, 0.0))
         if n_cycle_slips > 0:
-            logger.debug(f"Detected {n_cycle_slips} cycle slips for {station}/{channel} at {frequency_mhz}MHz")
-            # Hold the dTEC rate flat through the slip — the spurious
-            # integer-cycle jump must not be integrated. This is a coast, not
-            # a measurement: n_cycle_slips is surfaced on the result (P-H4) so
-            # consumers can down-weight or segment a slip-contaminated series.
-            doppler_hz[slip_mask] = 0.0
+            logger.debug(
+                f"Coasted {n_cycle_slips} cycle slip(s) for "
+                f"{station}/{channel} at {frequency_mhz}MHz"
+            )
 
-        # Midpoint epochs for the derivative
-        mid_epochs = (epochs[:-1] + epochs[1:]) / 2.0
-
-        # Convert Doppler to dTEC/dt
-        # d(sTEC)/dt = -f_D · c · f / 40.3
-        # where f is in Hz, result in el/m²/s
         freq_hz = frequency_mhz * 1e6
-        dtec_rate_el_m2_per_s = -doppler_hz * C_LIGHT * freq_hz / K_GROUP_DELAY
-        dtec_rate_tecu_per_s = dtec_rate_el_m2_per_s / TECU_SCALE
+        phase_to_tecu = -(C_LIGHT * freq_hz) / (
+            2.0 * np.pi * K_GROUP_DELAY * TECU_SCALE)
+        dtec_tecu = (phase_corrected - phase_corrected[0]) * phase_to_tecu
 
-        # Integrate dTEC/dt to get relative TEC(t)
-        # Use trapezoidal integration
-        dtec_tecu = np.zeros(len(mid_epochs))
-        for i in range(1, len(mid_epochs)):
-            dt_i = mid_epochs[i] - mid_epochs[i - 1]
-            if dt_i > 0 and dt_i < 120:  # Skip gaps > 2 minutes
-                avg_rate = (dtec_rate_tecu_per_s[i] + dtec_rate_tecu_per_s[i - 1]) / 2.0
-                dtec_tecu[i] = dtec_tecu[i - 1] + avg_rate * dt_i
-            else:
-                dtec_tecu[i] = dtec_tecu[i - 1]  # Hold through gaps
+        # Reported rate is the honest derivative of the dTEC actually
+        # produced — same sample grid, no half-sample offset.
+        dtec_rate_tecu_per_s = np.gradient(dtec_tecu, epochs)
 
-        # Anchor to absolute TEC if provided
+        # Anchor the relative dTEC to an absolute reference (P-M5). The anchor
+        # is applied only if a sample lies within anchor_max_age_seconds of
+        # the anchor epoch — argmin alone would always find *a* nearest
+        # sample, even one hours away, and offset the whole series to it.
         is_anchored = False
         anchor_tec = 0.0
         anchor_ep = 0.0
+        anchor_u = 0.0
         if anchor_tec_tecu is not None and anchor_epoch is not None:
-            # Find the closest point to the anchor epoch
-            anchor_idx = np.argmin(np.abs(mid_epochs - anchor_epoch))
-            offset = anchor_tec_tecu - dtec_tecu[anchor_idx]
-            dtec_tecu += offset
-            is_anchored = True
-            anchor_tec = anchor_tec_tecu
-            anchor_ep = anchor_epoch
+            age = np.abs(epochs - anchor_epoch)
+            anchor_idx = int(np.argmin(age))
+            if age[anchor_idx] <= anchor_max_age_seconds:
+                offset = anchor_tec_tecu - dtec_tecu[anchor_idx]
+                dtec_tecu = dtec_tecu + offset
+                is_anchored = True
+                anchor_tec = float(anchor_tec_tecu)
+                anchor_ep = float(anchor_epoch)
+                anchor_u = float(anchor_uncertainty_tecu
+                                 if anchor_uncertainty_tecu is not None
+                                 else 0.0)
+            else:
+                logger.warning(
+                    f"dTEC anchor for {station}/{channel} rejected: nearest "
+                    f"sample is {age[anchor_idx]:.0f}s from the anchor epoch "
+                    f"(> {anchor_max_age_seconds}s) — leaving dTEC unanchored"
+                )
 
-        # Uncertainty of the integrated dTEC (P-H7). Integrated dTEC is a
-        # random-walk cumulative sum, so its 1σ grows as √N with the number of
-        # integration steps. _estimate_noise_floor gives the per-tick dTEC
-        # noise (NaN when it cannot be estimated); propagate it to the
-        # end-of-integration uncertainty. NaN propagates — an unknown noise
-        # floor yields an unknown (NaN) σ, never a spurious 0.0.
-        sigma_floor = self._estimate_noise_floor(mid_epochs, dtec_tecu)
-        sigma = float(sigma_floor * np.sqrt(max(len(mid_epochs), 1)))
+        # Uncertainty of the dTEC series. With P-M3's direct-from-phase
+        # conversion the series is no longer a re-integrated random walk, so
+        # its 1σ does NOT grow as √N — each sample is φ(t)−φ(t₀) scaled, whose
+        # noise is the (constant) per-sample phase noise. _estimate_noise_floor
+        # measures exactly that detrended per-sample scatter, and returns NaN
+        # (never 0.0) when it cannot be estimated, so an unknown noise floor
+        # stays honestly unknown (P-H7).
+        sigma = self._estimate_noise_floor(epochs, dtec_tecu)
 
         return CarrierTECResult(
             station=station,
             channel=channel,
             frequency_mhz=frequency_mhz,
-            start_epoch=float(mid_epochs[0]),
-            end_epoch=float(mid_epochs[-1]),
-            epochs=mid_epochs.tolist(),
+            start_epoch=float(epochs[0]),
+            end_epoch=float(epochs[-1]),
+            epochs=epochs.tolist(),
             dtec_tecu=dtec_tecu.tolist(),
             dtec_rate_tecu_per_s=dtec_rate_tecu_per_s.tolist(),
             anchor_tec_tecu=anchor_tec,
             anchor_epoch=anchor_ep,
             is_anchored=is_anchored,
-            n_points=len(mid_epochs),
+            anchor_uncertainty_tecu=anchor_u,
+            n_points=len(epochs),
             sigma_dtec_tecu=sigma,
             mean_snr_db=0.0,  # Caller should set this
             unwrap_quality=unwrap_quality,
             n_phase_jumps=n_jumps,
             n_cycle_slips=n_cycle_slips,
+            n_gaps=n_gaps,
         )
 
     def compute_dtec_from_records(
@@ -261,6 +305,7 @@ class CarrierTECEstimator:
         channel: str = '',
         anchor_tec_tecu: Optional[float] = None,
         anchor_epoch: Optional[float] = None,
+        anchor_uncertainty_tecu: Optional[float] = None,
     ) -> Optional[CarrierTECResult]:
         """
         Convenience method: compute dTEC from a list of tick_phase records.
@@ -270,6 +315,7 @@ class CarrierTECEstimator:
             frequency_mhz: Carrier frequency in MHz
             station, channel: Identifiers
             anchor_tec_tecu, anchor_epoch: Optional absolute TEC anchor
+            anchor_uncertainty_tecu: Optional 1σ of the anchor TEC (P-M5)
 
         Returns:
             CarrierTECResult or None
@@ -298,6 +344,7 @@ class CarrierTECEstimator:
             channel=channel,
             anchor_tec_tecu=anchor_tec_tecu,
             anchor_epoch=anchor_epoch,
+            anchor_uncertainty_tecu=anchor_uncertainty_tecu,
         )
 
         if result is not None and len(snrs) > 0:
@@ -316,10 +363,13 @@ class CarrierTECEstimator:
         The differential removes common-mode errors (clock, geometry) and
         isolates the dispersive ionospheric component.
 
-        dTEC_diff(t) = TEC_f1(t) - TEC_f2(t)
-
-        For a consistent ionosphere, this should be near zero (both frequencies
-        see the same TEC). Deviations indicate mode changes or scintillation.
+        Each input dTEC series is RELATIVE — anchored, if at all, to its own
+        reference — so each carries an arbitrary constant offset. The two
+        series are therefore mean-removed over the common window before
+        differencing (P-M4); the result is the difference in dTEC *variation*,
+        which is the physical quantity. For a consistent ionosphere it stays
+        near zero (both frequencies see the same TEC); deviations indicate
+        mode changes or scintillation.
 
         Args:
             result_f1: CarrierTECResult for frequency 1
@@ -353,6 +403,14 @@ class CarrierTECEstimator:
         interp_1 = np.interp(common_epochs, epochs_1, dtec_1)
         interp_2 = np.interp(common_epochs, epochs_2, dtec_2)
 
+        # P-M4: mean-remove each series over the common window before
+        # differencing. Each is a RELATIVE dTEC with its own arbitrary offset;
+        # differencing them raw would report that offset difference as a
+        # physical dispersive signal. After mean-removal the difference
+        # reflects only the dTEC variation, which is the physical quantity.
+        interp_1 = interp_1 - np.mean(interp_1)
+        interp_2 = interp_2 - np.mean(interp_2)
+
         diff = interp_1 - interp_2
 
         return {
@@ -378,7 +436,9 @@ class CarrierTECEstimator:
         noise estimator. Returns NaN — not 0.0 — when the noise floor cannot
         be estimated (too few points, non-positive cadence, no usable
         windows): an unknown noise floor must read as unknown, not perfect
-        (P-H7). The caller propagates NaN through to sigma_dtec_tecu.
+        (P-H7). With P-M3's direct-from-phase dTEC this per-sample scatter is
+        the dTEC uncertainty itself (the series is not a re-integrated random
+        walk, so there is no √N growth to propagate).
         """
         if len(epochs) < 10:
             return float('nan')
