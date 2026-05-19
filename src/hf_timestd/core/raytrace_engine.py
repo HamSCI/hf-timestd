@@ -65,6 +65,8 @@ from typing import List, Optional
 
 import numpy as np
 
+from .hop_geometry import EARTH_RADIUS_KM, hop_geometry, n_hops_for_distance
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -201,6 +203,9 @@ class RaytraceResult:
 # IRI ionosphere grid helper
 # ---------------------------------------------------------------------------
 _C_KM_S = 299792.458  # km/s
+
+# Nominal F2 reflection height for the no-PHaRLAP geometric fallback.
+_FALLBACK_F2_HEIGHT_KM = 300.0
 
 
 def _gc_point(lat1_deg: float, lon1_deg: float,
@@ -563,7 +568,16 @@ class RaytraceEngine:
     # ------------------------------------------------------------------
     def _geometric_fallback(self, station: str, frequency_mhz: float,
                              utc_time: datetime) -> RaytraceResult:
-        """Vacuum great-circle delay — 1-hop only, confidence=0."""
+        """
+        Spherical-hop geometric delay fallback — confidence=0.
+
+        Used when PHaRLAP / IRI are unavailable. The path is a real
+        spherical-Earth hop geometry at a nominal F2 height via the shared
+        :mod:`hop_geometry` module (review item P-M18). The previous
+        version returned a straight-line ground-distance delay — it
+        ignored the up-and-over slant entirely and mislabelled every path
+        (including the multi-hop WWVH route) as a single hop.
+        """
         result = RaytraceResult(
             station=station,
             frequency_mhz=frequency_mhz,
@@ -579,14 +593,16 @@ class RaytraceEngine:
                 math.cos(math.radians(tx['lat'])) *
                 math.cos(math.radians(self.receiver_lat)) *
                 math.sin(dlon/2)**2)
-        dist_km  = 6371.0 * 2 * math.asin(math.sqrt(a))
-        delay_ms = (dist_km / _C_KM_S) * 1000.0
+        dist_km = EARTH_RADIUS_KM * 2 * math.asin(math.sqrt(a))
+
+        n_hops = n_hops_for_distance(dist_km, _FALLBACK_F2_HEIGHT_KM)
+        geom = hop_geometry(dist_km, _FALLBACK_F2_HEIGHT_KM, n_hops)
         result.modes.append(RayMode(
-            n_hops=1,
-            group_delay_ms=delay_ms,
-            launch_elev_deg=0.0,
+            n_hops=n_hops,
+            group_delay_ms=geom.geometric_delay_ms,
+            launch_elev_deg=geom.elevation_deg,
             ground_range_km=dist_km,
-            apogee_km=0.0,
+            apogee_km=_FALLBACK_F2_HEIGHT_KM,
             confidence=0.0,
         ))
         return result

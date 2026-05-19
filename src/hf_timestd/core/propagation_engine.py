@@ -25,6 +25,8 @@ import math
 from dataclasses import dataclass
 from typing import Optional
 
+from .hop_geometry import hop_geometry
+
 logger = logging.getLogger(__name__)
 
 # Constants for Geometric/Heuristic models
@@ -33,6 +35,18 @@ EARTH_RADIUS_KM = 6371.0
 D_LAYER_HEIGHT_KM = 75.0
 E_LAYER_HEIGHT_KM = 110.0
 F2_LAYER_HEIGHT_KM = 300.0
+
+# Ionospheric group-delay excess: Δt(ms) = K · TEC(TECU) / f(MHz)².
+# K = 40.3·10⁴ / c, the standard 40.3/f² dispersion constant — see e.g.
+# ionospheric_model.IONO_DELAY_CONSTANT_MS. At 10 MHz, 30 TECU → 0.40 ms.
+IONO_DELAY_CONSTANT_MS = 40.3 / SPEED_OF_LIGHT_KM_S * 1e16 / 1e12
+
+# Nominal slant TEC per hop for this lightweight estimator. PropagationEngine
+# has no ionospheric model (the dead IRI tier was removed — P-H23), so it
+# uses one coarse climatological figure: ~30 TECU is a mid-latitude,
+# moderate-solar-activity slant value. The estimate carries this term's full
+# magnitude as added uncertainty (TEC swings by its own size day-to-night).
+NOMINAL_SLANT_TEC_PER_HOP_TECU = 30.0
 
 
 @dataclass
@@ -93,65 +107,67 @@ class PropagationEngine:
         #    tier never had an implementation; see the module docstring).
         if preferred_method is None or preferred_method in ('IRI', 'GEOMETRIC'):
             try:
-                return self._estimate_geometric(dist_km)
+                return self._estimate_geometric(dist_km, frequency_hz)
             except Exception as e:
                 logger.debug(f"Geometric estimation failed: {e}")
         
         # 3. Fallback to Heuristic (Legacy)
         return self._estimate_heuristic(dist_km)
 
-    def _estimate_geometric(self, dist_km: float) -> PropagationResult:
+    def _estimate_geometric(
+        self, dist_km: float, frequency_hz: float
+    ) -> PropagationResult:
         """
-        Estimate delay using a multi-hop geometric model with standard layer heights.
-        Replaces the rough 1.15/1.05 factor heuristic with physics-lite.
+        Multi-hop geometric delay estimate with standard layer heights.
+
+        Geometry is the shared spherical law-of-cosines hop model (review
+        items S2, P-M19) — the old flat-Earth triangle here understated
+        the path on long routes. The ionospheric term is a proper
+        frequency-dependent 40.3/f² group delay (P-M19): the previous flat
+        ×1.03 ignored ``frequency_hz`` entirely, yet ionospheric delay
+        scales as 1/f² — wrong by a factor of ~25 across the 2.5–25 MHz
+        broadcast bands.
         """
-        # Select likely mode based on distance
+        # Select likely hop count from distance (coarse mode heuristic).
         if dist_km < 2000:
-            # 1-hop E-layer (day) or F-layer (night/far)
-            # Default to F2 roughly for robustness
             hops = 1
-            layer_height = F2_LAYER_HEIGHT_KM
         elif dist_km < 4000:
             hops = 2
-            layer_height = F2_LAYER_HEIGHT_KM
         else:
-            # Approx 3000km per hop max for F2
+            # Roughly 3500 km per hop for F2.
             hops = max(2, int(math.ceil(dist_km / 3500.0)))
-            layer_height = F2_LAYER_HEIGHT_KM
+        layer_height = F2_LAYER_HEIGHT_KM
 
-        # Calculate path length per hop
-        ground_per_hop = dist_km / hops
-        
-        # Triangle geometry (simplified flat earth for hop segment, 
-        # but spherical correction is better. Using simplified for robust estimation)
-        # Path = 2 * sqrt((ground/2)^2 + height^2)
-        # Using spherical law of cosines is more accurate but this is an initial estimator.
-        
-        # Spherical hop adjustment (approx)
-        # Angle at center gamma = (ground_per_hop / R)
-        # Path^2 = R^2 + (R+h)^2 - 2R(R+h)cos(gamma/2) ???
-        # Simpler: path = 2 * hypot(ground/2, height) is close enough for <2000km hops
-        
-        hop_length = 2 * math.sqrt((ground_per_hop / 2)**2 + layer_height**2)
-        total_path = hop_length * hops
-        
-        delay_sec = total_path / SPEED_OF_LIGHT_KM_S
-        delay_ms = delay_sec * 1000.0
-        
-        # Add minimal ionospheric group delay overhead (1/f^2 effect)
-        # Rough constant factor or small adder.
-        # Legacy heuristic added 15% (factor 1.15).
-        # Geometric path gives ~3-5% geometric increase.
-        # Add 3% extra for group delay/retardation.
-        final_delay_ms = delay_ms * 1.03
-        
+        # Spherical-Earth hop geometry — shared module.
+        geom = hop_geometry(dist_km, layer_height, hops)
+        geometric_delay_ms = geom.path_length_km / SPEED_OF_LIGHT_KM_S * 1000.0
+
+        # Ionospheric group delay: proper 40.3/f² term, climatological TEC.
+        f_mhz = frequency_hz / 1e6
+        if f_mhz > 0:
+            iono_delay_ms = (
+                IONO_DELAY_CONSTANT_MS
+                * NOMINAL_SLANT_TEC_PER_HOP_TECU * hops
+                / (f_mhz ** 2)
+            )
+        else:
+            iono_delay_ms = 0.0
+
+        total_delay_ms = geometric_delay_ms + iono_delay_ms
+
+        # The climatological iono term is itself uncertain to ~its own
+        # magnitude (TEC varies by its own size day-to-night), so carry it
+        # as uncertainty on top of the per-hop geometric uncertainty.
+        uncertainty_ms = 3.0 * hops + iono_delay_ms
+
         return PropagationResult(
-            delay_ms=final_delay_ms,
-            uncertainty_ms=3.0 * hops, # Scaling uncertainty with hops
+            delay_ms=total_delay_ms,
+            uncertainty_ms=uncertainty_ms,
             method='GEOMETRIC',
             num_hops=hops,
             layer='F2',
-            path_length_km=total_path
+            elevation_angle=geom.elevation_deg,
+            path_length_km=geom.path_length_km,
         )
 
     def _estimate_heuristic(self, dist_km: float) -> PropagationResult:

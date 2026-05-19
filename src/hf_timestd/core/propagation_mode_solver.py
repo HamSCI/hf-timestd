@@ -78,6 +78,7 @@ import math
 from .wwv_constants import (
     WWV_LAT, WWV_LON, WWVH_LAT, WWVH_LON, CHU_LAT, CHU_LON, BPM_LAT, BPM_LON
 )
+from .hop_geometry import hop_geometry
 
 logger = logging.getLogger(__name__)
 
@@ -374,42 +375,29 @@ class PropagationModeSolver:
         n_hops: int
     ) -> Tuple[float, float]:
         """
-        Calculate path length and elevation angle for N-hop propagation.
-        
+        Path length and elevation angle for N-hop propagation.
+
+        Spherical-Earth law-of-cosines geometry via the shared
+        :mod:`hop_geometry` module (review items S2, M-M29). The previous
+        flat-Earth triangle here disagreed with the spherical model used
+        by ``arrival_pattern_matrix`` / ``propagation_model`` by several
+        percent on long paths — tens of milliseconds — and that delay
+        fed ``back_calculate_emission_time``.
+
         Args:
             ground_distance_km: Great-circle ground distance
             layer_height_km: Ionospheric layer height
             n_hops: Number of ionospheric reflections
-            
+
         Returns:
             (path_length_km, elevation_angle_deg)
         """
         if n_hops == 0:
             # Ground wave (follows Earth curvature, approximately)
             return ground_distance_km, 0.0
-        
-        # Each hop covers ground_distance / n_hops
-        hop_ground_distance = ground_distance_km / n_hops
-        
-        # For a single hop, the path forms a triangle:
-        # - Base: hop_ground_distance
-        # - Height: layer_height_km
-        # - Slant path up + slant path down
-        
-        # Half the ground distance per hop
-        half_hop_distance = hop_ground_distance / 2
-        
-        # Slant distance (one way, up or down)
-        slant_distance = math.sqrt(layer_height_km**2 + half_hop_distance**2)
-        
-        # Total path for one hop = 2 * slant_distance
-        # Total path for N hops = N * 2 * slant_distance
-        path_length_km = n_hops * 2 * slant_distance
-        
-        # Elevation angle (at transmitter/receiver)
-        elevation_angle_deg = math.degrees(math.atan(layer_height_km / half_hop_distance))
-        
-        return path_length_km, elevation_angle_deg
+
+        geom = hop_geometry(ground_distance_km, layer_height_km, n_hops)
+        return geom.path_length_km, geom.elevation_deg
     
     def _ionospheric_group_delay_ms(self, frequency_mhz: float) -> float:
         """

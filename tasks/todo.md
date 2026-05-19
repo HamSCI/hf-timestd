@@ -1,56 +1,61 @@
-# HDF5 → SQLite cutover — status & flip runbook
+# S2 — Consolidate HF hop geometry onto one spherical module
 
-## Code: done & committed (branch metrology-physics-review-remediation)
-- `08097cc` reader foundation — `SqliteDataProductReader` + `make_data_product_reader`
-- `4e9b0d0` all producers → `make_data_product_writer`
-- `c13a2d8` all consumers → `make_data_product_reader`
-- `5518968` parity tooling covers every product (+`--hdf5-data-dir`, exit-3 PENDING)
-- repo `config/timestd-config.toml` gained a `[storage]` section (web-api)
+Branch: `metrology-physics-review-remediation` (HEAD `c8ea76b`).
+Resolves review items **S2, M-M29, P-M12, P-M18, P-M19**.
+(P-H8 `tec_geometry` elevation and P-H15 `propagation_model` MUF were
+already made spherical in `74024e3` / `ef24c62`.)
 
-The whole data path is backend-agnostic; behaviour is HDF5 until
-`[storage]` flips.
+## Problem
+Hop geometry is reimplemented in ≥4 places with two conventions:
+- spherical (correct): `arrival_pattern_matrix._spherical_hop_path`,
+  `propagation_model._evaluate_mode`
+- flat-Earth (wrong, several % long-path error):
+  `propagation_mode_solver._hop_geometry` (M-M29),
+  `propagation_engine._estimate_geometric` (P-M19),
+  `ionospheric_model.update_calibration` flat-triangle inverse (P-M12),
+  `raytrace_engine._geometric_fallback` straight-line (P-M18)
 
-## Live state on bee1 (via `scripts/parity_check_all.sh`)
-- metrology 6 products — dual-write, parity OK
-- L3 physics / tec / dtec / dtec_timeseries / dtec_diff — dual-write,
-  parity OK (physics_fusion already redeployed with the new code)
-- L3C propagation_stats, L3_tec REANALYZED — dual-write (reanalysis)
-- **L2_timing_measurements — PENDING.** `timestd-l2-calibration` is
-  still on pre-cutover code (last restart 2026-05-18 15:06); it is not
-  dual-writing yet.
-
-## The flip — blocked on one thing
-Flipping `read_sqlite=true` now would point fusion at a missing
-`L2_timing_measurements` table → fusion gets no L2 timing → chrony
-TSL2 loses its discipline source. Do NOT flip until:
-
-1. **Restart `timestd-l2-calibration`** — it then picks up the
-   committed code (editable install) and dual-writes
-   `L2_timing_measurements`.
-2. **Parity window.** Run `bash scripts/parity_check_all.sh` (ideally
-   `CHANNELS="CHU_3330 CHU_7850 CHU_14670 SHARED_2500 SHARED_5000
-   SHARED_10000 SHARED_15000 WWV_20000 WWV_25000" bash
-   scripts/parity_check_all.sh` for a full sweep). All products must
-   read OK/SKIP — zero PENDING, zero FAIL — sustained over the chosen
-   window (doc suggests ~3 days; at minimum several clean 6-hourly
-   `timestd-sqlite-parity` runs).
-3. **Flip reads:**
-   - `/etc/hf-timestd/timestd-config.toml` `[storage]`: add
-     `read_sqlite = true` (deployed config has write_* but not yet
-     read_sqlite).
-   - `config/timestd-config.toml` `[storage]`: `read_sqlite = true`
-     (web-api).
-   - Restart consumers: `timestd-fusion`, `timestd-l2-calibration`,
-     physics-fusion, web-api.
-4. Watch chrony (TSL2) + the parity timer for ~a day.
-5. Phase 3b: `write_hdf5 = false`. Phase 4: delete HDF5 writer/reader
-   paths + drop h5py.
-
-## Next
-Resume the metrology/physics remediation at P-H29 — the TID L3
-detector, built SQLite-native via the factories.
+## Plan
+- [x] 1. New `core/hop_geometry.py` — spherical law-of-cosines:
+      `HopGeometry` dataclass, `hop_geometry()`, `height_from_path()`
+      (inverse), `max_single_hop_distance_km()`, `n_hops_for_distance()`.
+- [x] 2. `arrival_pattern_matrix._spherical_hop_path` → delegate to
+      module (numerically identical — pure de-dup).
+- [x] 3. `propagation_model._evaluate_mode` → module for
+      slant/path/elevation + `max_single_hop_distance_km`
+      (numerically identical).
+- [x] 4. `propagation_mode_solver._hop_geometry` (M-M29) → spherical
+      via module (behaviour change: flat→spherical).
+- [x] 5. `propagation_engine._estimate_geometric` (P-M19) → spherical
+      via module; thread `frequency_hz` through; replace the
+      frequency-blind ×1.03 with a proper 40.3/f² group-delay term.
+- [x] 6. `ionospheric_model.update_calibration` (P-M12) → `height_from_path`
+      for both implied and predicted heights (one shared geometry).
+- [x] 7. `raytrace_engine._geometric_fallback` (P-M18) → real spherical
+      hop slant path + launch elevation + apogee.
+- [x] 8. `tests/unit/test_hop_geometry.py`; update CHANGELOG; full suite.
 
 ## Review
-SQLite cutover code is complete and committed; the flip is an
-operational step gated on the l2-calibration restart + a parity
-window (see above). No production behaviour changed by these commits.
+S2 complete. One spherical hop-geometry module (`core/hop_geometry.py`);
+all six call sites delegate to it. The two already-spherical sites
+(`arrival_pattern_matrix`, `propagation_model`) are numerically
+unchanged; the four flat-Earth sites (`propagation_mode_solver` M-M29,
+`propagation_engine` P-M19, `ionospheric_model.update_calibration`
+P-M12, `raytrace_engine._geometric_fallback` P-M18) now agree with
+them. P-M19 also gained a proper 40.3/f² ionospheric term in place of
+the frequency-blind ×1.03.
+
+Verification: 51 new `test_hop_geometry` tests (forward, exact
+round-trip inverse, flat-Earth limit, divergence, validation); full
+suite green except the two known time-of-day flakes
+(`test_geometric_prediction`, `test_fusion_gnss_vtec_rtp_gate`) —
+`test_geometric_prediction` confirmed to fail identically on the
+pre-change tree, so not a regression. New files black-clean.
+
+`uv.lock` was left untouched — a `ka9q-python` spec drift surfaced by
+`uv run` is unrelated to S2 and excluded from the commit.
+
+## Next
+Resume the clean P-M items: P-M11 (`ionospheric_model` IRI cache TTL —
+P-M11's `_extract_scalar` half already done in `c9117b3`), then
+P-M13–P-M17, P-M20–P-M26.

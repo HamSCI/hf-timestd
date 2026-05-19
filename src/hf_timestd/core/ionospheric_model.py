@@ -114,6 +114,7 @@ from pathlib import Path
 import numpy as np
 
 from hf_timestd.core.ionex_parser import IONEXParser
+from hf_timestd.core.hop_geometry import C_LIGHT_KM_MS, height_from_path
 
 try:
     import xarray as xr  # type: ignore
@@ -929,18 +930,20 @@ class IonosphericModel:
         
         DERIVATION:
         -----------
-        For a single F-layer hop at distance D with layer height h:
-            delay = (path_length / c) × 1000  [ms]
-            path_length = 2 × sqrt((D/2)² + h²)  [km]
-        
-        Solving for h given delay and D:
-            path_length = delay × c / 1000
-            sqrt((D/2)² + h²) = path_length / 2
-            h = sqrt((path_length/2)² - (D/2)²)
-        
+        A delay converts to a total slant path length, ``path = delay * c``.
+        ``hop_geometry.height_from_path()`` inverts the spherical-Earth
+        law-of-cosines hop geometry to recover the layer height that path
+        implies, for the given ground distance and hop count.
+
         The calibration offset is:
             offset = implied_h - predicted_h
-        
+        with ``implied_h`` inverted from the *observed* delay and
+        ``predicted_h`` from the model-*predicted* delay. Both go through
+        the same spherical geometry (review item P-M12) — the previous
+        flat-triangle inverse here disagreed with the spherical forward
+        predictors, so ``offset_km`` conflated a real height error with a
+        flat-vs-spherical geometry artefact.
+
         Args:
             latitude, longitude: Location of this measurement
             timestamp: When measurement was taken
@@ -962,49 +965,31 @@ class IonosphericModel:
             return  # Can't calibrate from ground wave or low-confidence/NaN
         
         self.stats['calibration_updates'] += 1
-        
-        # Speed of light in km/s
-        c_km_s = 299792.458
-        
-        # Calculate implied layer height from observed delay
-        # path_length_km = delay_ms × c / 1000
-        observed_path_km = observed_delay_ms * c_km_s / 1000.0
-        predicted_path_km = predicted_delay_ms * c_km_s / 1000.0
-        
-        # For N-hop path: each hop covers (ground_distance / N)
-        hop_distance = ground_distance_km / n_hops
-        half_hop = hop_distance / 2.0
-        
-        # Solve for height: h = sqrt((path_per_hop/2)² - half_hop²)
-        # path_per_hop = total_path / n_hops
-        observed_path_per_hop = observed_path_km / n_hops
-        predicted_path_per_hop = predicted_path_km / n_hops
-        
-        # Each hop: path = 2 × slant_range, slant_range = path_per_hop / 2
-        observed_slant = observed_path_per_hop / 2.0
-        predicted_slant = predicted_path_per_hop / 2.0
-        
-        # h = sqrt(slant² - half_hop²)
-        try:
-            implied_h_sq = observed_slant ** 2 - half_hop ** 2
-            predicted_h_sq = predicted_slant ** 2 - half_hop ** 2
-            
-            if implied_h_sq < 0 or predicted_h_sq < 0:
-                logger.debug(f"Calibration: geometry invalid (negative under sqrt)")
-                return
-            
-            implied_hmF2 = math.sqrt(implied_h_sq)
-            predicted_hmF2 = math.sqrt(predicted_h_sq)
-            
-            offset_km = implied_hmF2 - predicted_hmF2
-            
-            # Sanity check: offset shouldn't be extreme
-            if abs(offset_km) > 150:
-                logger.debug(f"Calibration: offset {offset_km:.1f} km too large, ignoring")
-                return
-            
-        except (ValueError, ZeroDivisionError) as e:
-            logger.debug(f"Calibration: calculation error: {e}")
+
+        # Delay (ms) → total slant path length (km): path = delay * c,
+        # with c expressed in km/ms.
+        observed_path_km = observed_delay_ms * C_LIGHT_KM_MS
+        predicted_path_km = predicted_delay_ms * C_LIGHT_KM_MS
+
+        # Invert the shared spherical hop geometry to recover the layer
+        # height each path implies. height_from_path returns None when the
+        # path is too short to close the triangle for this ground distance
+        # and hop count.
+        implied_hmF2 = height_from_path(observed_path_km, ground_distance_km, n_hops)
+        predicted_hmF2 = height_from_path(predicted_path_km, ground_distance_km, n_hops)
+
+        if implied_hmF2 is None or predicted_hmF2 is None:
+            logger.debug(
+                "Calibration: geometry invalid (path too short for "
+                f"ground distance {ground_distance_km:.0f} km, n_hops={n_hops})"
+            )
+            return
+
+        offset_km = implied_hmF2 - predicted_hmF2
+
+        # Sanity check: offset shouldn't be extreme
+        if abs(offset_km) > 150:
+            logger.debug(f"Calibration: offset {offset_km:.1f} km too large, ignoring")
             return
         
         # Store calibration entry

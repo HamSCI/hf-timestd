@@ -85,6 +85,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from .hop_geometry import hop_geometry, max_single_hop_distance_km
+
 logger = logging.getLogger(__name__)
 
 # =============================================================================
@@ -556,10 +558,10 @@ class HFPropagationModel:
         # Maximum single-hop ground distance
         R = EARTH_RADIUS_KM
         h = reflection_height
-        max_1hop_km = 2 * math.sqrt(2 * R * h + h ** 2)
-        
+        max_1hop_km = max_single_hop_distance_km(h)
+
         hop_distance = distance_km / n_hops
-        
+
         # Is this mode geometrically possible?
         if hop_distance > max_1hop_km * 1.1:  # 10% margin
             return ModeArrival(
@@ -573,20 +575,10 @@ class HFPropagationModel:
                 is_feasible=False,
                 uncertainty_1sigma_ms=0.0,
             )
-        
-        # Compute elevation angle
-        # From spherical geometry: sin(elev) = (cos(θ/2) * (R+h) - R) / slant
-        theta = hop_distance / R  # Central angle for one hop (radians)
-        half_theta = theta / 2
-        
-        slant_sq = R**2 + (R + h)**2 - 2 * R * (R + h) * math.cos(half_theta)
-        slant = math.sqrt(max(0, slant_sq))
-        
-        if slant > 0:
-            sin_elev = ((R + h) * math.cos(half_theta) - R) / slant
-            elevation_deg = math.degrees(math.asin(max(-1, min(1, sin_elev))))
-        else:
-            elevation_deg = 90.0
+
+        # Spherical-Earth hop geometry — shared module (review item S2).
+        geom = hop_geometry(distance_km, h, n_hops)
+        elevation_deg = geom.elevation_deg
         
         # Check MUF (Maximum Usable Frequency).
         # Secant law: MUF = f_critical / cos(i0), where i0 is the ray's angle
@@ -625,9 +617,9 @@ class HFPropagationModel:
                 foF2_MHz=foF2,
             )
         
-        # Compute geometric path length (spherical Earth)
-        path_length = n_hops * 2 * slant  # Up and down for each hop
-        
+        # Geometric path length (spherical Earth) — shared module (S2).
+        path_length = geom.path_length_km
+
         # Geometric (vacuum) delay
         geometric_delay_ms = path_length / C_LIGHT_KM_MS
         

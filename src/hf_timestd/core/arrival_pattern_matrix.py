@@ -107,6 +107,8 @@ from typing import Dict, List, Optional, Tuple, NamedTuple
 from dataclasses import dataclass, field
 from enum import Enum
 
+from .hop_geometry import hop_geometry
+
 logger = logging.getLogger(__name__)
 
 
@@ -849,41 +851,20 @@ class ArrivalPatternMatrix:
         earth_radius_km: float = 6371.0
     ) -> float:
         """
-        Calculate slant path length for one ionospheric hop using spherical geometry.
-        
-        Uses law of cosines: c² = a² + b² - 2ab*cos(C)
-        Where:
-            a = R (Earth radius)
-            b = R + h (radius to ionospheric layer)
-            C = θ/2 (half the central angle for this hop)
-            c = slant range (TX to reflection point, or reflection to RX)
-        
-        Total hop path = 2 * slant (up and down)
-        
-        Args:
-            ground_distance_km: Ground distance for this hop
-            height_km: Ionospheric layer height
-            earth_radius_km: Earth radius (default 6371 km)
-            
+        Slant path length for one ionospheric hop, spherical geometry.
+
+        Delegates to the shared :mod:`hop_geometry` module (review item
+        S2) so this and every other propagation module compute the same
+        path for the same input. ``ground_distance_km`` here is the
+        ground distance of a *single* hop, so n_hops=1.
+
         Returns:
-            Total path length for one hop in km
+            Total path length for one hop in km (up + down).
         """
-        R = earth_radius_km
-        h = height_km
-        
-        # Central angle for this hop (radians)
-        theta = ground_distance_km / R
-        
-        # Half angle (TX to reflection point)
-        half_theta = theta / 2
-        
-        # Law of cosines for slant range
-        # slant² = R² + (R+h)² - 2*R*(R+h)*cos(half_theta)
-        slant_squared = R**2 + (R + h)**2 - 2 * R * (R + h) * math.cos(half_theta)
-        slant = math.sqrt(slant_squared)
-        
-        # Total path = 2 * slant (up to layer, down from layer)
-        return 2 * slant
+        return hop_geometry(
+            ground_distance_km, height_km,
+            n_hops=1, earth_radius_km=earth_radius_km,
+        ).path_length_km
     
     def compute_matrix(self, utc_time: datetime) -> ArrivalMatrix:
         """
