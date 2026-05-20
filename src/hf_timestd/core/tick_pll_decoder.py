@@ -4,11 +4,12 @@ Tick PLL Decoder - Flywheel-style timing decoder for WWV/WWVH.
 Implements a stiff PLL that locks onto per-second tick frequencies (1000 Hz for WWV,
 1200 Hz for WWVH) and maintains lock across fades via flywheel coasting.
 
-This is a parallel implementation to tick_matched_filter.py for A/B testing.
-The decoder_variant field in HDF5 output distinguishes results.
-
-Author: AI Assistant
-Date: 2026-02-16
+History: this module was originally a parallel implementation to
+`tick_matched_filter.py` for an A/B comparison feature that has since
+been removed (review S1 / M-H2 -- `TickEdgeDetector` is now the sole
+timing path).  The PLL path is preserved here as a research / fallback
+implementation; the `decoder_variant="pll"` field on
+`MinutePLLAnalysis` is the trace marker.
 """
 
 import numpy as np
@@ -610,7 +611,12 @@ class DualStationPLL:
         
         # BCD frame
         bcd_frame = ''.join(bcd_bits) if bcd_bits else None
-        bcd_conf = np.mean([t.bcd_confidence for t in tick_results if t.bcd_confidence > 0])
+        # Guard the mean against an empty filtered list -- np.mean([])
+        # emits a RuntimeWarning and returns NaN, which then leaks into
+        # the MinutePLLAnalysis confidence field for any minute with no
+        # detected BCD bits (§3.4 Low).
+        _bcd_confidences = [t.bcd_confidence for t in tick_results if t.bcd_confidence > 0]
+        bcd_conf = float(np.mean(_bcd_confidences)) if _bcd_confidences else 0.0
         
         return MinutePLLAnalysis(
             minute_timestamp=minute_boundary / self.fs,  # Convert to Unix time
