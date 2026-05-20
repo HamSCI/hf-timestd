@@ -295,7 +295,9 @@ class HFPropagationModel:
             try:
                 from .ionospheric_model import IonosphericModel
                 self._iri_model = IonosphericModel(enable_iri=True)
-            except (ImportError, Exception) as e:
+            except Exception as e:
+                # `Exception` already catches `ImportError`; the previous
+                # `(ImportError, Exception)` was redundant (§4.4 Low).
                 logger.debug(f"IRI model not available: {e}")
         return self._iri_model
     
@@ -383,9 +385,30 @@ class HFPropagationModel:
             prediction.primary_mode = primary.mode.label
             prediction.primary_uncertainty_1sigma_ms = primary.uncertainty_1sigma_ms
         else:
-            # No feasible mode — use vacuum fallback
-            vacuum_delay = distance_km / C_LIGHT_KM_MS
-            prediction.primary_delay_ms = vacuum_delay * 1.15  # 15% overhead
+            # No feasible mode — vacuum fallback.
+            # §4.4 Low: the previous ``vacuum_delay * 1.15`` heuristic
+            # is the same unphysical 15 % overhead the metrology side
+            # corrected under M-M5 (``metrology_engine._vacuum_hop_
+            # fallback_delay``) and l2_calibration under M-M21.  Same
+            # recipe applies here: shared spherical-Earth hop geometry
+            # + 40.3/f² ionospheric group-delay term.  The uncertainty
+            # is unchanged -- this branch only fires when no MUF-
+            # feasible mode exists, which IS a "we have no real
+            # model" situation; the 3σ from 5 ms is 15 ms (P-H13).
+            from .propagation_engine import (
+                IONO_DELAY_CONSTANT_MS as _K_IONO_MS,
+                NOMINAL_SLANT_TEC_PER_HOP_TECU as _TEC_PER_HOP,
+                F2_LAYER_HEIGHT_KM as _F2_H,
+            )
+            from .hop_geometry import hop_geometry, n_hops_for_distance
+            n_hops_fb = n_hops_for_distance(distance_km, _F2_H)
+            geom_fb = hop_geometry(distance_km, _F2_H, n_hops_fb)
+            geom_ms = geom_fb.path_length_km / C_LIGHT_KM_MS  # vacuum slant
+            if frequency_mhz > 0:
+                iono_ms = _K_IONO_MS * _TEC_PER_HOP * n_hops_fb / (frequency_mhz ** 2)
+            else:
+                iono_ms = 0.0
+            prediction.primary_delay_ms = geom_ms + iono_ms
             prediction.primary_mode = "vacuum_fallback"
             # "No model" 1-sigma; the 3-sigma property then gives 15.0 ms,
             # the value this fallback historically reported (P-H13).
@@ -616,6 +639,14 @@ class HFPropagationModel:
         cos_i0 = math.sqrt(max(0.0, 1.0 - sin_i0 ** 2))
 
         # Critical frequency of the reflecting layer (E uses foE, F uses foF2).
+        # §4.4 Low: `foE_MHz` is never populated by any current caller --
+        # IRI's get_layer_heights returns hmF2/foF2 but no foE, so this
+        # branch unconditionally falls through to the 3.0 MHz
+        # climatological default.  Documented here as a known
+        # parametric (matches the ``NOMINAL_FOE_MHZ = 3.0`` constant in
+        # ``propagation_mode_solver`` for the same purpose); when a
+        # real foE source is wired in, the dict key can be filled and
+        # this branch will use it.
         f_critical = iono_params.get('foE_MHz', 3.0) if mode.layer == 'E' else foF2
         muf = f_critical / max(cos_i0, 1e-3)
         
