@@ -30,6 +30,35 @@ Each numbered step is its own commit on its own branch, with the
 `uv run pytest tests/` suite passing before merging. Fast-forward into
 `main` after each step's verification clears.
 
+### Step 0 — `scripts/pipeline-watchdog.sh` SQLite freshness check **(NEW — was a Phase-3b operational dependency we missed)**
+
+`pipeline-watchdog.sh` lines 171, 195, 214 do
+`newest_file_age "$dir" "*.h5"` then `do_restart "$unit"` if the
+newest `.h5` mtime exceeds the threshold. Phase 3b intentionally
+froze those `.h5` files, so the watchdog mass-restarted 9
+metrology@* + fusion every ~5 min on 2026-05-20 until both watchdog
+timers were manually stopped. **Both `timestd-pipeline-watchdog.timer`
+and `timestd-tsl3-watchdog.timer` are currently stopped on bee1 and
+will re-arm on reboot** — fixing this script is the blocker for
+re-enabling them.
+
+Replace the `newest_file_age "$dir" "*.h5"` calls with a SQLite
+freshness check, e.g. `sqlite3 /var/lib/timestd/phase2/timestd.db
+"SELECT max(timestamp_utc) FROM L1_metrology_measurements WHERE
+channel='$channel'"` and compute staleness against current UTC.
+
+Apply to all three call sites: metrology (per channel), fusion,
+physics/TEC. Test by stopping a producer manually and confirming the
+watchdog restarts it.
+
+After deploying the script, `systemctl start
+timestd-pipeline-watchdog.timer timestd-tsl3-watchdog.timer` to
+re-arm.
+
+This should arguably land BEFORE the rest of Phase 4 — it's the
+remaining live operational debt from Phase 3b.
+[[project_hf_timestd_tsl3_post_phase3b]]
+
 ### Step 1 — `chrony_stats` schema conversion
 
 `src/hf_timestd/core/chrony_stats.py` writes HDF5 directly via raw
