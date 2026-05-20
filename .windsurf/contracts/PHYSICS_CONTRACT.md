@@ -1,9 +1,9 @@
 # PHYSICS CONTRACT — hf-timestd
 
-**Version:** 1.2.0
+**Version:** 1.3.0
 **Last Updated:** 2026-05-20
 **Status:** Active — evolves with implementation
-**Last refresh:** 2026-05-20 — re-reconciled after the metrology/physics review remediation pass (S2, S3, S4 + all P-H + all P-M + all M-M).  Most §5 Known Deviations from the 2026-05-17 snapshot are now resolved; the residual P-H29 (TID L3 deliverable) is the only deferred item.  See `docs/CODE_REVIEW_2026-05-17_METROLOGY_PHYSICS.md` for the full audit and the project memory for the per-finding commit map.
+**Last refresh:** 2026-05-20 — re-reconciled after the metrology/physics review remediation pass.  **All Known Deviations resolved** (D1–D8); D8 (P-H29 TID L3 deliverable) closed in this version cycle with new `L3 tid` data product + writer wiring in `PhysicsFusionService` + rewritten `web-api/services/tid_service.py`.  See `docs/CODE_REVIEW_2026-05-17_METROLOGY_PHYSICS.md` for the full audit and the project memory for the per-finding commit map.
 
 ---
 
@@ -195,6 +195,6 @@ Recorded 2026-05-17 from the code review (`docs/CODE_REVIEW_2026-05-17_METROLOGY
 | D5 | §4 — physics service must maintain `_processed_minutes` to prevent duplicate records | In-memory only; restart reprocessed historical minutes | **Resolved.** `physics_fusion_service._seed_processed_minutes_from_l3()` (line 1352) reseeds from existing L3 files on startup. | P-H25 |
 | D6 | §4 — no full table scans of large HDF5 files | `_read_l2_slice` / `_read_tick_phase_minute` / `physics_service` did whole-dataset scans | **Resolved.** The HDF5→SQLite cutover gave `read_time_range` an indexed range query against `idx_<table>_chan_ts`; `physics_service.py` was deleted (P-H28). Bounded tail-reads where applicable. | P-H28, P-M21 |
 | D7 | `METROLOGY_PHYSICS_SPLIT.md` — physics must never be in the real-time metrology critical path | `timestd-physics.service` was `Type=notify` with `Requires=` on l2-calibration + `chown -R` over `phase2` | **Resolved.** `Type=simple` (systemd unit line 15), soft dependency comment ("Soft dependency only (was Requires=)") at line 5. | P-C1 |
-| D8 | §4 — TID detection is an L3 deliverable | `TIDDetector` runs but writes no science products; `web-api/services/tid_service.py` reads from a directory nothing writes | **Open, deferred** (P-H29).  Detector is statistically sound (P-H30/31/32/33 + P-M26 all resolved) but the L3 wiring is its own task — see the project memory. | P-H29 |
+| D8 | §4 — TID detection is an L3 deliverable | `TIDDetector` runs but writes no science products; `web-api/services/tid_service.py` reads from a directory nothing writes | **Resolved 2026-05-20** (P-H29).  New L3 `tid` data product (`schemas/l3_tid_v1.json` + `data_product_registry`); `PhysicsFusionService` constructs a `TIDDetector` at startup and `_run_tid_detection_cycle` runs every fusion minute, feeding L2 residuals to the detector and writing any returned event via `tid_writer`.  `web-api/services/tid_service.py` rewritten to read the new product via `make_data_product_reader`. | P-H29 |
 
 **Note on `tof_kalman_ms`:** verified still accurate — the field is always NaN in production and consumers (`physics_fusion_service._read_l2_slice`) read it with an immediate NaN-fallback to `clock_offset_ms`. This is correct deprecated-field handling and is **not** a deviation.

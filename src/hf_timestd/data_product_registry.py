@@ -90,6 +90,7 @@ class DataProductRegistry:
         ('L3', 'd_clock'):                   'l3_fusion_timing_v1.json',
         ('L3', 'tec'):                       'l3_tec_v1.json',
         ('L3', 'gnss_vtec'):                 'l3_gnss_vtec_v1.json',
+        ('L3', 'tid'):                       'l3_tid_v1.json',
         # L3B
         ('L3B', 'absorption'):               'l3b_absorption_v1.json',
         ('L3B', 'iono_events'):              'l3b_iono_events_v1.json',
@@ -144,6 +145,7 @@ class DataProductRegistry:
         ('L3', 'd_clock'): 'fusion:d_clock',
         ('L3', 'tec'): 'fusion:tec',
         ('L3', 'gnss_vtec'): 'fusion:vtec',
+        ('L3', 'tid'): 'fusion:tid',
         
         # L3B Products (Ionospheric Events)
         ('L3B', 'absorption'): 'fusion:absorption',

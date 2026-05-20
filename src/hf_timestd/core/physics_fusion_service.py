@@ -205,7 +205,45 @@ class PhysicsFusionService:
             station_metadata={'description': 'Differential dTEC frequency-pair RMS'},
             storage_config=self._storage_config,
         )
-        
+
+        # =================================================================
+        # L3 TID (Traveling Ionospheric Disturbance) events  (P-H29)
+        # =================================================================
+        # The TIDDetector statistical engine (P-H30..P-H33 + P-M26)
+        # finally has a backing data product.  Each fusion cycle the
+        # detector consumes the L2 timing residuals it sees, runs
+        # `detect_tid()`, and -- when a Bonferroni-significant
+        # cross-path correlation appears -- writes one row here.
+        # Path resolved via DataProductRegistry (`fusion:tid` →
+        # `phase2/fusion/tid/`) so the web-api reader hits the
+        # same location.
+        from .tid_detector import TIDDetector
+        from hf_timestd.data_product_registry import DataProductRegistry
+        self.tid_dir = DataProductRegistry.get_fusion_data_dir(
+            self.data_root / 'phase2',
+            product_level='L3',
+            product_name='tid',
+            create=True,
+        )
+        self.tid_writer = make_data_product_writer(
+            output_dir=self.tid_dir,
+            product_level='L3',
+            product_name='tid',
+            channel='AGGREGATED',
+            processing_version='1.0.0',
+            station_metadata={'description': 'Cross-path TID detections'},
+            storage_config=self._storage_config,
+        )
+        # One detector instance per service; rolling per-path residual
+        # buffers live on it.  Fed from `_read_l2_slice`'s output each
+        # cycle (see `_run_tid_detection_cycle`).
+        self.tid_detector = TIDDetector(
+            receiver_lat=self.receiver_lat,
+            receiver_lon=self.receiver_lon,
+            buffer_minutes=120,
+            sample_interval_seconds=60.0,
+        )
+
         # Tick-phase reader cache (separate from clock_offset readers)
         self._tick_phase_reader_cache: Dict[str, DataProductReader] = {}
         
@@ -697,7 +735,112 @@ class PhysicsFusionService:
         # 8. Carrier-phase dTEC estimation
         self._process_carrier_dtec(minute_timestamp, tec_estimates)
 
+        self._pet_watchdog()
+
+        # 9. TID (Traveling Ionospheric Disturbance) detection (P-H29)
+        #    Feed this minute's per-path residuals into the rolling buffer,
+        #    then ask the detector whether a Bonferroni-significant
+        #    cross-path signature is present.
+        self._run_tid_detection_cycle(minute_timestamp, station_data)
+
         return l3_ok
+
+    def _run_tid_detection_cycle(
+        self,
+        minute_timestamp: int,
+        station_data: Dict[str, List[Dict]],
+    ) -> None:
+        """Feed this minute's residuals to ``self.tid_detector`` and
+        write any detected event to the L3 ``tid`` product (P-H29).
+
+        ``station_data`` is the median-aggregated output of
+        :py:meth:`_read_l2_slice`: ``{station: [{frequency_hz, toa_ms,
+        uncertainty_ms, snr_db, mode, ...}, ...]}``.  ``toa_ms`` here is
+        the model-corrected residual (``clock_offset_ms`` /
+        ``tof_kalman_ms``), which IS the "observed - expected timing"
+        signal the TIDDetector expects.
+
+        Multiple modes for the same (station, frequency) collapse to
+        one ``PathResidual`` by median so the detector's per-path
+        buffer is single-valued at each timestamp -- matching the
+        ``_align_residuals`` assumption.
+        """
+        from .tid_detector import PathResidual
+
+        try:
+            # One PathResidual per (station, frequency) this minute.
+            by_path: Dict[Tuple[str, float], List[Dict]] = defaultdict(list)
+            for station, observations in station_data.items():
+                for obs in observations:
+                    freq_hz = obs.get('frequency_hz')
+                    if freq_hz is None or freq_hz <= 0:
+                        continue
+                    by_path[(station, freq_hz / 1e6)].append(obs)
+
+            for (station, freq_mhz), obs_list in by_path.items():
+                # Median across modes (typically just one mode per path).
+                residual_ms = float(np.median([o['toa_ms'] for o in obs_list]))
+                # Best-known uncertainty across the same set.
+                u_ms = float(min(o['uncertainty_ms'] for o in obs_list))
+                self.tid_detector.add_residual(PathResidual(
+                    timestamp=float(minute_timestamp),
+                    station=station,
+                    frequency_mhz=freq_mhz,
+                    residual_ms=residual_ms,
+                    uncertainty_ms=u_ms,
+                ))
+
+            event = self.tid_detector.detect_tid()
+            if event is None:
+                return
+
+            # Build the L3 record.  See `schemas/l3_tid_v1.json`.
+            ts = event.start_time
+            event_id = (
+                f"{ts.strftime('%Y%m%d_%H%M%S')}_"
+                f"{event.n_paths_correlated}"
+            )
+            record = {
+                'timestamp_utc': ts.isoformat().replace('+00:00', 'Z'),
+                'minute_boundary_utc': int(minute_timestamp),
+                'event_id': event_id,
+                'period_minutes': float(event.period_minutes),
+                'amplitude_ms': float(event.amplitude_ms),
+                'velocity_m_s': (
+                    float(event.velocity_m_s)
+                    if event.velocity_m_s is not None
+                    and np.isfinite(event.velocity_m_s)
+                    else float('nan')
+                ),
+                'direction_deg': (
+                    float(event.direction_deg)
+                    if event.direction_deg is not None
+                    and np.isfinite(event.direction_deg)
+                    else float('nan')
+                ),
+                'correlation_coefficient': float(event.correlation_coefficient),
+                'significance_p': float(event.significance_p),
+                'confidence': float(event.confidence),
+                'n_paths_correlated': int(event.n_paths_correlated),
+                'leading_path': str(event.leading_path),
+                'lagging_path': str(event.lagging_path),
+                'lag_minutes': float(event.lag_minutes),
+                'processing_version': '1.0.0',
+            }
+            try:
+                self.tid_writer.write_measurement(record)
+                logger.info(
+                    f"TID L3: wrote event {event_id} "
+                    f"(p={event.significance_p:.2g}, "
+                    f"period={event.period_minutes:.1f} min, "
+                    f"vel={record['velocity_m_s']:.0f} m/s)"
+                )
+            except Exception as exc:
+                logger.warning(f"Failed to write L3 TID event: {exc}")
+        except Exception as exc:
+            # The TID detector is best-effort science; never let it
+            # crash the fusion cycle's timing-critical work.
+            logger.warning(f"TID detection cycle failed: {exc}")
 
     def _get_iono_model(self):
         """Lazily build the ionospheric model used for F2 reflection

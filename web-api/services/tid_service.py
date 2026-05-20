@@ -1,287 +1,249 @@
 """
-TID (Traveling Ionospheric Disturbance) service for v6.5.0 data access.
+TID (Traveling Ionospheric Disturbance) service.
 
-Provides access to TID detection events from the tid_detector module
-and archived TID data products.
+Reads the L3 ``tid`` data product written by ``PhysicsFusionService``
+(P-H29).  One row per event detected by ``TIDDetector.detect_tid()``;
+see ``src/hf_timestd/schemas/l3_tid_v1.json`` for the field list.
+
+History: prior to v7 / P-H29 wiring this service read a bespoke
+per-date directory structure (``phase2/science/tid/<YYYY-MM-DD>/
+tid_events.json`` + ``tid_<event_id>.h5``) that *nothing* in the
+pipeline wrote.  Replaced with the standard ``DataProductReader``
+backed by HDF5+SQLite, the same machinery the rest of the L3 web
+endpoints use.
 """
 
-import numpy as np
-from datetime import datetime, timedelta
+import sys
+import math
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Any, Dict, List, Optional
 import logging
-import h5py
-import json
+
+import numpy as np
+
+# Add parent directory to path for hf_timestd imports
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'src'))
+
+from hf_timestd.io import make_data_product_reader
+from hf_timestd.data_product_registry import DataProductRegistry
+from config import config
 
 logger = logging.getLogger(__name__)
 
 
 class TIDService:
     """
-    Service for accessing TID (Traveling Ionospheric Disturbance) data products.
-    
-    TIDs are detected via cross-path correlation of timing residuals.
-    When a TID passes through the ionosphere, it creates correlated
-    perturbations in arrival times across multiple propagation paths.
-    
-    Data locations (v6.5.0):
-    - /var/lib/timestd/phase2/science/tid/ - Archived TID events
-    - Real-time TID detection from tid_detector.py
+    Service for accessing TID (Traveling Ionospheric Disturbance)
+    detections from the L3 ``tid`` data product.
+
+    Data location (resolved via DataProductRegistry):
+        ``<data_root>/phase2/fusion/tid/``
     """
-    
+
     def __init__(self, data_root: Path):
         """
         Initialize TID service.
-        
+
         Args:
-            data_root: Root directory for data products
+            data_root: Root directory for data products (typically
+                ``/var/lib/timestd``).
         """
         self.data_root = Path(data_root)
-        self.tid_dir = self.data_root / 'phase2' / 'science' / 'tid'
-        
+        # DataProductRegistry handles the ``fusion:tid`` subdirectory
+        # convention so we don't hard-code the path here.  Resolve from
+        # the registered location; falls back to the explicit path if
+        # the registry is unavailable for any reason.
+        try:
+            tid_dir = DataProductRegistry.get_fusion_data_dir(
+                self.data_root / 'phase2',
+                product_level='L3',
+                product_name='tid',
+            )
+        except Exception:  # pragma: no cover - registry should never fail
+            tid_dir = self.data_root / 'phase2' / 'fusion' / 'tid'
+        self.tid_dir = Path(tid_dir)
+        self.reader: Optional[Any]
+        try:
+            self.reader = make_data_product_reader(
+                data_dir=self.tid_dir,
+                product_level='L3',
+                product_name='tid',
+                channel='AGGREGATED',
+                storage_config=config.storage,
+            )
+        except Exception as e:
+            logger.warning(f"TID reader init failed ({e}); TID endpoints will return empty results")
+            self.reader = None
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     def get_recent_events(self, hours: int = 24) -> List[Dict[str, Any]]:
         """
         Get recent TID events.
-        
+
         Args:
-            hours: Number of hours to look back
-        
+            hours: Number of hours to look back from now (UTC).
+
         Returns:
-            List of TID event dictionaries
+            List of TID event dictionaries, newest first.  Empty list
+            on missing data or read failure -- never raises.
         """
-        end = datetime.utcnow()
+        end = datetime.now(timezone.utc)
         start = end - timedelta(hours=hours)
         return self.get_events_in_range(start, end)
-    
+
     def get_events_in_range(
         self,
         start: datetime,
-        end: datetime
+        end: datetime,
     ) -> List[Dict[str, Any]]:
         """
-        Get TID events within a time range.
-        
+        Get TID events within a UTC time range.
+
         Args:
-            start: Start time
-            end: End time
-        
+            start: Start time (timezone-aware; naive is treated as UTC).
+            end: End time (timezone-aware; naive is treated as UTC).
+
         Returns:
-            List of TID event dictionaries
+            List of TID event dictionaries sorted newest-first.
         """
-        events = []
-        
+        if self.reader is None:
+            return []
         try:
-            if not self.tid_dir.exists():
-                logger.warning(f"TID directory does not exist: {self.tid_dir}")
-                return events
-            
-            # TID files are organized by date: YYYY-MM-DD/tid_events.json
-            current_date = start.date()
-            end_date = end.date()
-            
-            while current_date <= end_date:
-                date_str = current_date.strftime('%Y-%m-%d')
-                date_dir = self.tid_dir / date_str
-                
-                if date_dir.exists():
-                    # Check for JSON event file
-                    events_file = date_dir / 'tid_events.json'
-                    if events_file.exists():
-                        day_events = self._read_events_json(events_file)
-                        for event in day_events:
-                            if self._event_in_range(event, start, end):
-                                events.append(event)
-                    
-                    # Also check for HDF5 files
-                    for h5_file in date_dir.glob('tid_*.h5'):
-                        event = self._read_event_h5(h5_file)
-                        if event and self._event_in_range(event, start, end):
-                            events.append(event)
-                
-                current_date += timedelta(days=1)
-            
-            # Sort by timestamp
-            events.sort(key=lambda e: e.get('timestamp', ''), reverse=True)
+            start_utc = start if start.tzinfo else start.replace(tzinfo=timezone.utc)
+            end_utc = end if end.tzinfo else end.replace(tzinfo=timezone.utc)
+            rows = self.reader.read_time_range(
+                start=start_utc.isoformat().replace('+00:00', 'Z'),
+                end=end_utc.isoformat().replace('+00:00', 'Z'),
+            )
+            events = [self._row_to_event(r) for r in rows]
+            events.sort(
+                key=lambda e: e.get('timestamp_utc', ''),
+                reverse=True,
+            )
             return events
-            
         except Exception as e:
             logger.error(f"Error getting TID events: {e}")
             return []
-    
+
     def get_event_details(self, event_id: str) -> Optional[Dict[str, Any]]:
         """
-        Get detailed information about a specific TID event.
-        
+        Get a single TID event by ``event_id``.
+
+        Event IDs are minted by the writer as ``YYYYMMDD_HHMMSS_<n_paths>``;
+        we search the day the event_id encodes plus the surrounding day
+        as a safety margin against minute-boundary edge cases.
+
         Args:
-            event_id: Event identifier (typically timestamp-based)
-        
+            event_id: Event identifier from the L3 record.
+
         Returns:
-            Detailed event dictionary or None
+            Event dictionary, or None if not found.
         """
-        try:
-            # Event ID format: YYYYMMDD_HHMMSS
-            if len(event_id) < 8:
-                return None
-            
-            date_str = f"{event_id[:4]}-{event_id[4:6]}-{event_id[6:8]}"
-            date_dir = self.tid_dir / date_str
-            
-            if not date_dir.exists():
-                return None
-            
-            # Look for specific event file
-            event_file = date_dir / f'tid_{event_id}.h5'
-            if event_file.exists():
-                return self._read_event_h5(event_file, detailed=True)
-            
-            # Fall back to events JSON
-            events_file = date_dir / 'tid_events.json'
-            if events_file.exists():
-                events = self._read_events_json(events_file)
-                for event in events:
-                    if event.get('event_id') == event_id:
-                        return event
-            
+        if self.reader is None or len(event_id) < 8:
             return None
-            
+        try:
+            yyyymmdd = event_id[:8]
+            day_start = datetime.strptime(yyyymmdd, '%Y%m%d').replace(tzinfo=timezone.utc)
+            # Search ±1 day so an event at 00:00 UTC isn't missed.
+            events = self.get_events_in_range(
+                day_start - timedelta(days=1),
+                day_start + timedelta(days=2),
+            )
+            for ev in events:
+                if ev.get('event_id') == event_id:
+                    return ev
+            return None
         except Exception as e:
             logger.error(f"Error getting TID event details: {e}")
             return None
-    
+
     def get_statistics(self, days: int = 7) -> Dict[str, Any]:
         """
-        Get TID detection statistics.
-        
+        Compute summary statistics over the last ``days`` of events.
+
         Args:
-            days: Number of days to analyze
-        
+            days: Lookback window (days).
+
         Returns:
-            Statistics dictionary
+            Dictionary with ``n_events``, per-day rate, velocity stats,
+            period stats, direction histogram.  Empty/None fields when
+            no events.
         """
-        end = datetime.utcnow()
+        end = datetime.now(timezone.utc)
         start = end - timedelta(days=days)
         events = self.get_events_in_range(start, end)
-        
+
         if not events:
             return {
                 'n_events': 0,
                 'period_days': days,
                 'events_per_day': 0,
                 'velocity_stats': None,
-                'direction_distribution': None
+                'period_stats': None,
+                'direction_distribution': None,
             }
-        
-        # Compute statistics
-        velocities = [e.get('velocity_m_s', 0) for e in events if e.get('velocity_m_s')]
-        directions = [e.get('direction_deg', 0) for e in events if e.get('direction_deg') is not None]
-        periods = [e.get('period_minutes', 0) for e in events if e.get('period_minutes')]
-        
-        stats = {
+
+        velocities = [
+            e['velocity_m_s'] for e in events
+            if isinstance(e.get('velocity_m_s'), (int, float))
+            and math.isfinite(e['velocity_m_s'])
+        ]
+        directions = [
+            e['direction_deg'] for e in events
+            if isinstance(e.get('direction_deg'), (int, float))
+            and math.isfinite(e['direction_deg'])
+        ]
+        periods = [
+            e['period_minutes'] for e in events
+            if isinstance(e.get('period_minutes'), (int, float))
+            and math.isfinite(e['period_minutes'])
+        ]
+
+        return {
             'n_events': len(events),
             'period_days': days,
-            'events_per_day': len(events) / days,
+            'events_per_day': len(events) / max(days, 1),
             'velocity_stats': {
-                'mean_m_s': float(np.mean(velocities)) if velocities else None,
-                'std_m_s': float(np.std(velocities)) if velocities else None,
-                'min_m_s': float(np.min(velocities)) if velocities else None,
-                'max_m_s': float(np.max(velocities)) if velocities else None
+                'mean_m_s': float(np.mean(velocities)),
+                'std_m_s': float(np.std(velocities)),
+                'min_m_s': float(np.min(velocities)),
+                'max_m_s': float(np.max(velocities)),
             } if velocities else None,
             'period_stats': {
-                'mean_minutes': float(np.mean(periods)) if periods else None,
-                'std_minutes': float(np.std(periods)) if periods else None
+                'mean_minutes': float(np.mean(periods)),
+                'std_minutes': float(np.std(periods)),
             } if periods else None,
-            'direction_distribution': self._compute_direction_histogram(directions) if directions else None
+            'direction_distribution': (
+                self._compute_direction_histogram(directions)
+                if directions else None
+            ),
         }
-        
-        return stats
-    
-    def _read_events_json(self, filepath: Path) -> List[Dict[str, Any]]:
-        """Read TID events from JSON file."""
-        try:
-            with open(filepath, 'r') as f:
-                data = json.load(f)
-                if isinstance(data, list):
-                    return data
-                elif isinstance(data, dict) and 'events' in data:
-                    return data['events']
-                return []
-        except Exception as e:
-            logger.error(f"Error reading TID events JSON {filepath}: {e}")
-            return []
-    
-    def _read_event_h5(self, filepath: Path, detailed: bool = False) -> Optional[Dict[str, Any]]:
-        """Read a single TID event from HDF5 file."""
-        try:
-            with h5py.File(filepath, 'r', libver='latest', swmr=True) as f:
-                event = {
-                    'event_id': f.attrs.get('event_id', filepath.stem),
-                    'timestamp': f.attrs.get('timestamp_utc', ''),
-                    'velocity_m_s': float(f.attrs.get('velocity_m_s', 0)),
-                    'direction_deg': float(f.attrs.get('direction_deg', 0)),
-                    'period_minutes': float(f.attrs.get('period_minutes', 0)),
-                    'confidence': float(f.attrs.get('confidence', 0)),
-                    'affected_paths': list(f.attrs.get('affected_paths', [])),
-                }
-                
-                if detailed:
-                    # Add correlation data if available
-                    if 'correlation' in f:
-                        corr_grp = f['correlation']
-                        event['correlation'] = {
-                            'lags': corr_grp['lags'][:].tolist() if 'lags' in corr_grp else [],
-                            'values': corr_grp['values'][:].tolist() if 'values' in corr_grp else [],
-                            'peak_lag_s': float(corr_grp.attrs.get('peak_lag_s', 0))
-                        }
-                    
-                    # Add residual time series if available
-                    if 'residuals' in f:
-                        res_grp = f['residuals']
-                        event['residuals'] = {
-                            'timestamps': res_grp['timestamps'][:].tolist() if 'timestamps' in res_grp else [],
-                            'values_ms': res_grp['values_ms'][:].tolist() if 'values_ms' in res_grp else []
-                        }
-                
-                return event
-                
-        except Exception as e:
-            logger.error(f"Error reading TID event HDF5 {filepath}: {e}")
-            return None
-    
-    def _event_in_range(self, event: Dict, start: datetime, end: datetime) -> bool:
-        """Check if event timestamp is within range."""
-        try:
-            ts_str = event.get('timestamp', '')
-            if not ts_str:
-                return False
-            ts = datetime.fromisoformat(ts_str.replace('Z', '+00:00')).replace(tzinfo=None)
-            return start <= ts <= end
-        except:
-            return False
-    
-    def _compute_direction_histogram(self, directions: List[float]) -> Dict[str, int]:
-        """Compute histogram of TID propagation directions."""
-        bins = {
-            'N': 0, 'NE': 0, 'E': 0, 'SE': 0,
-            'S': 0, 'SW': 0, 'W': 0, 'NW': 0
-        }
-        
-        for d in directions:
-            d = d % 360
-            if d < 22.5 or d >= 337.5:
-                bins['N'] += 1
-            elif d < 67.5:
-                bins['NE'] += 1
-            elif d < 112.5:
-                bins['E'] += 1
-            elif d < 157.5:
-                bins['SE'] += 1
-            elif d < 202.5:
-                bins['S'] += 1
-            elif d < 247.5:
-                bins['SW'] += 1
-            elif d < 292.5:
-                bins['W'] += 1
-            else:
-                bins['NW'] += 1
-        
-        return bins
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _row_to_event(row: Dict[str, Any]) -> Dict[str, Any]:
+        """Pass-through with NaN→None and explicit numeric coercion so
+        the FastAPI JSON serializer doesn't choke."""
+        def _safe(v: Any) -> Any:
+            if isinstance(v, float) and not math.isfinite(v):
+                return None
+            return v
+        return {k: _safe(v) for k, v in row.items()}
+
+    @staticmethod
+    def _compute_direction_histogram(directions: List[float]) -> Dict[str, int]:
+        """Bin direction azimuths into 8 compass sectors."""
+        sectors = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
+        counts = {s: 0 for s in sectors}
+        for az in directions:
+            # 0° = N, 45° = NE, etc.; bin width 45°, centred on each sector.
+            idx = int(((az + 22.5) % 360) // 45)
+            counts[sectors[idx]] += 1
+        return counts

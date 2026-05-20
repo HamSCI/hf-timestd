@@ -1,0 +1,134 @@
+{
+    "schema_version": "1.0.0",
+    "data_product": "L3_tid",
+    "description": "Traveling Ionospheric Disturbance (TID) events detected via cross-path correlation of band-passed timing residuals.  One row per event produced by TIDDetector.detect_tid().",
+    "cadence_seconds": 60,
+    "processing_level": "L3",
+    "standards": [
+        "CEDAR Madrigal patterns",
+        "ITU-R P.531 (MSTID / LSTID period bands)"
+    ],
+    "fields": [
+        {
+            "name": "timestamp_utc",
+            "type": "string",
+            "format": "iso8601",
+            "required": true,
+            "description": "Event start time (ISO 8601 UTC) -- the moment the detector saw the significant correlation"
+        },
+        {
+            "name": "minute_boundary_utc",
+            "type": "integer",
+            "required": true,
+            "description": "Unix epoch timestamp of the fusion-cycle minute boundary that produced this event"
+        },
+        {
+            "name": "event_id",
+            "type": "string",
+            "required": true,
+            "description": "Unique event identifier (YYYYMMDD_HHMMSS_<n_paths>); stable across re-reads",
+            "example": "20260520_141500_4"
+        },
+        {
+            "name": "period_minutes",
+            "type": "float",
+            "required": true,
+            "allow_nan": false,
+            "description": "Dominant period of the band-passed residual signature, MSTID (10-30 min) or LSTID (30-90 min)",
+            "units": "minutes",
+            "valid_range": [10.0, 90.0]
+        },
+        {
+            "name": "amplitude_ms",
+            "type": "float",
+            "required": true,
+            "allow_nan": false,
+            "description": "RMS amplitude of the band-passed residual on the strongest path (passes min_amplitude_ms gate)",
+            "units": "milliseconds"
+        },
+        {
+            "name": "velocity_m_s",
+            "type": "float",
+            "required": true,
+            "allow_nan": true,
+            "description": "Horizontal propagation velocity from TDOA solve or 2-path geometry fallback.  NaN when the detector could not resolve a velocity.",
+            "units": "metres per second"
+        },
+        {
+            "name": "direction_deg",
+            "type": "float",
+            "required": true,
+            "allow_nan": true,
+            "description": "Azimuth of propagation, 0 = north, 90 = east.  NaN when the detector could not resolve a direction.",
+            "units": "degrees from true north"
+        },
+        {
+            "name": "correlation_coefficient",
+            "type": "float",
+            "required": true,
+            "valid_range": [0.0, 1.0],
+            "description": "Strongest per-lag Pearson r found across all path pairs (P-H31)"
+        },
+        {
+            "name": "significance_p",
+            "type": "float",
+            "required": true,
+            "valid_range": [0.0, 1.0],
+            "description": "Bonferroni-corrected p-value of the strongest correlation (P-H32).  Detections require p < significance_alpha (typically 0.01)."
+        },
+        {
+            "name": "confidence",
+            "type": "float",
+            "required": true,
+            "valid_range": [0.0, 1.0],
+            "description": "1 - significance_p, treated as the detector's reported confidence (P-M26 replaces an ad-hoc correlation x 1.2)"
+        },
+        {
+            "name": "n_paths_correlated",
+            "type": "integer",
+            "required": true,
+            "description": "Number of (station, frequency_mhz) paths whose band-passed residuals contributed to the detection"
+        },
+        {
+            "name": "leading_path",
+            "type": "string",
+            "required": true,
+            "description": "Path that saw the disturbance first (format: 'STATION_FREQ_MHZ', e.g. 'WWV_10.0')",
+            "example": "WWV_10.0"
+        },
+        {
+            "name": "lagging_path",
+            "type": "string",
+            "required": true,
+            "description": "Path that saw the disturbance last",
+            "example": "CHU_7.85"
+        },
+        {
+            "name": "lag_minutes",
+            "type": "float",
+            "required": true,
+            "allow_nan": false,
+            "description": "Time delay between leading_path and lagging_path detections",
+            "units": "minutes"
+        },
+        {
+            "name": "processing_version",
+            "type": "string",
+            "required": true,
+            "description": "TIDDetector + physics_fusion_service version string"
+        }
+    ],
+    "tid_classes": {
+        "MSTID": "10 <= period_minutes <= 30 (medium-scale; 50-300 m/s typical)",
+        "LSTID": "30 < period_minutes <= 90 (large-scale; 300-1000 m/s typical)"
+    },
+    "quality_flags": {
+        "GOOD": "significance_p < 0.001 AND n_paths_correlated >= 3 AND velocity/direction resolved (non-NaN)",
+        "MARGINAL": "0.001 <= significance_p < 0.01 OR n_paths_correlated < 3 OR velocity/direction unresolved",
+        "BAD": "significance_p >= 0.01 (does not clear the detector's threshold; events at this level should not have been written)",
+        "MISSING": "No TID record for the queried window"
+    },
+    "history": [
+        "1.0.0 (2026-05-20): initial release; wires P-H29 -- the TIDDetector statistical engine (P-H30..P-H33 + P-M26) is now backed by a real L3 data product."
+    ]
+}
