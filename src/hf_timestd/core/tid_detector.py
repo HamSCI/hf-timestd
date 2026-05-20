@@ -52,6 +52,9 @@ STATISTICAL SOUNDNESS (code review P-H30..P-H33, 2026-05):
 """
 
 import math
+import itertools
+# §4.4 Low: `math` and `itertools` were re-imported inside individual
+# methods on every call; lifted both to the top-level imports.
 import numpy as np
 from scipy.signal import butter, filtfilt
 from scipy.stats import t as _student_t
@@ -194,7 +197,19 @@ class TIDDetector:
         self._path_azimuths: Dict[Tuple[str, float], float] = {}
         self._path_distances: Dict[Tuple[str, float], float] = {}
 
-        # Detected events
+        # Detected events.  Intended lifecycle: a new TID event is
+        # appended to `_active_events` when first detected; on the
+        # cycle the detection drops below threshold the event moves
+        # from `_active_events` to `_completed_events`.  Today
+        # nothing populates either list -- the detector has no
+        # run-loop / writer (P-H29 deferred), so both stay empty.
+        # When the L3 writer lands, both lists need a bound to avoid
+        # unbounded growth over multi-week runs (§4.4 Low): a sensible
+        # default is to cap `_completed_events` at e.g. 1000 entries
+        # using a deque(maxlen=1000) so the in-memory state stays
+        # constant even when no consumer drains them.  See
+        # `core/multi_broadcast_fusion.py:AllanDeviationTracker`
+        # for the same pattern applied to a different ring buffer.
         self._active_events: List[TIDEvent] = []
         self._completed_events: List[TIDEvent] = []
 
@@ -263,7 +278,7 @@ class TIDDetector:
     @staticmethod
     def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
         """Calculate great circle distance using Haversine formula."""
-        import math
+
         lat1_rad = math.radians(lat1)
         lat2_rad = math.radians(lat2)
         delta_lat = math.radians(lat2 - lat1)
@@ -279,7 +294,7 @@ class TIDDetector:
     @staticmethod
     def _compute_azimuth(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
         """Compute initial azimuth from point 1 to point 2."""
-        import math
+
         lat1_rad = math.radians(lat1)
         lat2_rad = math.radians(lat2)
         delta_lon = math.radians(lon2 - lon1)
@@ -772,7 +787,7 @@ class TIDDetector:
             return self.receiver_lat, self.receiver_lon
 
         st_lat, st_lon = self._station_locations[station]
-        import math
+
         rx_lat_rad = math.radians(self.receiver_lat)
         rx_lon_rad = math.radians(self.receiver_lon)
         tx_lat_rad = math.radians(st_lat)
@@ -790,7 +805,7 @@ class TIDDetector:
         return math.degrees(mid_lat_rad), math.degrees(mid_lon_rad)
 
     def _get_enu_coords(self, lat: float, lon: float) -> Tuple[float, float]:
-        import math
+
         R = 6371.0
         lat_rad, lon_rad = math.radians(lat), math.radians(lon)
         ref_lat_rad, ref_lon_rad = math.radians(self.receiver_lat), math.radians(self.receiver_lon)
@@ -851,7 +866,7 @@ class TIDDetector:
           coincident) the solve is ill-posed and ``None`` is returned
           rather than a confident-looking but meaningless velocity.
         """
-        import itertools
+
 
         if len(correlated_paths) < 3:
             return None, None
