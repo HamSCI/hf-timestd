@@ -53,13 +53,13 @@ This geometry provides ionospheric sampling across:
 
 ## 3. Currently Implemented Measurements
 
-### 3.1 Ionospheric Electron Content: dTEC and TEC ✅
+### 3.1 Ionospheric Electron Content
 
-**Status:** Carrier-phase dTEC fully operational (v6.8); group-delay TEC available as validation product
+The system produces two distinct TEC-related products with very different
+characteristics.  They share a section heading and a derivation chain, but
+their honesty markers are *not* the same — see review item D-H6.
 
-The system produces two distinct TEC-related products with very different characteristics:
-
-#### 3.1.1 Carrier-Phase Differential TEC (dTEC) — Primary Product
+#### 3.1.1 Carrier-Phase Differential TEC (dTEC) — Primary Product ✅
 
 **Sensitivity:** ~6 mTECU/min (carrier-phase precision)
 **Volume:** ~250,000 records/day across all station-channels
@@ -86,7 +86,22 @@ Carrier-phase dTEC measures the *rate of change* of TEC along each HF path by tr
 - Diurnal TEC variation with minute-level resolution
 - Storm-time ionospheric dynamics
 
-#### 3.1.2 HF Group-Delay TEC — Validation Product
+#### 3.1.2 HF Group-Delay TEC — Validation Product ❌
+
+> **Honesty marker: ❌ — not operational as an absolute TEC product.**
+>
+> The 1/f² fit across WWV/WWVH/CHU/BPM frequencies is **at or below
+> the noise floor** for any single epoch.  Per `PHYSICS_CONTRACT §1/§4`
+> and `METROLOGY_PHYSICS_SPLIT`, *claiming group-delay TEC is
+> operational* is listed as a failure condition.  We compute the fit,
+> keep the R² and the slope, and use them as **diagnostics** for the
+> carrier-phase pipeline above — never as a standalone TEC estimate.
+> Anything downstream that consumes `tec_tecu` as if it were a primary
+> science product is mis-using this column.
+>
+> Review history: this subsection used to live under the same ✅
+> heading as carrier-phase dTEC (review item D-H6); split out so the
+> two products carry honest, separate markers.
 
 **Physics:** The ionospheric group delay follows the dispersion relation:
 

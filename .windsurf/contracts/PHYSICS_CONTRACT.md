@@ -1,9 +1,9 @@
 # PHYSICS CONTRACT — hf-timestd
 
-**Version:** 1.1.0
-**Last Updated:** 2026-05-17
+**Version:** 1.2.0
+**Last Updated:** 2026-05-20
 **Status:** Active — evolves with implementation
-**Last refresh:** 2026-05-17 — reconciled against code. Factual drift corrected in place; clauses the code does not yet meet are listed in §5 Known Deviations. See `docs/CODE_REVIEW_2026-05-17_METROLOGY_PHYSICS.md`.
+**Last refresh:** 2026-05-20 — re-reconciled after the metrology/physics review remediation pass (S2, S3, S4 + all P-H + all P-M + all M-M).  Most §5 Known Deviations from the 2026-05-17 snapshot are now resolved; the residual P-H29 (TID L3 deliverable) is the only deferred item.  See `docs/CODE_REVIEW_2026-05-17_METROLOGY_PHYSICS.md` for the full audit and the project memory for the per-finding commit map.
 
 ---
 
@@ -186,14 +186,15 @@ HFPropagationModel.predict(station, frequency, utc_time) → {
 
 Recorded 2026-05-17 from the code review (`docs/CODE_REVIEW_2026-05-17_METROLOGY_PHYSICS.md`). These are points where the **current code does not yet meet the contract above**. The contract states the intended design; this section is the honest gap list. Each item should be resolved by either fixing the code or — if the clause itself is wrong — amending the clause.
 
-| # | Contract clause | Current code reality | Review ref |
-|---|-----------------|----------------------|------------|
-| D1 | §2/§4 — `PhysicsPropagationModel` is deprecated, must not be used by new code | Still exported from `core/__init__.py` `__all__` (line 262) with no runtime `DeprecationWarning`, keeping it discoverable | P-H12 |
-| D2 | §2 (Reanalysis) — negative TEC retained as-is, never discarded or clamped | **Resolved 2026-05-17.** `tec_estimator.py`, `physics_fusion_service.py`, and `ionospheric_reanalysis.py` now retain negative / out-of-range TEC (flagged MARGINAL, confidence 0) instead of returning `None`; tomography input is guarded at the consumption site. Tests `test_negative_slope_retained` updated | P-H5 |
-| D3 | §4 — TEC fit window must not span mode transitions | `physics_fusion_service` median-collapses observations across modes within a minute; `ionospheric_reanalysis` collapses an entire hour into a single TEC fit | P-H26 |
-| D4 | §4 — elevation angle must not be hardcoded at 30° | `iono_tomography.build_paths_from_tec_results` defaults elevation to 30° (and distance to 1500 km) when per-path geometry is absent | P-M9 |
-| D5 | §4 — physics service must maintain `_processed_minutes` to prevent duplicate records | `_processed_minutes` is an in-memory set, not persisted; on restart the 30-minute lookback reprocesses minutes whose L3 records already exist | P-H25 |
-| D6 | §4 — no full table scans of large HDF5 files | `physics_fusion_service._read_l2_slice` / `_read_tick_phase_minute` and `physics_service` still call `read_time_range` over whole datasets; only `_read_gnss_vtec` was converted to a bounded tail read | P-H28, P-M21 |
-| D7 | `METROLOGY_PHYSICS_SPLIT.md` — physics must never be in the real-time metrology critical path | `timestd-physics.service` is `Type=notify` with `Requires=timestd-l2-calibration.service` (a hard dependency on a metrology service) and an `ExecStartPre` `chown -R` over the whole `phase2` tree, including live L2 metrology files | P-C1 |
+| # | Contract clause | 2026-05-17 reality | 2026-05-20 status | Review ref |
+|---|-----------------|--------------------|-------------------|------------|
+| D1 | §2/§4 — `PhysicsPropagationModel` is deprecated, must not be used by new code | Still exported from `core/__init__.py` `__all__` (line 262) with no runtime `DeprecationWarning` | **Resolved.** `core/__init__.py` line 63: import carries `# deprecated — intentionally omitted from __all__ (P-H12)`; line 262 documents the omission. | P-H12 |
+| D2 | §2 (Reanalysis) — negative TEC retained as-is, never discarded or clamped | `tec_estimator.py` / `physics_fusion_service.py` / `ionospheric_reanalysis.py` returned `None` on negative slope | **Resolved 2026-05-17.** Retained, flagged MARGINAL, confidence 0; tomography input guarded at consumption site. | P-H5 |
+| D3 | §4 — TEC fit window must not span mode transitions | Per-minute median collapsed across modes; reanalysis collapsed an entire hour | **Resolved.** `physics_fusion_service.py` aggregates per `(station, frequency, mode)` (line 491; "TEC fit (P-H26)" comment); `ionospheric_reanalysis.py` uses one-regime windows (P-H26 markers at lines 115, 569, 811, 945). | P-H26 |
+| D4 | §4 — elevation angle must not be hardcoded at 30° | `iono_tomography.build_paths_from_tec_results` defaulted elevation 30° / distance 1500 km when geometry absent | **Resolved.** Paths with no propagation prediction are skipped (P-M9 comment at line ~425); no fabricated geometry. | P-M9 |
+| D5 | §4 — physics service must maintain `_processed_minutes` to prevent duplicate records | In-memory only; restart reprocessed historical minutes | **Resolved.** `physics_fusion_service._seed_processed_minutes_from_l3()` (line 1352) reseeds from existing L3 files on startup. | P-H25 |
+| D6 | §4 — no full table scans of large HDF5 files | `_read_l2_slice` / `_read_tick_phase_minute` / `physics_service` did whole-dataset scans | **Resolved.** The HDF5→SQLite cutover gave `read_time_range` an indexed range query against `idx_<table>_chan_ts`; `physics_service.py` was deleted (P-H28). Bounded tail-reads where applicable. | P-H28, P-M21 |
+| D7 | `METROLOGY_PHYSICS_SPLIT.md` — physics must never be in the real-time metrology critical path | `timestd-physics.service` was `Type=notify` with `Requires=` on l2-calibration + `chown -R` over `phase2` | **Resolved.** `Type=simple` (systemd unit line 15), soft dependency comment ("Soft dependency only (was Requires=)") at line 5. | P-C1 |
+| D8 | §4 — TID detection is an L3 deliverable | `TIDDetector` runs but writes no science products; `web-api/services/tid_service.py` reads from a directory nothing writes | **Open, deferred** (P-H29).  Detector is statistically sound (P-H30/31/32/33 + P-M26 all resolved) but the L3 wiring is its own task — see the project memory. | P-H29 |
 
 **Note on `tof_kalman_ms`:** verified still accurate — the field is always NaN in production and consumers (`physics_fusion_service._read_l2_slice`) read it with an immediate NaN-fallback to `clock_offset_ms`. This is correct deprecated-field handling and is **not** a deviation.

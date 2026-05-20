@@ -1,9 +1,9 @@
 # METROLOGY CONTRACT — hf-timestd
 
-**Version:** 1.1.0
-**Last Updated:** 2026-05-17
+**Version:** 1.2.0
+**Last Updated:** 2026-05-20
 **Status:** Active — evolves with implementation
-**Last refresh:** 2026-05-17 — reconciled against code. Factual drift corrected in place; clauses the code does not yet meet are listed in §5 Known Deviations. See `docs/CODE_REVIEW_2026-05-17_METROLOGY_PHYSICS.md`.
+**Last refresh:** 2026-05-20 — re-reconciled after the metrology/physics review remediation pass (S2, S3, S4 + all P-H + all P-M + all M-M). The §5 Known Deviations from the 2026-05-17 snapshot have been worked through: D3 (M-C1), D4 (M-C2), D6 (M-M18) are resolved; D1 (M-H2) and D5 are still open with status notes below. See `docs/CODE_REVIEW_2026-05-17_METROLOGY_PHYSICS.md` for the full audit.
 
 ---
 
@@ -167,13 +167,15 @@ Individual components are recorded in the L3 fusion HDF5.
 
 Recorded 2026-05-17 from the code review (`docs/CODE_REVIEW_2026-05-17_METROLOGY_PHYSICS.md`). These are points where the **current code does not yet meet the contract above**. The contract states the intended design; this section is the honest gap list. Each item should be resolved by either fixing the code or — if the clause itself is wrong — amending the clause.
 
-| # | Contract clause | Current code reality | Review ref |
-|---|-----------------|----------------------|------------|
-| D1 | §1/§4 — `TickEdgeDetector` is the sole timing module; A/B comparison removed | `metrology_engine.py` still constructs four `TickMatchedFilter` instances and calls `process_minute` every minute; the A/B comparison machinery and `l2_decoder_comparison_v1.json` schema still exist | M-H2 |
-| D2 | §1/§2/§4 — physics validation gate ±15 ms, "do not widen" | `ArrivalPatternMatrix` applies per-station 3σ uncertainty floors (`STATION_MIN_UNCERTAINTY_3SIGMA_MS`: CHU 100 ms, BPM 50 ms) that widen the effective gate well beyond ±15 ms | review §2 S1, §3 |
-| D3 | §2/§4 — TSL1 and TSL2 must have independent Kalman state | The per-broadcast Kalmans and convergence/drift state are shared and mutated twice per cycle (the L1-only then L2 `fuse()` calls); the two feeds are statistically coupled | M-C1 |
-| D4 | §4 — must advance `last_chrony_d_clock` on rejected updates | `last_chrony_d_clock` is advanced, but the paired `last_chrony_update_time` is updated only on success — the two references desynchronise, defeating the 5-minute recovery reset | M-C2 |
-| D5 | `METROLOGY_PHYSICS_SPLIT.md` action item 1 — gate → likelihood weight | `ArrivalPatternMatrix.validate_detection()` is still a binary `(is_valid, confidence, reason)` gate; no `[0,1]` likelihood-weight method exists | review §6 item 7 |
-| D6 | §4 — no per-record HDF5 writes for high-cadence products | `tick_phase` uses batch writes (compliant), but `all_arrivals` and `detection_attempts` are still written one record at a time | M-M18 |
+| # | Contract clause | 2026-05-17 reality | 2026-05-20 status | Review ref |
+|---|-----------------|--------------------|-------------------|------------|
+| D1 | §1/§4 — `TickEdgeDetector` is the sole timing module; A/B comparison removed | `metrology_engine.py` constructed four `TickMatchedFilter` instances; A/B comparison machinery + `l2_decoder_comparison_v1.json` still existed | **Open.**  A/B comparison still in place pending the S1 contract-refresh follow-up (which is itself listed in review §7 as the natural place to decide the matched-filter's fate). | M-H2 |
+| D2 | §1/§2/§4 — physics validation gate ±15 ms, "do not widen" | Per-station 3σ floors (CHU 100 ms, BPM 50 ms) widened the effective gate | **Open.** Floors still in place; the "gate → likelihood weight" refactor (D5 below) supersedes this — once the gate becomes a weight, the floors stop controlling accept/reject. | review §2 S1, §3 |
+| D3 | §2/§4 — TSL1 and TSL2 must have independent Kalman state | Per-broadcast Kalmans + convergence/drift state were shared and mutated twice per cycle | **Resolved 2026-05-17** (M-C1). The two feeds run independent banks; the M-M13 cycle-persistence convergence gate (commit `bdbfd2d`) further protects against premature lock during restart settling. | M-C1 |
+| D4 | §4 — must advance `last_chrony_d_clock` on rejected updates | `last_chrony_d_clock` advanced but `last_chrony_update_time` only on success, desynchronising the two references | **Resolved 2026-05-17** (M-C2).  Both references advance every cycle; see the in-source comment at `multi_broadcast_fusion.py` line ~5285. | M-C2 |
+| D5 | `METROLOGY_PHYSICS_SPLIT.md` action item 1 — gate → likelihood weight | `ArrivalPatternMatrix.validate_detection()` was a binary gate; no `[0,1]` weight method | **Open.** Listed in review §7 as item 11 ("S1 / D-H7"); pending the contract-refresh sequenced with M-H2's decision on the matched-filter. | review §6 item 7 |
+| D6 | §4 — no per-record HDF5 writes for high-cadence products | `all_arrivals` and `detection_attempts` were per-record | **Resolved** (M-M18, commit `39658c1`).  Both products now use `write_measurements_batch`; tick + CLEAN multipath share one batch.  Companion M-M19 promoted the failure path to rate-limited WARNING. | M-M18 |
+| D7 | §4 — Joseph-form covariance update for per-broadcast Kalmans | Short-form `P = (I − KH) P` accumulated asymmetry / drift toward non-PSD over ~10⁶ updates/week | **Resolved** (M-M14, commit `3b0245c`).  Joseph form + explicit symmetrisation; M-M15 added the NaN/Inf entrypoint guard. | M-M14/15 |
+| D8 | §4 — leap-second hold must coast the per-broadcast Kalmans across the entire transition | `_fsk_leap_second_hold` was a per-cycle boolean that cleared the very next cycle | **Resolved** (M-M11, commit `bdbfd2d`).  Hold is now a timestamp window (`_fsk_leap_second_hold_until`) with a 10-minute default; single TAI-UTC change observation coasts through the transition. | M-M11 |
 
 **Open question for the next contract revision:** the §2 Kalman `Q` values have no documented derivation, and `Q (Drift)` was `1e-12` in the prior contract but is `1e-8` in code (10⁴× larger). The table above now reflects the code; the *correct* value must be established (measurement-based) and the table re-pinned.

@@ -425,13 +425,55 @@ utc = gps_time_unix + (rtp_ts - rtp_timesnap) / sample_rate
 - Gaps filled with zeros.
 - Sample count never adjusted.
 
-### 3. HDF5 Concurrent Access
+### 3. HDF5 Concurrent Access — SWMR (v6.10+)
 
-All `h5py.File()` calls use `locking=False` to prevent HDF5 library-level file lock contention (errno=11) between concurrent readers/writers. The environment variable `HDF5_USE_FILE_LOCKING=FALSE` is set **before** `import h5py` in services that import h5py at module level.
+All concurrent HDF5 access uses the **Single Writer Multiple Reader (SWMR)**
+protocol introduced in v6.10.  The previous "open-write-close +
+`locking=False`" pattern documented here historically is *obsolete* —
+new code should not follow it.
 
-- **Writers** (`hdf5_writer.py`) open, append, and close per write cycle.
-- **Readers** (`hdf5_reader.py`, fusion service) open with `locking=False` for concurrent access.
-- Services use open-write-close patterns to minimize dirty flags on unclean shutdown.
+* **Writers** (`hdf5_writer.py`, `dual_writer.py`) open the file *once*,
+  enable SWMR mode (`File.swmr_mode = True` after creating all
+  datasets), and keep the file handle open for the lifetime of the
+  process.  Each `write_measurement` / `write_measurements_batch`
+  call appends to the extendable datasets and `flush()`-es so readers
+  see the new rows immediately.  A `close()` at clean shutdown.
+* **Readers** (`hdf5_reader.py`, `web-api/`, fusion service, any tool)
+  open with `h5py.File(path, 'r', swmr=True)`.  This bypasses the
+  POSIX advisory lock the kernel would otherwise hand back EWOULDBLOCK
+  for, so a reader can attach to a file the writer holds open.
+* **Recovery.** On unclean shutdown the writer's last few unflushed
+  bytes may be lost but the file structure survives — the writer's
+  next start runs `h5clear -s <file>` (via the installer) to reset
+  the "in use" superblock flag.  No more "dirty file" lockouts.
+* **What replaced what.**
+
+      v5.x and earlier         v6.10 SWMR (current)
+      ─────────────────────── ─────────────────────────────────────
+      open-write-close cycle  open once, flush per write
+      locking=False           swmr=True for readers
+      file-lock contention    cooperative SWMR — no POSIX lock at all
+      writer holds no handle  writer owns the handle for its lifetime
+      readers race the close  readers attach via the SWMR superblock
+
+  The `HDF5_USE_FILE_LOCKING=FALSE` environment shim documented in
+  v5.x is no longer required — SWMR opens already bypass POSIX locking
+  via the appropriate file driver flags.  Leaving it set is harmless;
+  removing it is correct.
+* **Pinning dependencies.** `h5py>=3.8.0,<3.16.0` — h5py 3.16 bundles
+  HDF5 2.0.0 which breaks SWMR in long-running processes (see
+  pyproject.toml comment).
+* **SQLite dual-writer (v7.0+).** L1/L2/L3 products are now
+  dual-written via `dual_writer.py` to both HDF5 (SWMR) and SQLite;
+  see `HDF5-TO-SQLITE-MIGRATION.md`.  The two backends are kept in
+  parity, and a future flip switches readers to SQLite-only while
+  HDF5 continues for legacy consumers.
+
+History: review item D-H4 (CODE_REVIEW_2026-05-17_METROLOGY_PHYSICS.md
+§5.1) flagged this section as describing the pre-SWMR
+"locking=False + open-write-close" pattern while ARCHITECTURE,
+README, and METROLOGY described the SWMR model in v6.10+.  This
+rewrite brings the developer reference in line with the actual code.
 
 ---
 
