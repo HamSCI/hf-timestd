@@ -1,12 +1,18 @@
 """Regression tests for S3: per-broadcast Kalman coast during a leap second.
 
-When a CHU-FSK-detected TAI-UTC change is in effect (`_fsk_leap_second_hold`),
-every measurement is stepped by ~1 s. Increment 2 routed that into the
-fusion-level holdover coast, but the per-broadcast Kalman banks still ran a
-full `update()` on the stepped measurement — corrupting their state.
+When a CHU-FSK-detected TAI-UTC change is in effect (the leap-second-hold
+window is open), every measurement is stepped by ~1 s. Increment 2 routed
+that into the fusion-level holdover coast, but the per-broadcast Kalman
+banks still ran a full `update()` on the stepped measurement — corrupting
+their state.
 
 S3: `_apply_broadcast_kalmans` coasts each per-broadcast Kalman (`predict()`,
 not `update()`) for the duration of the hold.
+
+M-M11 update: the hold state is now a timestamp window
+(`_fsk_leap_second_hold_until`) rather than a per-cycle boolean
+(`_fsk_leap_second_hold`).  These tests arm/disarm via
+`_fsk_leap_second_hold_until` directly.
 """
 
 import tempfile
@@ -52,7 +58,7 @@ class TestLeapSecondCoast(unittest.TestCase):
             self.assertLess(abs(kalman.state[0] - 2.0), 0.3)
 
             # Leap-second hold: a measurement stepped by ~1 s (+1000 ms).
-            fusion._fsk_leap_second_hold = True
+            fusion._fsk_leap_second_hold_until = time.time() + 600  # arm 10-min window
             out = fusion._apply_broadcast_kalmans(
                 [_measurement('WWV', 10.0, 1002.0)], feed='l2')
 
@@ -69,11 +75,11 @@ class TestLeapSecondCoast(unittest.TestCase):
                 fusion._apply_broadcast_kalmans(
                     [_measurement('WWV', 10.0, 2.0)], feed='l2')
 
-            fusion._fsk_leap_second_hold = True
+            fusion._fsk_leap_second_hold_until = time.time() + 600  # arm 10-min window
             fusion._apply_broadcast_kalmans(
                 [_measurement('WWV', 10.0, 1002.0)], feed='l2')
 
-            fusion._fsk_leap_second_hold = False
+            fusion._fsk_leap_second_hold_until = 0.0  # disarm
             out = fusion._apply_broadcast_kalmans(
                 [_measurement('WWV', 10.0, 2.0)], feed='l2')
             self.assertLess(abs(out[0].d_clock_ms - 2.0), 0.5)
@@ -82,7 +88,7 @@ class TestLeapSecondCoast(unittest.TestCase):
         """Coasting a never-seen broadcast gives a huge σ ⇒ ~zero fusion weight."""
         with tempfile.TemporaryDirectory() as td:
             fusion = MultiBroadcastFusion(data_root=Path(td))
-            fusion._fsk_leap_second_hold = True
+            fusion._fsk_leap_second_hold_until = time.time() + 600  # arm 10-min window
             out = fusion._apply_broadcast_kalmans(
                 [_measurement('CHU', 7.85, 5.0)], feed='l2')
             self.assertEqual(out[0].d_clock_ms, 0.0)

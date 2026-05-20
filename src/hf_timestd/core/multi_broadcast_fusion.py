@@ -273,6 +273,32 @@ except Exception as _apm_exc:
 
 
 
+def broadcast_key(station: str, frequency_mhz: float) -> str:
+    """Canonical (station, frequency) key for calibration lookup (M-M9).
+
+    Three call sites historically built this key with inconsistent
+    precision:
+
+      * :pyattr:`BroadcastCalibration.broadcast_key` used ``.2f``;
+      * the inline f-string at the calibration-history merge used ``.2f``;
+      * :meth:`MultiBroadcastFusion._get_broadcast_key` used ``.1f``.
+
+    For CHU's fractional-MHz channels (3.330 / 7.850 / 14.670 MHz) the
+    ``.1f`` format aliases or mis-rounds them, so calibration writes
+    landed on a different key than reads.  Routing every site through
+    this helper makes that impossible.
+
+    ``.2f`` is the chosen precision: it preserves CHU's 0.01 MHz
+    granularity (3.33 / 7.85 / 14.67) while leaving WWV/WWVH integer
+    frequencies unchanged in display.  ``frequency_mhz <= 0`` falls back
+    to the station name alone (the only synthetic measurement that hits
+    this path is the GLOBAL_DIFF anchor at frequency 0.0).
+    """
+    if frequency_mhz <= 0:
+        return station
+    return f"{station}_{frequency_mhz:.2f}"
+
+
 @dataclass
 class BroadcastMeasurement:
     """Single D_clock measurement from one broadcast."""
@@ -298,6 +324,14 @@ class BroadcastMeasurement:
     # _apply_broadcast_kalmans; used as σ_i for inverse-variance fusion
     # weighting in _calculate_weights (M-H12).
     kalman_uncertainty_ms: Optional[float] = None
+
+    # GPSDO lock state at the time the L1/L2 measurement was taken
+    # (M-M10).  Defaults to True so synthetic measurements (GLOBAL_DIFF,
+    # tick, CHU-FSK) and any path that doesn't yet propagate this flag
+    # stay safe — but the dead `hasattr(m, 'gpsdo_locked')` guards
+    # downstream now resolve unconditionally instead of being silently
+    # bypassed.
+    gpsdo_locked: bool = True
 
 
 
@@ -346,8 +380,12 @@ class BroadcastCalibration:
     
     @property
     def broadcast_key(self) -> str:
-        """Unique key for this broadcast (station_frequency)."""
-        return f"{self.station}_{self.frequency_mhz:.2f}"
+        """Unique key for this broadcast (station_frequency).
+
+        Delegates to the module-level :func:`broadcast_key` formatter
+        (M-M9) so every read/write path shares one canonical format.
+        """
+        return broadcast_key(self.station, self.frequency_mhz)
 
 
 # Legacy alias for backwards compatibility
@@ -721,8 +759,20 @@ class MultiBroadcastFusion:
         # TAI-UTC: leap second awareness for Kalman hold
         self._fsk_dut1: Optional[float] = None
         self._fsk_tai_utc: Optional[int] = None
-        self._fsk_leap_second_hold: bool = False
-        
+        # M-M11: hold-window expiry time (unix seconds), not a per-cycle
+        # boolean.  Set when a TAI-UTC change is observed; cleared by
+        # time elapsing past it.  Previously a one-shot boolean that
+        # cleared the next cycle (as soon as the TAI-UTC field was seen
+        # unchanged) — so the Kalman coast never actually persisted
+        # across the leap second.
+        self._fsk_leap_second_hold_until: float = 0.0
+        # Length of the post-leap-second coast window (seconds).  10 min
+        # comfortably covers chrony's reaction time + the broadcast-
+        # specific Kalman re-acquisition tail; shorter than the
+        # propagation cycle period so a single window can't span more
+        # than one leap second.
+        self._fsk_leap_second_hold_seconds: float = 10 * 60.0
+
         # Fusion output
         self.fusion_dir = self.data_root / 'phase2' / 'fusion'
         self.fusion_dir.mkdir(parents=True, exist_ok=True)
@@ -830,7 +880,22 @@ class MultiBroadcastFusion:
         logger.info(f"  Channels: {len(self.channels)}")
         logger.info(f"  Reference station: {reference_station}")
         logger.info(f"  Auto-calibrate: {auto_calibrate}")
-    
+
+    def _leap_second_hold_active(self, now: Optional[float] = None) -> bool:
+        """Return True while the post-leap-second Kalman-hold window
+        is in effect (M-M11).
+
+        ``now`` defaults to wall-clock time.  The hold-window expires
+        on a fixed timestamp set when a TAI-UTC change was last
+        observed via CHU-FSK (see the M-M11 history note on
+        :attr:`_fsk_leap_second_hold_until`), so a single observation
+        coasts the Kalman through the entire transition rather than
+        clearing on the next cycle.
+        """
+        if now is None:
+            now = time.time()
+        return now < self._fsk_leap_second_hold_until
+
     def _discover_channels(self) -> List[str]:
         """
         Discover available Phase 2 channels.
@@ -1163,9 +1228,11 @@ class MultiBroadcastFusion:
         """
         filtered_measurements = []
 
-        # S3: coast every per-broadcast Kalman through a leap-second hold rather
-        # than updating it with the 1-second-stepped measurement.
-        leap_second_hold = getattr(self, '_fsk_leap_second_hold', False)
+        # S3 + M-M11: coast every per-broadcast Kalman through a
+        # leap-second hold rather than updating it with the 1-second-
+        # stepped measurement.  The hold lasts a fixed timestamp window
+        # (10 min by default) — see `_leap_second_hold_active`.
+        leap_second_hold = self._leap_second_hold_active()
 
         for m in measurements:
             # Construct broadcast ID
@@ -1205,6 +1272,7 @@ class MultiBroadcastFusion:
                 # Per-broadcast Kalman posterior σ — the statistical uncertainty
                 # used for inverse-variance fusion weighting (M-H12).
                 kalman_uncertainty_ms=kalman_uncertainty,
+                gpsdo_locked=m.gpsdo_locked,  # M-M10
             )
 
             filtered_measurements.append(filtered_m)
@@ -1967,15 +2035,13 @@ class MultiBroadcastFusion:
                 
                 station = l1_item.get('station_id')
                 freq_mhz = float(l1_item.get('frequency_mhz', 0))
-                
-                # Check for Locked GPSDO in L1 (Critical for valid TOA)
-                # If L1 doesn't explicitly state, we assume logic elsewhere handled it?
-                # Actually, L1MetrologyMeasurement does not have gpsdo_locked? 
-                # Check metrics or assume MetrologyService filtered it.
-                # MetrologyService writes 'gpsdo_locked' attribute?
-                # Re-reading measurement.py: L1MetrologyMeasurement doesn't have gpsdo_locked.
-                # It does have 'quality_flag'.
-                # Let's assume for now Metrology filters bad data or flags it.
+
+                # M-M10: GPSDO lock state.  L1MetrologyMeasurement itself
+                # doesn't carry this flag, but L2TimingMeasurement does
+                # (`gpsdo_locked` is part of the L2 schema in
+                # `models/measurement.py`).  Read from whichever source
+                # carries it; default True (assume locked) so partial-
+                # provenance paths don't regress.
                 
                 # 3. Get L2 match
                 l2_item = l2_map.get(key)
@@ -2056,12 +2122,17 @@ class MultiBroadcastFusion:
                     # New L2 Fields
                     l2_propagation_delay_ms=prop_delay if l2_item else None,
                     l2_tec_estimate=float(l2_item.get('tec_estimate')) if (l2_item and l2_item.get('tec_estimate') is not None) else None,
-                    l2_model_confidence=model_conf if l2_item else None
+                    l2_model_confidence=model_conf if l2_item else None,
+                    # M-M10: prefer L2's explicit flag; fall back to L1's
+                    # if present; finally assume locked (matches default).
+                    gpsdo_locked=bool(
+                        (l2_item or {}).get(
+                            'gpsdo_locked',
+                            l1_item.get('gpsdo_locked', True),
+                        )
+                    ),
                 )
-                
-                # Propagate GPSDO lock if available in L1 (via extra fields or quality)
-                # If quality_flag is bad, we rely on fusion to filter
-                
+
                 measurements.append(m)
 
             except Exception as e:
@@ -2204,17 +2275,20 @@ class MultiBroadcastFusion:
                     w *= 0.1
                     logger.debug(f"Bootstrap: Suppressing BPM weight (too distant for calibration)")
                 else:
-                    broadcast_key = f"{m.station}_{m.frequency_mhz:.2f}"
+                    # M-M9: canonical formatter (was an inline `.2f` here
+                    # while `_get_broadcast_key` used `.1f` — see module
+                    # docstring on `broadcast_key`).
+                    bcast_key = broadcast_key(m.station, m.frequency_mhz)
                     # Check if this is an unambiguous channel (exact key match)
                     is_unambiguous = any(
-                        broadcast_key.startswith(prefix.replace('.', ''))  
+                        bcast_key.startswith(prefix.replace('.', ''))
                         for prefix in UNAMBIGUOUS_BOOTSTRAP_CHANNELS.keys()
                     ) or m.station == 'CHU' or m.frequency_mhz in (20.0, 25.0)
-                    
+
                     if is_unambiguous:
                         # 3x weight boost for unambiguous channels during bootstrap
                         w *= 3.0
-                        logger.debug(f"Bootstrap: Boosting unambiguous channel {broadcast_key} weight 3x")
+                        logger.debug(f"Bootstrap: Boosting unambiguous channel {bcast_key} weight 3x")
             
             # Ensure minimum weight for numerical stability
             weights.append(max(0.01, w))
@@ -2250,12 +2324,14 @@ class MultiBroadcastFusion:
     def _get_broadcast_key(self, station: str, frequency_mhz: float) -> str:
         """
         Generate broadcast key for calibration lookup.
-        
+
         Keys by (station, frequency) for frequency-dependent calibration.
+        Thin wrapper around the module-level :func:`broadcast_key` (M-M9)
+        — previously this used ``.1f`` while every other call site used
+        ``.2f``, so CHU's fractional MHz channels (3.330, 7.850, 14.670)
+        ended up under one key on writes and another on reads.
         """
-        if frequency_mhz > 0:
-            return f"{station}_{frequency_mhz:.1f}"
-        return station
+        return broadcast_key(station, frequency_mhz)
     
     def _apply_calibration(
         self,
@@ -2392,8 +2468,13 @@ class MultiBroadcastFusion:
             return
         
         # CRITICAL FIX: Check GPSDO lock status
-        # If any measurement has unlocked GPSDO, skip calibration update
-        n_unlocked = sum(1 for m in measurements if hasattr(m, 'gpsdo_locked') and not m.gpsdo_locked)
+        # If any measurement has unlocked GPSDO, skip calibration update.
+        # M-M10: the previous `hasattr(m, 'gpsdo_locked')` check was
+        # always False — the fusion dataclass didn't carry the flag,
+        # so this guard never fired.  Now that `BroadcastMeasurement`
+        # has `gpsdo_locked: bool = True` and the L2 reader propagates
+        # the L2 schema's value, the guard runs.
+        n_unlocked = sum(1 for m in measurements if not m.gpsdo_locked)
         if n_unlocked > 0:
             logger.warning(
                 f"Skipping calibration update: {n_unlocked}/{len(measurements)} measurements "
@@ -3317,12 +3398,22 @@ class MultiBroadcastFusion:
                     if self.physics_model is not None and hasattr(self.physics_model, 'set_dut1'):
                         self.physics_model.set_dut1(self._fsk_dut1)
                 if tai_utc is not None:
-                    if hasattr(self, '_fsk_tai_utc') and self._fsk_tai_utc != tai_utc:
-                        logger.warning(f"Fusion: TAI-UTC changed {self._fsk_tai_utc} → {tai_utc} "
-                                      f"— leap second transition, holding Kalman")
-                        self._fsk_leap_second_hold = True
-                    else:
-                        self._fsk_leap_second_hold = False
+                    # M-M11: on a TAI-UTC change, arm the timestamp-based
+                    # hold window.  The old boolean cleared on the very
+                    # next cycle (the moment the table reported the new
+                    # value unchanged), so the Kalman coast never spanned
+                    # the leap second.  Now the window stays armed for
+                    # `_fsk_leap_second_hold_seconds` past `time.time()`,
+                    # and only natural time elapsing clears it.
+                    if self._fsk_tai_utc is not None and self._fsk_tai_utc != tai_utc:
+                        logger.warning(
+                            f"Fusion: TAI-UTC changed {self._fsk_tai_utc} → {tai_utc} "
+                            f"— arming {self._fsk_leap_second_hold_seconds / 60:.0f}-min "
+                            f"Kalman hold window"
+                        )
+                        self._fsk_leap_second_hold_until = (
+                            time.time() + self._fsk_leap_second_hold_seconds
+                        )
                     self._fsk_tai_utc = tai_utc
         except Exception as e:
             logger.debug(f"CHU FSK timing integration failed: {e}")
@@ -3642,9 +3733,11 @@ class MultiBroadcastFusion:
         for m, w in zip(measurements, weights):
             if np.isnan(m.d_clock_ms) or np.isnan(w):
                 logger.warning(f"Filtering out measurement with NaN: station={m.station}, d_clock={m.d_clock_ms}, weight={w}")
-            elif hasattr(m, 'gpsdo_locked') and not m.gpsdo_locked:
+            elif not m.gpsdo_locked:
                 # CRITICAL FIX: Exclude measurements where GPSDO is not locked
-                # Unlocked GPSDO can drift by seconds, causing massive timing errors
+                # Unlocked GPSDO can drift by seconds, causing massive timing errors.
+                # M-M10: dropped the dead `hasattr(m, 'gpsdo_locked')`
+                # gate — the dataclass now always carries the flag.
                 n_gpsdo_unlocked += 1
                 logger.warning(f"Filtering out measurement with unlocked GPSDO: station={m.station}, freq={m.frequency_mhz}MHz")
             else:
@@ -3920,7 +4013,8 @@ class MultiBroadcastFusion:
         # Leap-second hold: a TAI-UTC change (detected via CHU FSK) injects a
         # 1-second UTC step. Force holdover so the fused output coasts on the
         # last LOCKED value instead of emitting the stepped raw measurement.
-        leap_second_hold = getattr(self, '_fsk_leap_second_hold', False)
+        # M-M11: timestamp-windowed (was a one-cycle boolean).
+        leap_second_hold = self._leap_second_hold_active()
         if leap_second_hold:
             logger.warning("Fusion HELD: leap second transition detected via CHU FSK TAI-UTC change")
 
@@ -3951,14 +4045,40 @@ class MultiBroadcastFusion:
             # of the most recent LOCKED cycle.
             self.last_locked_d_clock = fused_d_clock
 
-            # Convergence: good multi-station coverage with low uncertainty.
-            # 2 stations is the normal operating condition (WWV + WWVH).
-            if not self.kalman_converged and n_stations_now >= 2 and wls_uncertainty < 3.0:
-                self.kalman_converged = True
-                logger.info(
-                    f"WLS fusion CONVERGED: {n_stations_now} stations, "
-                    f"uncertainty={wls_uncertainty:.3f}ms"
-                )
+            # Convergence: single covariance-based criterion with
+            # persistence (M-M13).  Previously this gate was
+            # ``n_stations_now >= 2 AND wls_uncertainty < 3.0`` — two
+            # unrelated tests, where the station-count branch could trip
+            # the converged flag on the very first cycle a second station
+            # came in.  That premature lock tightened the calibration
+            # discontinuity filter at line ~2522
+            # (`MAX_CALIBRATION_OFFSET_MS` vs `*3` while unconverged)
+            # before the system had actually settled, so transient large
+            # offsets early in restart settled into long-lived
+            # calibration drift.
+            #
+            # New gate: the WLS posterior uncertainty (the only signal
+            # actually proportional to fusion quality) must stay below
+            # `_WLS_CONVERGED_UNC_MS` for `_WLS_CONVERGED_PERSISTENCE`
+            # consecutive cycles.  Coverage (≥2 stations) is an upstream
+            # precondition of producing a WLS uncertainty at all.
+            _WLS_CONVERGED_UNC_MS = 3.0
+            _WLS_CONVERGED_PERSISTENCE = 5
+            if not self.kalman_converged:
+                if wls_uncertainty < _WLS_CONVERGED_UNC_MS:
+                    self._wls_converged_streak = getattr(
+                        self, '_wls_converged_streak', 0
+                    ) + 1
+                else:
+                    self._wls_converged_streak = 0
+                if self._wls_converged_streak >= _WLS_CONVERGED_PERSISTENCE:
+                    self.kalman_converged = True
+                    logger.info(
+                        f"WLS fusion CONVERGED: uncertainty "
+                        f"{wls_uncertainty:.3f}ms held below "
+                        f"{_WLS_CONVERGED_UNC_MS:.1f}ms for "
+                        f"{_WLS_CONVERGED_PERSISTENCE} consecutive cycles"
+                    )
 
             uncertainty = wls_uncertainty
 
@@ -4236,14 +4356,32 @@ class MultiBroadcastFusion:
         # after any holdover/leap-second coast. Large jumps (>5ms) indicate tone
         # misidentification or calibration error. last_fused_d_clock tracks the
         # value actually emitted, so it stays consistent with what chrony sees.
+        #
+        # M-M12: previously the jump was logged but `last_fused_d_clock`
+        # advanced anyway — a transient outlier propagated straight to
+        # chrony.  Now: on the first cycle a >5 ms jump is seen we coast
+        # on the previous value (and don't advance `last_fused_d_clock`);
+        # if the new value persists on the next cycle the jump is treated
+        # as a genuine reference shift and accepted.
+        _DCLOCK_JUMP_MS = 5.0
         if hasattr(self, 'last_fused_d_clock'):
             delta = abs(fused_d_clock - self.last_fused_d_clock)
-            if delta > 5.0:
+            held_last_cycle = getattr(self, '_d_clock_held_prev', False)
+            if delta > _DCLOCK_JUMP_MS and not held_last_cycle:
                 logger.error(
                     f"D_clock jumped {delta:.1f}ms (from {self.last_fused_d_clock:+.3f}ms "
-                    f"to {fused_d_clock:+.3f}ms) - possible tone misidentification or "
-                    f"calibration error"
+                    f"to {fused_d_clock:+.3f}ms) - holding one cycle (M-M12)"
                 )
+                fused_d_clock = self.last_fused_d_clock
+                self._d_clock_held_prev = True
+            else:
+                if delta > _DCLOCK_JUMP_MS:
+                    logger.warning(
+                        f"D_clock jump persists across two cycles "
+                        f"({delta:.1f}ms); accepting new value as genuine "
+                        f"reference shift"
+                    )
+                self._d_clock_held_prev = False
         self.last_fused_d_clock = fused_d_clock
 
         # Fusion status string: LOCKED once the WLS branch has converged;
