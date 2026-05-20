@@ -342,12 +342,22 @@ class ChronyStatsCollector:
         interval_sec: float = 60.0,
         history_size: int = 1440,  # 24h at 1/min
         data_root: Optional[Path] = None,
+        storage_config: Optional[Dict[str, Any]] = None,
     ):
         self.interval_sec = interval_sec
         self._last_collect = 0.0
         self._history: List[ChronySnapshot] = []
         self._history_maxlen = history_size
         self._data_root = data_root
+        # chrony_stats is a diagnostic-only product outside the schema
+        # registry — it bypasses make_data_product_writer and writes
+        # HDF5 directly via h5py. Honour the [storage] write_hdf5 flag
+        # here so Phase 3b actually stops HDF5 writes site-wide.
+        # Phase 4 follow-up: convert this to a proper schema-based
+        # product with SQLite parity.
+        self._write_hdf5_enabled = bool(
+            (storage_config or {}).get('write_hdf5', True)
+        )
         self._available = None  # None = not checked yet
 
     def collect(self, force: bool = False) -> Optional[ChronySnapshot]:
@@ -384,8 +394,8 @@ class ChronyStatsCollector:
         # Log summary
         self._log_snapshot(snapshot)
 
-        # Write to HDF5
-        if self._data_root:
+        # Write to HDF5 (gated by [storage] write_hdf5 — see __init__)
+        if self._data_root and self._write_hdf5_enabled:
             self._write_hdf5(snapshot)
 
         return snapshot

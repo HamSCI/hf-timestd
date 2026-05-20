@@ -781,27 +781,35 @@ class MultiBroadcastFusion:
         self.fusion_dir.mkdir(parents=True, exist_ok=True)
         
         # ====================================================================
-        # HDF5 Data Product Writer (HDF5-Only Output)
+        # Data Product Writer for fusion_timing
         # ====================================================================
-        # Initialize HDF5 writer for schema-validated fusion results
+        # Route through make_data_product_writer so the [storage] config
+        # picks the backend (HDF5, SQLite, or DualWriter for both).
+        # Phase 2 of the HDF5→SQLite cutover converted every other producer
+        # to this factory; this site was missed and continued unconditionally
+        # writing HDF5 — see docs/HDF5-TO-SQLITE-MIGRATION.md.
         try:
-            from hf_timestd.io import DataProductWriter
-            
-            self.hdf5_fusion_writer = DataProductWriter(
+            from hf_timestd.io import make_data_product_writer
+
+            self.fusion_writer = make_data_product_writer(
                 output_dir=self.fusion_dir,
                 product_level='L3',
                 product_name='fusion_timing',
                 channel='fusion',  # Fusion is multi-channel aggregate
                 processing_version='3.2.0',
-                station_metadata={'description': 'Multi-broadcast fusion estimate'}
+                station_metadata={'description': 'Multi-broadcast fusion estimate'},
+                storage_config=self._storage_config,
             )
-            self.enable_hdf5_fusion_writes = True
-            logger.info("Initialized HDF5 L3 fusion writer")
+            self.enable_fusion_writes = True
+            logger.info(
+                f"Initialized L3 fusion_timing writer "
+                f"(storage={self._storage_config or '<default>'})"
+            )
         except Exception as e:
-            logger.warning(f"Failed to initialize HDF5 fusion writer: {e}")
-            logger.warning("HDF5 fusion writes disabled")
-            self.hdf5_fusion_writer = None
-            self.enable_hdf5_fusion_writes = False
+            logger.warning(f"Failed to initialize L3 fusion_timing writer: {e}")
+            logger.warning("Fusion writes disabled")
+            self.fusion_writer = None
+            self.enable_fusion_writes = False
 
         
         # History for calibration learning
@@ -4458,13 +4466,8 @@ class MultiBroadcastFusion:
         return self.adev_tracker.compute_all_adev(self.adev_tau_values)
     
     def _write_fused_result(self, result: FusedResult):
-        """Write fused result to HDF5."""
-        # HDF5 write (HDF5-only output)
-        self._write_fused_result_hdf5(result)
-    
-    def _write_fused_result_hdf5(self, result: FusedResult):
-        """Write fused result to HDF5 with schema validation."""
-        if not self.enable_hdf5_fusion_writes or not self.hdf5_fusion_writer:
+        """Persist fused result through the configured data-product writer."""
+        if not self.enable_fusion_writes or not self.fusion_writer:
             return
         
         try:
@@ -4571,11 +4574,11 @@ class MultiBroadcastFusion:
                 adev_1000s=float(result.adev_1000s) if result.adev_1000s is not None else None
             )
             
-            # Write to HDF5 with schema validation
-            self.hdf5_fusion_writer.write_measurement(l3_measurement.model_dump())
-            
+            # Write through the configured backend (HDF5, SQLite, or both)
+            self.fusion_writer.write_measurement(l3_measurement.model_dump())
+
         except Exception as e:
-            logger.error(f"Failed to write HDF5 fusion result: {e}", exc_info=True)
+            logger.error(f"Failed to write fusion result: {e}", exc_info=True)
 
     
     def _read_gnss_vtec(self) -> Optional[Tuple[float, float]]:
@@ -4827,6 +4830,7 @@ def run_fusion_service(
             chrony_stats_collector = ChronyStatsCollector(
                 interval_sec=60.0,  # Collect once per minute
                 data_root=data_root,
+                storage_config=_storage_config,
             )
             logger.info("Chrony stats collector initialized (60s interval)")
         except Exception as e:

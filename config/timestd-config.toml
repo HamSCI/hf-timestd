@@ -147,9 +147,10 @@ enable_metrics = true
 # read_sqlite here governs whether the dashboard reads from SQLite.
 # Core services (metrology, fusion, l2-calibration, ...) read
 # /etc/hf-timestd/timestd-config.toml instead — flip both for a full
-# cutover. Phase 3a (2026-05-20): read flipped to SQLite; HDF5
-# dual-write still on. Phase 3b will set write_hdf5=false.
-write_hdf5 = true
+# cutover. Phase 3a (2026-05-20 11:43 UTC): read_sqlite=true. Phase 3b
+# (2026-05-20 13:35 UTC): write_hdf5=false — SQLite is sole writer.
+# Rollback path: set write_hdf5=true and restart timestd-metrology@*.
+write_hdf5 = false
 write_sqlite = true
 read_sqlite = true
 sqlite_path = "/var/lib/timestd/phase2/timestd.db"
