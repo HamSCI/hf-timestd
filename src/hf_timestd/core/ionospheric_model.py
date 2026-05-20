@@ -405,7 +405,20 @@ class IonosphericModel:
             raise
     
     def _location_key(self, lat: float, lon: float, time: datetime) -> str:
-        """Generate cache key for location/time combination."""
+        """Generate cache key for location/time combination.
+
+        §4.4 Low: the key uses ``time.date()`` and ``time.hour``;
+        a naive (tz-less) datetime would key the *same* wall-clock
+        moment to a different cache bucket than the UTC-aware
+        equivalent.  ``get_layer_heights`` normalises to UTC before
+        calling this, but if a future caller bypasses that path the
+        cache would silently fragment.  Normalise here too so the
+        helper is self-consistent regardless of caller hygiene.
+        """
+        if time.tzinfo is None:
+            time = time.replace(tzinfo=timezone.utc)
+        else:
+            time = time.astimezone(timezone.utc)
         # Round to reduce cache granularity (5-minute, 1-degree resolution)
         lat_round = round(lat)
         lon_round = round(lon)
@@ -413,66 +426,14 @@ class IonosphericModel:
         minute_slot = (time.hour * 60 + time.minute) // 5
         return f"{lat_round}_{lon_round}_{time.date()}_{minute_slot}"
     
-    def calculate_hf_reflection_point(
-        self,
-        tx_lat: float,
-        tx_lon: float,
-        rx_lat: float,
-        rx_lon: float,
-        layer_height_km: float = 300.0
-    ) -> Tuple[float, float]:
-        """
-        Calculate ionospheric pierce point for HF propagation.
-        
-        Assumes single reflection at F2 layer. For HF skywave, the signal
-        reflects off the ionosphere at approximately the midpoint of the
-        great circle path between transmitter and receiver.
-        
-        Args:
-            tx_lat: Transmitter latitude (degrees)
-            tx_lon: Transmitter longitude (degrees)
-            rx_lat: Receiver latitude (degrees)
-            rx_lon: Receiver longitude (degrees)
-            layer_height_km: Ionospheric layer height (default: 300 km for F2)
-            
-        Returns:
-            (lat, lon) of reflection point in degrees
-        """
-        # Convert to radians
-        tx_lat_rad = math.radians(tx_lat)
-        tx_lon_rad = math.radians(tx_lon)
-        rx_lat_rad = math.radians(rx_lat)
-        rx_lon_rad = math.radians(rx_lon)
-        
-        # For single-hop HF, reflection point is approximately at the midpoint
-        # of the great circle path. This is a simplification but works well
-        # for typical HF distances (1000-3000 km).
-        
-        # Calculate midpoint using spherical geometry
-        Bx = math.cos(rx_lat_rad) * math.cos(rx_lon_rad - tx_lon_rad)
-        By = math.cos(rx_lat_rad) * math.sin(rx_lon_rad - tx_lon_rad)
-        
-        lat_mid_rad = math.atan2(
-            math.sin(tx_lat_rad) + math.sin(rx_lat_rad),
-            math.sqrt((math.cos(tx_lat_rad) + Bx)**2 + By**2)
-        )
-        lon_mid_rad = tx_lon_rad + math.atan2(By, math.cos(tx_lat_rad) + Bx)
-        
-        # Convert back to degrees
-        lat_mid = math.degrees(lat_mid_rad)
-        lon_mid = math.degrees(lon_mid_rad)
-        
-        # Normalize longitude to -180 to 180
-        if lon_mid > 180:
-            lon_mid -= 360
-        elif lon_mid < -180:
-            lon_mid += 360
-        
-        logger.debug(f"HF reflection point: ({lat_mid:.2f}°, {lon_mid:.2f}°) "
-                    f"for TX({tx_lat:.2f}°, {tx_lon:.2f}°) → RX({rx_lat:.2f}°, {rx_lon:.2f}°)")
-        
-        return lat_mid, lon_mid
-    
+    # §4.4 Low (2026-05-20): `calculate_hf_reflection_point(tx, rx,
+    # layer_height_km=300.0)` was removed.  It computed a great-circle
+    # midpoint (ignoring its `layer_height_km` argument entirely) and
+    # was duplicated by `tec_geometry.calculate_midpoint`, which is
+    # already used throughout the codebase for the same purpose.  No
+    # callers remained; if you need a midpoint, import from
+    # `core.tec_geometry`.
+
     def _find_ionex_file(self, timestamp: datetime) -> Optional[Path]:
         """
         Locate the IONEX GIM file for the exact UTC date of `timestamp`.
