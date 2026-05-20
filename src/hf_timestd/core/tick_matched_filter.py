@@ -196,7 +196,7 @@ class TickDetectionResult:
     timing_uncertainty_ms: float     # Estimated uncertainty
     snr_db: float                    # Signal-to-noise ratio
     correlation_peak: float          # Normalized correlation peak (0-1)
-    phase_rad: float                 # Audio-domain modulation phase (from AM envelope correlator)
+    phase_rad: float                 # AM-envelope modulation phase (NOT CURRENTLY MEASURED — always 0.0; reserved for future AM-correlator phase output)
     carrier_phase_rad: float         # RF carrier phase at tone freq (from IQ mix-down)
     dc_carrier_phase_rad: float      # Bare carrier phase from mean(IQ) DC phasor
     coherence_quality: float         # Phase stability metric (0-1)
@@ -298,9 +298,12 @@ class TickMatchedFilter:
         self._iq_templates: Dict[float, np.ndarray] = {}  # Complex IQ templates
         self._am_templates: Dict[float, np.ndarray] = {}  # AM envelope templates
         
-        # Pre-allocated buffers for zero-allocation DSP
-        self._max_samples = 65 * self.sample_rate
-        self._envelope_buffer = np.empty(self._max_samples, dtype=np.float32)
+        # NOTE: an `_envelope_buffer` pre-allocation lived here for an
+        # earlier "zero-allocation DSP" design that never materialised
+        # in the DSP path -- the buffer was allocated but never read or
+        # written.  Removed (§3.4 Low); allocations along the path are
+        # short-lived NumPy temporaries that the GC handles fine at
+        # per-minute cadence.
         self._build_templates()
         self._build_iq_templates()
         self._build_am_templates()
