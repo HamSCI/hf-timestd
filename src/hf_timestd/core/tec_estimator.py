@@ -50,7 +50,7 @@ must treat ``tec_u`` as advisory and gate on ``confidence``.
 """
 
 import numpy as np
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Optional, Dict
 import logging
 
@@ -164,10 +164,29 @@ class TECEstimator:
             # Weight = inverse variance from timing uncertainty
             w = 1.0 / (max(u_ms, 0.1) ** 2)
 
-            # Optionally boost weight by SNR (higher SNR = more reliable)
+            # Optionally boost weight by SNR (higher SNR = more reliable).
+            #
+            # §4.4 Low: spelling out the linear SNR weighting formula
+            # that was previously a single-line comment.  The weight
+            # factor is ``snr_db / 20``, *clamped* into [0.5, 3.0]:
+            #
+            #     SNR (dB) :   0    10    20    40    60+
+            #     factor   :  0.5  0.5   1.0   2.0   3.0  (clamped)
+            #
+            # The choice is heuristic rather than from first principles:
+            # 20 dB is the contract's "≥ 10 dB SNR" target plus a
+            # ~10 dB margin, and is treated as the "reference quality"
+            # weight of 1.0.  The 0.5 floor keeps very low-SNR samples
+            # from being dropped entirely (they still contribute, just
+            # less); the 3.0 cap prevents one very-high-SNR sample from
+            # dominating the WLS fit at the expense of geometric
+            # diversity across frequencies.  Both clamps are wider than
+            # the per-measurement uncertainty term (``1/u_ms²``) on
+            # purpose -- the uncertainty term carries the formal
+            # statistical weight and this is the soft "trustworthiness"
+            # multiplier on top.
             snr_db = m.get('snr_db')
             if snr_db is not None and snr_db > 0:
-                # Linear SNR weighting: 20 dB → 1.0, 40 dB → 2.0
                 snr_factor = max(0.5, min(3.0, snr_db / 20.0))
                 w *= snr_factor
 
