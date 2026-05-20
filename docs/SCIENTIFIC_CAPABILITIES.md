@@ -1,5 +1,38 @@
 # HF-TimeStd: Signal Features and Scientific Capabilities
 
+> ## ⚠️ SUPERSEDED — read [`PHYSICS.md`](PHYSICS.md) instead
+>
+> **Status:** STALE.  This document is preserved as a historical reference
+> only and **understates what the instrument currently measures**.
+> The canonical, version-tagged capability inventory lives in
+> [`docs/PHYSICS.md`](PHYSICS.md) — which carries explicit
+> ✅/⚠️/❌ honesty markers per feature and is the document the code is
+> kept in sync with.
+>
+> Known stale claims in *this* file (see review §5 / D-C1 for the full
+> list — fix in PHYSICS.md, not here):
+>
+> * **TID detection** — described here as "not yet implemented" /
+>   "needs implementation" / "could be measured".  In fact
+>   `core/tid_detector.py` is fully built; the L3 deliverable is
+>   deferred (P-H29) but the detector itself runs.
+> * **Scintillation (S4, σ_φ) and foF2 estimation** — described here as
+>   "future work".  `PHYSICS.md §4` and the code show them operational.
+> * **CHU FSK tones** — Bell-103 1070/1270 Hz listed below is the
+>   *originate* pair.  CHU uses the **answer** pair **2225/2025 Hz**;
+>   that's what `chu_fsk_detector.py` is built for.
+> * **L3 format** — "HDF5 (planned), CSV (current)" is two major
+>   versions out of date.  CSV was removed in v5.0; v6.10 moved L3 to
+>   HDF5 SWMR; v7.0 dual-writes HDF5 + SQLite per the migration doc
+>   (`HDF5-TO-SQLITE-MIGRATION.md`).
+>
+> Plan of record: this file will be retired (unique content folded into
+> `PHYSICS.md`) once the in-flight metrology/physics remediation
+> settles.  Until then, treat anything below as advisory at best —
+> **PHYSICS.md is the answer**.
+
+---
+
 ## Overview
 
 This document provides an honest assessment of what signal features the HF-TimeStd system can measure and what scientific questions those measurements can address. We distinguish between:

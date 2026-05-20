@@ -1,8 +1,8 @@
 # HF-TimeStd: Metrological Description
 
 **Prepared for:** Time metrology professionals, "time nuts", and general users  
-**System Version:** 6.11.0 (Unified Measurement Path + Adaptive Windowing + Multipath-Aware Uncertainty)  
-**Last Updated:** March 19, 2026  
+**System Version:** 7.0.0 (canonical: `pyproject.toml`)  
+**Last Updated:** 2026-05-20  
 **Author:** Michael James Hauan (AC0G)
 
 ---
@@ -203,6 +203,28 @@ radiod's `GPS_TIME` and `RTP_TIMESNAP` are both derived from `input_sample_index
 | **L3** | Fused Timing | Kalman filtered, multi-broadcast |
 
 ### 4.5 Timing Authority Hierarchy (A- and T-Levels)
+
+> **Implementation-status legend** (matches the markers used in
+> `docs/PHYSICS.md`):
+> - ✅ Operational in the deployed code today.
+> - ⚠️ Partial: the building blocks exist but some pieces of the policy / wiring described here are not yet running.
+> - ❌ Designed but not implemented; the schema/policy is recorded here as the contract a future implementation must satisfy.
+>
+> Status of the §4.5 / §4.6 content as of 2026-05-20 (review item D-H5):
+>
+> | Component | Status | Notes |
+> |---|---|---|
+> | A-level (ADC timebase) ranking | ✅ | Reported by `radiod` / `core_recorder`. |
+> | T0–T5 levels (chrony/NTP-based) | ✅ | These are conventional chrony plumbing; behaviour matches the table. |
+> | T3 (Fusion HF-derived UTC) | ✅ | Produced by `multi_broadcast_fusion`. |
+> | **T6 BPSK-PPS injection / detection** | ❌ | **Not implemented.** No injector exists; the detector is not in the code base. This subsection records the design that a future T6 must implement. ARCHITECTURE.md correctly lists PPS injection under "Future Options". |
+> | Authority manager + `/run/hf-timestd/authority.json` v1 | ⚠️ | `FusionStatusWriter` publishes `fusion_status.json` (per `multi_broadcast_fusion.py`); the full `authority.json` schema below + multi-source A/T selection logic is **not yet** integrated into a separate authority manager. Schema treated as design until that lands. |
+> | `chronyc selectopts` runtime gating | ❌ | Not wired in production; the configuration described below is the target. |
+> | mDNS TXT-record extension | ❌ | Not advertised by any service today. |
+>
+> Treat the rest of §4.5 / §4.6 as the **contract** an authority
+> manager must satisfy when it's built, not as a description of
+> live behaviour.
 
 > **Note:** The T-level hierarchy defined here is a **distinct axis** from the data-product levels L0–L3 in §4.4. L-levels describe *what a product is*. T-levels describe *how well the system knows UTC* at a given moment. A host has exactly one active T-level; it produces L0–L3 data products at whatever T-level is currently active. The two hierarchies are orthogonal.
 

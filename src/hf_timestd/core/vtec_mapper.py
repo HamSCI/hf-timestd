@@ -48,6 +48,12 @@ logger = logging.getLogger(__name__)
 EARTH_RADIUS_KM = 6371.0
 THIN_SHELL_HEIGHT_KM = 350.0  # Standard thin-shell height for vTEC mapping
 
+# 2D polynomial fit conditioning (P-H10)
+RIDGE_LAMBDA = 0.1            # Column-scaled Tikhonov ridge strength
+MAX_CONDITION_NUMBER = 1.0e8  # Above this the weighted design matrix is
+                              # treated as effectively rank-deficient
+                              # (clustered IPPs) and confidence collapses
+
 
 @dataclass
 class IPPMeasurement:
@@ -85,9 +91,13 @@ class VTECMapResult:
 
     # Quality
     n_ipps: int = 0
-    rms_residual_tecu: float = 0.0
+    rms_residual_tecu: float = 0.0      # in-sample fit residual (optimistic)
+    cv_rms_residual_tecu: float = 0.0   # leave-one-out CV residual — the
+                                        # honest out-of-sample metric (P-M8);
+                                        # NaN if N is too small to cross-validate
     confidence: float = 0.0
     spatial_coverage_km: float = 0.0
+    condition_number: float = 0.0   # cond(weighted design matrix); large => clustered IPPs
 
 
 class VTECMapper:
@@ -224,32 +234,71 @@ class VTECMapper:
         # Weights from uncertainties
         W = 1.0 / np.maximum(uncertainties, 0.1) ** 2
 
-        # Weighted least squares: minimize ||W^(1/2)(A·c - vtec)||²
-        W_sqrt = np.sqrt(W)
-        A_w = A * W_sqrt[:, np.newaxis]
-        b_w = vtecs * W_sqrt
-
+        # Conditioning of the weighted design matrix. Clustered IPPs make the
+        # polynomial basis nearly collinear; a plain lstsq then oscillates
+        # wildly off-cluster while the in-sample RMS still looks good (P-H10).
+        A_w = A * np.sqrt(W)[:, np.newaxis]
         try:
-            coeffs, residuals_arr, rank, sv = np.linalg.lstsq(A_w, b_w, rcond=None)
-        except np.linalg.LinAlgError as e:
-            logger.warning(f"VTEC polynomial fit failed: {e}")
+            cond = float(np.linalg.cond(A_w))
+        except np.linalg.LinAlgError:
+            cond = float('inf')
+        if not math.isfinite(cond) or cond > MAX_CONDITION_NUMBER:
+            logger.warning(
+                f"VTEC fit ill-conditioned (cond={cond:.2e}, {len(measurements)} "
+                f"IPPs over {coverage_km:.0f} km) - regularised, confidence reduced"
+            )
+
+        # Primary fit — weighted, ridge-regularised least squares (the solve
+        # lives in _solve_vtec_poly so leave-one-out below refits identically).
+        coeffs = self._solve_vtec_poly(A, vtecs, W)
+        if coeffs is None:
+            logger.warning("VTEC polynomial fit failed")
             return None
 
-        # Compute fit residuals
-        fitted = A @ coeffs
-        residuals = vtecs - fitted
-        rms_residual = float(np.sqrt(np.mean(residuals ** 2)))
+        # In-sample fit residual — kept for reference, but it is optimistic
+        # (the polynomial interpolates its own training points).
+        rms_residual = float(np.sqrt(np.mean((vtecs - A @ coeffs) ** 2)))
 
-        # Evaluate on a regular grid
+        # P-M8: leave-one-out cross-validation. The in-sample residual above
+        # systematically overstates map quality, so `confidence` is based on
+        # an out-of-sample metric instead: refit on N-1 points, predict the
+        # held-out one, and take the RMS of those errors. LOO needs N-1 >=
+        # n_coeffs so each refit stays determined; when it does not, the map
+        # cannot be honestly cross-validated and cv_rms is left NaN.
+        cv_rms = float('nan')
+        if len(measurements) - 1 >= n_coeffs:
+            cv_errors = []
+            for i in range(len(measurements)):
+                hold = np.ones(len(measurements), dtype=bool)
+                hold[i] = False
+                ci = self._solve_vtec_poly(A[hold], vtecs[hold], W[hold])
+                if ci is not None:
+                    cv_errors.append(float(vtecs[i] - A[i] @ ci))
+            if cv_errors:
+                cv_rms = float(np.sqrt(np.mean(np.square(cv_errors))))
+
+        # Evaluate on a regular grid; cells outside the convex hull of the
+        # IPPs are pure extrapolation and are masked to NaN (P-H10).
         grid_lats, grid_lons, grid_vtec = self._evaluate_grid(
-            coeffs, max_degree, center_lat, center_lon
+            coeffs, max_degree, center_lat, center_lon, lats, lons
         )
 
-        # Confidence metric
+        # Confidence metric — the residual term uses the cross-validated RMS
+        # when available; if the map was too small to cross-validate, fall
+        # back to the in-sample RMS but halve the term (quality unverified).
         conf_n = min(1.0, len(measurements) / 8.0)
-        conf_residual = max(0.0, 1.0 - rms_residual / 5.0)
+        if math.isfinite(cv_rms):
+            conf_residual = max(0.0, 1.0 - cv_rms / 5.0)
+        else:
+            conf_residual = 0.5 * max(0.0, 1.0 - rms_residual / 5.0)
         conf_coverage = min(1.0, coverage_km / 1000.0)
-        confidence = conf_n * conf_residual * conf_coverage
+        if math.isfinite(cond) and cond > 0.0:
+            conf_cond = float(np.clip(
+                (math.log10(MAX_CONDITION_NUMBER) - math.log10(cond)) /
+                (math.log10(MAX_CONDITION_NUMBER) - 4.0), 0.0, 1.0))
+        else:
+            conf_cond = 0.0
+        confidence = conf_n * conf_residual * conf_coverage * conf_cond
 
         return VTECMapResult(
             timestamp=timestamp,
@@ -263,8 +312,10 @@ class VTECMapper:
             ipp_measurements=measurements,
             n_ipps=len(measurements),
             rms_residual_tecu=rms_residual,
+            cv_rms_residual_tecu=cv_rms,
             confidence=confidence,
             spatial_coverage_km=coverage_km,
+            condition_number=cond,
         )
 
     def write_ionex(
@@ -304,13 +355,24 @@ class VTECMapper:
                 f.write(f"  6371.0                                                      BASE RADIUS\n")
                 f.write(f"     2                                                        MAP DIMENSION\n")
 
-                # Grid definition
-                lat_min = result.center_lat - self.grid_extent_deg
-                lat_max = result.center_lat + self.grid_extent_deg
-                lon_min = result.center_lon - self.grid_extent_deg
-                lon_max = result.center_lon + self.grid_extent_deg
-                dlat = self.grid_resolution_deg
-                dlon = self.grid_resolution_deg
+                # Grid definition — taken from the ACTUAL evaluated grid
+                # (result.grid_lats / grid_lons) so the bounds declared in the
+                # header always match the data rows written below (P-M8);
+                # recomputing them from center ± extent risked the header
+                # drifting from the data. An empty grid cannot produce a
+                # conformant IONEX file, so refuse rather than emit one.
+                if not (result.grid_lats and result.grid_lons):
+                    logger.warning(
+                        "VTEC map has no evaluated grid — IONEX file not written")
+                    return False
+                lat_min = result.grid_lats[0]
+                lat_max = result.grid_lats[-1]
+                lon_min = result.grid_lons[0]
+                lon_max = result.grid_lons[-1]
+                dlat = (result.grid_lats[1] - result.grid_lats[0]
+                        if len(result.grid_lats) > 1 else self.grid_resolution_deg)
+                dlon = (result.grid_lons[1] - result.grid_lons[0]
+                        if len(result.grid_lons) > 1 else self.grid_resolution_deg)
 
                 f.write(f"  {self.shell_height_km:6.1f}{self.shell_height_km:6.1f}   0.0                                    HGT1 / HGT2 / DHGT\n")
                 f.write(f"   {lat_min:6.1f}{lat_max:6.1f}{dlat:6.1f}                                    LAT1 / LAT2 / DLAT\n")
@@ -402,6 +464,37 @@ class VTECMapper:
         return lat, lon
 
     @staticmethod
+    def _solve_vtec_poly(
+        A: np.ndarray, vtecs: np.ndarray, weights: np.ndarray
+    ) -> Optional[np.ndarray]:
+        """
+        Weighted, ridge-regularised least-squares solve for the 2D-polynomial
+        VTEC coefficients. Factored out of generate_map so the primary fit and
+        the leave-one-out refits (P-M8) use an identical procedure.
+
+        Tikhonov (ridge) regularisation damps the non-constant polynomial
+        terms that clustered IPPs cannot constrain: the penalty is scaled per
+        column to each term's own magnitude, the constant term (column 0) is
+        left unpenalised so the mean VTEC level is not shrunk toward zero, and
+        the augmented system is full column rank so it also resolves the
+        rank-deficiency a plain lstsq would hit. Returns None if the solve
+        fails.
+        """
+        w_sqrt = np.sqrt(weights)
+        a_w = A * w_sqrt[:, np.newaxis]
+        b_w = vtecs * w_sqrt
+        col_norms = np.linalg.norm(a_w, axis=0)
+        penalty = RIDGE_LAMBDA * col_norms
+        penalty[0] = 0.0
+        a_aug = np.vstack([a_w, np.diag(penalty)])
+        b_aug = np.concatenate([b_w, np.zeros(a_w.shape[1])])
+        try:
+            coeffs, *_ = np.linalg.lstsq(a_aug, b_aug, rcond=None)
+            return coeffs
+        except np.linalg.LinAlgError:
+            return None
+
+    @staticmethod
     def _build_poly_matrix(dlat: np.ndarray, dlon: np.ndarray, degree: int) -> np.ndarray:
         """Build design matrix for 2D polynomial of given degree."""
         n = len(dlat)
@@ -417,8 +510,15 @@ class VTECMapper:
         degree: int,
         center_lat: float,
         center_lon: float,
+        ipp_lats: np.ndarray,
+        ipp_lons: np.ndarray,
     ) -> Tuple[List[float], List[float], List[List[float]]]:
-        """Evaluate polynomial on a regular lat/lon grid."""
+        """
+        Evaluate the polynomial on a regular lat/lon grid.
+
+        Cells outside the convex hull of the IPPs are pure extrapolation — the
+        polynomial is unconstrained there — and are masked to NaN (P-H10).
+        """
         lat_min = center_lat - self.grid_extent_deg
         lat_max = center_lat + self.grid_extent_deg
         lon_min = center_lon - self.grid_extent_deg
@@ -427,20 +527,95 @@ class VTECMapper:
         lats = np.arange(lat_min, lat_max + 0.01, self.grid_resolution_deg)
         lons = np.arange(lon_min, lon_max + 0.01, self.grid_resolution_deg)
 
+        # Convex hull of the IPPs defines the interpolation domain; cells
+        # outside it are extrapolation and are not evaluated.
+        hull = self._convex_hull(np.column_stack([ipp_lats, ipp_lons]))
+        if hull is not None:
+            lon_mesh, lat_mesh = np.meshgrid(lons, lats)
+            grid_pts = np.column_stack([lat_mesh.ravel(), lon_mesh.ravel()])
+            inside = self._points_in_hull(grid_pts, hull).reshape(lat_mesh.shape)
+        else:
+            # Degenerate IPP geometry (collinear/coincident): no interpolation
+            # domain can be defined — fall back to evaluating every cell.
+            inside = np.ones((len(lats), len(lons)), dtype=bool)
+
         grid = []
-        for lat in lats:
+        for i, lat in enumerate(lats):
             row = []
-            for lon in lons:
+            for j, lon in enumerate(lons):
+                if not inside[i, j]:
+                    row.append(float('nan'))
+                    continue
                 dlat = lat - center_lat
                 dlon = lon - center_lon
                 val = 0.0
                 idx = 0
-                for i in range(degree + 1):
-                    for j in range(degree + 1 - i):
+                for ii in range(degree + 1):
+                    for jj in range(degree + 1 - ii):
                         if idx < len(coeffs):
-                            val += coeffs[idx] * dlat ** i * dlon ** j
+                            val += coeffs[idx] * dlat ** ii * dlon ** jj
                         idx += 1
                 row.append(max(0.0, val))  # vTEC >= 0
             grid.append(row)
 
         return lats.tolist(), lons.tolist(), grid
+
+    @staticmethod
+    def _convex_hull(points: np.ndarray) -> Optional[np.ndarray]:
+        """
+        2D convex hull via Andrew's monotone chain.
+
+        Args:
+            points: (n, 2) array of (x, y) coordinates.
+
+        Returns:
+            Hull vertices (m, 2) in counter-clockwise order, or None if the
+            points are degenerate (fewer than 3 distinct, or all collinear).
+        """
+        pts = np.unique(np.asarray(points, dtype=float), axis=0)
+        if len(pts) < 3:
+            return None
+        pts = pts[np.lexsort((pts[:, 1], pts[:, 0]))]
+
+        def cross(o, a, b):
+            return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+        lower: List[np.ndarray] = []
+        for p in pts:
+            while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
+                lower.pop()
+            lower.append(p)
+        upper: List[np.ndarray] = []
+        for p in pts[::-1]:
+            while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
+                upper.pop()
+            upper.append(p)
+
+        hull = lower[:-1] + upper[:-1]
+        if len(hull) < 3:
+            return None
+        return np.array(hull)
+
+    @staticmethod
+    def _points_in_hull(grid_pts: np.ndarray, hull: np.ndarray) -> np.ndarray:
+        """
+        Vectorised point-in-convex-polygon test.
+
+        Args:
+            grid_pts: (n, 2) query points.
+            hull: (m, 2) convex polygon vertices in counter-clockwise order.
+
+        Returns:
+            Boolean array (n,): True where the point is inside or on the hull.
+        """
+        inside = np.ones(len(grid_pts), dtype=bool)
+        m = len(hull)
+        for i in range(m):
+            a = hull[i]
+            b = hull[(i + 1) % m]
+            edge_x, edge_y = b[0] - a[0], b[1] - a[1]
+            rel_x = grid_pts[:, 0] - a[0]
+            rel_y = grid_pts[:, 1] - a[1]
+            cross = edge_x * rel_y - edge_y * rel_x
+            inside &= cross >= -1e-9
+        return inside

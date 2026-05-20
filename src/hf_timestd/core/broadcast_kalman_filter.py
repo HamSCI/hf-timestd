@@ -169,11 +169,13 @@ class BroadcastKalmanFilter:
         self.previous_time = None
         
         # ADAPTIVE KALMAN ENHANCEMENTS (2026-01-08)
-        # Track mode transitions for adaptive process noise
-        self.time_since_mode_change = 100.0  # minutes (assume stable initially)
+        # Mode-transition timing — a single wall-clock base (M-H20). "Time
+        # since the last transition" is always derived from this timestamp via
+        # _minutes_since_mode_change(); there is no separate update-counter.
+        # Initialised far in the past so the filter starts in the stable regime.
         self.last_mode_status = 'STABLE'
         self.last_innovation = 0.0
-        self.last_mode_transition_time = datetime.now(timezone.utc).timestamp() - 10000  # Assume stable initially
+        self.last_mode_transition_time = time.time() - 10000.0
         
         logger.info(
             f"Initialized {self.broadcast_id} Kalman filter: "
@@ -313,14 +315,30 @@ class BroadcastKalmanFilter:
     def update(self, measurement_ms: float, snr_db: float) -> Tuple[float, float]:
         """
         Update filter with new measurement.
-        
+
         Args:
             measurement_ms: Measured ToF in milliseconds
             snr_db: Signal-to-noise ratio in dB
-            
+
         Returns:
             (tof_ms, uncertainty_ms)
         """
+        # M-M15: NaN/Inf guard.  Either input being non-finite poisons
+        # the state covariance instantly (the L3 NaN filter in the fusion
+        # service runs downstream, so it couldn't catch corruption that
+        # had already landed in `self.P` here).  Refuse the update and
+        # return the current state/uncertainty so the caller sees a
+        # well-defined "no-op" answer rather than NaN.  ~10⁶ updates/week
+        # means we cannot rely on upstream cleanliness for safety.
+        if not (np.isfinite(measurement_ms) and np.isfinite(snr_db)):
+            logger.warning(
+                f"{self.broadcast_id}: non-finite Kalman input rejected "
+                f"(measurement_ms={measurement_ms!r}, snr_db={snr_db!r})"
+            )
+            if not self.initialized:
+                return float('nan'), float('nan')
+            return float(self.state[0]), float(np.sqrt(self.P[0, 0]))
+
         # Initialize on first measurement
         if not self.initialized:
             self.state[0] = measurement_ms
@@ -328,59 +346,79 @@ class BroadcastKalmanFilter:
             self.initialized = True
             self.n_updates = 1
             self.last_update_time = datetime.now(timezone.utc)
-            
+
             uncertainty = np.sqrt(self.P[0, 0])
             logger.info(
                 f"{self.broadcast_id} initialized: "
                 f"tof={measurement_ms:.3f}ms, uncertainty={uncertainty:.3f}ms"
             )
             return measurement_ms, uncertainty
-        
-        # Predict step with adaptive process noise
-        # ADAPTIVE ENHANCEMENT: Adjust Q based on conditions
-        mode_status = self.detect_mode_transition(measurement_ms - self.state[0])
-        
-        if mode_status == 'MODE_CHANGE':
-            self.time_since_mode_change = 0.0
-            self.last_mode_transition_time = datetime.now(timezone.utc).timestamp()
-            logger.info(f"{self.broadcast_id}: Mode transition detected")
-        elif mode_status == 'POSSIBLE_CHANGE':
-            # Don't reset counter, but don't increment either
-            pass
-        else:
-            self.time_since_mode_change += 1.0  # Increment by 1 minute
-        
-        # Calculate adaptive Q
-        Q_adaptive = self._adaptive_process_noise(
-            innovation_ms=measurement_ms - self.state[0],
-            snr_db=snr_db,
-            time_since_mode_change=self.time_since_mode_change
-        )
-        
-        # Predict with adaptive Q (dt=1.0 minute)
+
+        # PREDICT (state) — F advances tof by doppler·dt. The covariance
+        # predict is deferred until the adaptive Q is known (below).
         self.state = self.F @ self.state
+
+        # ONE innovation, derived AFTER the predict — the true residual
+        # (M-H19). The filter's defences (mode-transition detection, adaptive
+        # process noise) and the measurement update all key off this same
+        # value. Previously they were fed `measurement - state[0]` computed
+        # BEFORE the predict, which differs from the true innovation by
+        # doppler·dt — so the defences keyed off the wrong residual.
+        innovation = measurement_ms - (self.H @ self.state)[0]
+        self.last_innovation = innovation
+
+        # Mode-transition detection (adaptive Kalman enhancement)
+        mode_status = self.detect_mode_transition(innovation)
+        if mode_status == 'MODE_CHANGE':
+            self.last_mode_transition_time = time.time()
+            logger.info(f"{self.broadcast_id}: Mode transition detected")
+        # POSSIBLE_CHANGE / STABLE: no transition — leave the timestamp as is.
+
+        # Adaptive process noise, then the covariance predict (dt=1.0 minute)
+        Q_adaptive = self._adaptive_process_noise(
+            innovation_ms=innovation,
+            snr_db=snr_db,
+            time_since_mode_change=self._minutes_since_mode_change(),
+        )
         self.P = self.F @ self.P @ self.F.T + Q_adaptive
-        
+
         # Measurement noise (dynamic, based on SNR)
         R = self._get_measurement_noise(snr_db)
-        
+
         # Kalman gain
         S = self.H @ self.P @ self.H.T + R
         K = self.P @ self.H.T / S
-        
-        # Update step
-        innovation = measurement_ms - (self.H @ self.state)[0]
-        self.last_innovation = innovation
+
+        # Update step (same innovation derived above)
         self.state = self.state + K.flatten() * innovation
-        self.P = (np.eye(2) - K @ self.H) @ self.P
-        
+
+        # M-M14: Joseph-form covariance update.
+        #
+        #     P = (I − K H) P (I − K H)ᵀ + K R Kᵀ
+        #
+        # The short form `P = (I − K H) P` is mathematically equivalent
+        # in exact arithmetic, but at finite precision it neither
+        # preserves symmetry nor guarantees positive-definiteness — both
+        # of which the Kalman gain on the *next* cycle needs.  With ~10⁶
+        # updates per week per broadcast bank, asymmetry and tiny
+        # negative eigenvalues accumulate; this filter would eventually
+        # produce NaN gains or negative-variance states.  The Joseph
+        # form is symmetric by construction (a congruence transform of a
+        # symmetric P plus a symmetric outer product) and remains PD as
+        # long as P was PD and R > 0.  A belt-and-braces explicit
+        # symmetrisation (½(P + Pᵀ)) cleans up the last bits of
+        # asymmetry the asymmetric subtraction `I − KH` can shed.
+        IKH = np.eye(2) - K @ self.H
+        self.P = IKH @ self.P @ IKH.T + (K @ K.T) * float(R)
+        self.P = 0.5 * (self.P + self.P.T)
+
         # Increment counter
         self.n_updates += 1
         self.last_update_time = datetime.now(timezone.utc)
-        
+
         # Extract uncertainty
         uncertainty = np.sqrt(self.P[0, 0])
-        
+
         return self.state[0], uncertainty
     
     def _get_measurement_noise(self, snr_db: float) -> float:
@@ -414,8 +452,17 @@ class BroadcastKalmanFilter:
         # Return variance
         return noise_ms ** 2
     
+    def _minutes_since_mode_change(self) -> float:
+        """Minutes elapsed since the last detected mode transition.
+
+        Single wall-clock time base (M-H20): the adaptive process noise, the
+        search-window widening, and is_converged() all derive "time since the
+        last transition" from this one call, which is persisted across restarts.
+        """
+        return (time.time() - self.last_mode_transition_time) / 60.0
+
     def _adaptive_process_noise(
-        self, 
+        self,
         innovation_ms: float, 
         snr_db: float,
         time_since_mode_change: float
@@ -525,7 +572,7 @@ class BroadcastKalmanFilter:
             snr_factor = 1.0
         
         # Mode stability (recent transition → widen)
-        if self.time_since_mode_change < 5.0:
+        if self._minutes_since_mode_change() < 5.0:
             mode_factor = 2.0
         else:
             mode_factor = 1.0
@@ -567,9 +614,9 @@ class BroadcastKalmanFilter:
         # Check innovation (measurements match predictions)
         innovation_ok = abs(self.last_innovation) < 1.0
         
-        # Check mode stability (no recent transitions)
-        time_since_transition = time.time() - self.last_mode_transition_time
-        mode_stable = time_since_transition > 180  # 3 minutes
+        # Check mode stability (no recent transitions) — same wall-clock base
+        # as the adaptive Q and search window (M-H20).
+        mode_stable = self._minutes_since_mode_change() > 3.0  # minutes
         
         return uncertainty_ok and innovation_ok and mode_stable
     
@@ -648,6 +695,7 @@ class BroadcastKalmanFilter:
             'n_updates': self.n_updates,
             'initialized': self.initialized,
             'last_update': self.last_update_time.isoformat() if self.last_update_time else None,
+            'last_mode_transition_time': self.last_mode_transition_time,
             'saved_at': datetime.now(timezone.utc).isoformat()
         }
         
@@ -684,7 +732,12 @@ class BroadcastKalmanFilter:
             
             if state_data['last_update']:
                 self.last_update_time = datetime.fromisoformat(state_data['last_update'])
-            
+
+            # Restore mode-transition timing (M-H20). Pre-M-H20 state files
+            # lack this key — keep the constructor default (stable) for those.
+            if 'last_mode_transition_time' in state_data:
+                self.last_mode_transition_time = state_data['last_mode_transition_time']
+
             logger.info(
                 f"Loaded {self.broadcast_id} state: "
                 f"tof={self.state[0]:.3f}ms, n_updates={self.n_updates}"

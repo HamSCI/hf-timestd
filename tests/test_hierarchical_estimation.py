@@ -195,11 +195,16 @@ class TestTECEstimator:
         # With good 1/f² fit, confidence should be high
         assert result.confidence > 0.5
     
-    def test_negative_slope_rejected(self):
-        """Negative slope (higher freq arriving later) is unphysical and must be rejected."""
+    def test_negative_slope_retained(self):
+        """Negative slope (higher freq arriving later) yields a negative TEC
+        estimate that is RETAINED with zero confidence, not rejected.
+
+        CR-2 (settled 2026-05-17, DATA_CONTRACT.md): discarding negative TEC
+        estimates censors the estimator and biases downstream aggregates high.
+        """
         estimator = TECEstimator()
 
-        # Inverted relationship (higher freq arrives later - impossible)
+        # Inverted relationship (higher freq arrives later → negative slope)
         measurements = [
             {'frequency_hz': 5e6, 'toa_ms': 33.0, 'uncertainty_ms': 0.5},
             {'frequency_hz': 10e6, 'toa_ms': 35.0, 'uncertainty_ms': 0.5},
@@ -207,8 +212,10 @@ class TestTECEstimator:
 
         result = estimator.estimate_tec(measurements, 'WWV', 0.0)
 
-        # Estimator rejects unphysical data outright (mode mixing / noise)
-        assert result is None
+        # Retained, not rejected; flagged via negative tec_u and zero confidence
+        assert result is not None
+        assert result.tec_u < 0.0
+        assert result.confidence == 0.0
     
     def test_group_delay_calculation(self):
         """Test per-frequency group delay is calculated."""

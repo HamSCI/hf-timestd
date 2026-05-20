@@ -60,7 +60,7 @@ from .tone_detector import ToneDetector
 # Analytics and discrimination
 from .wwvh_discrimination import WWVHDiscriminator
 from .bpm_discriminator import BPMDiscriminator, BPMTimingMode, BPMDiscriminationResult
-from .physics_propagation import PhysicsPropagationModel, PropagationResult, PropagationModelTier  # deprecated
+from .physics_propagation import PhysicsPropagationModel, PropagationResult, PropagationModelTier  # deprecated — intentionally omitted from __all__ (P-H12)
 from .propagation_model import HFPropagationModel, PropagationPrediction, ModeArrival
 from .wwv_test_signal import WWVTestSignalDetector
 from .metrology_service import MetrologyService, MetrologyEngine
@@ -259,9 +259,8 @@ __all__ = [
     "DecoderVariant",
     "ComparisonMetrics",
     "get_decoder_config",
-    "PhysicsPropagationModel",
-    "PropagationResult",
-    "PropagationModelTier",
+    # PhysicsPropagationModel / PropagationResult / PropagationModelTier are
+    # deprecated (P-H12) — importable but no longer part of the public API.
     # Two-Phase Pipeline (PipelineRecorder archived 2026-01-16)
     "BinaryArchiveWriter",
     "BinaryArchiveConfig",

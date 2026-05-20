@@ -32,6 +32,7 @@ import math
 import time
 import argparse
 import signal
+import threading
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Set, Tuple
 from collections import defaultdict
@@ -51,7 +52,11 @@ from hf_timestd.core.tec_estimator import TECEstimator, TECResult
 from hf_timestd.core.carrier_tec import CarrierTECEstimator
 from hf_timestd.core.iono_tomography import IonoTomography, RayPath
 from hf_timestd.core.vtec_mapper import VTECMapper, IPPMeasurement
-from hf_timestd.io import DataProductReader, DataProductWriter
+from hf_timestd.core.hop_geometry import hop_geometry
+from hf_timestd.io import (
+    DataProductReader, DataProductWriter,
+    make_data_product_writer, make_data_product_reader,
+)
 
 # Systemd watchdog support
 try:
@@ -66,6 +71,10 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Climatological F2 reflection height (km) used only when the ionospheric
+# model is unavailable (P-M22 fallback).
+_F2_FALLBACK_HEIGHT_KM = 300.0
 
 
 class PhysicsFusionService:
@@ -83,11 +92,16 @@ class PhysicsFusionService:
         receiver_lat: Optional[float] = None,
         receiver_lon: Optional[float] = None,
         gnss_vtec_dir: Optional[Path] = None,
+        storage_config: Optional[Dict] = None,
     ):
         self.data_root = Path(data_root)
         self.output_dir = Path(output_dir)
         self.poll_interval = poll_interval
         self.lookback_minutes = lookback_minutes
+        # [storage] config — drives HDF5 / SQLite / dual-write selection
+        # in make_data_product_writer (HDF5→SQLite migration). None →
+        # HDF5-only, preserving today's behaviour.
+        self._storage_config = storage_config or {}
 
         # GNSS VTEC anchoring: path to HDF5 files written by live_vtec.py
         if gnss_vtec_dir is not None:
@@ -123,37 +137,40 @@ class PhysicsFusionService:
         self.ionex_dir.mkdir(parents=True, exist_ok=True)
         
         # Initialize L3 Writers
-        self.l3_writer = DataProductWriter(
+        self.l3_writer = make_data_product_writer(
             output_dir=self.output_dir,
             product_level='L3',
             product_name='physics',
             channel='global', # Global aggregate
             processing_version='5.0.0',
-            station_metadata={'description': 'Physics-Based Fusion Service v5.0'}
+            station_metadata={'description': 'Physics-Based Fusion Service v5.0'},
+            storage_config=self._storage_config,
         )
         
         # Second writer for individual station TEC records (consumed by Web API)
         # PropagationService looks in phase2/science/tec/AGGREGATED_tec_*.h5
         self.tec_dir = self.data_root / 'phase2' / 'science' / 'tec'
-        self.tec_writer = DataProductWriter(
+        self.tec_writer = make_data_product_writer(
             output_dir=self.tec_dir,
             product_level='L3', # Schema says L3A but product_level is used for schema lookup L3
             product_name='tec',
             channel='AGGREGATED',
             processing_version='5.0.0',
-            station_metadata={'description': 'Physics-Based Fusion TEC Output'}
+            station_metadata={'description': 'Physics-Based Fusion TEC Output'},
+            storage_config=self._storage_config,
         )
         
         # Third writer for carrier-phase dTEC per-minute summary records
         self.dtec_dir = self.data_root / 'phase2' / 'science' / 'dtec'
         self.dtec_dir.mkdir(parents=True, exist_ok=True)
-        self.dtec_writer = DataProductWriter(
+        self.dtec_writer = make_data_product_writer(
             output_dir=self.dtec_dir,
             product_level='L3',
             product_name='dtec',
             channel='AGGREGATED',
             processing_version='5.0.0',
-            station_metadata={'description': 'Carrier-Phase dTEC Output'}
+            station_metadata={'description': 'Carrier-Phase dTEC Output'},
+            storage_config=self._storage_config,
         )
 
         # Fourth writer for full per-tick dTEC time series (P3-B fix)
@@ -162,13 +179,14 @@ class PhysicsFusionService:
         # the summary HDF5 files.
         self.dtec_ts_dir = self.data_root / 'phase2' / 'science' / 'dtec_timeseries'
         self.dtec_ts_dir.mkdir(parents=True, exist_ok=True)
-        self.dtec_ts_writer = DataProductWriter(
+        self.dtec_ts_writer = make_data_product_writer(
             output_dir=self.dtec_ts_dir,
             product_level='L3',
             product_name='dtec_timeseries',
             channel='AGGREGATED',
             processing_version='5.0.0',
-            station_metadata={'description': 'Carrier-Phase dTEC Full Time Series (~1s resolution)'}
+            station_metadata={'description': 'Carrier-Phase dTEC Full Time Series (~1s resolution)'},
+            storage_config=self._storage_config,
         )
 
         # Fifth writer for per-minute differential dTEC frequency-pair records.
@@ -177,13 +195,14 @@ class PhysicsFusionService:
         # across frequencies; elevated RMS flags scintillation or mode changes.
         self.dtec_diff_dir = self.data_root / 'phase2' / 'science' / 'dtec_diff'
         self.dtec_diff_dir.mkdir(parents=True, exist_ok=True)
-        self.dtec_diff_writer = DataProductWriter(
+        self.dtec_diff_writer = make_data_product_writer(
             output_dir=self.dtec_diff_dir,
             product_level='L3',
             product_name='dtec_diff',
             channel='AGGREGATED',
             processing_version='5.0.0',
-            station_metadata={'description': 'Differential dTEC frequency-pair RMS'}
+            station_metadata={'description': 'Differential dTEC frequency-pair RMS'},
+            storage_config=self._storage_config,
         )
         
         # Tick-phase reader cache (separate from clock_offset readers)
@@ -211,7 +230,15 @@ class PhysicsFusionService:
         # service hang until the systemd watchdog kills it.
         self._write_timeout_seconds = 30
         self._write_timeout_count = 0
-        
+        # Per-writer locks (P-M20): keyed by id(writer). A write thread that
+        # timed out keeps holding its writer's lock until it finally returns,
+        # so the next write to that writer skips instead of racing the same
+        # HDF5 handle — bounding orphan write threads to one per writer.
+        self._writer_locks: Dict[int, 'threading.Lock'] = {}
+
+        # Ionospheric model for F2 reflection heights (P-M22), lazily built.
+        self._iono_model = None
+
         logger.info(f"PhysicsFusionService initialized with {len(self.channels)} channels")
 
     def _get_reader(self, channel: str) -> DataProductReader:
@@ -228,12 +255,13 @@ class PhysicsFusionService:
         else:
             reader_dir = channel_dir
 
-        reader = DataProductReader(
+        reader = make_data_product_reader(
             data_dir=reader_dir,
             product_level='L2',
             product_name='timing_measurements',
             channel=channel,
-            use_registry=False
+            use_registry=False,
+            storage_config=self._storage_config,
         )
         self._reader_cache[channel] = reader
         return reader
@@ -259,28 +287,69 @@ class PhysicsFusionService:
         if SYSTEMD_AVAILABLE:
             systemd_daemon.notify('WATCHDOG=1')
 
-    def _timed_write(self, writer: 'DataProductWriter', record: dict, label: str = '') -> bool:
-        """Write a measurement with a timeout to prevent file-lock hangs.
+    def _writer_lock(self, writer: 'DataProductWriter') -> threading.Lock:
+        """Return the lock guarding a single writer (P-M20).
 
-        Returns True if the write succeeded, False if it timed out or failed.
-        On timeout, logs a warning and increments the timeout counter but does
-        NOT raise — the caller can continue processing the next record.
+        Writers are created once and held for the service lifetime, so
+        ``id(writer)`` is a stable key. The lock serialises every write to
+        that writer — including across ``_timed_write`` and
+        ``_timed_write_batch`` — so a write thread that timed out (and is
+        still holding the HDF5 handle) is never raced by the next write.
         """
-        import threading
+        key = id(writer)
+        lock = self._writer_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            self._writer_locks[key] = lock
+        return lock
+
+    def _run_timed_write(self, writer: 'DataProductWriter',
+                         write_fn, label: str) -> bool:
+        """Run ``write_fn()`` in a daemon thread under a per-writer lock
+        with a timeout. Shared by _timed_write and _timed_write_batch.
+
+        Returns True on success, False on timeout or failure — never
+        raises, so the caller can move on to the next record.
+
+        P-M20: the previous implementation spawned a fresh write thread
+        on every call. When a write timed out, that thread was abandoned
+        while still inside ``write_measurement`` holding the HDF5 handle,
+        and the next call started *another* thread racing the same handle
+        — corrupting the file and leaking a daemon thread per timeout.
+        Now a per-writer lock is taken before the thread starts: if a
+        prior write to this writer is still in flight the call skips
+        outright, so at most one write thread per writer ever exists and
+        the abandoned one finishes (or hangs) alone.
+        """
+        lock = self._writer_lock(writer)
+        if not lock.acquire(blocking=False):
+            self._write_timeout_count += 1
+            logger.warning(
+                f"HDF5 write skipped ({label or 'unknown'}) — a previous "
+                f"write to this product is still in flight; total "
+                f"timeouts/skips: {self._write_timeout_count}"
+            )
+            return False
 
         result = [None]  # [exception_or_None]
 
         def _do_write():
             try:
-                writer.write_measurement(record)
+                write_fn()
             except Exception as e:
                 result[0] = e
+            finally:
+                lock.release()
 
         t = threading.Thread(target=_do_write, daemon=True)
         t.start()
         t.join(timeout=self._write_timeout_seconds)
 
         if t.is_alive():
+            # Orphaned: the thread still holds `lock` and the HDF5 handle.
+            # It releases the lock when the write finally returns; until
+            # then the next write to this writer skips (see above), so the
+            # orphan runs alone — no race, no unbounded thread growth.
             self._write_timeout_count += 1
             logger.warning(
                 f"HDF5 write timed out after {self._write_timeout_seconds}s "
@@ -294,45 +363,27 @@ class PhysicsFusionService:
 
         return True
 
+    def _timed_write(self, writer: 'DataProductWriter', record: dict, label: str = '') -> bool:
+        """Write one measurement under a timeout and a per-writer lock."""
+        return self._run_timed_write(
+            writer, lambda: writer.write_measurement(record), label
+        )
+
     def _timed_write_batch(self, writer: 'DataProductWriter', records: list, label: str = '') -> bool:
         """Write a batch of measurements in a single HDF5 open/close cycle.
 
-        Same timeout semantics as _timed_write but uses
+        Same timeout / per-writer-lock semantics as _timed_write but uses
         write_measurements_batch() — one open/append-N/close instead of N
         open/append-1/close cycles.  Critical for high-frequency products
         like dTEC timeseries (~55 rows/station/min × 9 channels).
         """
         if not records:
             return True
-
-        import threading
-
-        result = [None]
-
-        def _do_write():
-            try:
-                writer.write_measurements_batch(records)
-            except Exception as e:
-                result[0] = e
-
-        t = threading.Thread(target=_do_write, daemon=True)
-        t.start()
-        t.join(timeout=self._write_timeout_seconds)
-
-        if t.is_alive():
-            self._write_timeout_count += 1
-            logger.warning(
-                f"HDF5 batch write timed out after {self._write_timeout_seconds}s "
-                f"({label or 'unknown'}, {len(records)} records), "
-                f"total timeouts: {self._write_timeout_count}"
-            )
-            return False
-
-        if result[0] is not None:
-            logger.error(f"HDF5 batch write failed ({label}, {len(records)} records): {result[0]}")
-            return False
-
-        return True
+        n = len(records)
+        batch_label = f'{label}, {n} records' if label else f'{n} records'
+        return self._run_timed_write(
+            writer, lambda: writer.write_measurements_batch(records), batch_label
+        )
 
     def _discover_channels(self) -> List[str]:
         """Discover available L2 broadcast channels."""
@@ -421,7 +472,12 @@ class PhysicsFusionService:
                     snr = item.get('snr_db', 0.0)
 
                     freq_mhz = float(item['frequency_mhz'])
-                    raw_by_station_freq[(station, freq_mhz)].append({
+                    # Key the aggregation by mode as well as (station,
+                    # frequency): a mid-minute mode hop otherwise lets the
+                    # median collapse two different geometric regimes into
+                    # one toa, injecting a multi-ms step into the 1/f^2
+                    # TEC fit (P-H26).
+                    raw_by_station_freq[(station, freq_mhz, mode)].append({
                         'toa_ms': toa,
                         'uncertainty_ms': uncertainty,
                         'mode': mode,
@@ -432,29 +488,27 @@ class PhysicsFusionService:
                 logger.warning(f"Failed to read channel {channel}: {e}")
                 continue
         
-        # Median-aggregate per (station, frequency) to produce one measurement
-        # per distinct frequency per station
+        # Median-aggregate per (station, frequency, mode) — one measurement
+        # per distinct frequency *and mode* per station, so the median is
+        # never taken across a mode transition (P-H26).  ``mode`` is the
+        # group key, so there is no separate (and previously disagreeing)
+        # dominant-mode computation here.
         measurements_by_station: Dict[str, List[Dict]] = defaultdict(list)
-        
-        for (station, freq_mhz), obs_list in raw_by_station_freq.items():
+
+        for (station, freq_mhz, mode), obs_list in raw_by_station_freq.items():
             toas = np.array([o['toa_ms'] for o in obs_list])
             median_toa = float(np.median(toas))
             # Use minimum uncertainty (best measurement)
             min_unc = min(o['uncertainty_ms'] for o in obs_list)
             # Best SNR
             best_snr = max(o.get('snr_db', 0.0) for o in obs_list)
-            # Dominant mode: use the mode from the highest-SNR observation.
-            # Mode-by-count is unreliable when different channels disagree;
-            # the highest-SNR measurement is the most trustworthy single source.
-            best_obs = max(obs_list, key=lambda o: o.get('snr_db', 0.0))
-            dominant_mode = best_obs['mode']
-            
+
             measurements_by_station[station].append({
                 'frequency_hz': freq_mhz * 1e6,
                 'toa_ms': median_toa,
                 'uncertainty_ms': min_unc,
                 'snr_db': best_snr,
-                'mode': dominant_mode,
+                'mode': mode,
                 'n_raw': len(obs_list),
             })
         
@@ -510,11 +564,16 @@ class PhysicsFusionService:
             result = self.tec_estimator.estimate_tec(observations, station, minute_timestamp)
             
             if result:
+                # CR-2 (settled 2026-05-17, DATA_CONTRACT.md): a negative or
+                # out-of-range tec_u is RETAINED, not discarded. Group-delay
+                # TEC is below the noise floor, so a negative estimate is a
+                # normal noisy realisation; discarding on value censors the
+                # estimator and biases aggregates high. Flag it, keep it.
                 if not (0.0 < result.tec_u <= 200.0):
                     logger.warning(
-                        f"TEC out of bounds for {station}: {result.tec_u:.2f} TECU - skipping"
+                        f"TEC out of nominal range for {station}: "
+                        f"{result.tec_u:.2f} TECU — retained, flagged MARGINAL"
                     )
-                    continue
 
                 result.propagation_mode = dominant_mode
                 tec_estimates[(station, dominant_mode)] = result
@@ -527,9 +586,16 @@ class PhysicsFusionService:
 
         # 3. E/F Layer Tomography
         tomo_result = None
-        if len(tec_estimates) >= 2:
+        # Tomography is a bounded inverse problem; feed it only physically
+        # plausible slant TEC. Negative / out-of-range values (retained in
+        # tec_estimates per CR-2, DATA_CONTRACT.md) are excluded here — a
+        # consumption-time guard, not a record-level rejection.
+        physical_tec = {
+            k: v for k, v in tec_estimates.items() if 0.0 < v.tec_u <= 200.0
+        }
+        if len(physical_tec) >= 2:
             try:
-                paths = self.tomography.build_paths_from_tec_results(tec_estimates)
+                paths = self.tomography.build_paths_from_tec_results(physical_tec)
                 if len(paths) >= 2:
                     tomo_result = self.tomography.solve(paths)
                     if tomo_result:
@@ -549,7 +615,8 @@ class PhysicsFusionService:
         # CRITIC_CONTEXT), so ipp_measurements is always empty and vtec_tecu is
         # always NaN.  Log this explicitly rather than silently writing NaN.
         vtec_result = None
-        ipp_measurements = self._build_ipp_measurements(tec_estimates)
+        ipp_measurements = self._build_ipp_measurements(
+            minute_timestamp, tec_estimates)
         vtec_by_station: Dict[str, float] = {}
 
         if not ipp_measurements:
@@ -616,13 +683,43 @@ class PhysicsFusionService:
 
         return l3_ok
 
+    def _get_iono_model(self):
+        """Lazily build the ionospheric model used for F2 reflection
+        heights (P-M22)."""
+        if self._iono_model is None:
+            from hf_timestd.core.ionospheric_model import IonosphericModel
+            self._iono_model = IonosphericModel()
+        return self._iono_model
+
+    def _reflection_height_km(
+        self, minute_timestamp: int, lat: float, lon: float
+    ) -> float:
+        """
+        F2 reflection height (km) at a pierce point, from the ionospheric
+        model (P-M22 — replaces a hardcoded 300 km).
+
+        Falls back to the climatological default if the model is
+        unavailable or returns an out-of-range height.
+        """
+        try:
+            utc = datetime.fromtimestamp(minute_timestamp, tz=timezone.utc)
+            heights = self._get_iono_model().get_layer_heights(
+                timestamp=utc, latitude=lat, longitude=lon
+            )
+            if heights is not None and 150.0 < heights.hmF2 < 600.0:
+                return float(heights.hmF2)
+        except Exception as e:
+            logger.debug(f"hmF2 model lookup failed, using fallback: {e}")
+        return _F2_FALLBACK_HEIGHT_KM
+
     def _build_ipp_measurements(
         self,
+        minute_timestamp: int,
         tec_estimates: Dict[tuple, TECResult],
     ) -> List[IPPMeasurement]:
         """
         Build IPP measurements from TEC estimates for VTEC mapping.
-        
+
         Computes ionospheric pierce points at the great-circle midpoint
         between receiver and transmitter, and converts sTEC to vTEC.
         """
@@ -652,19 +749,19 @@ class PhysicsFusionService:
                 station_lat, station_lon
             )
 
-            # Compute elevation angle geometrically from path distance and
-            # F2 layer height (P1-C fix — replaces hardcoded 30°).
-            # For a 1-hop path: elevation = atan(h / (d/2)) where d is the
-            # great-circle distance and h is the virtual reflection height.
+            # Compute the elevation angle from the path geometry.
             gc_dist_km = self._great_circle_km(
                 self.receiver_lat, self.receiver_lon, station_lat, station_lon
             )
             # n_hops from mode string (e.g. '2F2' -> 2, '1E' -> 1)
             n_hops = max(1, int(''.join(filter(str.isdigit, str(mode)[:2])) or '1'))
-            h_km = 300.0  # F2 virtual height (km) — improved by P2-A later
-            half_hop_km = gc_dist_km / (2 * n_hops)
-            elevation_geometric = math.degrees(math.atan2(h_km, half_hop_km))
-            elevation_geometric = max(5.0, min(85.0, elevation_geometric))
+            # F2 reflection height from the ionospheric model at the pierce
+            # point (P-M22 — replaces a hardcoded 300 km). The elevation
+            # then comes from the shared spherical hop geometry (S2), not a
+            # flat-Earth triangle.
+            h_km = self._reflection_height_km(minute_timestamp, ipp_lat, ipp_lon)
+            geom = hop_geometry(gc_dist_km, h_km, n_hops)
+            elevation_geometric = max(5.0, min(85.0, geom.elevation_deg))
 
             for f_mhz in result.group_delay_ms.keys():
                 elevation = elevation_geometric
@@ -748,7 +845,10 @@ class PhysicsFusionService:
                 'residuals_ms': float(result.residuals_ms),
                 # Format frequencies as comma-separated list
                 'frequencies_mhz': ",".join([f"{f:.2f}" for f in result.group_delay_ms.keys()]),
-                'quality_flag': 'GOOD' if result.confidence > 0.8 else 'MARGINAL',
+                'quality_flag': (
+                    'GOOD' if result.confidence > 0.8
+                    and 0.0 <= result.tec_u <= 200.0 else 'MARGINAL'
+                ),
                 'validation_flag': 'UNVALIDATED',
                 'processing_version': '5.0.0'
             }
@@ -770,12 +870,13 @@ class PhysicsFusionService:
             return None
 
         try:
-            reader = DataProductReader(
+            reader = make_data_product_reader(
                 data_dir=tp_dir,
                 product_level='L2',
                 product_name='tick_phase',
                 channel=channel,
-                use_registry=False
+                use_registry=False,
+                storage_config=self._storage_config,
             )
             self._tick_phase_reader_cache[channel] = reader
             return reader
@@ -1248,6 +1349,48 @@ class PhysicsFusionService:
                     )
                 logger.info("\n".join(info_parts))
 
+    def _seed_processed_minutes_from_l3(self) -> None:
+        """Seed ``_processed_minutes`` from minutes already written to the
+        L3 dtec output (P-H25).
+
+        ``_processed_minutes`` is an in-memory set, so on every restart it
+        is empty; the startup lookback window then reprocesses minutes
+        whose L3 records already exist, producing duplicate TEC/dTEC/L3
+        records (the contract forbids duplicate records).  Reading the
+        ``minute_boundary`` dataset of the recent L3 dtec files back into
+        the set makes the loop's ``target_minute in self._processed_minutes``
+        guard effective across a restart.  The set is pruned to a 12 h
+        window elsewhere, so scanning the few most-recent day files is
+        sufficient.
+        """
+        import h5py
+        dtec_dir = self.data_root / 'phase2' / 'science' / 'dtec'
+        if not dtec_dir.exists():
+            return
+        seeded = 0
+        for l3_path in sorted(
+            dtec_dir.glob('AGGREGATED_dtec_????????.h5'), reverse=True,
+        )[:3]:
+            try:
+                with h5py.File(str(l3_path), 'r', swmr=True) as f:
+                    if 'minute_boundary' not in f or len(f['minute_boundary']) == 0:
+                        continue
+                    for raw in f['minute_boundary'][:]:
+                        # Normalise to a minute-aligned epoch second so the
+                        # value matches the loop's target_minute exactly.
+                        m = int(raw)
+                        m -= m % 60
+                        if m not in self._processed_minutes:
+                            self._processed_minutes.add(m)
+                            seeded += 1
+            except Exception as e:
+                logger.debug(f"L3 seed scan failed for {l3_path}: {e}")
+        if seeded:
+            logger.info(
+                f"Seeded {seeded} already-processed minute(s) from L3 "
+                f"output — restart will not reprocess them"
+            )
+
     def _startup_lookback_minutes(self) -> int:
         """Return how many minutes back to scan on startup.
 
@@ -1355,7 +1498,10 @@ class PhysicsFusionService:
         # On restart after a gap (crash, update, etc.) the standard 5-minute
         # lookback window misses all minutes between the last processed minute
         # and now.  Compute a wider initial window that shrinks to 5 once we
-        # have caught up to real-time.
+        # have caught up to real-time.  Seed _processed_minutes from the L3
+        # output first so the wider window does not reprocess (and duplicate)
+        # minutes already written before the restart (P-H25).
+        self._seed_processed_minutes_from_l3()
         max_lookback = self._startup_lookback_minutes()
         
         while self.running:
@@ -1478,12 +1624,14 @@ if __name__ == '__main__':
     if rx_lat is None or rx_lon is None:
         rx_lat, rx_lon = _load_receiver_coords(args.config)
 
-    # Load GNSS VTEC path from config if available
+    # Load GNSS VTEC path and [storage] config from the config file.
     gnss_vtec_dir = None
+    storage_config = {}
     if tomllib is not None:
         try:
             with open(args.config, 'rb') as _f:
                 _cfg = tomllib.load(_f)
+            storage_config = _cfg.get('storage', {}) or {}
             gnss_cfg = _cfg.get('gnss_vtec', {})
             if gnss_cfg.get('enabled', False):
                 hdf5_rel = gnss_cfg.get('hdf5_path')
@@ -1500,6 +1648,7 @@ if __name__ == '__main__':
         receiver_lat=rx_lat,
         receiver_lon=rx_lon,
         gnss_vtec_dir=gnss_vtec_dir,
+        storage_config=storage_config,
     )
 
     service.run()

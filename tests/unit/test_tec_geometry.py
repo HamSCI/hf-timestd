@@ -140,15 +140,25 @@ class TestCalculateElevationAngle:
         e_high = calculate_elevation_angle(*rx, *tx, h_iono=500.0)
         assert e_high > e_low
 
-    def test_geometry_for_known_distance(self):
-        # 1000 km half-distance, 350 km height → arctan(350/1000) ≈ 19.29°
-        # Build TX/RX 2000 km apart along the equator (≈ 17.97° of longitude)
+    def test_spherical_elevation_for_known_distance(self):
+        # 2000 km path (1000 km half-distance), 350 km reflection height.
+        # A flat-Earth triangle would give atan2(350, 1000) ≈ 19.3°; the
+        # spherical formula (P-H8) must come out meaningfully lower because
+        # the ground curves away from the receiver's local horizontal.
         rx_lat, rx_lon = 0.0, 0.0
         # 2000 km along the equator = 2000 / (2π * 6371 / 360) ≈ 17.985°
         deg_for_2000_km = 2000.0 / (math.pi * EARTH_RADIUS_KM / 180)
         elev = calculate_elevation_angle(rx_lat, rx_lon, 0.0, deg_for_2000_km, h_iono=350.0)
-        expected = math.degrees(math.atan2(350.0, 1000.0))
-        assert elev == pytest.approx(expected, abs=0.5)
+
+        gamma = 1000.0 / EARTH_RADIUS_KM
+        r_p = EARTH_RADIUS_KM + 350.0
+        expected = math.degrees(math.atan2(
+            r_p * math.cos(gamma) - EARTH_RADIUS_KM, r_p * math.sin(gamma)))
+        assert elev == pytest.approx(expected, abs=0.1)
+
+        # Curvature lowers the elevation by several degrees vs flat-Earth.
+        flat_earth = math.degrees(math.atan2(350.0, 1000.0))
+        assert elev < flat_earth - 2.0
 
     def test_elevation_in_valid_range(self):
         # Any plausible HF link → 0 < elevation ≤ 90

@@ -64,12 +64,15 @@ import math
 import os
 import time
 import threading
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Tuple, List, NamedTuple
 from dataclasses import dataclass, field
 
 import numpy as np
+
+from .tec_geometry import great_circle_distance
 
 try:
     import requests as _requests
@@ -95,6 +98,12 @@ WAMIPE_NOMADS_BASE = "https://nomads.ncep.noaa.gov/pub/data/nccf/com/wfs/prod"
 # GIRO DIDBase
 GIRO_DIDBASE_URL = "https://lgdc.uml.edu/common/DIDBFastStationList"
 GIRO_SAO_URL = "https://lgdc.uml.edu/common/DIDBFast498"
+
+# GIRO correction weighting by great-circle distance from the query point
+# (P-M16). Full weight within ~5° (555 km), zero beyond ~30° (3330 km) —
+# the km equivalents of the original degree thresholds, now dateline-safe.
+GIRO_FULL_WEIGHT_KM = 555.0
+GIRO_ZERO_WEIGHT_KM = 3330.0
 
 # Cache settings
 DEFAULT_CACHE_DIR = "/var/lib/timestd/iono_cache"
@@ -489,9 +498,14 @@ class IonoDataService:
             if len(urls_to_try) >= 6:
                 break
         
-        # S3 fallback
-        s3_prefix = f"v1.2/wfs.{cycle_date}"
-        urls_to_try.append(f"{WAMIPE_S3_BASE_URL}/{s3_prefix}/")
+        # S3 fallback — list the prefix and append the latest ipe05 .nc.
+        # The bucket is virtual-hosted, so a bucket *listing* needs the
+        # ?list-type=2&prefix= query; the original code appended a path
+        # ending in '/', which S3 serves as a (missing) object whose XML
+        # body was then fed to the NetCDF parser (P-H19).
+        s3_nc_url = self._resolve_s3_latest_nc(f"v1.2/wfs.{cycle_date}")
+        if s3_nc_url is not None:
+            urls_to_try.append(s3_nc_url)
         
         grid = None
         for url in urls_to_try:
@@ -526,20 +540,59 @@ class IonoDataService:
             else:
                 logger.warning("No WAM-IPE data available (network and cache both failed)")
     
+    def _resolve_s3_latest_nc(self, s3_prefix: str) -> Optional[str]:
+        """Resolve the WAM-IPE S3 fallback prefix to the URL of the most
+        recent ipe05 NetCDF object.
+
+        The S3 bucket is virtual-hosted; a bucket *listing* requires the
+        ``?list-type=2&prefix=`` query and returns a ``ListBucketResult``
+        XML document.  Requesting ``{prefix}/`` directly (the original
+        bug, P-H19) makes S3 serve a missing-object error whose XML body
+        was then handed to the NetCDF parser.  Returns ``None`` when the
+        listing is unavailable or contains no ``.nc`` object.
+        """
+        if _requests is None:
+            return None
+        requests = _requests
+        list_url = (f"{WAMIPE_S3_BASE_URL}/"
+                    f"?list-type=2&prefix={s3_prefix}/")
+        try:
+            resp = requests.get(list_url, timeout=15)
+            if resp.status_code != 200:
+                return None
+            root = ET.fromstring(resp.content)
+        except (requests.RequestException, ET.ParseError) as e:
+            logger.debug(f"WAM-IPE S3 prefix listing failed "
+                         f"({s3_prefix}): {e}")
+            return None
+        # <Contents><Key>…</Key>; the ListBucketResult document is
+        # namespaced, so match the element by local name.
+        nc_keys = sorted(
+            el.text for el in root.iter()
+            if el.tag.rsplit('}', 1)[-1] == 'Key'
+            and el.text and el.text.endswith('.nc')
+        )
+        if not nc_keys:
+            return None
+        # ipe05 object keys embed the cycle timestamp, so the
+        # lexically-greatest key is the most recent grid.
+        return f"{WAMIPE_S3_BASE_URL}/{nc_keys[-1]}"
+
     def _download_and_parse_wamipe(self, url: str) -> Optional[IonoGrid]:
         """Download a WAM-IPE NetCDF file and parse into IonoGrid."""
         if _requests is None:
             return None
         requests = _requests
-        
+
         try:
             resp = requests.get(url, timeout=30, stream=True)
             if resp.status_code != 200:
                 return None
-            
-            # Check content type - skip HTML directory listings
-            content_type = resp.headers.get('content-type', '')
-            if 'html' in content_type.lower():
+
+            # Skip HTML directory listings and XML (an S3 listing or
+            # error document) — neither is ever NetCDF (P-H19).
+            content_type = resp.headers.get('content-type', '').lower()
+            if 'html' in content_type or 'xml' in content_type:
                 return None
             
             data = resp.content
@@ -646,11 +699,18 @@ class IonoDataService:
                 model_cycle=str(model_cycle),
             )
             
-            logger.debug(f"Parsed WAM-IPE grid: {len(lats)}x{len(lons)}, "
+            # Validate/normalise before use: ascending coordinates and
+            # finite physical field values (P-M16).
+            grid = self._validate_grid(grid)
+            if grid is None:
+                logger.warning("WAM-IPE grid failed validation — discarding")
+                return None
+
+            logger.debug(f"Parsed WAM-IPE grid: {len(grid.lats)}x{len(grid.lons)}, "
                         f"hmF2 range [{grid.hmF2.min():.0f}, {grid.hmF2.max():.0f}] km")
-            
+
             return grid
-            
+
         except ImportError:
             logger.warning("xarray not available for WAM-IPE parsing")
             return None
@@ -665,6 +725,89 @@ class IonoDataService:
             if name in ds.data_vars:
                 return ds[name].values
         return None
+
+    @staticmethod
+    def _validate_grid(grid: 'IonoGrid') -> Optional['IonoGrid']:
+        """
+        Validate and normalise a parsed WAM-IPE grid (P-M16).
+
+        Two properties the bilinear interpolator silently depends on:
+
+        * Coordinates strictly ascending — ``IonoGrid.interpolate`` uses
+          ``np.searchsorted``, which needs monotonic-ascending lats/lons.
+          NetCDF latitude is commonly stored north-to-south (descending),
+          which would have produced wrong bracketing indices. Each axis
+          is sorted ascending and the field arrays reordered to match;
+          duplicate coordinates leave the grid unusable.
+        * Finite, physical field values — NetCDF fill values (NaN, ±Inf,
+          sentinels such as 9.99e36) poison the bilinear average. Bad
+          cells are replaced with the median of the good cells; a field
+          with no valid cell at all rejects the grid.
+
+        Returns the normalised grid, or None if it cannot be used.
+        """
+        lats = np.asarray(grid.lats, dtype=np.float64)
+        lons = np.asarray(grid.lons, dtype=np.float64)
+        if lats.ndim != 1 or lons.ndim != 1 or lats.size < 2 or lons.size < 2:
+            logger.warning("WAM-IPE grid rejected: coordinate arrays not 1-D / too small")
+            return None
+
+        fields = {'hmF2': grid.hmF2, 'NmF2': grid.NmF2, 'TEC': grid.TEC}
+        expected = (lats.size, lons.size)
+        for name, arr in fields.items():
+            if arr.size and arr.shape != expected:
+                logger.warning(
+                    f"WAM-IPE grid rejected: {name} shape {arr.shape} != {expected}"
+                )
+                return None
+
+        # Sort each coordinate axis ascending, reordering the field arrays.
+        lat_order = np.argsort(lats, kind='stable')
+        lon_order = np.argsort(lons, kind='stable')
+        lats = lats[lat_order]
+        lons = lons[lon_order]
+        if np.any(np.diff(lats) <= 0) or np.any(np.diff(lons) <= 0):
+            logger.warning("WAM-IPE grid rejected: duplicate / non-monotonic coordinates")
+            return None
+        for name in list(fields):
+            arr = fields[name]
+            if arr.size:
+                fields[name] = arr[np.ix_(lat_order, lon_order)]
+        ne_3d = grid.Ne_3d
+        if ne_3d is not None and ne_3d.ndim >= 2:
+            ne_3d = ne_3d[lat_order][:, lon_order]
+
+        # Replace fill values / non-physical cells with the field median.
+        bounds = {'hmF2': (100.0, 600.0), 'NmF2': (1e9, 1e14), 'TEC': (0.1, 400.0)}
+        for name, (lo, hi) in bounds.items():
+            arr = fields[name]
+            if not arr.size:
+                continue
+            bad = ~np.isfinite(arr) | (arr < lo) | (arr > hi)
+            if bad.all():
+                logger.warning(f"WAM-IPE grid rejected: {name} has no valid cells")
+                return None
+            if bad.any():
+                median = float(np.median(arr[~bad]))
+                fields[name] = np.where(bad, median, arr)
+                logger.debug(
+                    f"WAM-IPE grid: replaced {int(bad.sum())} fill/out-of-range "
+                    f"{name} cell(s) with median {median:.3g}"
+                )
+
+        return IonoGrid(
+            timestamp=grid.timestamp,
+            source=grid.source,
+            lats=lats,
+            lons=lons,
+            hmF2=fields['hmF2'],
+            NmF2=fields['NmF2'],
+            TEC=fields['TEC'],
+            altitudes=grid.altitudes,
+            Ne_3d=ne_3d,
+            forecast_hour=grid.forecast_hour,
+            model_cycle=grid.model_cycle,
+        )
     
     def _load_cached_grid(self) -> Optional[IonoGrid]:
         """Load the most recent cached WAM-IPE grid."""
@@ -796,34 +939,67 @@ class IonoDataService:
             if resp.status_code != 200:
                 return None
             
-            # Parse simple text response
-            # Format varies, but typically: timestamp, foF2, hmF2, confidence
-            lines = resp.text.strip().split('\n')
-            if len(lines) < 2:
+            # GIRO DIDBase fast-char response: '#'-prefixed comment lines
+            # (one of which names the columns) then whitespace-delimited
+            # data rows.  Parse foF2/hmF2 by *column name* from that
+            # header — a swapped or inserted column otherwise silently
+            # corrupts hmF2, which is blended into the propagation
+            # geometry at weight up to 1.0 (P-H20).  Fall back to the
+            # documented positional layout only when no header is present,
+            # and range-validate the result against ionospheric physics
+            # either way.
+            header_cols = None
+            data_lines = []
+            for line in resp.text.splitlines():
+                s = line.strip()
+                if not s:
+                    continue
+                if s.startswith('#'):
+                    toks = s.lstrip('#').split()
+                    if 'foF2' in toks and 'hmF2' in toks:
+                        header_cols = toks
+                else:
+                    data_lines.append(s)
+            if not data_lines:
                 return None
-            
-            # Take the most recent measurement (last line)
-            last_line = lines[-1].strip()
-            parts = last_line.split()
-            
-            if len(parts) >= 3:
-                try:
-                    foF2 = float(parts[-3]) if len(parts) >= 3 else 0.0
-                    hmF2 = float(parts[-2]) if len(parts) >= 2 else 0.0
-                    conf = float(parts[-1]) if len(parts) >= 1 else 0.0
-                    
-                    if foF2 > 0 and hmF2 > 50:
-                        return GiroMeasurement(
-                            station_code=station_code,
-                            timestamp=now,
-                            foF2_MHz=foF2,
-                            hmF2_km=hmF2,
-                            confidence=min(1.0, conf / 100.0)
-                        )
-                except (ValueError, IndexError):
-                    pass
-            
-            return None
+
+            # Most recent measurement = last data row.
+            parts = data_lines[-1].split()
+            try:
+                if header_cols is not None:
+                    foF2 = float(parts[header_cols.index('foF2')])
+                    hmF2 = float(parts[header_cols.index('hmF2')])
+                    conf = 0.0
+                    for cs_name in ('CS', 'Confidence', 'confidence'):
+                        if cs_name in header_cols:
+                            conf = float(parts[header_cols.index(cs_name)])
+                            break
+                else:
+                    # No header — documented positional layout
+                    # (timestamp, foF2, hmF2, confidence).
+                    foF2 = float(parts[-3])
+                    hmF2 = float(parts[-2])
+                    conf = float(parts[-1])
+            except (ValueError, IndexError):
+                return None
+
+            # Range-validate: a corrupted column (a QD letter, a
+            # confidence score, a timestamp field) will not fall inside
+            # both physical ranges — foF2 0.5–30 MHz, hmF2 100–600 km.
+            if not (0.5 <= foF2 <= 30.0 and 100.0 <= hmF2 <= 600.0):
+                logger.debug(
+                    f"GIRO {station_code}: parsed foF2={foF2} MHz / "
+                    f"hmF2={hmF2} km out of physical range — rejected"
+                )
+                return None
+
+            return GiroMeasurement(
+                station_code=station_code,
+                timestamp=now,
+                foF2_MHz=foF2,
+                hmF2_km=hmF2,
+                confidence=min(1.0, max(0.0, conf) / 100.0),
+            )
             
         except Exception as e:
             logger.debug(f"Caught exception: {e}")
@@ -833,6 +1009,73 @@ class IonoDataService:
     # PUBLIC API
     # =========================================================================
     
+    @staticmethod
+    def _blend_points(
+        p_prev: IonoGridPoint,
+        p_curr: IonoGridPoint,
+        frac: float,
+        utc_time: datetime,
+    ) -> IonoGridPoint:
+        """Linearly interpolate two grid points in time (frac=0 → p_prev,
+        frac=1 → p_curr)."""
+        f = max(0.0, min(1.0, frac))
+        g = 1.0 - f
+        nmf2 = g * p_prev.NmF2_m3 + f * p_curr.NmF2_m3
+        return IonoGridPoint(
+            latitude=p_curr.latitude,
+            longitude=p_curr.longitude,
+            timestamp=utc_time,
+            hmF2_km=g * p_prev.hmF2_km + f * p_curr.hmF2_km,
+            NmF2_m3=nmf2,
+            # foF2 ∝ √NmF2; recompute from the blended density so the two
+            # stay mutually consistent.
+            foF2_MHz=float(np.sqrt(max(0.0, nmf2) / 1.24e10)),
+            TEC_TECU=g * p_prev.TEC_TECU + f * p_curr.TEC_TECU,
+            hmE_km=g * p_prev.hmE_km + f * p_curr.hmE_km,
+            source=p_curr.source,
+        )
+
+    def _apply_temporal_interpolation(
+        self,
+        curr_point: IonoGridPoint,
+        prev_grid: Optional[IonoGrid],
+        curr_grid: IonoGrid,
+        lat: float,
+        lon: float,
+        utc_time: datetime,
+    ) -> IonoGridPoint:
+        """
+        Blend the previous and current WAM-IPE grids in time (P-M16).
+
+        WAM-IPE grids arrive on a ~5-minute cadence; serving only the
+        current grid makes get_iono_params step discontinuously every
+        time a new grid replaces the old one. When the query time lies
+        between the two grids' valid times, the previous and current grid
+        points are linearly interpolated; otherwise (query outside the
+        pair's window, or no usable previous grid) the current grid's
+        point is returned unchanged.
+        """
+        if prev_grid is None or not prev_grid.is_valid():
+            return curr_point
+        if prev_grid.timestamp is None or curr_grid.timestamp is None:
+            return curr_point
+
+        def _utc(t: datetime) -> datetime:
+            return t if t.tzinfo is not None else t.replace(tzinfo=timezone.utc)
+
+        t_prev = _utc(prev_grid.timestamp)
+        t_curr = _utc(curr_grid.timestamp)
+        q = _utc(utc_time)
+        span = (t_curr - t_prev).total_seconds()
+        if span <= 0:
+            return curr_point  # grids identical / out of order — no blend
+        frac = (q - t_prev).total_seconds() / span
+        if frac <= 0.0 or frac >= 1.0:
+            return curr_point  # query outside the [previous, current] window
+
+        prev_point = prev_grid.interpolate(lat, lon)
+        return self._blend_points(prev_point, curr_point, frac, q)
+
     def get_iono_params(
         self,
         lat: float,
@@ -860,10 +1103,39 @@ class IonoDataService:
         # Start with WAM-IPE grid interpolation
         with self._grid_lock:
             grid = self._current_grid
-        
-        if grid is not None and grid.is_valid():
+            prev_grid = self._previous_grid
+
+        # A grid older than WAMIPE_CACHE_MAX_AGE_S must not be served as
+        # current data: if the background fetch stalls, an hours-old grid
+        # was otherwise returned tagged source="wamipe" at full
+        # confidence (P-H22).  Treat a stale grid as unusable and fall
+        # back to the climatological model.
+        grid_age_s = None
+        if grid is not None and grid.timestamp is not None:
+            gts = grid.timestamp
+            if gts.tzinfo is None:
+                gts = gts.replace(tzinfo=timezone.utc)
+            ref = utc_time if utc_time.tzinfo is not None \
+                else utc_time.replace(tzinfo=timezone.utc)
+            grid_age_s = (ref - gts).total_seconds()
+
+        grid_stale = (
+            grid_age_s is not None and grid_age_s > WAMIPE_CACHE_MAX_AGE_S
+        )
+        if grid is not None and grid.is_valid() and not grid_stale:
             point = grid.interpolate(lat, lon)
+            # Temporal interpolation across the previous→current grid pair
+            # so the result does not step each time a new grid is fetched.
+            point = self._apply_temporal_interpolation(
+                point, prev_grid, grid, lat, lon, utc_time
+            )
         else:
+            if grid_stale:
+                logger.debug(
+                    f"WAM-IPE grid stale ({grid_age_s / 3600.0:.1f} h old, "
+                    f"max {WAMIPE_CACHE_MAX_AGE_S / 3600.0:.1f} h) — "
+                    f"using climatological fallback"
+                )
             # Fallback to climatological defaults
             point = self._climatological_fallback(lat, lon, utc_time)
         
@@ -1012,25 +1284,31 @@ class IonoDataService:
                 if station is None:
                     continue
                 
-                # Simple distance (degrees, not km - good enough for weighting)
-                dlat = lat - station.latitude
-                dlon = lon - station.longitude
-                dist = (dlat ** 2 + dlon ** 2) ** 0.5
-                
-                if dist < best_distance:
-                    best_distance = dist
-                    best_station = (meas, dist)
-            
+                # Great-circle distance in km (P-M16). The old Euclidean
+                # distance in degrees overstated east-west spans away from
+                # the equator and was grossly wrong across the ±180°
+                # dateline (e.g. lon 179° vs −179° read as 358° apart).
+                dist_km = great_circle_distance(
+                    lat, lon, station.latitude, station.longitude
+                )
+
+                if dist_km < best_distance:
+                    best_distance = dist_km
+                    best_station = (meas, dist_km)
+
             if best_station is None:
                 return None
-            
-            meas, dist_deg = best_station
-            
-            # Weight decreases with distance: full weight within 5°, zero at 30°
-            if dist_deg > 30.0:
+
+            meas, dist_km = best_station
+
+            # Weight decreases with distance: full weight within
+            # GIRO_FULL_WEIGHT_KM, zero beyond GIRO_ZERO_WEIGHT_KM.
+            if dist_km > GIRO_ZERO_WEIGHT_KM:
                 return None
-            
-            weight = max(0.0, min(1.0, (30.0 - dist_deg) / 25.0))
+
+            weight = max(0.0, min(1.0,
+                         (GIRO_ZERO_WEIGHT_KM - dist_km)
+                         / (GIRO_ZERO_WEIGHT_KM - GIRO_FULL_WEIGHT_KM)))
             weight *= meas.confidence  # Scale by measurement confidence
             
             if weight < 0.05:
@@ -1038,8 +1316,8 @@ class IonoDataService:
             
             return (meas.hmF2_km, meas.foF2_MHz, weight)
     
+    @staticmethod
     def _climatological_fallback(
-        self,
         lat: float,
         lon: float,
         utc_time: datetime

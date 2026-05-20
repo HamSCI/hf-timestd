@@ -13,7 +13,8 @@ import logging
 # Add parent directory to path for hf_timestd imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'src'))
 
-from hf_timestd.io.hdf5_reader import DataProductReader
+from hf_timestd.io import make_data_product_reader
+from config import config
 
 logger = logging.getLogger(__name__)
 
@@ -39,11 +40,12 @@ class PhysicsService:
         
         self.fusion_dir = Path(data_root) / 'phase2' / 'fusion'
         
-        self.reader = DataProductReader(
+        self.reader = make_data_product_reader(
             data_dir=self.fusion_dir,
             product_level='L3',
             product_name='physics',
-            channel='global'
+            channel='global',
+            storage_config=config.storage
         )
     
     def _convert_to_native(self, obj: Any) -> Any:

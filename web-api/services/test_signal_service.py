@@ -17,7 +17,8 @@ import math
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'src'))
 
-from hf_timestd.io.hdf5_reader import DataProductReader
+from hf_timestd.io import make_data_product_reader
+from config import config
 from hf_timestd.core.solar_zenith_calculator import (
     solar_position, calculate_midpoint
 )
@@ -121,13 +122,14 @@ class TestSignalService:
                     continue
                 
                 try:
-                    reader = DataProductReader(
+                    reader = make_data_product_reader(
                         data_dir=channel_dir,
                         product_level='L2',
                         product_name='test_signal',
-                        channel=channel
+                        channel=channel,
+                        storage_config=config.storage
                     )
-                    
+
                     # Get last 24 hours (test signals are hourly)
                     end_time = datetime.utcnow()
                     start_time = end_time - timedelta(hours=24)
@@ -262,13 +264,14 @@ class TestSignalService:
                     continue
                 
                 try:
-                    reader = DataProductReader(
+                    reader = make_data_product_reader(
                         data_dir=channel_dir,
                         product_level='L2',
                         product_name='test_signal',
-                        channel=channel
+                        channel=channel,
+                        storage_config=config.storage
                     )
-                    
+
                     measurements = reader.read_time_range(
                         start=start.strftime('%Y-%m-%dT%H:%M:%S.%fZ'),
                         end=end.strftime('%Y-%m-%dT%H:%M:%S.%fZ')

@@ -1,76 +1,57 @@
-# TSL3 — V1-fix anchor-churn investigation (2026-05-18)
+# Metrology/physics remediation — M-M batch
 
-## What the V1-fix subsystem is
+Branch `metrology-physics-review-remediation`. P-M1–P-M26 all done. Now
+on **M-M (metrology-Medium)** findings, 11 file-clusters.
 
-`docs/TIMING-PIPELINE-WIRING.md §10.3` — TSL3's SHM push computes the edge
-wall-time via `rtp_to_wallclock`, which projects the RTP counter forward from a
-`(gps_time, rtp_timesnap)` anchor captured from radiod's status. "V1" = that
-anchor going stale. The fix is a layered policy in `core_recorder_v2.py`:
-- Layer 1 — settled-capture gate: capture the anchor only when chrony is
-  settled (|offset| ≤ 100 µs). Correct, working.
-- Layer 2 — drift monitor: Signal A (`_t6_check_anchor_consistency`,
-  anchor discontinuity) + Signal B (`_t6_check_delta_breach`, sustained Δ).
-- Layer 3 — `_t6_attempt_recapture`: re-capture the anchor on a flag.
+## Done this session (M-M)
+- [x] **S4 + M-M1 + M-M3** — canonical correlation-peak SNR: new
+      `core/snr.py` with `peak_snr_db_envelope` (Rayleigh) and
+      `peak_snr_db_signed` (Gaussian); `tick_edge_detector` and
+      `tick_matched_filter._correlate_tick_iq` migrated to the envelope
+      branch; `tick_matched_filter._correlate_tick_am` migrated to the
+      signed branch (replaces the 40 dB sentinel with NaN). The
+      `metrology_engine` correlation-SNR sites will migrate when its
+      M-M cluster lands.
 
-## Root cause of the live TSL3 churn — Layer 2 Signal A misfires on noise
+## Remaining M-M clusters (one commit each)
+- [ ] **M-M2** `tick_edge_detector` — Doppler polyfit unweighted +
+      cycle-slip-risky unwrap.
+- [ ] **M-M4** `buffer_timing` — GPS_LEAP_SECONDS captured once at import.
+- [ ] **M-M5/M-M6/M-M7/M-M8 + S4-finish** `metrology_engine` — vacuum
+      fallback `×1.15`; minute_number from untrusted system_time;
+      synthetic edge round-trip truncates mid_sec; ±800 ms multipath
+      suppression; migrate correlation SNR to `peak_snr_db_envelope`.
+- [ ] **M-M9/M-M10/M-M11/M-M12/M-M13** `multi_broadcast_fusion` — key
+      formatter; dead `gpsdo_locked` guard; leap-second Kalman hold
+      length; >5 ms D_clock jump not damped; dual convergence definitions.
+- [ ] **M-M14/M-M15** `broadcast_kalman_filter` — Joseph-form covariance
+      update; NaN/Inf guard on entrypoint.
+- [ ] **M-M16/M-M17** `chrony_shm` — `_connect_sysv` recreates a segment
+      chronyd may be attached to; failed `update()` does not clear
+      `.connected`.
+- [ ] **M-M18/M-M19/M-M20** `metrology_service` — per-record
+      `all_arrivals`/`detection_attempts` heap risk; DEBUG-not-WARNING
+      log; `_cleanup_processed_set` horizon uses `time.time()` while
+      minutes are keyed by ring `head_utc`.
+- [ ] **M-M21/M-M22/M-M23** `l2_calibration_service` — vacuum-only
+      geometric-fallback `propagation_delay_ms`; `k=2.0 / dof=10`
+      mis-labelled as 95 %; uncertainty components un-sourced.
+- [ ] **M-M24/M-M25/M-M26/M-M27/M-M28** `arrival_pattern_matrix` —
+      `int()` truncation in sample conversions; `contains_sample` /
+      `deviation_sigma` disagreement; `max_search_sample` clamp;
+      RTP-mode gate on TEC correction; virtual-vs-true hmF2 semantics.
+- [ ] **M-M30/M-M31/M-M32/M-M33/M-M34/M-M35** `propagation_mode_solver` —
+      Tier-2 MUF check; `back_calculate_emission_time` fallback;
+      E-layer ×0.5 fudge; `identify_mode` metric mismatch; dead FSS
+      branch; circular `second_aligned` boost.
 
-The doc §10.3 is explicit: the anchor must be **FROZEN** (a frozen anchor +
-GPSDO sample clock projects UTC exactly; Δ then tracks chrony's current
-discipline error — what we want). Periodic re-capture is the **wrong** thing —
-it "injects chrony's drift into Δ". Re-capture is meant to fire only on a
-genuine radiod **restart** or a **sustained** Δ breach.
+(M-M29 done by S2 — `propagation_mode_solver._hop_geometry` now uses
+spherical `hop_geometry`.)
 
-Signal A as implemented also flags an "anchor discontinuity" whenever
-`|actual_rtp_delta − expected_rtp_delta| > T6_ANCHOR_DISCONTINUITY_SAMPLES`
-(1000 samples ≈ 10 ms @ 96 kHz), and Layer 3 acts on it **immediately,
-bypassing all hysteresis**. The design comment assumes the residual noise is
-"single-digit samples". It is not:
+## Then
+Low (§3.4, §4.4); documentation (§5); P-H29 (TID L3 wire-in, deferred).
 
-- Measured directly (8 `discover_channels` polls, this session): residual
-  **±410 samples** noise floor — already ~40 % of the threshold.
-- Journal since restart: outlier-triggered residuals **−4023, −1690, −11728,
-  −83193, −17417 samples** (the −83193 ≈ 867 ms). 5 re-captures in ~10 min.
-- The re-capture old→new `(gps,rtp)` pairs are mutually consistent (±350) —
-  the underlying RTP↔gps relation is fine; Signal A is reacting to **reading
-  noise**, not real drift.
-
-So every noise outlier → false "discontinuity" → immediate re-capture → the
-`rtp_to_wallclock` anchor is swapped for a fresh (often-noisy) reading → TSL3's
-reference jumps. Re-capture every ~1 min IS the "periodic refresh" §10.3 says
-is wrong → TSL3 churns, chrony flags it `x`.
-
-This is the same failure shape as the Costas/phantom bugs: a disruptive action
-taken on a single noisy sample instead of a persistent signal.
-
-## Fix — IMPLEMENTED on branch `tsl3-anchor-drift-monitor-fix`
-
-- **Persistence-gated Signal A.** `_t6_check_anchor_consistency` now counts
-  *consecutive* polls on which the residual breaches the threshold
-  (`_t6_drift_residual_breach_count`); the flag is raised only at
-  `T6_ANCHOR_DISCONTINUITY_POLLS` (5 → 25 s). A clean reading resets the
-  counter, so a lone noise outlier is ignored and the anchor stays frozen
-  (the §10.3 design). A genuine radiod restart / clock step breaches every
-  poll and still flags. Same principle as Part 1's `STEP_CONFIRM_EDGES`.
-- **Counter-rollback check kept as-is** — a backwards jump is unambiguous and
-  still fires immediately.
-- Bypass-hysteresis on `anchor_discontinuity` kept: once persistence-gated the
-  flag only fires on a genuine, confirmed discontinuity, where an immediate
-  re-capture is the right response. Signal B keeps its cooldown/cap.
-- Re-capture clears `_t6_drift_residual_breach_count`; `residual_breach_count`
-  added to the `drift_monitor` status block; corrected the stale "single-digit
-  samples" design comment.
-- Tests: `test_core_recorder_t6_drift_monitor.py` reworked — single large
-  residual must NOT flag; sustained residual flags only at the Nth poll;
-  isolated outliers interleaved with clean reads never flag. 78/78 T6+BPSK
-  tests pass.
-
-## Deferred (noted, not done)
-- Radiod-side: why does radiod occasionally emit ~800 ms-off status readings?
-  Separate, lower-priority.
-- Bad-seed robustness (the drift anchor seeded from one possibly-noisy
-  reading) — persistence-gating makes it converge in one re-capture; a
-  median-of-N seed would be cleaner. Revisit if observed live.
-
-## Status
-- Costas-gate (`d8ca67e`) + calibrator phantom fix (`6bfc6b9`) — deployed.
-- Anchor-drift-monitor fix — implemented on branch, NOT merged/deployed.
+## Workflow
+`uv run --frozen --extra dev pytest tests/` — `--frozen` keeps uv.lock
+pinned. Known time-of-day flakes (deselect / not regressions):
+`test_geometric_prediction`, `test_fusion_gnss_vtec_rtp_gate`.

@@ -18,6 +18,11 @@ Key improvements over the previous model:
 4. Adaptive uncertainty based on model confidence
 5. Self-consistency checks via multi-frequency differential delay
 
+A complete PHaRLAP ray-tracing engine (core/raytrace_engine.py) exists as a
+would-be Tier-0 physics overlay but is deliberately NOT wired into this model.
+See that module's "Deployment status (P-H14)" docstring section for the
+rationale and the intended reanalysis-only, advisory wiring path.
+
 ================================================================================
 PHYSICS
 ================================================================================
@@ -80,6 +85,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from .hop_geometry import hop_geometry, max_single_hop_distance_km
+
 logger = logging.getLogger(__name__)
 
 # =============================================================================
@@ -132,12 +139,19 @@ class ModeArrival:
     reflection_height_km: float    # Ionospheric reflection height
     elevation_angle_deg: float     # Launch elevation angle
     is_feasible: bool              # Whether this mode is physically possible
-    uncertainty_ms: float          # 1-sigma uncertainty estimate
-    
+    uncertainty_1sigma_ms: float   # 1-sigma uncertainty estimate (P-H13)
+
     # Diagnostics
     slant_tec_tecu: float = 0.0   # Slant TEC along path
     foF2_MHz: float = 0.0         # F2 critical frequency (for MUF check)
     muf_MHz: float = 0.0          # Maximum usable frequency for this mode
+
+    @property
+    def uncertainty_3sigma_ms(self) -> float:
+        """3-sigma uncertainty — the convention used by the arrival-window
+        schema and the propagation-contract tier table (P-H13). Always
+        exactly 3x the 1-sigma estimate."""
+        return 3.0 * self.uncertainty_1sigma_ms
 
 
 @dataclass
@@ -154,12 +168,19 @@ class PropagationPrediction:
     # Best (most likely) arrival
     primary_delay_ms: float = 0.0
     primary_mode: str = ""
-    primary_uncertainty_ms: float = 15.0
-    
+    primary_uncertainty_1sigma_ms: float = 5.0   # 1-sigma (P-H13)
+
     # Model metadata
     data_source: str = "fallback"  # "wamipe", "wamipe+giro", "iri", "fallback"
     model_confidence: float = 0.0  # 0-1
-    
+
+    @property
+    def primary_uncertainty_3sigma_ms(self) -> float:
+        """3-sigma uncertainty of the primary arrival — the schema /
+        propagation-contract convention (P-H13). Always exactly 3x the
+        1-sigma value."""
+        return 3.0 * self.primary_uncertainty_1sigma_ms
+
     def get_feasible_arrivals(self) -> List[ModeArrival]:
         """Get all feasible arrivals sorted by delay."""
         return sorted(
@@ -202,19 +223,26 @@ class HFPropagationModel:
         self,
         receiver_lat: float,
         receiver_lon: float,
-        enable_realtime: bool = True
+        enable_realtime: bool = True,
+        enable_cache: bool = True
     ):
         """
         Initialize the propagation model.
-        
+
         Args:
             receiver_lat: Receiver latitude (degrees)
             receiver_lon: Receiver longitude (degrees)
             enable_realtime: Whether to use real-time ionospheric data
+            enable_cache: Whether to cache predictions. The cache's
+                eviction assumes ``utc_time`` advances monotonically
+                (see ``predict``); reanalysis that re-walks or jumps
+                around archived time should pass ``enable_cache=False``
+                (P-M15).
         """
         self.receiver_lat = receiver_lat
         self.receiver_lon = receiver_lon
         self.enable_realtime = enable_realtime
+        self._enable_cache = enable_cache
         
         # Station locations (canonical source: wwv_constants)
         from .wwv_constants import STATION_LOCATIONS as _SL
@@ -235,7 +263,10 @@ class HFPropagationModel:
         # IRI model reference (lazy init)
         self._iri_model = None
         
-        # Cache of recent predictions
+        # Cache of recent predictions, keyed by (station, freq, time-bucket).
+        # Eviction (in predict()) drops the lowest time-bucket, which is the
+        # least-recently-used ONLY while utc_time advances monotonically —
+        # see the note there. Disabled via enable_cache=False.
         self._cache: Dict[Tuple[str, float, int], PropagationPrediction] = {}
         self._cache_ttl_s = 60  # Cache predictions for 1 minute
         
@@ -296,9 +327,9 @@ class HFPropagationModel:
         if modes is None:
             modes = PROPAGATION_MODES
         
-        # Check cache
+        # Check cache (skipped when enable_cache=False — see __init__).
         cache_key = (station, frequency_mhz, int(utc_time.timestamp()) // self._cache_ttl_s)
-        if cache_key in self._cache:
+        if self._enable_cache and cache_key in self._cache:
             return self._cache[cache_key]
         
         distance_km = self.distances.get(station, 0.0)
@@ -350,22 +381,29 @@ class HFPropagationModel:
             primary = feasible[0]
             prediction.primary_delay_ms = primary.delay_ms
             prediction.primary_mode = primary.mode.label
-            prediction.primary_uncertainty_ms = primary.uncertainty_ms
+            prediction.primary_uncertainty_1sigma_ms = primary.uncertainty_1sigma_ms
         else:
             # No feasible mode — use vacuum fallback
             vacuum_delay = distance_km / C_LIGHT_KM_MS
             prediction.primary_delay_ms = vacuum_delay * 1.15  # 15% overhead
             prediction.primary_mode = "vacuum_fallback"
-            prediction.primary_uncertainty_ms = 15.0
+            # "No model" 1-sigma; the 3-sigma property then gives 15.0 ms,
+            # the value this fallback historically reported (P-H13).
+            prediction.primary_uncertainty_1sigma_ms = 5.0
         
-        # Cache
-        self._cache[cache_key] = prediction
-        # Evict old entries
-        if len(self._cache) > 1000:
-            oldest = sorted(self._cache.keys(), key=lambda k: k[2])[:500]
-            for k in oldest:
-                del self._cache[k]
-        
+        # Cache. Eviction drops the 500 lowest cache-key time buckets —
+        # the least-recently-used set ONLY while utc_time advances
+        # monotonically (live operation, or a single forward reanalysis
+        # pass). A caller that re-walks or jumps around archived time must
+        # construct the model with enable_cache=False (P-M15), or it will
+        # evict buckets it is about to request again.
+        if self._enable_cache:
+            self._cache[cache_key] = prediction
+            if len(self._cache) > 1000:
+                oldest = sorted(self._cache.keys(), key=lambda k: k[2])[:500]
+                for k in oldest:
+                    del self._cache[k]
+
         return prediction
     
     def predict_all_modes(
@@ -427,12 +465,21 @@ class HFPropagationModel:
                     longitude=lon
                 )
                 if heights is not None:
+                    # TEC: IRI-2020 outputs vertical TEC, and IonosphericModel
+                    # now surfaces it on LayerHeights (P-M13) — no longer a
+                    # fixed 20 TECU placeholder. Fall back to the parametric
+                    # TEC only when this IRI build did not supply one.
+                    tec_tecu = heights.tec_tecu
+                    if tec_tecu is None:
+                        tec_tecu = self._parametric_iono(
+                            lat, lon, utc_time
+                        ).get('TEC_TECU', 20.0)
                     return {
                         'hmF2_km': heights.hmF2,
                         'hmE_km': heights.hmE,
                         'NmF2_m3': 1.24e10 * (heights.foF2 ** 2) if hasattr(heights, 'foF2') and heights.foF2 else 1e12,
                         'foF2_MHz': heights.foF2 if hasattr(heights, 'foF2') and heights.foF2 else 8.0,
-                        'TEC_TECU': 20.0,  # IRI doesn't directly give TEC here
+                        'TEC_TECU': tec_tecu,
                         'source': 'iri',
                         'confidence': 0.5,
                     }
@@ -535,10 +582,10 @@ class HFPropagationModel:
         # Maximum single-hop ground distance
         R = EARTH_RADIUS_KM
         h = reflection_height
-        max_1hop_km = 2 * math.sqrt(2 * R * h + h ** 2)
-        
+        max_1hop_km = max_single_hop_distance_km(h)
+
         hop_distance = distance_km / n_hops
-        
+
         # Is this mode geometrically possible?
         if hop_distance > max_1hop_km * 1.1:  # 10% margin
             return ModeArrival(
@@ -550,39 +597,27 @@ class HFPropagationModel:
                 reflection_height_km=reflection_height,
                 elevation_angle_deg=0.0,
                 is_feasible=False,
-                uncertainty_ms=0.0,
+                uncertainty_1sigma_ms=0.0,
             )
+
+        # Spherical-Earth hop geometry — shared module (review item S2).
+        geom = hop_geometry(distance_km, h, n_hops)
+        elevation_deg = geom.elevation_deg
         
-        # Compute elevation angle
-        # From spherical geometry: sin(elev) = (cos(θ/2) * (R+h) - R) / slant
-        theta = hop_distance / R  # Central angle for one hop (radians)
-        half_theta = theta / 2
-        
-        slant_sq = R**2 + (R + h)**2 - 2 * R * (R + h) * math.cos(half_theta)
-        slant = math.sqrt(max(0, slant_sq))
-        
-        if slant > 0:
-            sin_elev = ((R + h) * math.cos(half_theta) - R) / slant
-            elevation_deg = math.degrees(math.asin(max(-1, min(1, sin_elev))))
-        else:
-            elevation_deg = 90.0
-        
-        # Check MUF (Maximum Usable Frequency)
-        # MUF = foF2 * sec(i) where i is the angle of incidence at the layer
-        # For oblique incidence: sec(i) ≈ distance factor
-        # Simplified: MUF ≈ foF2 / sin(elevation)
-        if elevation_deg > 0:
-            muf = foF2 / math.sin(math.radians(elevation_deg))
-        else:
-            muf = foF2 * 3.0  # Rough estimate for very low angles
-        
-        # E-layer MUF is lower
-        if mode.layer == 'E':
-            foE = iono_params.get('foE_MHz', 3.0)
-            if elevation_deg > 0:
-                muf = foE / math.sin(math.radians(elevation_deg))
-            else:
-                muf = foE * 3.0
+        # Check MUF (Maximum Usable Frequency).
+        # Secant law: MUF = f_critical / cos(i0), where i0 is the ray's angle
+        # of incidence at the reflecting layer. On a curved Earth the layer at
+        # height h curves away from the launch point, so i0 is steeper (closer
+        # to vertical) than the flat-Earth value — from the law of sines,
+        # sin(i0) = R*cos(elev)/(R+h). The flat-Earth secant law foF2/sin(elev)
+        # overestimates the MUF and would mis-gate high-band short-path modes
+        # as feasible (P-H15).
+        sin_i0 = min(1.0, R * math.cos(math.radians(elevation_deg)) / (R + h))
+        cos_i0 = math.sqrt(max(0.0, 1.0 - sin_i0 ** 2))
+
+        # Critical frequency of the reflecting layer (E uses foE, F uses foF2).
+        f_critical = iono_params.get('foE_MHz', 3.0) if mode.layer == 'E' else foF2
+        muf = f_critical / max(cos_i0, 1e-3)
         
         # Is the frequency below the MUF? (with margin)
         is_feasible = frequency_mhz <= muf * 1.1  # 10% margin for model uncertainty
@@ -601,14 +636,14 @@ class HFPropagationModel:
                 reflection_height_km=reflection_height,
                 elevation_angle_deg=elevation_deg,
                 is_feasible=False,
-                uncertainty_ms=0.0,
+                uncertainty_1sigma_ms=0.0,
                 muf_MHz=muf,
                 foF2_MHz=foF2,
             )
         
-        # Compute geometric path length (spherical Earth)
-        path_length = n_hops * 2 * slant  # Up and down for each hop
-        
+        # Geometric path length (spherical Earth) — shared module (S2).
+        path_length = geom.path_length_km
+
         # Geometric (vacuum) delay
         geometric_delay_ms = path_length / C_LIGHT_KM_MS
         
@@ -633,8 +668,8 @@ class HFPropagationModel:
         
         total_delay_ms = geometric_delay_ms + iono_delay_ms
         
-        # Uncertainty estimate
-        uncertainty_ms = self._estimate_uncertainty(
+        # Uncertainty estimate (1-sigma)
+        uncertainty_1sigma_ms = self._estimate_uncertainty(
             mode=mode,
             iono_params=iono_params,
             frequency_mhz=frequency_mhz,
@@ -650,7 +685,7 @@ class HFPropagationModel:
             reflection_height_km=reflection_height,
             elevation_angle_deg=elevation_deg,
             is_feasible=True,
-            uncertainty_ms=uncertainty_ms,
+            uncertainty_1sigma_ms=uncertainty_1sigma_ms,
             slant_tec_tecu=iono_params.get('TEC_TECU', 0.0),
             foF2_MHz=foF2,
             muf_MHz=muf,
@@ -908,38 +943,66 @@ class HFPropagationModel:
         utc_time: Optional[datetime] = None
     ) -> Tuple[float, float]:
         """
-        Compute differential group delay between two frequencies.
-        
-        This is a key observable for TEC estimation:
-            Δτ = τ(f1) - τ(f2) = 40.3 * sTEC * (1/f1² - 1/f2²) / c
-        
+        Differential group delay between two frequencies, on a shared mode.
+
+        For one fixed propagation mode the delay splits into a geometric
+        part (frequency-independent — the slant path is fixed by geometry,
+        not frequency) and a dispersive ionospheric part ∝ 1/f². The
+        differential of two frequencies on the *same* mode therefore
+        isolates the dispersive term, a key observable for TEC:
+
+            Δτ = τ(f1) − τ(f2) = K · sTEC · (1/f1² − 1/f2²) / c
+
+        which inverts to the slant TEC along the (multi-hop) ray path.
+
+        P-M14: this previously differenced the two frequencies' *primary*
+        modes, which can differ (e.g. 1F at one frequency, 2F at the other,
+        via MUF gating). A 1F-vs-2F step is a large *geometric* path
+        difference with nothing to do with TEC; folding it into the
+        inversion produced a meaningless "implied TEC". The fix differences
+        a mode feasible at *both* frequencies, so the geometric delay
+        cancels exactly and only the dispersive term remains.
+
         Args:
             station: Station name
             freq1_mhz: First frequency (MHz)
             freq2_mhz: Second frequency (MHz)
             utc_time: UTC time
-            
+
         Returns:
-            Tuple of (differential_delay_ms, implied_tec_tecu)
+            (differential_delay_ms, implied_slant_tec_tecu) — the slant TEC
+            integrated along the whole ray path. Both 0.0 when the two
+            frequencies share no feasible mode (the differential TEC is
+            then undefined, not contaminated).
         """
         pred1 = self.predict(station, freq1_mhz, utc_time)
         pred2 = self.predict(station, freq2_mhz, utc_time)
-        
-        diff_ms = pred1.primary_delay_ms - pred2.primary_delay_ms
-        
-        # Implied TEC from differential delay
-        # Δτ = K * sTEC * (1/f1² - 1/f2²) / c
-        # sTEC = Δτ * c / (K * (1/f1² - 1/f2²))
+
+        # Difference a mode the two frequencies have in common. Same mode →
+        # identical geometry → the geometric delay cancels exactly, leaving
+        # the dispersive ionospheric term. The lowest-delay shared mode is
+        # the dominant common path.
+        modes1 = {a.mode.label: a for a in pred1.arrivals if a.is_feasible}
+        modes2 = {a.mode.label: a for a in pred2.arrivals if a.is_feasible}
+        shared = set(modes1) & set(modes2)
+        if not shared:
+            return 0.0, 0.0
+
+        label = min(shared, key=lambda lbl: modes1[lbl].delay_ms)
+        diff_ms = modes1[label].delay_ms - modes2[label].delay_ms
+
+        # Invert the dispersion relation for slant TEC along the path.
+        # Δτ = K · sTEC · (1/f1² − 1/f2²) / c  →  sTEC = Δτ·c / (K·Δ(1/f²))
         f1_hz = freq1_mhz * 1e6
         f2_hz = freq2_mhz * 1e6
         freq_factor = 1.0 / f1_hz**2 - 1.0 / f2_hz**2
-        
+
         if abs(freq_factor) > 0:
             stec_el_m2 = (diff_ms / 1000.0) * C_LIGHT_M_S / (K_GROUP_DELAY * freq_factor)
             implied_tec_tecu = stec_el_m2 / 1e16
         else:
             implied_tec_tecu = 0.0
-        
+
         return diff_ms, implied_tec_tecu
     
     def self_consistency_check(

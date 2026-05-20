@@ -407,7 +407,7 @@ class StationModelFactory:
         
         # Use simple geometric model for station model initialization
         # (fast, consistent, better than simple heuristic)
-        engine = PropagationEngine(enable_iri=False)
+        engine = PropagationEngine()
         
         # Get coordinates based on station ID
         if station == StationID.WWV:

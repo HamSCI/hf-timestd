@@ -11,6 +11,30 @@ critical path.  It augments PropagationModeSolver with full numerical ray
 tracing when pyLAP is available; the rest of the pipeline degrades gracefully
 when it is not.
 
+Deployment status (P-H14)
+-------------------------
+As of the 2026-05 metrology/physics review this engine is **complete but not
+yet wired into any caller** — neither HFPropagationModel nor
+PropagationModeSolver constructs a RaytraceEngine.  This is a deliberate
+deferral, not an oversight:
+
+  * pyLAP/PHaRLAP is an optional dependency requiring a manual native install
+    and three environment variables (see "Environment setup" below).  It is
+    absent on the standard deployment, so a wired-in call would resolve to the
+    geometric fallback anyway.
+  * A single 2-D ray trace is orders of magnitude more expensive than the
+    analytic tier, and PHaRLAP's Fortran ODE solver can enter runaway loops —
+    every call is already isolated in a worker process with a timeout
+    (``_raytrace_with_timeout``).  That cost rules it out of the real-time
+    chrony-feed path.
+
+The intended wiring, when scheduled, is **reanalysis-only and advisory**:
+HFPropagationModel / PropagationModeSolver would, when ``is_available()`` is
+true, call ``compute_modes()`` asynchronously as a Tier-0 cross-check whose
+result is logged and compared against the analytic prediction but never
+blocks or replaces the delivered delay.  Until then this module is retained,
+tested for graceful degradation, and intentionally unreferenced.
+
 Environment setup (macOS / Linux)
 ----------------------------------
     export PHARLAP_HOME=/path/to/pharlap_4.7.4
@@ -40,6 +64,8 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 import numpy as np
+
+from .hop_geometry import EARTH_RADIUS_KM, hop_geometry, n_hops_for_distance
 
 logger = logging.getLogger(__name__)
 
@@ -88,25 +114,44 @@ _try_import_pylap()
 RAYTRACE_TIMEOUT_S = 120  # Max wall-clock seconds per raytrace_2d call
 
 
-def _raytrace_with_timeout(raytrace_func, args, timeout_s=RAYTRACE_TIMEOUT_S):
-    """Run raytrace_2d in a forked subprocess with hard timeout.
+def _raytrace_worker(queue, fn_args):
+    """
+    Subprocess entry point for one ``raytrace_2d`` call.
+
+    Module-level (not a closure) and resolving the raytrace function from
+    the module global, so nothing unpicklable has to cross the ``spawn``
+    boundary — only ``fn_args``, which are numpy arrays and scalars.
+    """
+    try:
+        if _pylap_raytrace_2d is None:
+            queue.put(('err', 'pylap.raytrace_2d unavailable in subprocess'))
+            return
+        result = _pylap_raytrace_2d(*fn_args)
+        queue.put(('ok', result))
+    except Exception as exc:
+        queue.put(('err', str(exc)))
+
+
+def _raytrace_with_timeout(args, timeout_s=RAYTRACE_TIMEOUT_S):
+    """Run raytrace_2d in a subprocess with a hard timeout.
 
     PHaRLAP's Fortran ODE solver can enter runaway loops for certain
     frequency/ionosphere combinations (e.g. above-MUF at night).  A hung
-    C-extension call cannot be interrupted by Python signals, so we fork
-    a child process and kill it if it exceeds the deadline.
+    C-extension call cannot be interrupted by Python signals, so the call
+    runs in a child process that is killed if it exceeds the deadline.
+
+    The child uses the ``spawn`` start method (P-M17).  The timestd
+    services are multi-threaded, and forking a multi-threaded process
+    copies locked mutexes into the child while only the forking thread
+    survives there — a classic deadlock hazard.  ``spawn`` starts a clean
+    interpreter; the child re-imports this module, so ``_try_import_pylap``
+    repopulates ``_pylap_raytrace_2d`` and ``_raytrace_worker`` resolves
+    it locally rather than receiving it (unpicklable) over the boundary.
     """
-    ctx = mp.get_context('fork')
+    ctx = mp.get_context('spawn')
     q = ctx.Queue(maxsize=1)
 
-    def _worker(queue, fn, fn_args):
-        try:
-            result = fn(*fn_args)
-            queue.put(('ok', result))
-        except Exception as exc:
-            queue.put(('err', str(exc)))
-
-    proc = ctx.Process(target=_worker, args=(q, raytrace_func, args),
+    proc = ctx.Process(target=_raytrace_worker, args=(q, args),
                        daemon=True)
     proc.start()
     proc.join(timeout=timeout_s)
@@ -178,6 +223,9 @@ class RaytraceResult:
 # ---------------------------------------------------------------------------
 _C_KM_S = 299792.458  # km/s
 
+# Nominal F2 reflection height for the no-PHaRLAP geometric fallback.
+_FALLBACK_F2_HEIGHT_KM = 300.0
+
 
 def _gc_point(lat1_deg: float, lon1_deg: float,
               bearing_deg: float, dist_km: float) -> tuple[float, float]:
@@ -205,6 +253,31 @@ def _gc_bearing(lat1: float, lon1: float,
         math.cos(lat1r) * math.sin(lat2r) -
         math.sin(lat1r) * math.cos(lat2r) * math.cos(dlon)
     )) % 360.0
+
+
+def _interp_profiles_to_columns(
+    profiles_arr: np.ndarray,
+    sample_km: np.ndarray,
+    range_km: np.ndarray,
+) -> np.ndarray:
+    """
+    Linearly interpolate per-height Ne profiles onto a range grid.
+
+    Vectorised across all heights at once (P-M17 — replaces a per-height
+    ``np.interp`` loop).  ``profiles_arr`` is ``(n_heights, n_samples)``,
+    the profiles sampled at the ascending x-grid ``sample_km``; the result
+    is ``(n_heights, n_ranges)`` at the query points ``range_km``.  Range
+    values outside the sample span clamp to the end profile, matching
+    ``np.interp``'s flat extrapolation.
+    """
+    n_samp = sample_km.shape[0]
+    hi = np.clip(np.searchsorted(sample_km, range_km, side='right'),
+                 1, n_samp - 1)
+    lo = hi - 1
+    x0 = sample_km[lo]
+    x1 = sample_km[hi]
+    w = np.clip((range_km - x0) / (x1 - x0), 0.0, 1.0)   # (n_ranges,)
+    return profiles_arr[:, lo] * (1.0 - w) + profiles_arr[:, hi] * w
 
 
 def _build_iri_grid(tx_lat: float, tx_lon: float,
@@ -253,7 +326,13 @@ def _build_iri_grid(tx_lat: float, tx_lon: float,
         n_ranges = int(grid_max_km / range_inc_km) + 1
 
         brg = _gc_bearing(tx_lat, tx_lon, rx_lat, rx_lon)
-        r12_idx = 100.0  # moderate solar activity
+        # R12 = -1 tells IRI to read the date-appropriate 12-month smoothed
+        # sunspot index from its own ig_rz.dat / apf107.dat files, instead
+        # of a fixed value that ignores the solar cycle entirely (P-M17).
+        # The codebase has no separate solar-index feed; IRI's bundled,
+        # date-indexed files are the authoritative source and cover
+        # historical dates as well as near-future predictions.
+        r12_idx = -1.0
         ut_list = [utc.year, utc.month, utc.day,
                    utc.hour, utc.minute]
 
@@ -303,12 +382,9 @@ def _build_iri_grid(tx_lat: float, tx_lon: float,
         else:
             range_km = np.arange(n_ranges) * range_inc_km
             profiles_arr = np.column_stack(sample_profiles)  # (n_heights, n_samp)
-            sample_km = np.array(sample_dists)
-            # np.interp operates per-height row; vectorise with apply_along_axis
-            iono_en_grid = np.zeros((n_heights, n_ranges), dtype=np.float64)
-            for h in range(n_heights):
-                iono_en_grid[h, :] = np.interp(range_km, sample_km,
-                                               profiles_arr[h, :])
+            sample_km = np.asarray(sample_dists, dtype=np.float64)
+            iono_en_grid = _interp_profiles_to_columns(
+                profiles_arr, sample_km, range_km)
 
         iono_en_grid_5 = np.zeros_like(iono_en_grid)  # Doppler shift not needed
         collision_grid = np.zeros_like(iono_en_grid)
@@ -441,7 +517,6 @@ class RaytraceEngine:
             # that occurs when raytrace_2d is invoked multiple times per process.
             # Wrapped in subprocess timeout to kill runaway ODE solver loops.
             ray_list, _rpath, _rstate = _raytrace_with_timeout(
-                _pylap_raytrace_2d,
                 (tx_lat, tx_lon,
                  elevs, bearing_deg, freqs, max_hops,
                  tol, 0,   # irreg_flag=0
@@ -451,46 +526,8 @@ class RaytraceEngine:
                  iono['irreg_grid']),
             )
 
-            for i, ray_dict in enumerate(ray_list):
-                labels = np.asarray(ray_dict.get('ray_label', []))
-                if len(labels) == 0:
-                    continue
-                ground_ranges = np.asarray(ray_dict.get('ground_range', []))
-                group_ranges  = np.asarray(ray_dict.get('group_range',  []))
-                apogees       = np.asarray(ray_dict.get('apogee',       []))
-                if len(ground_ranges) == 0:
-                    continue
-
-                # hop-0 group/ground ratio is always correctly extracted.
-                # Use it to estimate total group path for any hop count.
-                gnd0 = float(ground_ranges[0])
-                grp0 = float(group_ranges[0]) if len(group_ranges) > 0 else 0.0
-                apex0 = float(apogees[0]) if len(apogees) > 0 else 0.0
-                if gnd0 > 0 and not math.isnan(grp0) and grp0 > 0:
-                    grp_factor = grp0 / gnd0
-                else:
-                    grp_factor = 1.02  # typical ionospheric slowing
-
-                for k in range(len(ground_ranges)):
-                    if int(labels[k]) != 1:
-                        continue  # this hop did not complete cleanly
-                    total_gnd = float(ground_ranges[k])
-                    if math.isnan(total_gnd):
-                        continue
-                    if abs(total_gnd - target_range_km) > tolerance_km:
-                        continue  # ray doesn't land near the receiver
-                    # Estimate total group path from hop-0 ratio
-                    total_grp = total_gnd * grp_factor
-                    delay_ms  = (total_grp / _C_KM_S) * 1000.0
-                    result.modes.append(RayMode(
-                        n_hops=k + 1,
-                        group_delay_ms=delay_ms,
-                        launch_elev_deg=float(elevs[i]),
-                        ground_range_km=total_gnd,
-                        apogee_km=apex0,
-                        confidence=1.0,
-                        ray_label=1,
-                    ))
+            result.modes.extend(self._modes_from_ray_list(
+                ray_list, elevs, target_range_km, tolerance_km))
 
         except TimeoutError:
             logger.warning("RaytraceEngine: raytrace_2d timed out for "
@@ -518,9 +555,75 @@ class RaytraceEngine:
         return result
 
     # ------------------------------------------------------------------
+    @staticmethod
+    def _modes_from_ray_list(ray_list, elevs, target_range_km,
+                             tolerance_km) -> List[RayMode]:
+        """Convert PHaRLAP raytrace_2d per-elevation ray dicts to RayModes.
+
+        raytrace_2d returns per-hop arrays: index k is the (k+1)-hop ray,
+        ``ground_range[k]`` / ``group_range[k]`` are the cumulative
+        ground / group path after k+1 hops, and ``apogee[k]`` is that
+        hop's apogee.  The per-hop group range and apogee are used
+        *directly* — the previous code extrapolated every hop count from
+        the hop-0 group/ground ratio and reused the hop-0 apogee, an
+        approximation of an approximation on what is meant to be the
+        authoritative ray-traced path (P-H24).  The arrays must agree in
+        length for index k to mean the same hop across all of them; a ray
+        whose arrays disagree is skipped rather than mis-indexed.
+        """
+        modes: List[RayMode] = []
+        for i, ray_dict in enumerate(ray_list):
+            labels = np.asarray(ray_dict.get('ray_label', []))
+            if len(labels) == 0:
+                continue
+            ground_ranges = np.asarray(ray_dict.get('ground_range', []))
+            group_ranges = np.asarray(ray_dict.get('group_range', []))
+            apogees = np.asarray(ray_dict.get('apogee', []))
+            if len(ground_ranges) == 0:
+                continue
+            if not (len(group_ranges) == len(ground_ranges)
+                    and len(apogees) == len(ground_ranges)
+                    and len(labels) == len(ground_ranges)):
+                logger.warning(
+                    "RaytraceEngine: inconsistent PHaRLAP per-hop array "
+                    "lengths (ground=%d group=%d apogee=%d label=%d) — "
+                    "skipping ray", len(ground_ranges), len(group_ranges),
+                    len(apogees), len(labels))
+                continue
+            for k in range(len(ground_ranges)):
+                if int(labels[k]) != 1:
+                    continue  # this hop did not complete cleanly
+                total_gnd = float(ground_ranges[k])
+                total_grp = float(group_ranges[k])
+                if (math.isnan(total_gnd) or math.isnan(total_grp)
+                        or total_grp <= 0.0):
+                    continue
+                if abs(total_gnd - target_range_km) > tolerance_km:
+                    continue  # ray doesn't land near the receiver
+                modes.append(RayMode(
+                    n_hops=k + 1,
+                    group_delay_ms=(total_grp / _C_KM_S) * 1000.0,
+                    launch_elev_deg=float(elevs[i]),
+                    ground_range_km=total_gnd,
+                    apogee_km=float(apogees[k]),
+                    confidence=1.0,
+                    ray_label=1,
+                ))
+        return modes
+
+    # ------------------------------------------------------------------
     def _geometric_fallback(self, station: str, frequency_mhz: float,
                              utc_time: datetime) -> RaytraceResult:
-        """Vacuum great-circle delay — 1-hop only, confidence=0."""
+        """
+        Spherical-hop geometric delay fallback — confidence=0.
+
+        Used when PHaRLAP / IRI are unavailable. The path is a real
+        spherical-Earth hop geometry at a nominal F2 height via the shared
+        :mod:`hop_geometry` module (review item P-M18). The previous
+        version returned a straight-line ground-distance delay — it
+        ignored the up-and-over slant entirely and mislabelled every path
+        (including the multi-hop WWVH route) as a single hop.
+        """
         result = RaytraceResult(
             station=station,
             frequency_mhz=frequency_mhz,
@@ -536,14 +639,16 @@ class RaytraceEngine:
                 math.cos(math.radians(tx['lat'])) *
                 math.cos(math.radians(self.receiver_lat)) *
                 math.sin(dlon/2)**2)
-        dist_km  = 6371.0 * 2 * math.asin(math.sqrt(a))
-        delay_ms = (dist_km / _C_KM_S) * 1000.0
+        dist_km = EARTH_RADIUS_KM * 2 * math.asin(math.sqrt(a))
+
+        n_hops = n_hops_for_distance(dist_km, _FALLBACK_F2_HEIGHT_KM)
+        geom = hop_geometry(dist_km, _FALLBACK_F2_HEIGHT_KM, n_hops)
         result.modes.append(RayMode(
-            n_hops=1,
-            group_delay_ms=delay_ms,
-            launch_elev_deg=0.0,
+            n_hops=n_hops,
+            group_delay_ms=geom.geometric_delay_ms,
+            launch_elev_deg=geom.elevation_deg,
             ground_range_km=dist_km,
-            apogee_km=0.0,
+            apogee_km=_FALLBACK_F2_HEIGHT_KM,
             confidence=0.0,
         ))
         return result

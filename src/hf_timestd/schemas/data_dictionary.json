@@ -175,7 +175,7 @@
             "sign_convention": "Positive TEC means ionospheric group delay (signal arrives later at lower frequencies).",
             "known_pitfalls": [
                 "CRITICAL (P1-A): In production, the TEC estimator receives clock_offset_ms which is the L1 residual (raw_toa_ms), NOT the geometric-delay-corrected D_clock. The fit is therefore dominated by propagation model error, not ionospheric dispersion. SNR ~0.01-0.14 (see F1 in CRITIC_CONTEXT).",
-                "Negative TEC slope is physically impossible and is rejected — but it occurs frequently due to noise, indicating the signal is below the noise floor.",
+                "True TEC is non-negative, but the ESTIMATE goes negative frequently because the signal is below the noise floor. Negative estimates are retained as-is (CR-2 is WARNING, not ERROR) — not rejected, not clamped to zero: censoring on sign biases aggregates high, worst when true TEC is genuinely low. Aggregate using the value with its uncertainty, never by discarding.",
                 "Confidence > 0.8 (GOOD flag) does not mean the TEC is physically meaningful — it only means the fit is self-consistent. With N=2 frequencies, R²=1 always.",
                 "The 5-minute aggregation window mixes propagation conditions — mode switching within the window produces garbage fits."
             ],
@@ -282,11 +282,11 @@
         },
         {
             "id": "CR-2",
-            "description": "tec_tecu must be positive (negative TEC is unphysical)",
+            "description": "tec_tecu is expected positive; a negative value is flagged but NOT rejected. True TEC is non-negative, but a negative ESTIMATE is a normal noisy realization when true TEC is low or the signal is below the noise floor (see the tec_tecu noise_floor_analysis). Rejecting or clamping records on TEC sign censors the estimator and biases every downstream aggregate high.",
             "formula": "tec_tecu > 0",
             "level": "L3",
-            "severity": "ERROR",
-            "action": "Reject record. Negative TEC indicates mode mixing or noise domination."
+            "severity": "WARNING",
+            "action": "Flag as MARGINAL. Retain the record with its raw (possibly negative) value. Never reject or clamp on sign; aggregate using the value with its uncertainty."
         },
         {
             "id": "CR-3",

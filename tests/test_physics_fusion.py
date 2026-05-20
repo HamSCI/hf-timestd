@@ -37,7 +37,7 @@ class TestPhysicsFusionService(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.test_dir)
         
-    @patch('hf_timestd.core.physics_fusion_service.DataProductReader')
+    @patch('hf_timestd.core.physics_fusion_service.make_data_product_reader')
     def test_process_minute_tec_logic(self, MockReader):
         """Test that TEC estimation is triggered when multi-freq data exists."""
         
@@ -94,7 +94,7 @@ class TestPhysicsFusionService(unittest.TestCase):
         # We don't check exact TEC float value due to estimator details, 
         # but check it ran
         
-    @patch('hf_timestd.core.physics_fusion_service.DataProductReader')
+    @patch('hf_timestd.core.physics_fusion_service.make_data_product_reader')
     def test_process_minute_insufficient_data(self, MockReader):
         """Test graceful handling of single frequency (no TEC)."""
          # Setup mocks

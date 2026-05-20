@@ -9,17 +9,15 @@ and calculating ionospheric pierce points (midpoints).
 import math
 from typing import Tuple, Dict
 
+from hf_timestd.core.wwv_constants import STATION_LOCATIONS as STATIONS
+
 # Physical constants
 EARTH_RADIUS_KM = 6371.0
 DEFAULT_IONO_HEIGHT_KM = 350.0
 
-# Station locations (from wwv_constants.py)
-STATIONS = {
-    'WWV': {'lat': 40.678, 'lon': -105.039, 'name': 'WWV Fort Collins, CO'},
-    'WWVH': {'lat': 21.987, 'lon': -159.763, 'name': 'WWVH Kauai, HI'},
-    'CHU': {'lat': 45.295, 'lon': -75.753, 'name': 'CHU Ottawa, ON'},
-    'BPM': {'lat': 34.457, 'lon': 109.550, 'name': 'BPM Pucheng, China'}
-}
+# Station locations: the single source of truth is wwv_constants.STATION_LOCATIONS
+# (P-M6). A local copy here had drifted — BPM sat at 34.457°N, ~55 km from the
+# real Pucheng transmitter — so it is now imported, not duplicated.
 
 
 def calculate_midpoint(lat1: float, lon1: float, lat2: float, lon2: float) -> Tuple[float, float]:
@@ -58,26 +56,48 @@ def calculate_elevation_angle(
     h_iono: float = DEFAULT_IONO_HEIGHT_KM
 ) -> float:
     """
-    Calculate elevation angle from receiver to ionospheric reflection point.
-    
+    Elevation angle from the receiver to the single-hop ionospheric
+    reflection point, on a spherical Earth (P-H8).
+
+    The reflection point sits at height ``h_iono`` above the ground midpoint.
+    A flat-Earth triangle, ``atan2(h_iono, d/2)``, ignores curvature: over
+    1000-3000 km paths the ground curves away from the receiver's local
+    horizontal, so the flat triangle overestimates the elevation (≈2x at
+    2000 km), underestimates the obliquity factor, and biases VTEC high.
+
+    Spherical geometry — with central angle ``gamma = (d/2)/R_E`` between the
+    receiver and the sub-reflection point, and reflection-point geocentric
+    radius ``r_p = R_E + h_iono``:
+
+        tan(elevation) = (r_p*cos(gamma) - R_E) / (r_p*sin(gamma))
+
+    This reduces to the flat-Earth triangle as ``gamma -> 0``. A negative
+    result means ``h_iono`` is too low to support a single hop at this range
+    (reflection point below the local horizon); it is returned as-is so the
+    caller can gate on it.
+
     Args:
         rx_lat, rx_lon: Receiver location (degrees)
         tx_lat, tx_lon: Transmitter location (degrees)
         h_iono: Ionospheric height (km)
-    
+
     Returns:
         Elevation angle (degrees)
     """
-    # Great circle distance
+    # Great circle distance; a single hop reflects above the ground midpoint.
     distance_km = great_circle_distance(rx_lat, rx_lon, tx_lat, tx_lon)
-    
-    # For single-hop, half the ground distance
     half_distance = distance_km / 2.0
-    
-    # Elevation angle from geometry
-    # tan(elevation) = h / (half_distance)
-    elevation_rad = math.atan2(h_iono, half_distance)
-    
+
+    # Central angle (receiver -> sub-reflection point) and reflection radius.
+    gamma = half_distance / EARTH_RADIUS_KM
+    r_p = EARTH_RADIUS_KM + h_iono
+
+    # Spherical-Earth elevation; -> atan2(h_iono, half_distance) as gamma -> 0.
+    elevation_rad = math.atan2(
+        r_p * math.cos(gamma) - EARTH_RADIUS_KM,
+        r_p * math.sin(gamma),
+    )
+
     return math.degrees(elevation_rad)
 
 

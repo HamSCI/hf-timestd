@@ -20,9 +20,30 @@ import pytest
 from hf_timestd.core.chrony_shm import (
     SHM_KEY_BASE,
     SHM_SIZE,
+    SHM_STRUCT_FORMAT,
     ChronySHM,
     install_chrony_config,
 )
+
+
+# =============================================================================
+# Struct layout (M-H21)
+# =============================================================================
+
+
+class TestStructLayout:
+    """The SHM struct format and the segment size stay consistent."""
+
+    def test_shm_size_is_derived_from_the_format(self):
+        # SHM_SIZE == struct.calcsize(SHM_STRUCT_FORMAT) — they cannot drift.
+        assert SHM_SIZE == struct.calcsize(SHM_STRUCT_FORMAT)
+
+    def test_struct_is_96_bytes(self):
+        # chrony/ntpd/gpsd `struct shmTime` is 96 bytes on x86-64. A packed
+        # record must fill the whole segment — the format previously packed
+        # only 92 of the 96 bytes (M-H21).
+        assert SHM_SIZE == 96
+        assert struct.calcsize(SHM_STRUCT_FORMAT) == 96
 
 
 # =============================================================================

@@ -336,6 +336,10 @@ class TestPhaseContinuity(unittest.TestCase):
     
     def test_carrier_phase_continuity(self):
         """Consecutive windows should have smooth carrier phase (σ < 0.3 rad)"""
+        # Seed the global RNG so the noise realisation is deterministic
+        # regardless of test ordering — without this the test is sensitive
+        # to whichever sibling tests have consumed np.random state first.
+        np.random.seed(20260519)
         sample_rate = 20000
         tone_freq = 1000.0
         carrier_phase = 0.7  # Known carrier phase offset

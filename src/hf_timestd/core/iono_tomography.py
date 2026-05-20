@@ -62,6 +62,10 @@ F_SHELL_BOTTOM = 150.0
 F_SHELL_TOP = 500.0
 F_SHELL_CENTER = 300.0
 
+# Below this posterior-vs-prior variance reduction for the E-layer, the
+# E/F split is treated as prior-dominated rather than a measurement (P-H11).
+PRIOR_DOMINATED_VR_THRESHOLD = 0.5
+
 
 @dataclass
 class TomographyResult:
@@ -82,13 +86,24 @@ class TomographyResult:
     rms_residual_tecu: float    # RMS fit residual
     condition_number: float     # Matrix condition (higher = less stable)
     confidence: float           # 0-1 overall confidence
-    
+
+    # E/F-split identifiability (P-H11): how much the data sharpened each
+    # layer relative to its prior.  Near 0 => the value is essentially the
+    # prior, not a measurement.
+    variance_reduction_e: float = 0.0   # 1 - Var_posterior(E)/Var_prior(E)
+    variance_reduction_f: float = 0.0   # 1 - Var_posterior(F)/Var_prior(F)
+    prior_dominated: bool = True        # True => data does not constrain the split
+
     # Per-path diagnostics
     path_residuals: Dict[str, float] = field(default_factory=dict)
     
     # Solar context
     is_daytime: bool = True
     solar_elevation_deg: float = 0.0
+
+    # True if the optimiser converged. A non-converged solve (P-M10) keeps
+    # its estimate but is heavily down-confidenced; consumers gate on this.
+    converged: bool = True
 
 
 @dataclass
@@ -153,7 +168,18 @@ class IonoTomography:
         valid_paths = [p for p in paths if p.stec_tecu > 0 and p.uncertainty_tecu > 0]
         if len(valid_paths) < 2:
             return None
-        
+
+        # P-M9: restrict the E/F tomography to SINGLE-HOP paths. A multi-hop
+        # path's hops pierce the ionosphere at points hundreds of km apart,
+        # but the 2-layer (E, F) model carries one column of unknowns —
+        # folding a multi-hop path in via n_hops × obliquity silently assumed
+        # the ionosphere is horizontally uniform over the whole multi-thousand-
+        # km track. Single-hop paths sample one column, where that holds.
+        valid_paths = [p for p in valid_paths if p.n_hops == 1]
+        if len(valid_paths) < 2:
+            logger.debug("Tomography needs >= 2 single-hop paths")
+            return None
+
         # Check elevation diversity
         elevations = [p.elevation_deg for p in valid_paths]
         elev_range = max(elevations) - min(elevations)
@@ -170,12 +196,11 @@ class IonoTomography:
         W = np.zeros(n)  # Weights (inverse variance)
         
         for i, path in enumerate(valid_paths):
+            # valid_paths is single-hop only (see above), so the obliquity
+            # factor maps one shell traversal — no n_hops multiply.
             A[i, 0] = self._obliquity_factor(path.elevation_deg, self.e_shell_height_km)
             A[i, 1] = self._obliquity_factor(path.elevation_deg, self.f_shell_height_km)
-            
-            # For multi-hop paths, each hop traverses both shells
-            A[i, :] *= path.n_hops
-            
+
             b[i] = path.stec_tecu
             W[i] = 1.0 / (path.uncertainty_tecu ** 2)
         
@@ -223,17 +248,26 @@ class IonoTomography:
                 objective, x0, method='L-BFGS-B', bounds=bounds,
                 options={'maxiter': 100, 'ftol': 1e-10}
             )
-            
-            if not result.success:
-                logger.debug(f"Tomography optimization did not converge: {result.message}")
-                # Still use the result if it's reasonable
-            
-            tec_e = float(result.x[0])
-            tec_f = float(result.x[1])
-            
-        except Exception as e:
+        except (ValueError, np.linalg.LinAlgError) as e:
+            # P-M10: catch only the errors a genuine ill-posed solve raises;
+            # anything else is a real bug and must propagate.
             logger.warning(f"Tomography optimization failed: {e}")
             return None
+
+        tec_e = float(result.x[0])
+        tec_f = float(result.x[1])
+
+        # P-M10: the objective is a smooth convex quadratic with box bounds,
+        # so a non-converged L-BFGS-B result signals trouble. The estimate is
+        # kept (it may still be roughly right) but `converged` is recorded and
+        # the confidence is heavily penalised below — a non-converged solve
+        # must not be presented as a normal result.
+        converged = bool(result.success)
+        if not converged:
+            logger.warning(
+                f"Tomography did not converge ({result.message}) — "
+                f"result down-confidenced"
+            )
         
         # Compute fit quality
         fitted = A @ result.x
@@ -254,13 +288,41 @@ class IonoTomography:
             key = f"{path.station}_{path.frequency_mhz:.0f}"
             path_residuals[key] = float(residuals[i])
         
-        # Confidence based on fit quality and data quantity
-        # Higher confidence with more paths, lower residuals, better conditioning
+        # Posterior-vs-prior variance reduction for the E/F split (P-H11).
+        # The E- and F-shell thin-shell obliquity factors are nearly
+        # proportional across the available elevations, so AᵀWA is almost
+        # singular in the E/F-split direction and the MAP estimate collapses
+        # onto the prior. The posterior covariance (AᵀWA + Λ)⁻¹ versus the
+        # prior covariance Λ⁻¹ quantifies how much the data actually
+        # sharpened each layer.
+        Lambda = np.diag([lambda_e, lambda_f])
+        AtWA = A.T @ (W[:, np.newaxis] * A)
+        try:
+            cov_post = np.linalg.inv(AtWA + Lambda)
+            var_reduction_e = float(np.clip(1.0 - cov_post[0, 0] * lambda_e, 0.0, 1.0))
+            var_reduction_f = float(np.clip(1.0 - cov_post[1, 1] * lambda_f, 0.0, 1.0))
+        except np.linalg.LinAlgError:
+            var_reduction_e = 0.0
+            var_reduction_f = 0.0
+        prior_dominated = var_reduction_e < PRIOR_DOMINATED_VR_THRESHOLD
+        if prior_dominated:
+            logger.debug(
+                f"Tomography E/F split is prior-dominated (E-layer variance "
+                f"reduction {var_reduction_e:.0%}): tec_e_tecu={tec_e:.1f} "
+                f"reflects the prior, not the data"
+            )
+
+        # Confidence based on fit quality and data quantity. Higher confidence
+        # with more paths, lower residuals, better conditioning, and a
+        # data-constrained (not prior-dominated) E/F split.
         conf_paths = min(1.0, len(valid_paths) / 6.0)  # 6+ paths for full confidence
         conf_residual = max(0.0, 1.0 - rms_residual / 5.0)  # 5 TECU residual = 0 confidence
         conf_cond = max(0.0, 1.0 - math.log10(max(1, cond)) / 4.0)  # cond > 10000 = 0
-        confidence = conf_paths * conf_residual * conf_cond
-        
+        conf_split = var_reduction_e  # 0 => the reported E/F split is the prior
+        confidence = conf_paths * conf_residual * conf_cond * conf_split
+        if not converged:
+            confidence *= 0.1  # P-M10: a non-converged solve is not trusted
+
         # E/F ratio
         tec_total = tec_e + tec_f
         e_f_ratio = tec_e / max(0.01, tec_f)
@@ -276,9 +338,13 @@ class IonoTomography:
             rms_residual_tecu=rms_residual,
             condition_number=cond,
             confidence=confidence,
+            variance_reduction_e=var_reduction_e,
+            variance_reduction_f=var_reduction_f,
+            prior_dominated=prior_dominated,
             path_residuals=path_residuals,
             is_daytime=is_daytime,
             solar_elevation_deg=solar_elevation_deg,
+            converged=converged,
         )
     
     @staticmethod
@@ -356,36 +422,40 @@ class IonoTomography:
             if stec <= 0 or confidence < 0.3:
                 continue
             
-            # Get geometry from propagation predictions
+            # Geometry from propagation predictions. P-M9: real geometry is
+            # required — the contract forbids inventing it. A path with no
+            # propagation prediction (no primary arrival giving a real
+            # elevation and hop count) is SKIPPED, not given a fabricated
+            # 30°/1-hop default that would silently corrupt the obliquity
+            # mapping and the single-hop filter in solve().
             for freq_mhz in freqs:
-                elevation = 30.0  # Default
-                azimuth = 0.0
-                distance = 1500.0
-                mode = '1F'
-                n_hops = 1
-                
+                primary = None
+                distance = None
                 if propagation_predictions:
-                    pred_key = (station, freq_mhz)
-                    pred = propagation_predictions.get(pred_key)
+                    pred = propagation_predictions.get((station, freq_mhz))
                     if pred and hasattr(pred, 'get_primary_arrival'):
                         primary = pred.get_primary_arrival()
-                        if primary:
-                            elevation = primary.elevation_angle_deg
-                            mode = primary.mode.label
-                            n_hops = primary.mode.n_hops
                     if pred and hasattr(pred, 'distance_km'):
                         distance = pred.distance_km
-                
+
+                if primary is None:
+                    logger.debug(
+                        f"Tomography: skipping {station} {freq_mhz} MHz — "
+                        f"no propagation prediction (geometry must not be "
+                        f"fabricated)"
+                    )
+                    continue
+
                 uncertainty = max(1.0, stec * (1.0 - confidence))
-                
+
                 paths.append(RayPath(
                     station=station,
                     frequency_mhz=freq_mhz,
-                    elevation_deg=elevation,
-                    azimuth_deg=azimuth,
-                    distance_km=distance,
-                    propagation_mode=mode,
-                    n_hops=n_hops,
+                    elevation_deg=primary.elevation_angle_deg,
+                    azimuth_deg=0.0,
+                    distance_km=distance if distance is not None else 0.0,
+                    propagation_mode=primary.mode.label,
+                    n_hops=primary.mode.n_hops,
                     stec_tecu=stec,
                     uncertainty_tecu=uncertainty,
                 ))

@@ -260,11 +260,12 @@ enabled = false
 #                                 # Omit (or None) to use the iq preset's ±5 kHz default.
 
 [storage]
-# Storage backend selection. Phase 1 of the HDF5 → SQLite migration
-# (see docs/HDF5-TO-SQLITE-MIGRATION.md): producers can opt into
-# dual-write to verify SQLite output parity before any read-side
-# switch. Default off — flip to true on individual hosts as part of
-# the migration rollout.
+# Storage backend selection for the HDF5 → SQLite migration (see
+# docs/HDF5-TO-SQLITE-MIGRATION.md). The write and read knobs are
+# independent: producers opt into dual-write to verify SQLite output
+# parity, and only once parity holds do consumers opt into SQLite
+# reads. Defaults preserve today's HDF5-only behaviour — flip per host
+# as part of the migration rollout.
 #
 # write_hdf5  = true  (default): write to per-product daily .h5 files
 #                                under /var/lib/timestd/phase2/{channel}/.
@@ -272,11 +273,19 @@ enabled = false
 #                                 database at sqlite_path. Safe to
 #                                 enable alongside HDF5 — both backends
 #                                 receive the same validated rows.
+# read_sqlite = false (default): consumers read data products from the
+#                                 HDF5 archive. When true, consumers
+#                                 that go through make_data_product_reader()
+#                                 read from the SQLite database instead.
+#                                 Flip only after dual-write parity has
+#                                 been verified for the products that
+#                                 consumer reads.
 # sqlite_path = "/var/lib/timestd/phase2/timestd.db" — single database
 #                                 for all of hf-timestd, with one table
 #                                 per data product and a channel column.
 write_hdf5 = true
 write_sqlite = false
+read_sqlite = false
 sqlite_path = "/var/lib/timestd/phase2/timestd.db"
 
 [gnss_vtec]

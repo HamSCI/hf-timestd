@@ -107,6 +107,8 @@ from typing import Dict, List, Optional, Tuple, NamedTuple
 from dataclasses import dataclass, field
 from enum import Enum
 
+from .hop_geometry import hop_geometry
+
 logger = logging.getLogger(__name__)
 
 
@@ -354,10 +356,21 @@ class ExpectedArrival:
     data_source: str = 'static'            # 'wamipe', 'wamipe+giro', 'iri', 'parametric', 'static'
     model_confidence: float = 0.0          # 0-1, from propagation model
     
-    def contains_sample(self, sample: int) -> bool:
-        """Check if a sample falls within the search window."""
-        return self.min_search_sample <= sample <= self.max_search_sample
-    
+    def contains_sample(self, sample: int,
+                        sample_rate: int = DEFAULT_SAMPLE_RATE) -> bool:
+        """Return True iff ``sample`` is within the ±3σ search window.
+
+        M-M25: both the accept/reject decision and the logged σ-distance
+        are derived from the same float source-of-truth quantities —
+        ``expected_delay_ms`` and ``uncertainty_3sigma_ms`` — via
+        :meth:`deviation_sigma`.  The old version compared against the
+        already-truncated ``min_search_sample`` / ``max_search_sample``
+        ints, so a sample that fell *outside* the truncated window
+        could still log ``deviation_sigma < 3``; the accept/reject and
+        the logged σ disagreed by up to one sample.
+        """
+        return self.deviation_sigma(sample, sample_rate) <= 3.0
+
     def deviation_sigma(self, sample: int, sample_rate: int = DEFAULT_SAMPLE_RATE) -> float:
         """Calculate how many sigma a sample deviates from expected."""
         sample_ms = sample * 1000 / sample_rate
@@ -436,23 +449,32 @@ class ArrivalPatternMatrix:
         receiver_lon: float,
         sample_rate: int = DEFAULT_SAMPLE_RATE,
         enable_iri: bool = True,
-        default_uncertainty_3sigma_ms: float = DEFAULT_UNCERTAINTY_3SIGMA_MS
+        default_uncertainty_3sigma_ms: float = DEFAULT_UNCERTAINTY_3SIGMA_MS,
+        apply_tec_correction: bool = True,
     ):
         """
         Initialize the arrival pattern matrix.
-        
+
         Args:
             receiver_lat: Receiver latitude (degrees)
             receiver_lon: Receiver longitude (degrees)
             sample_rate: Sample rate in Hz
             enable_iri: Whether to attempt IRI-2020 model (falls back to parametric)
             default_uncertainty_3sigma_ms: Default 3-sigma uncertainty for search window
+            apply_tec_correction: Whether to fold measured-TEC corrections
+                into ``expected_delay_ms`` (M-M27).  Default True (Fusion
+                mode).  RTP-mode callers should pass False — there GPS
+                anchors the timing, and TEC is the *science observable*,
+                so applying it as a model correction would zero out the
+                very signal the pipeline wants to measure.
         """
         self.receiver_lat = receiver_lat
         self.receiver_lon = receiver_lon
         self.sample_rate = sample_rate
         self.enable_iri = enable_iri
         self.default_uncertainty_3sigma_ms = default_uncertainty_3sigma_ms
+        # M-M27: mode-gating flag; respected by `compute_tec_correction_ms`.
+        self._apply_tec_correction = bool(apply_tec_correction)
         
         # Bootstrap state - starts wide, narrows with confidence
         self._is_locked = False
@@ -533,11 +555,14 @@ class ArrivalPatternMatrix:
         logger.info(f"Initialized {len(self._broadcast_windows)} broadcast windows "
                    f"(initial ±{BOOTSTRAP_INITIAL_UNCERTAINTY_MS}ms)")
         
-        # Real-time TEC feedback state
-        # Stores measured TEC values per station for refining predictions
+        # Real-time TEC feedback state.
+        # Stores measured TEC values per station for refining predictions.
+        # NOTE: ``self._apply_tec_correction`` (set in ``__init__`` from
+        # the constructor's ``apply_tec_correction`` flag, M-M27) is
+        # the *gate* on whether corrections get applied.  This block
+        # only stores the inputs.
         self._measured_tec: Dict[str, float] = {}  # station -> TECU
         self._measured_tec_timestamp: Dict[str, float] = {}  # station -> unix timestamp
-        self._tec_feedback_enabled = True
         self._tec_max_age_seconds = 300.0  # Use measured TEC for up to 5 minutes
     
     def update_measured_tec(self, station: str, tec_tecu: float, timestamp: Optional[float] = None):
@@ -587,29 +612,49 @@ class ArrivalPatternMatrix:
     def compute_tec_correction_ms(self, station: str, frequency_mhz: float) -> float:
         """
         Compute ionospheric delay correction based on measured TEC.
-        
-        Uses the 1/f² law: τ = K × TEC / f²
-        where K ≈ 40.3 / c × 10^16 ≈ 0.1345 ms/TECU/MHz²
-        
+
+        Returns ``K · TEC / f²`` with ``K`` the canonical 40.3 / c group-
+        delay constant shared with ``propagation_engine.IONO_DELAY_CONSTANT_MS``
+        (sanity check: 30 TECU at 10 MHz → ≈ 0.40 ms).
+
+        M-M27 mode gate: returns 0.0 when this matrix was constructed with
+        ``apply_tec_correction=False`` (RTP mode — TEC is the science
+        observable there, not a model input).
+
+        History (M-M27 side-discovery): a previous local constant
+        ``K_MS_PER_TECU_MHZ2 = 0.1345`` was off by a factor of 10 (the
+        correct value is ≈ 1.344 ms·MHz²/TECU); 30 TECU at 10 MHz used
+        to come out as 0.04 ms instead of 0.40 ms — i.e. the TEC
+        correction was operationally a no-op.  Importing the constant
+        from ``propagation_engine`` ties this to one canonical source.
+
         Args:
             station: Station name
             frequency_mhz: Frequency in MHz
-            
+
         Returns:
-            Ionospheric delay correction in milliseconds (0 if no TEC available)
+            Ionospheric delay correction in milliseconds (0 if no TEC available
+            or correction is disabled).
         """
-        measured_tec = self.get_measured_tec(station)
-        if measured_tec is None or not self._tec_feedback_enabled:
+        if not self._apply_tec_correction:
             return 0.0
-        
-        # K = 40.3 / c × 10^16 in units of ms/TECU/MHz²
-        # 40.3 / 299792.458 × 10^16 / 10^12 ≈ 0.1345
-        K_MS_PER_TECU_MHZ2 = 0.1345
-        
-        # Ionospheric delay = K × TEC / f²
-        iono_delay_ms = K_MS_PER_TECU_MHZ2 * measured_tec / (frequency_mhz ** 2)
-        
-        return iono_delay_ms
+        measured_tec = self.get_measured_tec(station)
+        if measured_tec is None or frequency_mhz <= 0:
+            return 0.0
+
+        # Canonical 40.3/f² group-delay constant; see module-level docstring.
+        from .propagation_engine import IONO_DELAY_CONSTANT_MS
+
+        return IONO_DELAY_CONSTANT_MS * measured_tec / (frequency_mhz ** 2)
+
+    def set_tec_correction_enabled(self, enabled: bool) -> None:
+        """Toggle the M-M27 TEC-correction gate at runtime.
+
+        Equivalent to passing ``apply_tec_correction=`` at construction —
+        provided so authority-mode switches can flip the gate without
+        rebuilding the matrix.
+        """
+        self._apply_tec_correction = bool(enabled)
     
     def set_locked(self, locked: bool, confidence: float = 1.0):
         """
@@ -799,22 +844,43 @@ class ArrivalPatternMatrix:
         height_km: float
     ) -> Tuple[float, int]:
         """
-        Compute propagation delay for ionospheric path using spherical Earth geometry.
-        
+        Compute the **vacuum** slant-path delay through an ionospheric
+        reflection at *true* (peak-density) height.
+
+        M-M28 height semantics — explicit so the caller doesn't double-
+        count:
+
+          * ``height_km`` here is the **true** F2 peak height (``hmF2``
+            from IRI, or the parametric proxy that approximates it).  It
+            is **not** the virtual (group-)height that subsumes the iono
+            group delay.
+          * The returned ``delay_ms`` is the path length divided by
+            ``C_LIGHT_KM_MS`` — vacuum, no excess group delay.
+          * The caller is therefore expected to add a *proper*
+            40.3/f² group-delay term on top.  In this module that's
+            :meth:`compute_tec_correction_ms`, which uses
+            ``propagation_engine.IONO_DELAY_CONSTANT_MS`` — the same
+            constant ``propagation_engine._estimate_geometric`` uses
+            for the same purpose.
+
+        Using virtual height *with* a 40.3/f² term would double-count
+        the iono excess; using true height *without* a 40.3/f² term
+        would under-count.  Stick to the recipe above.
+
         For paths > 2000 km, flat-Earth approximation introduces ~1-3% error.
         This implementation uses the law of cosines on a sphere to compute
         the actual slant path through the ionosphere.
-        
+
         Geometry:
             R = Earth radius (6371 km)
-            h = ionospheric layer height
+            h = ionospheric layer height (true)
             θ = central angle for one hop = ground_distance / (R * n_hops)
-            
-            Slant path per hop (using law of cosines):
+
+            Slant path per hop (law of cosines):
             slant² = R² + (R+h)² - 2*R*(R+h)*cos(θ)
-            
+
         Returns:
-            Tuple of (delay_ms, num_hops)
+            Tuple of (delay_ms, num_hops) — vacuum slant delay.
         """
         R = 6371.0  # Earth radius in km
         
@@ -849,41 +915,20 @@ class ArrivalPatternMatrix:
         earth_radius_km: float = 6371.0
     ) -> float:
         """
-        Calculate slant path length for one ionospheric hop using spherical geometry.
-        
-        Uses law of cosines: c² = a² + b² - 2ab*cos(C)
-        Where:
-            a = R (Earth radius)
-            b = R + h (radius to ionospheric layer)
-            C = θ/2 (half the central angle for this hop)
-            c = slant range (TX to reflection point, or reflection to RX)
-        
-        Total hop path = 2 * slant (up and down)
-        
-        Args:
-            ground_distance_km: Ground distance for this hop
-            height_km: Ionospheric layer height
-            earth_radius_km: Earth radius (default 6371 km)
-            
+        Slant path length for one ionospheric hop, spherical geometry.
+
+        Delegates to the shared :mod:`hop_geometry` module (review item
+        S2) so this and every other propagation module compute the same
+        path for the same input. ``ground_distance_km`` here is the
+        ground distance of a *single* hop, so n_hops=1.
+
         Returns:
-            Total path length for one hop in km
+            Total path length for one hop in km (up + down).
         """
-        R = earth_radius_km
-        h = height_km
-        
-        # Central angle for this hop (radians)
-        theta = ground_distance_km / R
-        
-        # Half angle (TX to reflection point)
-        half_theta = theta / 2
-        
-        # Law of cosines for slant range
-        # slant² = R² + (R+h)² - 2*R*(R+h)*cos(half_theta)
-        slant_squared = R**2 + (R + h)**2 - 2 * R * (R + h) * math.cos(half_theta)
-        slant = math.sqrt(slant_squared)
-        
-        # Total path = 2 * slant (up to layer, down from layer)
-        return 2 * slant
+        return hop_geometry(
+            ground_distance_km, height_km,
+            n_hops=1, earth_radius_km=earth_radius_km,
+        ).path_length_km
     
     def compute_matrix(self, utc_time: datetime) -> ArrivalMatrix:
         """
@@ -974,7 +1019,7 @@ class ArrivalPatternMatrix:
                         data_source=prediction.data_source,
                         model_confidence=prediction.model_confidence,
                         distance_km=distance_km,
-                        model_uncertainty_ms=prediction.primary_uncertainty_ms,
+                        model_uncertainty_ms=prediction.primary_uncertainty_3sigma_ms,
                         is_primary=True
                     )
                     continue
@@ -993,7 +1038,7 @@ class ArrivalPatternMatrix:
                     
                     # Adaptive uncertainty: use model's uncertainty estimate,
                     # but respect the dynamic window tracking
-                    model_3sigma_ms = mode_arrival.uncertainty_ms * 3.0
+                    model_3sigma_ms = mode_arrival.uncertainty_3sigma_ms
                     
                     self._add_arrival_to_matrix(
                         matrix=matrix,
@@ -1014,18 +1059,36 @@ class ArrivalPatternMatrix:
                         is_primary=is_primary
                     )
                 
-                # Apply TEC feedback correction to primary arrival
+                # Apply TEC feedback correction to primary arrival.
+                # M-M27: gate on mode and apply for ANY sign.  The
+                # previous code skipped `tec_correction_ms <= 0` — a
+                # one-sided bias that only ever shifted predictions
+                # later (never earlier when the iono was emptier than
+                # the climatology).  RTP-mode callers should disable
+                # the correction entirely (`apply_tec_correction=False`)
+                # because TEC is the science observable, not a model
+                # input there.
                 tec_correction_ms = self.compute_tec_correction_ms(station, freq_mhz)
-                if tec_correction_ms > 0:
+                if tec_correction_ms != 0.0:
                     primary = matrix.arrivals.get((station, freq_mhz))
                     if primary is not None:
                         primary.expected_delay_ms += tec_correction_ms
                         primary.iono_delay_ms += tec_correction_ms
-                        primary.expected_sample = int(primary.expected_delay_ms * self.sample_rate / 1000)
-                        # Recompute search window
-                        unc_samples = int(primary.uncertainty_3sigma_ms * self.sample_rate / 1000)
-                        primary.min_search_sample = max(0, primary.expected_sample - unc_samples)
-                        primary.max_search_sample = primary.expected_sample + unc_samples
+                        # M-M24/26: round centre, ceil half-width, clamp
+                        # both ends.
+                        primary.expected_sample = int(round(
+                            primary.expected_delay_ms * self.sample_rate / 1000
+                        ))
+                        unc_samples = int(math.ceil(
+                            primary.uncertainty_3sigma_ms * self.sample_rate / 1000
+                        ))
+                        primary.min_search_sample = max(
+                            0, primary.expected_sample - unc_samples,
+                        )
+                        primary.max_search_sample = min(
+                            self.sample_rate * 60,
+                            primary.expected_sample + unc_samples,
+                        )
                         model_tiers_used.add('TEC-Corrected')
         
         # Set overall model tier
@@ -1099,11 +1162,27 @@ class ArrivalPatternMatrix:
         station_floor_ms = STATION_MIN_UNCERTAINTY_3SIGMA_MS.get(station, DEFAULT_UNCERTAINTY_3SIGMA_MS)
         adaptive_3sigma_ms = max(adaptive_3sigma_ms, station_floor_ms)
 
-        # Convert to samples
-        expected_sample = int(delay_ms * self.sample_rate / 1000)
-        uncertainty_samples = int(adaptive_3sigma_ms * self.sample_rate / 1000)
+        # Convert to samples.
+        #
+        # M-M24: the centre uses `round()` so a delay halfway between two
+        # samples doesn't get systematically biased one sample early —
+        # `int()` truncates toward zero, costing ~½·(1/sample_rate) ≈
+        # 21 µs on a positive delay at 24 kHz.  The half-width uses
+        # `ceil()` so rounding never *narrows* the physics-derived
+        # window (`ceil(adaptive_3sigma_ms / sample_rate)` ≥ the true
+        # sample count, never less).
+        #
+        # M-M26: both ends are clamped — `min_sample` at 0 and
+        # `max_sample` at `SAMPLES_PER_MINUTE`.  Previously only the
+        # min was clamped, so a wide search window near the end of a
+        # minute could index past the buffer.
+        expected_sample = int(round(delay_ms * self.sample_rate / 1000))
+        uncertainty_samples = int(math.ceil(adaptive_3sigma_ms * self.sample_rate / 1000))
         min_sample = max(0, expected_sample - uncertainty_samples)
-        max_sample = expected_sample + uncertainty_samples
+        max_sample = min(
+            self.sample_rate * 60,  # SAMPLES_PER_MINUTE for this sample_rate
+            expected_sample + uncertainty_samples,
+        )
         
         arrival = ExpectedArrival(
             station=station,
@@ -1151,10 +1230,16 @@ class ArrivalPatternMatrix:
         )
         delay_ms, num_hops = self._compute_propagation_delay_ms(distance_km, height_km)
         
+        # M-M27: apply TEC correction for any sign (was `> 0` only —
+        # a one-sided bias that ignored negative corrections from
+        # below-climatology TEC).  Mode-gating is done by
+        # `compute_tec_correction_ms` itself via
+        # `_tec_feedback_enabled` (now exposed via constructor +
+        # `set_tec_correction_enabled`).
         tec_correction_ms = self.compute_tec_correction_ms(station, freq_mhz)
-        if tec_correction_ms > 0:
+        if tec_correction_ms != 0.0:
             delay_ms += tec_correction_ms
-        
+
         self._add_arrival_to_matrix(
             matrix=matrix,
             station=station,

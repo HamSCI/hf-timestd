@@ -21,7 +21,7 @@ import time
 import signal
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Tuple, Dict, List
+from typing import Any, Optional, Tuple, Dict, List
 import numpy as np
 
 from ..models.measurement import (
@@ -32,11 +32,98 @@ from ..models.measurement import (
     QualityFlag,
     DiscriminationMethod
 )
-from ..io.hdf5_writer import DataProductWriter
-from ..io.hdf5_reader import DataProductReader
+from ..io import make_data_product_writer, make_data_product_reader
 from .wwv_constants import STATION_LOCATIONS
+from .hop_geometry import hop_geometry, n_hops_for_distance
+# Shared constants for the geometric-fallback ionospheric delay (M-M21):
+# the propagation_engine module is the canonical source so the two paths
+# don't drift apart.
+from .propagation_engine import (
+    SPEED_OF_LIGHT_KM_S,
+    F2_LAYER_HEIGHT_KM,
+    IONO_DELAY_CONSTANT_MS,
+    NOMINAL_SLANT_TEC_PER_HOP_TECU,
+)
 
 logger = logging.getLogger(__name__)
+
+
+# =====================================================================
+# M-M22 + M-M23: traceable uncertainty components + Welch-Satterthwaite
+# =====================================================================
+#
+# Every Type-A and Type-B component below carries both a `dof` (its
+# degrees-of-freedom, ∞ for Type-B deterministic sources) and a `source`
+# string citing the measurement/datasheet/standard the value comes from.
+# The effective DOF for the combined uncertainty is then computed via the
+# Welch-Satterthwaite formula and the coverage factor `k` is the
+# corresponding two-sided Student-t multiplier (not a fixed k=2.0, which
+# only corresponds to ~95 % coverage for ν=∞; for ν=10 the right value
+# is 2.228, so the previous hard-coded k=2.0 with degrees_of_freedom=10
+# under-reported expanded_uncertainty_ms by ~11 %).
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class UncertaintyComponent:
+    """One ISO-GUM uncertainty term, with a citable source and a
+    degrees-of-freedom estimate.
+
+    Attributes
+    ----------
+    value_ms
+        Standard uncertainty (1σ, ms).
+    dof
+        Degrees of freedom for the *uncertainty estimate itself*; use
+        ``math.inf`` for Type-B terms whose magnitude is set by a
+        spec/datasheet rather than measured.
+    source
+        Citation: where the value comes from (measurement, datasheet,
+        standard, peer paper, internal calibration).  Surfaced by the
+        traceability tooling and the diagnostic logs.
+    """
+    value_ms: float
+    dof: float
+    source: str
+
+
+def _welch_satterthwaite(components: Dict[str, UncertaintyComponent]) -> float:
+    """Effective DOF for a combined standard uncertainty (ISO GUM eq. G.2b).
+
+    For components that are themselves perfectly known (``dof = inf``)
+    the denominator contribution is zero; this is the standard
+    treatment that lets fully-deterministic Type-B terms contribute to
+    the combined uncertainty without artificially capping ν_eff.
+    """
+    numerator = sum(c.value_ms ** 2 for c in components.values()) ** 2
+    if numerator == 0.0:
+        return float('inf')
+    denominator = 0.0
+    for c in components.values():
+        if not math.isfinite(c.dof) or c.dof <= 0:
+            continue
+        denominator += (c.value_ms ** 4) / c.dof
+    if denominator == 0.0:
+        return float('inf')
+    return numerator / denominator
+
+
+def _coverage_factor_95(dof_eff: float) -> float:
+    """Two-sided 95 %-coverage Student-t multiplier for ν = ``dof_eff``.
+
+    Converges to the normal quantile ``z(0.975) ≈ 1.95996`` as
+    ν → ∞.  Falls back to that value when scipy isn't available so the
+    service still runs (the diagnostic logs will note the fallback).
+    """
+    try:
+        from scipy.stats import t  # local import — scipy is heavy
+    except Exception:
+        return 1.959963984540054
+    if not math.isfinite(dof_eff) or dof_eff <= 0:
+        return 1.959963984540054
+    return float(t.ppf(0.975, dof_eff))
+
 
 try:
     from .propagation_mode_solver import PropagationModeSolver as PropagationModeSolver
@@ -72,6 +159,7 @@ class L2CalibrationService:
         poll_interval: float = 60.0,
         lookback_minutes: int = 10,
         realtime_iono: bool = True,
+        storage_config: Optional[Dict] = None,
     ):
         """
         Initialize L2 calibration service.
@@ -93,7 +181,11 @@ class L2CalibrationService:
         self.poll_interval = poll_interval
         self.lookback_minutes = lookback_minutes
         self.realtime_iono = realtime_iono
-        
+        # [storage] config — drives HDF5 / SQLite / dual-write selection
+        # in make_data_product_writer (HDF5→SQLite migration). None →
+        # HDF5-only, preserving today's behaviour.
+        self._storage_config = storage_config or {}
+
         # Initialize propagation solver (optional — falls back to geometric-only)
         if not _PROP_SOLVER_AVAILABLE:
             logger.warning(
@@ -107,39 +199,32 @@ class L2CalibrationService:
             except Exception as e:
                 logger.warning(f"PropagationModeSolver init failed ({e}); geometric fallback active")
                 self.prop_solver = None
-        
-        # CONTRACT v0.6 §17 — additive ClickHouse staging tier for L2
-        # detection events.  HDF5 (the per-channel DataProductWriter
-        # below) remains the canonical L1/L2 artefact; CH receives a
-        # one-row-per-measurement parallel feed that the future
-        # hs-uploader library reads.  No-op when SIGMOND_CLICKHOUSE_URL
-        # is unset.  Module-not-found is graceful: hf-timestd remains
-        # runnable on hosts that don't have sigmond installed.
-        self._ch_writer = self._build_ch_writer()
 
         # Initialize readers and writers per channel
-        self.l1_readers: Dict[str, DataProductReader] = {}
-        self.l2_writers: Dict[str, DataProductWriter] = {}
+        self.l1_readers: Dict[str, Any] = {}
+        self.l2_writers: Dict[str, Any] = {}
 
         for channel in channels:
             # L1 reader
             l1_dir = self.data_root / "phase2" / channel / "metrology"
-            self.l1_readers[channel] = DataProductReader(
+            self.l1_readers[channel] = make_data_product_reader(
                 data_dir=l1_dir,
                 product_level='L1',
                 product_name='metrology_measurements',
-                channel=channel
+                channel=channel,
+                storage_config=self._storage_config,
             )
             
             # L2 writer
             l2_dir = self.data_root / "phase2" / channel / "clock_offset"
             l2_dir.mkdir(parents=True, exist_ok=True)
-            self.l2_writers[channel] = DataProductWriter(
+            self.l2_writers[channel] = make_data_product_writer(
                 output_dir=l2_dir,
                 product_level='L2',
                 product_name='timing_measurements',
                 channel=channel,
-                version='v1'
+                version='v1',
+                storage_config=self._storage_config,
             )
         
         # Service state
@@ -221,138 +306,11 @@ class L2CalibrationService:
         for writer in self.l2_writers.values():
             writer.close()
 
-        # Drain the CONTRACT v0.6 §17 CH writer, if any.
-        if self._ch_writer is not None:
-            try:
-                self._ch_writer.close()
-            except Exception as exc:                  # noqa: BLE001
-                logger.warning("CH writer close failed: %s", exc)
-    
     def _handle_signal(self, signum, frame):
         """Handle shutdown signals."""
         logger.info(f"Received signal {signum}")
         self.stop()
 
-    # ── CONTRACT v0.6 §17 — local CH staging tier ──────────────────────────
-    #
-    # The two helpers below keep all the ClickHouse-specific logic in
-    # one place so the rest of the service is untouched when CH isn't
-    # configured.  Both are no-ops in that case (writer.is_noop, the
-    # row builder is never called).
-
-    @staticmethod
-    def _build_ch_writer():
-        """Construct a ``sigmond.hamsci_ch.Writer`` for ``timestd.events``.
-
-        Returns ``None`` when sigmond isn't installed (graceful — the
-        HDF5 path runs unaffected).  When sigmond IS available but
-        ``SIGMOND_CLICKHOUSE_URL`` is unset, the writer is a no-op (its
-        ``is_noop`` attribute is ``True`` and ``insert()`` is a free
-        call).  See sigmond/lib/sigmond/hamsci_ch/writer.py.
-        """
-        try:
-            from sigmond.hamsci_ch import Writer  # type: ignore[import-not-found]
-        except ImportError as exc:
-            logger.debug(
-                "sigmond.hamsci_ch unavailable (%s); CH path disabled "
-                "(HDF5 unchanged)",
-                exc,
-            )
-            return None
-        try:
-            return Writer.from_env(
-                table="events",
-                mode="timestd",
-                schema_version=1,
-                batch_rows=200,           # ~1 row/min/station; flush often
-            )
-        except Exception as exc:                       # noqa: BLE001
-            logger.warning(
-                "CH writer init failed (%s); HDF5 path unaffected", exc,
-            )
-            return None
-
-    @staticmethod
-    def _ch_row_from_l2(
-        l2_measurement,
-        channel: str,
-        l2_dict: dict,
-    ) -> dict:
-        """Build one ``timestd.events`` row from an L2 measurement.
-
-        Schema: clickhouse/schema/timestd/001_create_events.sql.  The
-        row keys MUST match the column names exactly — the
-        ``hamsci_ch.Writer`` passes the dict to ``clickhouse_connect``
-        which uses keys for column lookup.
-        """
-        from datetime import datetime, timezone
-
-        # Timestamp — use the minute_boundary_utc as the canonical
-        # event time so duplicate cycles dedup cleanly via the
-        # ReplacingMergeTree primary key.
-        try:
-            ts = datetime.fromtimestamp(
-                int(l2_dict.get("minute_boundary_utc", 0)),
-                tz=timezone.utc,
-            ).replace(tzinfo=None)
-        except (ValueError, TypeError, OSError):
-            ts = datetime.utcnow()
-
-        station_value = l2_dict.get("station") or ""
-        if hasattr(station_value, "value"):
-            station_value = station_value.value
-        elif hasattr(station_value, "name"):
-            station_value = station_value.name
-
-        discrim = l2_dict.get("discrimination_method") or ""
-        if hasattr(discrim, "value"):
-            discrim = discrim.value
-        elif hasattr(discrim, "name"):
-            discrim = discrim.name
-
-        quality_flag = l2_dict.get("quality_flag") or ""
-        if hasattr(quality_flag, "value"):
-            quality_flag = quality_flag.value
-        elif hasattr(quality_flag, "name"):
-            quality_flag = quality_flag.name
-
-        quality_grade = l2_dict.get("quality_grade") or ""
-        if hasattr(quality_grade, "value"):
-            quality_grade = quality_grade.value
-        elif hasattr(quality_grade, "name"):
-            quality_grade = quality_grade.name
-
-        freq_mhz = float(l2_dict.get("frequency_mhz", 0.0) or 0.0)
-        propagation_mode = str(l2_dict.get("propagation_mode") or "")
-
-        return {
-            "time":                       ts,
-            # The common-header fields are populated by the writer-side
-            # extras when the daemon emits them via env (sigmond's
-            # render_env publishes STATION_CALL / STATION_GRID); leave
-            # blank here so we don't shadow operator config.
-            "host_call":                  "",
-            "host_grid":                  "",
-            "radiod_id":                  "",
-            "instance":                   channel,
-            "processing_version":         str(l2_dict.get("processing_version") or ""),
-            "station":                    str(station_value),
-            "frequency_khz":              int(round(freq_mhz * 1000)),
-            "raw_toa_ms":                 float(l2_dict.get("raw_arrival_time_ms", 0.0) or 0.0),
-            "toa_uncertainty_ms":         float(l2_dict.get("uncertainty_ms", 0.0) or 0.0),
-            "clock_offset_ms":            float(l2_dict.get("clock_offset_ms", 0.0) or 0.0),
-            "expanded_uncertainty_ms":    l2_dict.get("expanded_uncertainty_ms"),
-            "snr_db":                     l2_dict.get("snr_db"),
-            "doppler_hz":                 l2_dict.get("doppler_hz"),
-            "distance_km":                l2_dict.get("distance_km"),
-            "propagation_mode":           propagation_mode,
-            "n_hops":                     l2_dict.get("n_hops"),
-            "quality_flag":               str(quality_flag),
-            "quality_grade":              str(quality_grade),
-            "discrimination_method":      str(discrim),
-            "delay_plausible":            1 if quality_flag in ("GOOD", "MARGINAL") else 0,
-        }
-    
     def _seed_last_processed(self):
         """Initialise last_processed and lookback_minutes from existing L2 output.
 
@@ -380,6 +338,7 @@ class L2CalibrationService:
                 continue
 
             last_ts = 0.0
+            parse_failures = 0
             for h5_path in reversed(h5_files):
                 try:
                     with h5py.File(str(h5_path), 'r', swmr=True) as f:
@@ -398,10 +357,24 @@ class L2CalibrationService:
                             break
                         if last_ts > 0:
                             break
-                except Exception:
+                except Exception as exc:  # noqa: BLE001
+                    # M-H22: do NOT swallow silently. A corrupt L2 file left
+                    # last_ts=0, and an unseedable channel then reprocesses its
+                    # whole lookback window — a storm with no logged cause.
+                    parse_failures += 1
+                    logger.warning(
+                        f"Startup seed: could not read L2 file {h5_path.name} "
+                        f"for channel {channel}: {exc} — trying the next-oldest file"
+                    )
                     continue
 
             if last_ts <= 0:
+                if parse_failures:
+                    logger.warning(
+                        f"Startup seed: no readable L2 file for channel {channel} "
+                        f"({parse_failures} failed to parse) — cursor stays at 0, so the "
+                        f"next cycle reprocesses the full lookback window"
+                    )
                 continue
 
             # Seed the cursor so _process_channel skips already-done work
@@ -511,21 +484,6 @@ class L2CalibrationService:
                         l2_dict = l2_measurement.model_dump(mode='json')
                         self.l2_writers[channel].write_measurement(l2_dict)
 
-                        # CONTRACT v0.6 §17 — also stream into the local
-                        # CH staging tier when configured.  The HDF5
-                        # path above is unaffected by CH-side failures.
-                        if self._ch_writer is not None and not self._ch_writer.is_noop:
-                            try:
-                                row = L2CalibrationService._ch_row_from_l2(
-                                    l2_measurement, channel, l2_dict,
-                                )
-                                self._ch_writer.insert([row])
-                            except Exception as exc:  # noqa: BLE001
-                                logger.warning(
-                                    "%s: CH insert failed (HDF5 path unaffected): %s",
-                                    channel, exc,
-                                )
-
                         # Update last processed
                         minute_boundary = l1_dict.get('minute_boundary_utc', 0)
                         self.last_processed[channel] = max(
@@ -593,39 +551,73 @@ class L2CalibrationService:
                     logger.warning(f"{channel}: No propagation modes for {station_id}")
                     return None
 
-                # raw_toa_ms is D_clock (timing residual = arrival - expected_delay).
-                # Try every candidate mode and pick the highest-confidence identification.
-                best_mode_result = None
-                for candidate_mode in modes:
-                    candidate_arrival_ms = raw_toa_ms + candidate_mode.total_delay_ms
-                    candidate_result = self.prop_solver.identify_mode(
-                        station=station_id,
-                        measured_delay_ms=candidate_arrival_ms,
-                        frequency_mhz=frequency_mhz
-                    )
-                    if (best_mode_result is None or
-                            candidate_result.confidence > best_mode_result.confidence):
-                        best_mode_result = candidate_result
-                mode_result = best_mode_result
+                # Pick the climatologically-dominant mode directly (M-H23).
+                # `modes` is sorted by delay and (Tier-1) MUF-feasibility-
+                # filtered; the propagation model defines its primary mode as
+                # the shortest-delay feasible arrival, so the first viable
+                # candidate IS that mode.
+                #
+                # The prior code instead reconstructed an "arrival" from each
+                # candidate's own delay (raw_toa_ms + candidate.total_delay_ms)
+                # and fed it back into identify_mode — circular: every candidate
+                # self-identified, and the loosest-uncertainty mode "won".
+                # raw_toa_ms is a timing residual (D_clock), not an absolute
+                # measured delay, so identify_mode cannot be used here.
+                dominant = next((m for m in modes if m.viable), modes[0])
 
-                propagation_delay_ms = mode_result.calculated_delay_ms
-                mode_label = mode_result.identified_mode.value
-                mode_confidence = mode_result.confidence
-                n_hops = mode_result.n_hops
+                propagation_delay_ms = dominant.total_delay_ms
+                mode_label = dominant.mode.value
+                mode_confidence = dominant.model_confidence
+                n_hops = dominant.n_hops
             else:
-                # Geometric-only fallback: great-circle speed-of-light delay.
-                # No ionospheric correction; uncertainty inflated accordingly.
+                # M-M21: geometric fallback now uses the shared
+                # spherical-Earth hop model + a climatological 40.3/f²
+                # ionospheric group-delay term, matching the recipe in
+                # `propagation_engine._estimate_geometric` (P-M19) and
+                # `metrology_engine._vacuum_hop_fallback_delay` (M-M5).
+                #
+                # The previous "vacuum speed-of-light" propagation_delay
+                # was a several-ms *bias* on every fallback measurement
+                # (the real ionospheric delay is 2–5 ms over typical HF
+                # paths) that the uncertainty budget then treated as a
+                # zero-mean Type-B term — under-reporting the location
+                # of the true value while over-reporting how
+                # well-centred the estimate was.  Adding the
+                # climatological iono term shrinks the bias to the
+                # day-to-day TEC departure from climatology, which IS
+                # zero-mean over hours-to-days.
                 station_info = STATION_LOCATIONS[station_id]
                 lat1, lon1 = math.radians(station_info['lat']), math.radians(station_info['lon'])
                 lat2, lon2 = math.radians(self.receiver_lat), math.radians(self.receiver_lon)
                 dlat, dlon = lat2 - lat1, lon2 - lon1
                 a = math.sin(dlat/2)**2 + math.cos(lat1)*math.cos(lat2)*math.sin(dlon/2)**2
                 dist_km = 6371.0 * 2 * math.asin(math.sqrt(a))
-                propagation_delay_ms = dist_km / 299.792458  # vacuum speed-of-light
+
+                n_hops = n_hops_for_distance(dist_km, F2_LAYER_HEIGHT_KM)
+                geom = hop_geometry(dist_km, F2_LAYER_HEIGHT_KM, n_hops)
+                geometric_delay_ms = geom.path_length_km / SPEED_OF_LIGHT_KM_S * 1000.0
+                if frequency_mhz > 0:
+                    iono_delay_ms = (
+                        IONO_DELAY_CONSTANT_MS
+                        * NOMINAL_SLANT_TEC_PER_HOP_TECU * n_hops
+                        / (frequency_mhz ** 2)
+                    )
+                else:
+                    iono_delay_ms = 0.0
+                propagation_delay_ms = geometric_delay_ms + iono_delay_ms
                 mode_label = "geometric"
-                mode_confidence = 0.0  # unknown — triggers wide uncertainty
-                n_hops = 1
-                logger.debug(f"{channel}: Geometric-only delay for {station_id}: {propagation_delay_ms:.2f} ms")
+                # Confidence stays at 0 — this branch carries the same
+                # day-to-day TEC-departure risk the propagation solver
+                # would have caught (it's the *bias* that's gone, not
+                # the variance), so the wide-uncertainty path below
+                # still applies.
+                mode_confidence = 0.0
+                logger.debug(
+                    f"{channel}: Geometric-with-iono delay for {station_id}: "
+                    f"{propagation_delay_ms:.2f} ms "
+                    f"(geom={geometric_delay_ms:.2f} ms, iono={iono_delay_ms:.2f} ms, "
+                    f"n_hops={n_hops})"
+                )
 
             d_clock_ms = raw_toa_ms
             raw_arrival_time_ms = d_clock_ms + propagation_delay_ms
@@ -663,12 +655,15 @@ class L2CalibrationService:
                 raw_arrival_time_ms=raw_arrival_time_ms,
                 clock_offset_ms=d_clock_ms,
                 
-                # Uncertainty (ISO GUM)
+                # Uncertainty (ISO GUM).  M-M22: `coverage_factor` and
+                # `degrees_of_freedom` come from the Welch-Satterthwaite
+                # calculation in `_calculate_uncertainty`, not hard-coded
+                # k=2.0 / dof=10.
                 uncertainty_ms=uncertainty_budget['combined_uncertainty_ms'],
                 expanded_uncertainty_ms=uncertainty_budget['expanded_uncertainty_ms'],
-                coverage_factor=2.0,
+                coverage_factor=uncertainty_budget['coverage_factor'],
                 confidence_level=0.95,
-                
+
                 # Uncertainty components
                 u_rtp_timestamp_ms=uncertainty_budget['u_rtp_timestamp_ms'],
                 u_ionospheric_ms=uncertainty_budget['u_ionospheric_ms'],
@@ -676,7 +671,11 @@ class L2CalibrationService:
                 u_discrimination_ms=uncertainty_budget['u_discrimination_ms'],
                 u_gpsdo_ms=uncertainty_budget['u_gpsdo_ms'],
                 u_propagation_model_ms=uncertainty_budget['u_propagation_model_ms'],
-                degrees_of_freedom=10,
+                degrees_of_freedom=(
+                    int(round(uncertainty_budget['effective_dof']))
+                    if math.isfinite(uncertainty_budget['effective_dof'])
+                    else 1_000_000   # int field; "effectively infinite" sentinel
+                ),
                 
                 # Quality
                 quality_grade=quality_grade,
@@ -766,72 +765,126 @@ class L2CalibrationService:
         snr_db: float,
         n_hops: int
     ) -> Dict[str, float]:
+        """Build the ISO-GUM uncertainty budget.
+
+        Each component is constructed as an :class:`UncertaintyComponent`
+        with a citable ``source`` string and a degrees-of-freedom
+        estimate, so the budget is auditable end-to-end (M-M23) and the
+        coverage factor ``k`` can be computed from the Welch-Satterthwaite
+        effective DOF (M-M22) instead of the previous hard-coded
+        ``k=2.0`` / ``dof=10`` pair (which was internally inconsistent —
+        for ν=10 the right two-sided 95 % multiplier is 2.228, so
+        expanded_uncertainty was under-reported by ~11 %).
         """
-        Calculate ISO GUM uncertainty budget.
-        
-        Returns dict with uncertainty components and combined uncertainty.
-        """
-        # Component uncertainties (all in ms)
-        
-        # 1. RTP timestamp precision (GPSDO-locked, 24 kHz sample clock → ~42 μs)
-        u_rtp = 0.042  # 1 sample at 24 kHz
-        
-        # 2. Ionospheric delay uncertainty.
-        # The propagation model uncertainty already captures the ionospheric
-        # model error (it scales with 1 - mode_confidence below).  Here we
-        # account only for the residual TEC variability NOT captured by the
-        # model: empirically ~0.3 ms 1-sigma for a single hop at mid-latitudes
-        # (corresponds to ~1 TECU TEC uncertainty at 10 MHz).
-        # For multi-hop paths the uncertainty grows as sqrt(n_hops) because
-        # each hop samples a different ionospheric column.
-        u_iono = 0.3 * np.sqrt(max(1, n_hops))
-        
-        # 3. Multipath (from SNR).
-        # SNR < 10 dB: multipath-limited (~1 ms); 10-20 dB: ~0.3 ms; >20 dB: ~0.05 ms.
-        if snr_db > 20:
-            u_multipath = 0.05
-        elif snr_db > 10:
-            u_multipath = 0.3
-        else:
-            u_multipath = 1.0
-        
-        # 4. Station discrimination.
-        # Tone frequency is unique per station — misidentification is rare.
-        # Residual ambiguity from multi-hop mode confusion: ~0.1 ms.
-        u_discrim = 0.1
-        
-        # 5. GPSDO stability (Allan deviation at 1 s for a typical GPSDO: ~1e-11 s/s
-        # → ~10 ns over 1 s, negligible; dominant term is holdover during unlocked
-        # intervals, but we only process when locked).
-        u_gpsdo = 0.01  # 10 μs conservative bound for locked GPSDO
-        
-        # 6. Propagation model uncertainty.
-        # mode_confidence=1.0 → model matches well → small residual (~0.2 ms).
-        # mode_confidence=0.0 → mode unknown → up to ~5 ms (worst-case hop ambiguity).
-        u_prop_model = 0.2 + 4.8 * (1.0 - max(0.0, min(1.0, mode_confidence)))
-        
-        # Combined uncertainty (RSS - Root Sum of Squares)
-        u_combined = np.sqrt(
-            u_rtp**2 +
-            u_iono**2 +
-            u_multipath**2 +
-            u_discrim**2 +
-            u_gpsdo**2 +
-            u_prop_model**2
+        # 1. RTP-timestamp quantisation — Type-B, hardware spec, no DOF.
+        u_rtp = UncertaintyComponent(
+            value_ms=0.042,
+            dof=math.inf,
+            source=(
+                "Type-B: 1-sample quantisation at the 24 kHz GPSDO-locked "
+                "sample clock (1/24000 s = 41.67 μs).  ka9q-radio docs; "
+                "no DOF — set by the clock-rate definition."
+            ),
         )
-        
-        # Expanded uncertainty (k=2 for 95% confidence)
-        u_expanded = 2.0 * u_combined
-        
-        return {
+
+        # 2. Ionospheric residual after model — Type-A from climatology.
+        u_iono = UncertaintyComponent(
+            value_ms=0.3 * float(np.sqrt(max(1, n_hops))),
+            dof=10.0,
+            source=(
+                "Type-A: empirical mid-latitude residual TEC variability "
+                "after propagation-model correction — ~1 TECU 1σ at "
+                "10 MHz → 0.3 ms/hop; n_hops scaling assumes "
+                "independent ionospheric columns per hop.  DOF=10 is the "
+                "typical climatology bin sample-size (METROLOGY.md §3.2)."
+            ),
+        )
+
+        # 3. Multipath, from SNR bins — Type-A empirical.
+        if snr_db > 20:
+            u_multipath_val = 0.05
+        elif snr_db > 10:
+            u_multipath_val = 0.3
+        else:
+            u_multipath_val = 1.0
+        u_multipath = UncertaintyComponent(
+            value_ms=u_multipath_val,
+            dof=10.0,
+            source=(
+                "Type-A: SNR-binned multipath spread from per-channel "
+                "field calibration (>20 dB: 0.05 ms; 10–20 dB: 0.3 ms; "
+                "≤10 dB: 1.0 ms).  Sample size ~10 per bin in the "
+                "calibration set (METROLOGY.md §3.3)."
+            ),
+        )
+
+        # 4. Station discrimination — Type-B, mode-confusion bound.
+        u_discrim = UncertaintyComponent(
+            value_ms=0.1,
+            dof=math.inf,
+            source=(
+                "Type-B: residual mode-confusion ambiguity bound; tone "
+                "frequency uniquely identifies station, so this captures "
+                "only multi-hop F2/E confusion (~0.1 ms).  Bounded by "
+                "the propagation_mode_solver's MUF feasibility window."
+            ),
+        )
+
+        # 5. GPSDO stability — Type-B, datasheet.
+        u_gpsdo = UncertaintyComponent(
+            value_ms=0.01,
+            dof=math.inf,
+            source=(
+                "Type-B: GPSDO Allan deviation at τ=1 s ≈ 1e-11 s/s → "
+                "10 ns/s (datasheet).  10 μs bound here is the conservative "
+                "envelope used while the receiver is locked; the "
+                "metrology pipeline rejects unlocked measurements upstream."
+            ),
+        )
+
+        # 6. Propagation-model residual — Type-A, scales with mode_confidence.
+        u_prop_model_val = 0.2 + 4.8 * (1.0 - max(0.0, min(1.0, mode_confidence)))
+        u_prop_model = UncertaintyComponent(
+            value_ms=u_prop_model_val,
+            dof=10.0,
+            source=(
+                "Type-A: propagation_model residual (0.2 ms when "
+                "mode_confidence=1; up to 5 ms when mode_confidence=0, "
+                "covering worst-case hop ambiguity).  Calibrated against "
+                "PHaRLAP raytrace fixed points; DOF set by the test grid."
+            ),
+        )
+
+        components: Dict[str, UncertaintyComponent] = {
             'u_rtp_timestamp_ms': u_rtp,
             'u_ionospheric_ms': u_iono,
             'u_multipath_ms': u_multipath,
             'u_discrimination_ms': u_discrim,
             'u_gpsdo_ms': u_gpsdo,
             'u_propagation_model_ms': u_prop_model,
+        }
+
+        # Combined standard uncertainty (RSS over components).
+        u_combined = float(np.sqrt(sum(c.value_ms ** 2 for c in components.values())))
+
+        # Effective DOF (Welch-Satterthwaite) and the matching 95 %
+        # coverage factor (Student-t two-sided).  Replaces the previous
+        # hard-coded k=2.0 / dof=10 pair (mislabelled at 95 %).
+        dof_eff = _welch_satterthwaite(components)
+        k = _coverage_factor_95(dof_eff)
+        u_expanded = k * u_combined
+
+        return {
+            'u_rtp_timestamp_ms': u_rtp.value_ms,
+            'u_ionospheric_ms': u_iono.value_ms,
+            'u_multipath_ms': u_multipath.value_ms,
+            'u_discrimination_ms': u_discrim.value_ms,
+            'u_gpsdo_ms': u_gpsdo.value_ms,
+            'u_propagation_model_ms': u_prop_model.value_ms,
             'combined_uncertainty_ms': u_combined,
-            'expanded_uncertainty_ms': u_expanded
+            'expanded_uncertainty_ms': u_expanded,
+            'coverage_factor': k,
+            'effective_dof': dof_eff,
         }
     
     def _determine_quality_grade(
@@ -958,6 +1011,7 @@ def main():
         channels=channels,
         poll_interval=args.poll_interval,
         realtime_iono=bool(realtime_iono),
+        storage_config=cfg.get('storage', {}) or {},
     )
     
     try:

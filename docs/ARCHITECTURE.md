@@ -1,9 +1,9 @@
 # HF Time Standard - System Architecture
 
-**Last Updated:** April 2, 2026  
+**Last Updated:** 2026-05-20  
 **Author:** Michael James Hauan (AC0G)  
 **Status:** CANONICAL - Single source of truth for system design  
-**Version:** V6.12.0
+**Version:** 7.0.0  (single source of truth: `pyproject.toml`)
 
 ---
 
@@ -101,9 +101,12 @@ There's an apparent circularity:
 | **CHU** | Reference | 100% | Unique frequencies, FSK-verified timing |
 | **WWV** | Primary | 100% | Closest station, best SNR |
 | **WWVH** | Primary | 100% | Independent path, cross-validation |
-| **BPM** | Scientific | 30% | Long path, high uncertainty, scientific interest |
+| **BPM** | Science-only | 0% | EXCLUDED from fusion since 2026-02-07 (long-path systematic error too large); retained as a science observable. See `multi_broadcast_fusion.py` priority dict. |
 
-See `docs/design/DUAL_PURPOSE_ARCHITECTURE.md` for detailed rationale.
+See `docs/design/METROLOGY_PHYSICS_SPLIT.md` for the canonical
+two-pipeline rationale.  (The legacy `docs/design/DUAL_PURPOSE_ARCHITECTURE.md`
+was renamed/superseded by the split doc; cross-references still
+landing there should be redirected.)
 
 ---
 
@@ -626,8 +629,6 @@ GRAPE decimation is intentionally decoupled from the timing/metrology pipeline. 
 - **`INSTALLATION.md`** - Setup and service configuration
 
 ---
-
-**Last Updated:** March 19, 2026
 
 ## Unified Measurement Path (v6.11)
 

@@ -113,11 +113,14 @@ CHU AS REFERENCE:
 ================================================================================
 OUTLIER REJECTION
 ================================================================================
-Uses weighted Median Absolute Deviation (MAD) for robust outlier detection:
+A single pre-fusion pass rejects outliers using the Median Absolute
+Deviation (MAD) of the CALIBRATED residuals:
 
-    MAD = median(|D_clock_i - weighted_median|) × 1.4826
+    MAD = median(|d_cal_i - median(d_cal)|) × 1.4826
     
-Measurements with deviation > 3σ are rejected.
+Measurements deviating more than 3.5σ from the median are rejected.
+Detection runs on calibrated residuals, not raw D_clock: raw values
+carry 30-60 ms inter-broadcast offsets that would swamp the MAD.
 
 This prevents ionospheric events or detection errors on one channel
 from corrupting the fused estimate.
@@ -240,9 +243,11 @@ logger = logging.getLogger(__name__)
 # has no effect on HDF5 ≥ 1.14.
 os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 
-# HDF5 I/O for reading L1A and L2 data products
+# Data-product I/O for reading L1A and L2 products. The reader backend
+# (HDF5 / SQLite) is selected per-call by make_data_product_reader from
+# the [storage] config — see docs/HDF5-TO-SQLITE-MIGRATION.md.
 try:
-    from hf_timestd.io import DataProductReader
+    from hf_timestd.io import make_data_product_reader
     HDF5_AVAILABLE = True
 except ImportError:
     HDF5_AVAILABLE = False
@@ -268,6 +273,32 @@ except Exception as _apm_exc:
 
 
 
+def broadcast_key(station: str, frequency_mhz: float) -> str:
+    """Canonical (station, frequency) key for calibration lookup (M-M9).
+
+    Three call sites historically built this key with inconsistent
+    precision:
+
+      * :pyattr:`BroadcastCalibration.broadcast_key` used ``.2f``;
+      * the inline f-string at the calibration-history merge used ``.2f``;
+      * :meth:`MultiBroadcastFusion._get_broadcast_key` used ``.1f``.
+
+    For CHU's fractional-MHz channels (3.330 / 7.850 / 14.670 MHz) the
+    ``.1f`` format aliases or mis-rounds them, so calibration writes
+    landed on a different key than reads.  Routing every site through
+    this helper makes that impossible.
+
+    ``.2f`` is the chosen precision: it preserves CHU's 0.01 MHz
+    granularity (3.33 / 7.85 / 14.67) while leaving WWV/WWVH integer
+    frequencies unchanged in display.  ``frequency_mhz <= 0`` falls back
+    to the station name alone (the only synthetic measurement that hits
+    this path is the GLOBAL_DIFF anchor at frequency 0.0).
+    """
+    if frequency_mhz <= 0:
+        return station
+    return f"{station}_{frequency_mhz:.2f}"
+
+
 @dataclass
 class BroadcastMeasurement:
     """Single D_clock measurement from one broadcast."""
@@ -288,6 +319,19 @@ class BroadcastMeasurement:
     l2_propagation_delay_ms: Optional[float] = None  # Physics model delay
     l2_tec_estimate: Optional[float] = None          # TECU estimate
     l2_model_confidence: Optional[float] = None      # Physics model confidence
+
+    # Per-broadcast Kalman posterior uncertainty (ms). Set by
+    # _apply_broadcast_kalmans; used as σ_i for inverse-variance fusion
+    # weighting in _calculate_weights (M-H12).
+    kalman_uncertainty_ms: Optional[float] = None
+
+    # GPSDO lock state at the time the L1/L2 measurement was taken
+    # (M-M10).  Defaults to True so synthetic measurements (GLOBAL_DIFF,
+    # tick, CHU-FSK) and any path that doesn't yet propagate this flag
+    # stay safe — but the dead `hasattr(m, 'gpsdo_locked')` guards
+    # downstream now resolve unconditionally instead of being silently
+    # bypassed.
+    gpsdo_locked: bool = True
 
 
 
@@ -336,8 +380,12 @@ class BroadcastCalibration:
     
     @property
     def broadcast_key(self) -> str:
-        """Unique key for this broadcast (station_frequency)."""
-        return f"{self.station}_{self.frequency_mhz:.2f}"
+        """Unique key for this broadcast (station_frequency).
+
+        Delegates to the module-level :func:`broadcast_key` formatter
+        (M-M9) so every read/write path shares one canonical format.
+        """
+        return broadcast_key(self.station, self.frequency_mhz)
 
 
 # Legacy alias for backwards compatibility
@@ -569,7 +617,8 @@ class MultiBroadcastFusion:
         receiver_lon: Optional[float] = None,
         sample_rate: Optional[int] = None,
         timing_authority_level: str = 'L5',
-        is_rtp_authority: bool = True
+        is_rtp_authority: bool = True,
+        storage_config: Optional[Dict] = None
     ):
         """
         Initialize multi-broadcast fusion engine.
@@ -598,13 +647,15 @@ class MultiBroadcastFusion:
             self.timing_authority_level = 'L5'
         self.is_rtp_authority = is_rtp_authority
         self.phase2_dir = self.data_root / 'phase2'
+        # [storage] config for make_data_product_reader (HDF5→SQLite
+        # migration). None → HDF5-only, preserving today's behaviour.
+        self._storage_config = storage_config or {}
         self.calibration: Dict[str, BroadcastCalibration] = {}
         self.calibration_update_count = 0  # Track updates for auto-save
         self.calibration_trust_level = 1.0  # Trust level from loaded calibration (1.0 = full trust)
         self.calibration_age_hours = 0.0    # Age of loaded calibration in hours
         self.auto_calibrate = auto_calibrate
         self.reference_station = reference_station
-        self.correction_alpha = 0.0  # Gradual ramp-up for Kalman correction (0→1)
 
         from .wwv_constants import SAMPLE_RATE_FULL
         self.sample_rate = int(sample_rate if sample_rate is not None else SAMPLE_RATE_FULL)
@@ -654,9 +705,14 @@ class MultiBroadcastFusion:
         # dynamics. This is physically justified because the ionosphere has
         # temporal continuity - it cannot teleport.
         from .broadcast_kalman_filter import BroadcastKalmanFilter
+        # Per-broadcast Kalman banks, keyed "{feed}:{broadcast_id}". The L1 and
+        # L2 chrony feeds get INDEPENDENT filter instances per broadcast so the
+        # two SHM feeds carry genuinely uncorrelated estimates — the dual-feed
+        # cross-check is meaningless if they share filter state.
         self.broadcast_kalmans: Dict[str, BroadcastKalmanFilter] = {}
         self.broadcast_kalman_state_dir = self.data_root / 'state' / 'broadcast_kalmans'
-        self.broadcast_kalman_state_dir.mkdir(parents=True, exist_ok=True)
+        for _feed in ('l1', 'l2'):
+            (self.broadcast_kalman_state_dir / _feed).mkdir(parents=True, exist_ok=True)
         self._load_broadcast_kalman_states()
         
         # Initialize HF Propagation Model (for GNSS VTEC integration + mode scoring)
@@ -679,28 +735,23 @@ class MultiBroadcastFusion:
             self.data_root / 'state' / 'broadcast_calibration.json'
         )
         self.calibration: Dict[str, StationCalibration] = {}
-        
-        # CRITICAL FIX (2026-01-20): Initialize Kalman state BEFORE loading calibration
-        # so that _load_calibration can restore the persisted Kalman state
-        #
-        # DUAL KALMAN ARCHITECTURE (2026-02-07):
-        # L1 Kalman (kalman_state): Tracks raw L1 metrology D_clock
-        # L2 Kalman (kalman_state_l2): Tracks physics-corrected L2 D_clock independently
-        # This ensures TSL1 and TSL2 chrony feeds carry genuinely different estimates.
-        self.kalman_state = np.array([0.0, 0.0])  # [offset_ms, drift_ms_per_min]
-        self.kalman_P = np.array([[100.0, 0.0], [0.0, 1.0]])  # Initial uncertainty
-        self.kalman_initialized = False
+
+        # FUSION CONVERGENCE STATE (Increment 2, 2026-05-18: L3 Kalman removed)
+        # The per-broadcast Kalman banks smooth each broadcast's D_clock; WLS
+        # combines them. There is no L3 Kalman — fuse() outputs the WLS weighted
+        # mean directly. Two attributes track fusion-level convergence; they are
+        # initialized BEFORE _load_calibration() because load_state seeds
+        # kalman_n_updates to skip the bootstrap ramp on a warm restart:
+        #   kalman_converged — set by the WLS branch (>=2 stations, low unc)
+        #   kalman_n_updates — count of fusion cycles (drives the bootstrap
+        #                      systematic-uncertainty ramp)
         self.kalman_n_updates = 0
         self.kalman_converged = False
-        self.kalman_convergence_threshold = 50
-        
-        # Independent L2 Kalman state
-        self.kalman_state_l2 = np.array([0.0, 0.0])
-        self.kalman_P_l2 = np.array([[100.0, 0.0], [0.0, 1.0]])
-        self.kalman_initialized_l2 = False
-        self.kalman_n_updates_l2 = 0
-        self.kalman_converged_l2 = False
-        
+
+        # Last fused D_clock from a LOCKED (valid multi-station) cycle.
+        # Holdover and leap-second hold coast the output on this anchor.
+        self.last_locked_d_clock: Optional[float] = None
+
         self._load_calibration()
         
         # CHU FSK auxiliary state (populated during FSK timing integration)
@@ -708,8 +759,20 @@ class MultiBroadcastFusion:
         # TAI-UTC: leap second awareness for Kalman hold
         self._fsk_dut1: Optional[float] = None
         self._fsk_tai_utc: Optional[int] = None
-        self._fsk_leap_second_hold: bool = False
-        
+        # M-M11: hold-window expiry time (unix seconds), not a per-cycle
+        # boolean.  Set when a TAI-UTC change is observed; cleared by
+        # time elapsing past it.  Previously a one-shot boolean that
+        # cleared the next cycle (as soon as the TAI-UTC field was seen
+        # unchanged) — so the Kalman coast never actually persisted
+        # across the leap second.
+        self._fsk_leap_second_hold_until: float = 0.0
+        # Length of the post-leap-second coast window (seconds).  10 min
+        # comfortably covers chrony's reaction time + the broadcast-
+        # specific Kalman re-acquisition tail; shorter than the
+        # propagation cycle period so a single window can't span more
+        # than one leap second.
+        self._fsk_leap_second_hold_seconds: float = 10 * 60.0
+
         # Fusion output
         self.fusion_dir = self.data_root / 'phase2' / 'fusion'
         self.fusion_dir.mkdir(parents=True, exist_ok=True)
@@ -741,17 +804,7 @@ class MultiBroadcastFusion:
         # History for calibration learning
         self.measurement_history: Dict[str, List[BroadcastMeasurement]] = defaultdict(list)
         self.history_max_size = 100  # Keep last N measurements per station
-        
-        # Two-tier Kalman approach (2026-01-10)
-        # Tier 1: Fast measurements (every 8s) - record variations, don't adjust baseline
-        # Tier 2: Slow adjustments (detect persistent drift) - only adjust if GPSDO drifting
-        # NOTE: kalman_state, kalman_P, kalman_initialized, kalman_n_updates, kalman_converged,
-        # and kalman_convergence_threshold are initialized BEFORE _load_calibration() above
-        self.measurement_window = []  # Recent measurements for drift detection
-        self.measurement_window_size = 30  # 30 measurements = ~4 minutes
-        self.last_baseline_adjustment = 0.0  # Timestamp of last adjustment
-        self.baseline_adjustment_interval = 600.0  # Minimum 10 minutes between adjustments
-        
+
         # ====================================================================
         # METROLOGICAL HOLDOVER MODEL (2026-01-16)
         # ====================================================================
@@ -821,16 +874,28 @@ class MultiBroadcastFusion:
         # Data freshness tracking for upstream starvation detection
         self.upstream_stale_warning_issued = False
         self.max_upstream_age_seconds = 300.0  # 5 minutes - warn if L1/L2 data older than this
-        
-        # DIAGNOSTIC: Track updates since this restart (separate from kalman_n_updates which may be restored)
-        self._updates_since_restart = 0
-        
+
         logger.info(f"MultiBroadcastFusion initialized")
         logger.info(f"  Data root: {data_root}")
         logger.info(f"  Channels: {len(self.channels)}")
         logger.info(f"  Reference station: {reference_station}")
         logger.info(f"  Auto-calibrate: {auto_calibrate}")
-    
+
+    def _leap_second_hold_active(self, now: Optional[float] = None) -> bool:
+        """Return True while the post-leap-second Kalman-hold window
+        is in effect (M-M11).
+
+        ``now`` defaults to wall-clock time.  The hold-window expires
+        on a fixed timestamp set when a TAI-UTC change was last
+        observed via CHU-FSK (see the M-M11 history note on
+        :attr:`_fsk_leap_second_hold_until`), so a single observation
+        coasts the Kalman through the entire transition rather than
+        clearing on the next cycle.
+        """
+        if now is None:
+            now = time.time()
+        return now < self._fsk_leap_second_hold_until
+
     def _discover_channels(self) -> List[str]:
         """
         Discover available Phase 2 channels.
@@ -976,52 +1041,14 @@ class MultiBroadcastFusion:
                 self.calibration_trust_level = trust_level
                 self.calibration_age_hours = age_hours
                 
-                # STEEL RULER (2026-01-18 - REVISED): Restore Kalman OFFSET but not drift
-                # The GPSDO doesn't drift, so drift_ms_per_min should stay at zero.
-                # But the Kalman offset represents the current D_clock estimate, which is
-                # a real physical quantity that should persist across restarts.
-                # NOT restoring it causes visible discontinuities in the D_clock trace.
-                if '_kalman_state' in data:
-                    kalman_state = data['_kalman_state']
-                    logger.info(f"Found _kalman_state: converged={kalman_state.get('converged')}, offset={kalman_state.get('offset_ms', 0):.3f}ms")
-                    if kalman_state.get('converged', False):
-                        # Restore the offset but keep drift at zero (Steel Ruler)
-                        restored_offset = kalman_state.get('offset_ms', 0.0)
-                        # CRITICAL: Set kalman_state array, not separate variables
-                        self.kalman_state[0] = restored_offset  # offset_ms
-                        self.kalman_state[1] = 0.0  # drift forced to zero (Steel Ruler)
-                        self.kalman_n_updates = kalman_state.get('n_updates', 0)
-                        self.kalman_initialized = True
-                        self.kalman_converged = True
-                        # Restore covariance for proper uncertainty propagation
-                        if 'covariance' in kalman_state:
-                            self.kalman_P = np.array(kalman_state['covariance'])
-                        logger.info(
-                            f"Steel Ruler mode: Restored Kalman state[0]={self.kalman_state[0]:.3f}ms "
-                            f"(drift forced to 0, n_updates={self.kalman_n_updates})"
-                        )
-                    else:
-                        logger.info(
-                            "Steel Ruler mode: Kalman not converged, starting fresh. "
-                            "Broadcast calibrations will be loaded."
-                        )
-                
-                # DUAL KALMAN (2026-02-07): Restore independent L2 Kalman state
-                if '_kalman_state_l2' in data:
-                    ks_l2 = data['_kalman_state_l2']
-                    if ks_l2.get('converged', False):
-                        self.kalman_state_l2[0] = ks_l2.get('offset_ms', 0.0)
-                        self.kalman_state_l2[1] = 0.0
-                        self.kalman_n_updates_l2 = ks_l2.get('n_updates', 0)
-                        self.kalman_initialized_l2 = True
-                        self.kalman_converged_l2 = True
-                        if 'covariance' in ks_l2:
-                            self.kalman_P_l2 = np.array(ks_l2['covariance'])
-                        logger.info(
-                            f"Restored L2 Kalman state: offset={self.kalman_state_l2[0]:.3f}ms, "
-                            f"n_updates={self.kalman_n_updates_l2}"
-                        )
-                
+                # Increment 2 (2026-05-18): the L3 Kalman was removed. There is no
+                # persisted filter state to restore — fusion-level convergence
+                # (kalman_converged) re-establishes from the WLS branch within a
+                # cycle or two of multi-station coverage. Legacy '_kalman_state'
+                # and '_kalman_state_l2' keys in older calibration files are
+                # ignored. Per-broadcast Kalman state is restored separately by
+                # _load_broadcast_kalman_states().
+
                 # Load validated calibration
                 for broadcast_key, cal_data in data.items():
                     # Skip metadata keys (Kalman state, etc.)
@@ -1055,28 +1082,15 @@ class MultiBroadcastFusion:
                     # High trust (1.0) -> 200 (full skip of bootstrap)
                     # Low trust (0.1) -> 20 (partial bootstrap, allows some adjustment)
                     self.calibration_update_count = int(200 * trust_level)
-                    
-                    # Also scale Kalman covariance by inverse trust
-                    # Low trust -> higher uncertainty -> Kalman adapts faster
-                    if trust_level < 0.9:
-                        uncertainty_scale = 1.0 / trust_level
-                        self.kalman_P[0, 0] *= uncertainty_scale
-                        logger.info(
-                            f"✅ Loaded calibration (age={age_hours:.1f}h, trust={trust_level:.2f}). "
-                            f"Bootstrap count={self.calibration_update_count}, "
-                            f"Kalman uncertainty scaled by {uncertainty_scale:.1f}x"
-                        )
-                    else:
-                        logger.info(
-                            f"✅ Loaded calibration (age={age_hours:.1f}h, trust={trust_level:.2f}). "
-                            f"Full trust - skipping warmup and bootstrap"
-                        )
-                    
+                    logger.info(
+                        f"✅ Loaded calibration (age={age_hours:.1f}h, trust={trust_level:.2f}). "
+                        f"Bootstrap count={self.calibration_update_count}"
+                    )
+
                     # DIAGNOSTIC: Log complete restart state for variance investigation
                     logger.info(
                         f"[RESTART_DIAG] Fusion restart state: "
-                        f"kalman_state=[{self.kalman_state[0]:.4f}, {self.kalman_state[1]:.6f}], "
-                        f"kalman_P_diag=[{self.kalman_P[0,0]:.4f}, {self.kalman_P[1,1]:.8f}], "
+                        f"kalman_n_updates={self.kalman_n_updates}, "
                         f"trust={trust_level:.3f}, age_h={age_hours:.2f}, "
                         f"cal_update_count={self.calibration_update_count}, "
                         f"n_broadcasts={len(self.calibration)}"
@@ -1116,54 +1130,58 @@ class MultiBroadcastFusion:
         """
         from .broadcast_kalman_filter import BroadcastKalmanFilter
         
-        # Scan for existing state files
-        if self.broadcast_kalman_state_dir.exists():
-            state_files = list(self.broadcast_kalman_state_dir.glob('*_kalman_state.json'))
-            loaded_count = 0
-            
-            for state_file in state_files:
+        # Each feed (l1, l2) has its own state subdirectory so the two banks
+        # persist independently across restarts.
+        loaded_count = 0
+        for feed in ('l1', 'l2'):
+            feed_dir = self.broadcast_kalman_state_dir / feed
+            if not feed_dir.exists():
+                continue
+            for state_file in feed_dir.glob('*_kalman_state.json'):
                 try:
                     with open(state_file) as f:
                         state_data = json.load(f)
-                    
+
                     broadcast_id = state_data.get('broadcast_id')
                     station = state_data.get('station')
                     frequency_mhz = state_data.get('frequency_mhz')
-                    
+
                     if broadcast_id and station and frequency_mhz:
-                        # Create filter and load state
                         kalman = BroadcastKalmanFilter(broadcast_id, station, frequency_mhz)
-                        if kalman.load_state(self.broadcast_kalman_state_dir):
-                            self.broadcast_kalmans[broadcast_id] = kalman
+                        if kalman.load_state(feed_dir):
+                            self.broadcast_kalmans[f"{feed}:{broadcast_id}"] = kalman
                             loaded_count += 1
                 except Exception as e:
                     logger.warning(f"Failed to load Kalman state from {state_file}: {e}")
-            
-            if loaded_count > 0:
-                logger.info(f"Loaded {loaded_count} per-broadcast Kalman filter states")
+
+        if loaded_count > 0:
+            logger.info(f"Loaded {loaded_count} per-broadcast Kalman filter states (l1+l2 banks)")
         else:
             logger.info("No per-broadcast Kalman states found - will initialize on first measurements")
     
-    def _get_or_create_broadcast_kalman(self, broadcast_id: str, station: str, frequency_mhz: float):
+    def _get_or_create_broadcast_kalman(self, broadcast_id: str, station: str,
+                                        frequency_mhz: float, feed: str):
         """
-        Get existing Kalman filter for broadcast or create new one.
-        
+        Get the existing per-broadcast Kalman filter, or create one.
+
         Args:
             broadcast_id: Unique broadcast identifier (e.g., "WWV_10000")
             station: Station name (WWV, WWVH, CHU, BPM)
             frequency_mhz: Frequency in MHz
-            
+            feed: 'l1' or 'l2' — selects the independent per-feed bank
+
         Returns:
-            BroadcastKalmanFilter instance
+            BroadcastKalmanFilter instance (one per (feed, broadcast))
         """
-        if broadcast_id not in self.broadcast_kalmans:
+        key = f"{feed}:{broadcast_id}"
+        if key not in self.broadcast_kalmans:
             from .broadcast_kalman_filter import BroadcastKalmanFilter
-            self.broadcast_kalmans[broadcast_id] = BroadcastKalmanFilter(
+            self.broadcast_kalmans[key] = BroadcastKalmanFilter(
                 broadcast_id, station, frequency_mhz
             )
-            logger.info(f"Created new Kalman filter for {broadcast_id}")
-        
-        return self.broadcast_kalmans[broadcast_id]
+            logger.info(f"Created new Kalman filter for {broadcast_id} ({feed} feed)")
+
+        return self.broadcast_kalmans[key]
     
     def _save_broadcast_kalman_states(self):
         """
@@ -1172,51 +1190,71 @@ class MultiBroadcastFusion:
         Called periodically and on shutdown to persist state.
         """
         saved_count = 0
-        for broadcast_id, kalman in self.broadcast_kalmans.items():
+        for key, kalman in self.broadcast_kalmans.items():
             try:
-                kalman.save_state(self.broadcast_kalman_state_dir)
+                # key is "{feed}:{broadcast_id}" — persist into the feed subdir
+                feed = key.split(':', 1)[0]
+                kalman.save_state(self.broadcast_kalman_state_dir / feed)
                 saved_count += 1
             except Exception as e:
-                logger.warning(f"Failed to save Kalman state for {broadcast_id}: {e}")
+                logger.warning(f"Failed to save Kalman state for {key}: {e}")
         
         if saved_count > 0:
             logger.debug(f"Saved {saved_count} per-broadcast Kalman filter states")
     
-    def _apply_broadcast_kalmans(self, measurements: List['BroadcastMeasurement']) -> List['BroadcastMeasurement']:
+    def _apply_broadcast_kalmans(self, measurements: List['BroadcastMeasurement'],
+                                 feed: str) -> List['BroadcastMeasurement']:
         """
         Apply per-broadcast Kalman filtering to measurements.
-        
+
         This is the core of the v6.0 hierarchical architecture:
         - Each broadcast's d_clock is filtered by its own Kalman
         - The Kalman tracks ionospheric path dynamics (ToF)
         - Glitches are rejected, real dynamics are preserved
-        
+
+        Leap-second hold (S3): when a CHU-FSK-detected TAI-UTC change is in
+        effect, every measurement is stepped by ~1 s. Feeding that to the
+        per-broadcast Kalmans would corrupt their state, so the filters coast
+        — predict() (advance the motion model) instead of update() (incorporate
+        the measurement) — until the hold clears. The fusion layer separately
+        coasts its output on the last LOCKED value.
+
         Args:
             measurements: Raw measurements from L1/L2
-            
+            feed: 'l1' or 'l2' — selects the independent per-feed Kalman bank
+
         Returns:
             Measurements with Kalman-filtered d_clock values and uncertainties
         """
         filtered_measurements = []
-        
+
+        # S3 + M-M11: coast every per-broadcast Kalman through a
+        # leap-second hold rather than updating it with the 1-second-
+        # stepped measurement.  The hold lasts a fixed timestamp window
+        # (10 min by default) — see `_leap_second_hold_active`.
+        leap_second_hold = self._leap_second_hold_active()
+
         for m in measurements:
             # Construct broadcast ID
             broadcast_id = f"{m.station}_{int(m.frequency_mhz * 1000)}"
-            
-            # Get or create Kalman filter for this broadcast
+
+            # Get or create the Kalman filter for this broadcast on this feed
             kalman = self._get_or_create_broadcast_kalman(
-                broadcast_id, m.station, m.frequency_mhz
+                broadcast_id, m.station, m.frequency_mhz, feed
             )
-            
-            # Update Kalman with measurement
+
             # Note: We're filtering d_clock directly, which includes both
             # ionospheric path and clock offset. The TEC estimator will
             # later separate these.
             snr_db = getattr(m, 'snr_db', 10.0)  # Default SNR if not available
-            
-            filtered_d_clock, kalman_uncertainty = kalman.update(
-                m.d_clock_ms, snr_db
-            )
+
+            if leap_second_hold:
+                # Coast: advance the filter's model, ignore the stepped value.
+                filtered_d_clock, kalman_uncertainty = kalman.predict()
+            else:
+                filtered_d_clock, kalman_uncertainty = kalman.update(
+                    m.d_clock_ms, snr_db
+                )
             
             # Create new measurement with filtered values
             # We preserve the original measurement but update d_clock and uncertainty
@@ -1230,12 +1268,13 @@ class MultiBroadcastFusion:
                 confidence=m.confidence,
                 snr_db=m.snr_db,
                 quality_grade=m.quality_grade,
-                channel_name=m.channel_name
+                channel_name=m.channel_name,
+                # Per-broadcast Kalman posterior σ — the statistical uncertainty
+                # used for inverse-variance fusion weighting (M-H12).
+                kalman_uncertainty_ms=kalman_uncertainty,
+                gpsdo_locked=m.gpsdo_locked,  # M-M10
             )
-            
-            # Store Kalman uncertainty for weighting
-            filtered_m.kalman_uncertainty_ms = kalman_uncertainty
-            
+
             filtered_measurements.append(filtered_m)
         
         return filtered_measurements
@@ -1338,31 +1377,10 @@ class MultiBroadcastFusion:
                 'hardware_converged': cal.hardware_converged
             }
         
-        # CRITICAL FIX: Persist Kalman state to prevent discontinuities on restart
-        # Without this, each restart resets Kalman to [0.0, 0.0] causing ~5ms jumps
-        data['_kalman_state'] = {
-            'offset_ms': float(self.kalman_state[0]),
-            'drift_ms_per_min': float(self.kalman_state[1]),
-            'covariance': self.kalman_P.tolist(),
-            'converged': self.kalman_converged,
-            'n_updates': self.kalman_n_updates,
-            'initialized': self.kalman_initialized,
-            'saved_at': time.time()
-        }
-        
-        # DUAL KALMAN (2026-02-07): Persist independent L2 Kalman state
-        data['_kalman_state_l2'] = {
-            'offset_ms': float(self.kalman_state_l2[0]),
-            'drift_ms_per_min': float(self.kalman_state_l2[1]),
-            'covariance': self.kalman_P_l2.tolist(),
-            'converged': self.kalman_converged_l2,
-            'n_updates': self.kalman_n_updates_l2,
-            'initialized': self.kalman_initialized_l2,
-            'saved_at': time.time()
-        }
-        
-        # v6.0 ARCHITECTURE: Save per-broadcast Kalman states
-        # Each broadcast has its own Kalman filter tracking ionospheric path dynamics
+        # Increment 2 (2026-05-18): the L3 Kalman was removed, so there is no
+        # fused-filter state to persist. The fused D_clock is the WLS weighted
+        # mean of the per-broadcast Kalman estimates; those per-broadcast filters
+        # carry the only state worth persisting across restarts.
         self._save_broadcast_kalman_states()
         
         # Atomic write: write to temp file, fsync, then rename
@@ -1454,11 +1472,12 @@ class MultiBroadcastFusion:
             
             try:
                 # Initialize HDF5 reader for L2 timing measurements
-                reader = DataProductReader(
+                reader = make_data_product_reader(
                     data_dir=channel_dir,
                     product_level='L2',  # CRITICAL FIX: Read L2 timing_measurements from analytics
                     product_name='timing_measurements',  # Correct schema name
-                    channel=channel
+                    channel=channel,
+                    storage_config=self._storage_config,
                 )
                 
                 # Read measurements with quality filtering
@@ -1571,11 +1590,12 @@ class MultiBroadcastFusion:
                 continue
             
             try:
-                reader = DataProductReader(
+                reader = make_data_product_reader(
                     data_dir=channel_dir,
                     product_level='L2',
                     product_name='tick_timing',
-                    channel=channel
+                    channel=channel,
+                    storage_config=self._storage_config,
                 )
                 
                 tick_measurements = reader.read_time_range(start=start_iso, end=end_iso)
@@ -1652,11 +1672,12 @@ class MultiBroadcastFusion:
                 continue
             
             try:
-                reader = DataProductReader(
+                reader = make_data_product_reader(
                     data_dir=channel_dir,
                     product_level='L2',
                     product_name='chu_fsk',
-                    channel=channel
+                    channel=channel,
+                    storage_config=self._storage_config,
                 )
                 
                 fsk_measurements = reader.read_time_range(start=start_iso, end=end_iso)
@@ -1853,11 +1874,12 @@ class MultiBroadcastFusion:
                 continue
 
             try:
-                reader = DataProductReader(
+                reader = make_data_product_reader(
                     data_dir=channel_dir,
                     product_level='L1',
                     product_name='metrology_measurements',
-                    channel=channel
+                    channel=channel,
+                    storage_config=self._storage_config,
                 )
                 
                 # Filter locally to avoid reader complexity, or rely on reader if optimized
@@ -1917,11 +1939,12 @@ class MultiBroadcastFusion:
                 continue
 
             try:
-                reader = DataProductReader(
+                reader = make_data_product_reader(
                     data_dir=channel_dir,
                     product_level='L2',
                     product_name='timing_measurements',
-                    channel=channel
+                    channel=channel,
+                    storage_config=self._storage_config,
                 )
                 
                 measurements = reader.read_time_range(
@@ -2012,15 +2035,13 @@ class MultiBroadcastFusion:
                 
                 station = l1_item.get('station_id')
                 freq_mhz = float(l1_item.get('frequency_mhz', 0))
-                
-                # Check for Locked GPSDO in L1 (Critical for valid TOA)
-                # If L1 doesn't explicitly state, we assume logic elsewhere handled it?
-                # Actually, L1MetrologyMeasurement does not have gpsdo_locked? 
-                # Check metrics or assume MetrologyService filtered it.
-                # MetrologyService writes 'gpsdo_locked' attribute?
-                # Re-reading measurement.py: L1MetrologyMeasurement doesn't have gpsdo_locked.
-                # It does have 'quality_flag'.
-                # Let's assume for now Metrology filters bad data or flags it.
+
+                # M-M10: GPSDO lock state.  L1MetrologyMeasurement itself
+                # doesn't carry this flag, but L2TimingMeasurement does
+                # (`gpsdo_locked` is part of the L2 schema in
+                # `models/measurement.py`).  Read from whichever source
+                # carries it; default True (assume locked) so partial-
+                # provenance paths don't regress.
                 
                 # 3. Get L2 match
                 l2_item = l2_map.get(key)
@@ -2101,12 +2122,17 @@ class MultiBroadcastFusion:
                     # New L2 Fields
                     l2_propagation_delay_ms=prop_delay if l2_item else None,
                     l2_tec_estimate=float(l2_item.get('tec_estimate')) if (l2_item and l2_item.get('tec_estimate') is not None) else None,
-                    l2_model_confidence=model_conf if l2_item else None
+                    l2_model_confidence=model_conf if l2_item else None,
+                    # M-M10: prefer L2's explicit flag; fall back to L1's
+                    # if present; finally assume locked (matches default).
+                    gpsdo_locked=bool(
+                        (l2_item or {}).get(
+                            'gpsdo_locked',
+                            l1_item.get('gpsdo_locked', True),
+                        )
+                    ),
                 )
-                
-                # Propagate GPSDO lock if available in L1 (via extra fields or quality)
-                # If quality_flag is bad, we rely on fusion to filter
-                
+
                 measurements.append(m)
 
             except Exception as e:
@@ -2120,23 +2146,26 @@ class MultiBroadcastFusion:
         measurements: List[BroadcastMeasurement]
     ) -> List[float]:
         """
-        Calculate statistically optimal weights for each measurement.
-        
-        Uses inverse variance weighting (precision) as the base:
-            w_i = 1 / σ²_i
-        
-        This is the statistically optimal weighting for combining independent
-        measurements with different uncertainties (ISO GUM, GUM-S1).
-        
-        Weights are then scaled by confidence to account for non-statistical
-        quality factors:
-        - Discrimination quality (WWV vs WWVH separation)
-        - Propagation mode reliability (1E vs 3F)
-        - Signal quality (SNR, multipath)
+        Calculate statistically optimal fusion weights for each measurement.
+
+        Inverse-variance (precision) weighting:
+
+            w_i = trust_i / σ²_i
+
+        σ_i is the per-broadcast Kalman posterior uncertainty
+        (``kalman_uncertainty_ms``) — the genuine statistical uncertainty of
+        that broadcast's filtered D_clock. SNR already drives σ_i (the
+        per-broadcast Kalman is fed snr_db), so it is NOT reapplied here
+        (M-H12: SNR was previously triple-counted — snr_scale, an
+        SNR-boosted confidence, and σ_i — while the real σ_i went unused).
+
+        trust_i is a small non-statistical quality scalar for factors the
+        Kalman σ cannot see: measurement grade, propagation-mode reliability
+        and ambiguity, and station-path priority.
         """
         weights = []
-        
-        # Quality scaling factors (applied to base inverse-variance weight)
+
+        # Non-statistical trust factors (multiplied into the 1/σ² weight)
         grade_scale = {'A': 1.0, 'B': 0.9, 'C': 0.7, 'D': 0.5}
         mode_scale = {
             '1E': 1.0, '1F': 0.95, '2F': 0.85, '3F': 0.7, 'GW': 1.0
@@ -2162,7 +2191,12 @@ class MultiBroadcastFusion:
         # about which station is being detected. This prevents locking onto wrong timing.
         from .wwv_constants import UNAMBIGUOUS_BOOTSTRAP_CHANNELS
         is_bootstrap = self.calibration_update_count < 100
-        
+
+        # Fallback σ when a measurement carries no per-broadcast Kalman
+        # uncertainty (e.g. it never passed through _apply_broadcast_kalmans).
+        DEFAULT_SIGMA_MS = 1.0   # historical default uncertainty
+        MIN_SIGMA_MS = 0.05      # floor so 1/σ² stays finite
+
         for m in measurements:
             # Special handling for GLOBAL_DIFF (cross-station validation)
             if m.station == 'GLOBAL_DIFF':
@@ -2172,20 +2206,18 @@ class MultiBroadcastFusion:
                 weights.append(max(10.0, base_weight * confidence_scale))
                 continue
             
-            # CRITICAL FIX: Use inverse variance (precision) as base weight
-            # This is the statistically optimal weighting formula
-            if m.uncertainty_ms is None or m.uncertainty_ms <= 0:
-                # Fallback for missing/invalid uncertainty
-                # Use inverse confidence as a rough proxy
-                base_weight = 1.0 / max(0.1, (1.0 / max(0.01, m.confidence)))
-            else:
-                # Inverse variance: w = 1/σ²
-                base_weight = 1.0 / (m.uncertainty_ms ** 2)
-            
-            # Scale by confidence to account for non-statistical factors
-            # (discrimination quality, propagation mode reliability, etc.)
-            confidence_scale = m.confidence if m.confidence > 0 else 0.5
-            
+            # Inverse-variance base weight: w = 1/σ², with σ = the per-broadcast
+            # Kalman posterior uncertainty (M-H12). SNR is already folded into
+            # σ_i by the per-broadcast Kalman, so it is NOT reapplied below.
+            sigma_ms = m.kalman_uncertainty_ms
+            if sigma_ms is None or sigma_ms <= 0:
+                # Measurement never passed through the per-broadcast Kalman;
+                # fall back to its declared uncertainty, then a 1 ms default.
+                sigma_ms = m.uncertainty_ms if (m.uncertainty_ms and m.uncertainty_ms > 0) else DEFAULT_SIGMA_MS
+            sigma_ms = max(sigma_ms, MIN_SIGMA_MS)
+            base_weight = 1.0 / (sigma_ms ** 2)
+
+            # Non-statistical trust factors — quality the Kalman σ cannot see.
             # Scale by quality grade (measurement process quality)
             grade_scale_factor = grade_scale.get(m.quality_grade, 0.5)
             
@@ -2226,24 +2258,13 @@ class MultiBroadcastFusion:
                     logger.debug(f"Ignored exception: {e}")
                     pass  # Fail silently - mode scoring is an enhancement, not critical
             
-            # Scale by SNR (signal quality)
-            if m.snr_db is not None:
-                if m.snr_db > 15:
-                    snr_scale = 1.0
-                elif m.snr_db > 10:
-                    snr_scale = 0.95
-                elif m.snr_db > 5:
-                    snr_scale = 0.85
-                else:
-                    snr_scale = 0.7
-            else:
-                snr_scale = 0.9  # Default if SNR unknown
-            
             # Apply station priority (primary anchors vs secondary sources)
             station_priority_factor = station_priority.get(m.station, 0.5)
-            
-            # Combine: base precision × quality factors × station priority
-            w = base_weight * confidence_scale * grade_scale_factor * mode_scale_factor * snr_scale * station_priority_factor
+
+            # w = inverse-variance precision × a small non-statistical trust
+            # scalar. SNR is deliberately absent here — it lives in σ_i (M-H12).
+            trust = grade_scale_factor * mode_scale_factor * station_priority_factor
+            w = base_weight * trust
             
             # BOOTSTRAP PREFERENCE (2026-01-24): Boost unambiguous channels during bootstrap
             # WWV 20/25 MHz and all CHU frequencies have no station ambiguity
@@ -2254,76 +2275,63 @@ class MultiBroadcastFusion:
                     w *= 0.1
                     logger.debug(f"Bootstrap: Suppressing BPM weight (too distant for calibration)")
                 else:
-                    broadcast_key = f"{m.station}_{m.frequency_mhz:.2f}"
+                    # M-M9: canonical formatter (was an inline `.2f` here
+                    # while `_get_broadcast_key` used `.1f` — see module
+                    # docstring on `broadcast_key`).
+                    bcast_key = broadcast_key(m.station, m.frequency_mhz)
                     # Check if this is an unambiguous channel (exact key match)
                     is_unambiguous = any(
-                        broadcast_key.startswith(prefix.replace('.', ''))  
+                        bcast_key.startswith(prefix.replace('.', ''))
                         for prefix in UNAMBIGUOUS_BOOTSTRAP_CHANNELS.keys()
                     ) or m.station == 'CHU' or m.frequency_mhz in (20.0, 25.0)
-                    
+
                     if is_unambiguous:
                         # 3x weight boost for unambiguous channels during bootstrap
                         w *= 3.0
-                        logger.debug(f"Bootstrap: Boosting unambiguous channel {broadcast_key} weight 3x")
+                        logger.debug(f"Bootstrap: Boosting unambiguous channel {bcast_key} weight 3x")
             
             # Ensure minimum weight for numerical stability
             weights.append(max(0.01, w))
-        
-        return weights
-    
-    def _reject_outliers(
-        self,
-        measurements: List[BroadcastMeasurement],
-        weights: List[float],
-        sigma_threshold: float = 3.0
-    ) -> Tuple[List[BroadcastMeasurement], List[float], int]:
-        """
-        Reject outliers using weighted median absolute deviation.
-        
-        Returns filtered measurements, weights, and count of rejected.
-        """
-        if len(measurements) < 4:
-            return measurements, weights, 0
-        
-        # Calculate weighted median
-        d_clocks = np.array([m.d_clock_ms for m in measurements])
-        w = np.array(weights)
-        
-        sorted_idx = np.argsort(d_clocks)
-        sorted_d = d_clocks[sorted_idx]
-        sorted_w = w[sorted_idx]
-        cumsum = np.cumsum(sorted_w)
-        median_idx = np.searchsorted(cumsum, cumsum[-1] / 2)
-        weighted_median = sorted_d[min(median_idx, len(sorted_d)-1)]
-        
-        # Calculate MAD
-        deviations = np.abs(d_clocks - weighted_median)
-        mad = np.median(deviations) * 1.4826  # Scale to std dev
-        
-        if mad < 0.1:
-            mad = 0.1  # Minimum to avoid divide by zero
-        
-        # Reject outliers
-        keep_mask = deviations < (sigma_threshold * mad)
 
-        # FIX 2: Removed "God Mode" immunity for GLOBAL_DIFF
-        # It must survive the same statistical scrutiny as other measurements
-        
-        filtered_m = [m for m, keep in zip(measurements, keep_mask) if keep]
-        filtered_w = [w for w, keep in zip(weights, keep_mask) if keep]
-        n_rejected = len(measurements) - len(filtered_m)
-        
-        return filtered_m, filtered_w, n_rejected
-    
+        return weights
+
+    @staticmethod
+    def _wls_uncertainty(weights: np.ndarray, values: np.ndarray,
+                         fused: float) -> float:
+        """
+        Uncertainty of a WLS weighted mean (M-H12).
+
+        Returns the larger of two estimates:
+          - formal:  sqrt(1/Σw) — inverse-variance precision of the mean
+          - scatter: sqrt(Σw·(xᵢ−fused)²/Σw) — observed weighted spread of
+                     the inputs about the fused value
+
+        Taking max() is a Birge-style robustness guard: if the inputs disagree
+        by more than their σᵢ predict (Σw·residuals² large), trust the observed
+        spread rather than the optimistic formal precision. It is deliberately
+        conservative — the fused estimate is never reported tighter than the
+        broadcasts that produced it.
+
+        Returns NaN if the weights sum to zero (caller should fall back).
+        """
+        sum_w = float(np.sum(weights))
+        if sum_w <= 0:
+            return float('nan')
+        formal = np.sqrt(1.0 / sum_w)
+        scatter = np.sqrt(np.sum(weights * (values - fused) ** 2) / sum_w)
+        return float(max(formal, scatter))
+
     def _get_broadcast_key(self, station: str, frequency_mhz: float) -> str:
         """
         Generate broadcast key for calibration lookup.
-        
+
         Keys by (station, frequency) for frequency-dependent calibration.
+        Thin wrapper around the module-level :func:`broadcast_key` (M-M9)
+        — previously this used ``.1f`` while every other call site used
+        ``.2f``, so CHU's fractional MHz channels (3.330, 7.850, 14.670)
+        ended up under one key on writes and another on reads.
         """
-        if frequency_mhz > 0:
-            return f"{station}_{frequency_mhz:.1f}"
-        return station
+        return broadcast_key(station, frequency_mhz)
     
     def _apply_calibration(
         self,
@@ -2460,8 +2468,13 @@ class MultiBroadcastFusion:
             return
         
         # CRITICAL FIX: Check GPSDO lock status
-        # If any measurement has unlocked GPSDO, skip calibration update
-        n_unlocked = sum(1 for m in measurements if hasattr(m, 'gpsdo_locked') and not m.gpsdo_locked)
+        # If any measurement has unlocked GPSDO, skip calibration update.
+        # M-M10: the previous `hasattr(m, 'gpsdo_locked')` check was
+        # always False — the fusion dataclass didn't carry the flag,
+        # so this guard never fired.  Now that `BroadcastMeasurement`
+        # has `gpsdo_locked: bool = True` and the L2 reader propagates
+        # the L2 schema's value, the guard runs.
+        n_unlocked = sum(1 for m in measurements if not m.gpsdo_locked)
         if n_unlocked > 0:
             logger.warning(
                 f"Skipping calibration update: {n_unlocked}/{len(measurements)} measurements "
@@ -2843,216 +2856,6 @@ class MultiBroadcastFusion:
                 f"This exceeds 3σ uncertainty and may indicate GPSDO issue."
             )
     
-    def _kalman_update(self, measurement: float, measurement_uncertainty: float, use_l2: bool = False) -> float:
-        """
-        Two-tier Kalman filter for stable baseline maintenance.
-        
-        DUAL KALMAN ARCHITECTURE (2026-02-07):
-        When use_l2=False (default): operates on L1 state (kalman_state/kalman_P)
-        When use_l2=True: operates on independent L2 state (kalman_state_l2/kalman_P_l2)
-        This ensures TSL1 and TSL2 chrony feeds carry genuinely different estimates.
-        
-        TIER 1 (Bootstrap): Learn the baseline offset from measurements
-        - Active for first ~50 updates (~7 minutes)
-        - Normal Kalman updates to converge to true offset
-        - High process noise to resist chasing individual variations
-        
-        TIER 2 (Operational): Maintain stable baseline, detect real drift
-        - Active after convergence
-        - Only adjust baseline if persistent drift detected
-        - Measurements recorded for science, not used to chase variations
-        - GPSDO is the "steel ruler" - it doesn't drift significantly
-        
-        Philosophy: After bootstrap, the baseline offset should be rock solid.
-        Individual broadcast appearances/disappearances should not jerk the offset.
-        Measurement variations are ionospheric effects (the science signal), not
-        clock drift (which the GPSDO prevents).
-        
-        Args:
-            measurement: Current fused D_clock measurement (ms)
-            measurement_uncertainty: Uncertainty of this measurement (ms)
-            use_l2: If True, operate on the independent L2 Kalman state
-            
-        Returns:
-            Kalman filter uncertainty (converges over time)
-        """
-        # Select which Kalman state to operate on
-        feed_label = "L2" if use_l2 else "L1"
-        if use_l2:
-            k_state = self.kalman_state_l2
-            k_P = self.kalman_P_l2
-            k_init = self.kalman_initialized_l2
-            k_n = self.kalman_n_updates_l2
-            k_conv = self.kalman_converged_l2
-        else:
-            k_state = self.kalman_state
-            k_P = self.kalman_P
-            k_init = self.kalman_initialized
-            k_n = self.kalman_n_updates
-            k_conv = self.kalman_converged
-        
-        # DIAGNOSTIC: Log entry to confirm this function is being called
-        if not hasattr(self, '_kalman_entry_count'):
-            self._kalman_entry_count = 0
-        self._kalman_entry_count += 1
-        if self._kalman_entry_count <= 10:
-            logger.info(f"[KALMAN_ENTRY] _kalman_update #{self._kalman_entry_count} ({feed_label}): meas={measurement:.4f}ms, unc={measurement_uncertainty:.4f}ms, initialized={k_init}")
-        
-        # Initialize on first measurement
-        # CRITICAL FIX (2026-02-06): Initialize from first measurement, not 0.
-        # With hardware-only calibration, measurements carry real clock offset.
-        # Starting from 0 would take many updates to converge to the real value.
-        if not k_init:
-            k_state[0] = measurement  # Start from first measurement
-            k_state[1] = 0.0  # No drift assumed (GPSDO)
-            init_var = max(measurement_uncertainty ** 2, 1.0)
-            k_P[:] = np.array([[init_var, 0.0], [0.0, 1e-4]])
-            k_n = 1
-            if use_l2:
-                self.kalman_initialized_l2 = True
-                self.kalman_n_updates_l2 = k_n
-            else:
-                self.kalman_initialized = True
-                self.kalman_n_updates = k_n
-            logger.info(f"Kalman filter ({feed_label}) initialized from measurement: {measurement:+.3f}ms ± {measurement_uncertainty:.3f}ms")
-            return measurement_uncertainty
-        
-        # State transition matrix (1 minute step)
-        dt = 1.0  # 1 minute
-        F = np.array([[1.0, dt], [0.0, 1.0]])
-        
-        # Process noise (clock drift uncertainty)
-        q_offset = 0.01  # ms^2 per minute (allows ~0.1ms/min tracking)
-        q_drift = 1e-8   # (ms/min)^2 per minute (GPSDO drift is negligible)
-        Q = np.array([[q_offset, 0.0], [0.0, q_drift]])
-        
-        # Predict step
-        x_pred = F @ k_state
-        P_pred = F @ k_P @ F.T + Q
-        
-        # Measurement matrix (we only observe offset)
-        H = np.array([[1.0, 0.0]])
-        
-        # Measurement noise
-        R = np.array([[measurement_uncertainty ** 2]])
-        
-        # Kalman gain
-        S = H @ P_pred @ H.T + R
-        K = P_pred @ H.T @ np.linalg.inv(S)
-        
-        # Update step
-        y = (measurement - (H @ x_pred).item())  # Innovation (scalar)
-        k_state[:] = x_pred + K.flatten() * y
-        k_P[:] = (np.eye(2) - K @ H) @ P_pred
-        
-        # Increment update counter and check convergence
-        k_n += 1
-        
-        # DIAGNOSTIC: Log first 20 updates after restart to track settling behavior
-        if not use_l2:
-            self._updates_since_restart += 1
-            if self._updates_since_restart <= 20:
-                logger.info(
-                    f"[SETTLING_DIAG] Update #{self._updates_since_restart}: "
-                    f"meas={measurement:.4f}ms, innov={y:.4f}ms, "
-                    f"state=[{k_state[0]:.4f}, {k_state[1]:.6f}], "
-                    f"P_diag=[{k_P[0,0]:.4f}, {k_P[1,1]:.8f}]"
-                )
-        
-        if not k_conv and k_n >= self.kalman_convergence_threshold:
-            k_conv = True
-            k_P[:] = np.array([[1.0, 0.0], [0.0, 1e-6]])
-            k_state[1] = 0.0
-            
-            logger.info(
-                f"Kalman filter ({feed_label}) CONVERGED after {k_n} updates. "
-                f"Baseline offset: {k_state[0]:.3f}ms. "
-                f"Transitioning to operational mode: Covariance clamped, baseline locked, DRIFT FROZEN AT 0."
-            )
-        
-        # OPERATIONAL MODE: Force zero drift to prevent linear "walk away" from 0
-        if k_conv:
-            k_state[1] = 0.0
-        
-        # Divergence recovery
-        if abs(k_state[0]) > 20.0:
-            logger.error(
-                f"Kalman filter ({feed_label}) diverged: state={k_state[0]:.3f}ms, "
-                f"resetting to measurement value for graceful recovery"
-            )
-            k_state[:] = np.array([measurement, 0.0])
-            k_P[:] = np.array([[10.0, 0.0], [0.0, 1.0]])
-            k_n = 1
-        
-        # Write back counters and flags
-        if use_l2:
-            self.kalman_n_updates_l2 = k_n
-            self.kalman_converged_l2 = k_conv
-        else:
-            self.kalman_n_updates = k_n
-            self.kalman_converged = k_conv
-        
-        # TIER 2: Operational mode - maintain stable baseline (L1 only)
-        # Drift detection window is shared state, only update from L1 feed
-        if not use_l2 and self.kalman_converged:
-            # Add measurement to window for drift detection
-            self.measurement_window.append({
-                'timestamp': time.time(),
-                'measurement': measurement,
-                'uncertainty': measurement_uncertainty,
-                'kalman_state': self.kalman_state[0]
-            })
-            
-            # Keep window size limited
-            if len(self.measurement_window) > self.measurement_window_size:
-                self.measurement_window.pop(0)
-            
-            # Detect persistent drift (measurements consistently different from baseline)
-            if len(self.measurement_window) >= self.measurement_window_size:
-                recent_measurements = [m['measurement'] for m in self.measurement_window]
-                recent_mean = np.mean(recent_measurements)
-                recent_std = np.std(recent_measurements)
-                baseline = self.kalman_state[0]
-                
-                # Check if measurements persistently deviate from baseline
-                deviation = abs(recent_mean - baseline)
-                
-                # Only adjust if:
-                # 1. Deviation is significant (>1ms)
-                # 2. Deviation is consistent (std < 2ms indicates not just noise)
-                # 3. Enough time has passed since last adjustment (>10 minutes)
-                current_time = time.time()
-                time_since_adjustment = current_time - self.last_baseline_adjustment
-                
-                if (deviation > 1.0 and 
-                    recent_std < 2.0 and 
-                    time_since_adjustment > self.baseline_adjustment_interval):
-                    
-                    logger.warning(
-                        f"DRIFT DETECTED: Measurements persistently deviate from baseline by {deviation:.2f}ms. "
-                        f"Baseline: {baseline:.3f}ms, Recent mean: {recent_mean:.3f}ms (σ={recent_std:.2f}ms). "
-                        f"Adjusting baseline to track real GPSDO drift."
-                    )
-                    self.last_baseline_adjustment = current_time
-                    # Allow the Kalman update to proceed (already done above)
-                else:
-                    # No drift detected - maintain stable baseline
-                    # Don't log every cycle, only periodically
-                    if self.kalman_n_updates % 100 == 0:
-                        logger.debug(
-                            f"Baseline stable: {baseline:.3f}ms. "
-                            f"Recent measurements: {recent_mean:.3f}ms ± {recent_std:.2f}ms. "
-                            f"No adjustment needed (deviation={deviation:.2f}ms)."
-                        )
-        
-        # Return uncertainty (sqrt of offset variance) from the active feed
-        kalman_uncertainty = np.sqrt(k_P[0, 0])
-        
-        # Minimum uncertainty floor based on measurement quality
-        min_uncertainty = max(0.1, measurement_uncertainty / np.sqrt(max(k_n, 1)))
-        
-        return max(kalman_uncertainty, min_uncertainty)
-    
     def _cross_validate_stations(
         self,
         measurements: List[BroadcastMeasurement],
@@ -3379,7 +3182,9 @@ class MultiBroadcastFusion:
         # Each broadcast's d_clock is filtered by its own Kalman filter.
         # This rejects detection glitches while preserving real ionospheric dynamics.
         with self._phase("kalman_apply"):
-            measurements = self._apply_broadcast_kalmans(measurements)
+            measurements = self._apply_broadcast_kalmans(
+                measurements, feed='l1' if force_l1_only else 'l2'
+            )
         
         # Filter out NaN measurements immediately (tone not detected)
         # CRITICAL FIX (2026-01-08): Leverage GPSDO stability during detection gaps
@@ -3396,10 +3201,12 @@ class MultiBroadcastFusion:
         # stricter chrony feed criteria prevent discontinuities.
         measurements = [m for m in measurements if m.d_clock_ms is not None and not np.isnan(m.d_clock_ms)]
         
-        # CRITICAL FIX: Pre-fusion outlier rejection using CALIBRATED values
-        # Raw d_clock_ms has 30-60ms offsets between broadcasts (propagation model error).
-        # Using raw values makes the MAD huge, letting real outliers slip through.
-        # Apply calibration first so outlier detection sees the residual scatter.
+        # OUTLIER REJECTION — single pre-fusion pass on CALIBRATED residuals
+        # (M-H16). Raw d_clock_ms carries 30-60ms inter-broadcast offsets
+        # (propagation-model error) that would swamp the MAD, so calibration is
+        # applied first and detection sees only the residual scatter. A second,
+        # raw-value pass (the old _reject_outliers call) was removed — M-H16.
+        n_rejected = 0
         if len(measurements) > 2:
             with self._phase("calibration_apply"):
                 cal_for_outlier = self._apply_calibration(measurements)
@@ -3452,6 +3259,7 @@ class MultiBroadcastFusion:
                     f"Keeping all to prevent Kalman starvation."
                 )
             elif len(keep_indices) < len(measurements):
+                n_rejected = len(measurements) - len(keep_indices)
                 measurements = [measurements[i] for i in keep_indices]
         
         if not measurements:
@@ -3590,12 +3398,22 @@ class MultiBroadcastFusion:
                     if self.physics_model is not None and hasattr(self.physics_model, 'set_dut1'):
                         self.physics_model.set_dut1(self._fsk_dut1)
                 if tai_utc is not None:
-                    if hasattr(self, '_fsk_tai_utc') and self._fsk_tai_utc != tai_utc:
-                        logger.warning(f"Fusion: TAI-UTC changed {self._fsk_tai_utc} → {tai_utc} "
-                                      f"— leap second transition, holding Kalman")
-                        self._fsk_leap_second_hold = True
-                    else:
-                        self._fsk_leap_second_hold = False
+                    # M-M11: on a TAI-UTC change, arm the timestamp-based
+                    # hold window.  The old boolean cleared on the very
+                    # next cycle (the moment the table reported the new
+                    # value unchanged), so the Kalman coast never spanned
+                    # the leap second.  Now the window stays armed for
+                    # `_fsk_leap_second_hold_seconds` past `time.time()`,
+                    # and only natural time elapsing clears it.
+                    if self._fsk_tai_utc is not None and self._fsk_tai_utc != tai_utc:
+                        logger.warning(
+                            f"Fusion: TAI-UTC changed {self._fsk_tai_utc} → {tai_utc} "
+                            f"— arming {self._fsk_leap_second_hold_seconds / 60:.0f}-min "
+                            f"Kalman hold window"
+                        )
+                        self._fsk_leap_second_hold_until = (
+                            time.time() + self._fsk_leap_second_hold_seconds
+                        )
                     self._fsk_tai_utc = tai_utc
         except Exception as e:
             logger.debug(f"CHU FSK timing integration failed: {e}")
@@ -3681,21 +3499,37 @@ class MultiBroadcastFusion:
                         
                         # Store original for logging
                         original_d_clock = m.d_clock_ms
-                        
-                        # Apply correction only if significant (> 0.1 ms)
-                        if abs(delta_iono_ms) > 0.1:
+
+                        # In RTP mode (GPS+PPS authority) D_clock is already
+                        # pinned to ~50 us. Applying a model-derived TEC
+                        # correction there would inject ionospheric model noise
+                        # into a reference more accurate than the model — so
+                        # GNSS VTEC is used only as an independent cross-check,
+                        # never as a D_clock correction. The correction applies
+                        # only in Fusion mode (no GPS+PPS), where HF is the
+                        # primary timing source. See METROLOGY_PHYSICS_SPLIT.md.
+                        if self.is_rtp_authority:
+                            m.propagation_mode = f"{prediction.primary_mode}+GNSS_VALIDATED"
+                            m.confidence = min(1.0, m.confidence * 1.1)
+                            logger.debug(
+                                f"  {m.station} {m.frequency_mhz}MHz: GNSS TEC "
+                                f"cross-check only (RTP mode — ΔTEC={tec_diff:+.1f} TECU, "
+                                f"Δiono={delta_iono_ms:+.3f}ms NOT applied to D_clock)"
+                            )
+                        elif abs(delta_iono_ms) > 0.1:
+                            # Fusion mode, significant correction — apply it
                             m.d_clock_ms = original_d_clock + delta_iono_ms
                             m.propagation_mode = f"{prediction.primary_mode}+GNSS_TEC"
                             m.confidence = min(1.0, m.confidence * 1.2)  # Boost confidence
                             corrections_applied += 1
-                            
+
                             logger.debug(
                                 f"  {m.station} {m.frequency_mhz}MHz: TEC correction "
                                 f"model={model_tec:.1f} gnss={vtec_tecu:.1f} ΔTEC={tec_diff:+.1f} TECU, "
                                 f"Δiono={delta_iono_ms:+.3f}ms, D_clock {original_d_clock:.3f}->{m.d_clock_ms:.3f}ms"
                             )
                         else:
-                            # Small correction - just validate
+                            # Fusion mode, correction below threshold — validate only
                             m.propagation_mode = f"{prediction.primary_mode}+GNSS_VALIDATED"
                             m.confidence = min(1.0, m.confidence * 1.1)
                             logger.debug(
@@ -3801,7 +3635,7 @@ class MultiBroadcastFusion:
                             # TEC is physically reasonable (1-200 TECU) and well-fit
                             logger.info(
                                 f"TEC Solved for {station}: {tec_result.tec_u:.1f} TECU "
-                                f"(R2={tec_result.confidence:.2f}), "
+                                f"(conf={tec_result.confidence:.2f}), "
                                 f"t_vacuum={tec_result.t_vacuum_error_ms:.3f}ms"
                             )
 
@@ -3877,12 +3711,12 @@ class MultiBroadcastFusion:
                                 )
                         elif tec_result.confidence > 0.9:
                             # TEC fit is good but value is unrealistic (e.g., 0.0 TECU)
-                            logger.warning(f"TEC unrealistic for {station}: {tec_result.tec_u:.1f} TECU (R2={tec_result.confidence:.2f}) - not applying correction")
+                            logger.warning(f"TEC unrealistic for {station}: {tec_result.tec_u:.1f} TECU (conf={tec_result.confidence:.2f}) - not applying correction")
                             for m in station_meas:
                                 m.propagation_mode = 'TEC_UNREALISTIC'
                         else:
                             # TEC fit is poor - reduce confidence slightly
-                            logger.warning(f"TEC poor fit for {station}: R2={tec_result.confidence:.2f} (Needs >0.9)")
+                            logger.warning(f"TEC poor fit for {station}: conf={tec_result.confidence:.2f} (Needs >0.9)")
                             for m in station_meas:
                                 m.confidence = max(0.5, m.confidence * 0.95)
                                 m.propagation_mode = 'TEC_POOR_FIT'
@@ -3890,21 +3724,6 @@ class MultiBroadcastFusion:
                         logger.warning(f"TEC solver returned None for {station} (inputs: {len(tec_input)})")
                 else:
                      logger.info(f"Skipping TEC for {station}: Only {len(station_meas)} measurements (Need >=2)")
-        
-        # ====================================================================
-        
-        # ====================================================================
-        
-        # ====================================================================
-        
-        # Reject outliers
-        measurements, weights, n_rejected = self._reject_outliers(
-            measurements, weights
-        )
-        
-        if len(measurements) < 1:
-            logger.debug("Too few measurements after outlier rejection")
-            return None
         
         # CRITICAL: Filter out any measurements with NaN values or unlocked GPSDO before fusion
         # This is a safety net to prevent NaN from propagating and to exclude unlocked measurements
@@ -3914,9 +3733,11 @@ class MultiBroadcastFusion:
         for m, w in zip(measurements, weights):
             if np.isnan(m.d_clock_ms) or np.isnan(w):
                 logger.warning(f"Filtering out measurement with NaN: station={m.station}, d_clock={m.d_clock_ms}, weight={w}")
-            elif hasattr(m, 'gpsdo_locked') and not m.gpsdo_locked:
+            elif not m.gpsdo_locked:
                 # CRITICAL FIX: Exclude measurements where GPSDO is not locked
-                # Unlocked GPSDO can drift by seconds, causing massive timing errors
+                # Unlocked GPSDO can drift by seconds, causing massive timing errors.
+                # M-M10: dropped the dead `hasattr(m, 'gpsdo_locked')`
+                # gate — the dataclass now always carries the flag.
                 n_gpsdo_unlocked += 1
                 logger.warning(f"Filtering out measurement with unlocked GPSDO: station={m.station}, freq={m.frequency_mhz}MHz")
             else:
@@ -4017,42 +3838,19 @@ class MultiBroadcastFusion:
         fused_d_clock_uncalibrated = np.sum(w * d_raw) / np.sum(w)
         
         # ====================================================================
-        # KALMAN FILTER UPDATE (2026-02-06: was dead code, now connected)
+        # FUSED OUTPUT (Increment 2, 2026-05-18: L3 Kalman removed — M-H13)
         # ====================================================================
-        # Feed the hardware-calibrated weighted mean into the Kalman filter.
-        # The Kalman smooths ionospheric variations while tracking real offsets.
-        #
-        # DUAL KALMAN (2026-02-07): L1 and L2 feeds use independent Kalman states
-        # so that TSL1 (geometric fallback) and TSL2 (physics model) carry
-        # genuinely different estimates to chrony.
-        use_l2_kalman = not force_l1_only
-        measurement_uncertainty = float(np.sqrt(np.sum(w * (d_calibrated - fused_d_clock_raw)**2) / np.sum(w)))
-        measurement_uncertainty = max(measurement_uncertainty, 1.0)  # Floor at 1ms
-        
-        # Leap second hold: skip Kalman update when CHU FSK detects TAI-UTC change.
-        # A leap second causes a 1-second UTC jump that would look like a massive
-        # Kalman innovation and corrupt the state. Coast on prediction instead.
-        if getattr(self, '_fsk_leap_second_hold', False):
-            logger.warning("Kalman HELD: leap second transition detected via CHU FSK TAI-UTC change")
-            kalman_uncertainty = measurement_uncertainty
-        else:
-            kalman_uncertainty = self._kalman_update(fused_d_clock_raw, measurement_uncertainty, use_l2=use_l2_kalman)
-        
-        # Use the Kalman-filtered state as the fused output
-        k_state_active = self.kalman_state_l2 if use_l2_kalman else self.kalman_state
-        k_init_active = self.kalman_initialized_l2 if use_l2_kalman else self.kalman_initialized
-        if k_init_active:
-            fused_d_clock = float(k_state_active[0])
-            
-            # Log the filtering effect
-            residual = fused_d_clock_raw - fused_d_clock
-            logger.debug(f"Kalman: State={fused_d_clock:+.3f}ms, Raw={fused_d_clock_raw:+.3f}ms, Residual={residual:+.3f}ms")
-            
-            # Legacy ramp-up variable for logging compatibility (set to max)
-            self.correction_alpha = 1.0
-        else:
-            # During initialization, we have to trust the measurement until the filter starts
-            fused_d_clock = fused_d_clock_raw
+        # The per-broadcast Kalman banks have already smoothed each broadcast's
+        # D_clock; fused_d_clock_raw is their WLS weighted mean. Cascading a
+        # second (L3) Kalman on top violated the white-innovation assumption and
+        # produced an optimistic covariance, so there is NO temporal smoothing
+        # at this layer — the WLS weighted mean IS the fused estimate. Holdover
+        # and leap-second hold (below) coast this output on the last LOCKED value.
+        fused_d_clock = fused_d_clock_raw
+
+        # Count fusion cycles — drives the bootstrap systematic-uncertainty ramp
+        # and the LOCKED/ACQUIRING/REACQUIRING status string.
+        self.kalman_n_updates += 1
         
         # ====================================================================
         # UPDATE HARDWARE CALIBRATION (2026-02-06)
@@ -4062,8 +3860,8 @@ class MultiBroadcastFusion:
         # 
         # Metrological separation of concerns:
         # - Hardware calibration: Constant delays (matched filter, ADC, detection bias)
-        # - Kalman: Temporal smoothing of the science product (clock offset + iono)
-        # - Fusion output: Real D_clock that can be validated against GPS
+        # - Per-broadcast Kalmans: temporal smoothing of each broadcast's D_clock
+        # - Fusion output: WLS weighted mean — a real D_clock validatable against GPS
         self._update_calibration(
             measurements, 
             validated=cross_valid,
@@ -4073,18 +3871,6 @@ class MultiBroadcastFusion:
         # Update long-term drift statistics (exploits the "long view")
         self._update_long_term_stats(measurements)
         self.log_long_term_drift_status()
-        
-        # CRITICAL FIX (P3.2): D_clock monotonicity check
-        # Large jumps (>5ms) indicate tone misidentification or other errors
-        if hasattr(self, 'last_fused_d_clock'):
-            delta = abs(fused_d_clock - self.last_fused_d_clock)
-            if delta > 5.0:
-                logger.error(
-                    f"D_clock jumped {delta:.1f}ms (from {self.last_fused_d_clock:+.3f}ms "
-                    f"to {fused_d_clock:+.3f}ms) - possible tone misidentification or "
-                    f"calibration error"
-                )
-        self.last_fused_d_clock = fused_d_clock
         
         # Raw mean for comparison (raw_d_clocks already defined above)
         raw_mean = np.mean(raw_d_clocks)
@@ -4218,110 +4004,150 @@ class MultiBroadcastFusion:
             0.5  # 4+ stations
         )
         
-        # Determine if this is a valid multi-station fusion
-        # Key insight: station coverage and measurement quality are SEPARATE concerns
-        # - Station coverage determines if we can cross-validate (reduces systematic error)
-        # - Measurement quality determines the uncertainty of the update
-        # With good station coverage, we ALWAYS update the Kalman, just with appropriate uncertainty
+        # Determine if this is a valid multi-station fusion (LOCKED) or holdover.
+        # Station coverage and measurement quality are separate concerns:
+        # - Coverage (>=2 stations) lets us cross-validate, cutting systematic error
+        # - Quality sets the uncertainty of the fused estimate
         is_valid_multi_station = (n_stations_now >= 2 and n_broadcasts_now >= 2)
-        
-        # Uncertainty threshold only gates updates during SINGLE-station mode
-        # With multi-station coverage, we trust the cross-validation and update with measured uncertainty
-        uncertainty_threshold = 10.0 if not self.kalman_converged else 20.0  # Relaxed for multi-station
-        
-        if is_valid_multi_station:
+
+        # Leap-second hold: a TAI-UTC change (detected via CHU FSK) injects a
+        # 1-second UTC step. Force holdover so the fused output coasts on the
+        # last LOCKED value instead of emitting the stepped raw measurement.
+        # M-M11: timestamp-windowed (was a one-cycle boolean).
+        leap_second_hold = self._leap_second_hold_active()
+        if leap_second_hold:
+            logger.warning("Fusion HELD: leap second transition detected via CHU FSK TAI-UTC change")
+
+        if is_valid_multi_station and not leap_second_hold:
             # ============================================================
-            # v6.0 ARCHITECTURE: Weighted Least Squares Fusion (No Temporal Smoothing)
+            # LOCKED: Weighted Least Squares fusion (no temporal smoothing)
             # ============================================================
-            # The per-broadcast Kalmans have already smoothed the measurements.
-            # Here we simply combine them using optimal linear weighting.
-            # NO temporal smoothing at this layer - that would be unjustified.
+            # The per-broadcast Kalman banks already smoothed the measurements;
+            # fused_d_clock is their WLS weighted mean (computed above). There is
+            # NO L3 Kalman — filtering already-filtered estimates with a second
+            # filter would violate the white-innovation assumption (M-H13).
             self.holdover_mode = False
-            
-            # The fused_d_clock_raw is already the weighted mean from earlier
-            # The measurement_uncertainty is the combined uncertainty from ISO GUM
-            # We use this directly without additional Kalman filtering
-            
-            # Apply station count scaling to final uncertainty
-            # More stations = more confidence in cross-validation
-            wls_uncertainty = measurement_uncertainty * station_scale
-            
+
+            # WLS uncertainty of the fused weighted mean (M-H12): the larger of
+            # the formal inverse-variance precision and the observed weighted
+            # scatter (see _wls_uncertainty). Falls back to the RSS budget only
+            # in the degenerate zero-weight case.
+            wls_uncertainty = self._wls_uncertainty(w, d_calibrated, fused_d_clock)
+            if not np.isfinite(wls_uncertainty):
+                wls_uncertainty = measurement_uncertainty
+
             # Record this valid fusion for holdover calculations
             self.last_valid_fusion_time = current_time
             self.last_valid_fusion_uncertainty = wls_uncertainty
             self.last_valid_n_stations = n_stations_now
-            
-            # Track convergence based on measurement quality (not Kalman state)
-            # We consider converged when we have good multi-station coverage
-            # 2 stations is the normal operating condition (WWV + WWVH)
-            if not self.kalman_converged and n_stations_now >= 2 and wls_uncertainty < 3.0:
-                self.kalman_converged = True
-                logger.info(
-                    f"WLS fusion CONVERGED: {n_stations_now} stations, "
-                    f"uncertainty={wls_uncertainty:.3f}ms"
-                )
-            
+
+            # Anchor for holdover / leap-second coasting (S2): the fused output
+            # of the most recent LOCKED cycle.
+            self.last_locked_d_clock = fused_d_clock
+
+            # Convergence: single covariance-based criterion with
+            # persistence (M-M13).  Previously this gate was
+            # ``n_stations_now >= 2 AND wls_uncertainty < 3.0`` — two
+            # unrelated tests, where the station-count branch could trip
+            # the converged flag on the very first cycle a second station
+            # came in.  That premature lock tightened the calibration
+            # discontinuity filter at line ~2522
+            # (`MAX_CALIBRATION_OFFSET_MS` vs `*3` while unconverged)
+            # before the system had actually settled, so transient large
+            # offsets early in restart settled into long-lived
+            # calibration drift.
+            #
+            # New gate: the WLS posterior uncertainty (the only signal
+            # actually proportional to fusion quality) must stay below
+            # `_WLS_CONVERGED_UNC_MS` for `_WLS_CONVERGED_PERSISTENCE`
+            # consecutive cycles.  Coverage (≥2 stations) is an upstream
+            # precondition of producing a WLS uncertainty at all.
+            _WLS_CONVERGED_UNC_MS = 3.0
+            _WLS_CONVERGED_PERSISTENCE = 5
+            if not self.kalman_converged:
+                if wls_uncertainty < _WLS_CONVERGED_UNC_MS:
+                    self._wls_converged_streak = getattr(
+                        self, '_wls_converged_streak', 0
+                    ) + 1
+                else:
+                    self._wls_converged_streak = 0
+                if self._wls_converged_streak >= _WLS_CONVERGED_PERSISTENCE:
+                    self.kalman_converged = True
+                    logger.info(
+                        f"WLS fusion CONVERGED: uncertainty "
+                        f"{wls_uncertainty:.3f}ms held below "
+                        f"{_WLS_CONVERGED_UNC_MS:.1f}ms for "
+                        f"{_WLS_CONVERGED_PERSISTENCE} consecutive cycles"
+                    )
+
             uncertainty = wls_uncertainty
-            
+
             logger.debug(
                 f"WLS fusion: {n_stations_now} stations, {n_broadcasts_now} broadcasts, "
                 f"uncertainty={uncertainty:.3f}ms (scale={station_scale:.1f}x)"
             )
-            
+
         else:
             # ============================================================
-            # HOLDOVER MODE: Insufficient stations or poor measurement quality
+            # HOLDOVER MODE: insufficient stations, poor quality, or leap hold
             # ============================================================
-            # The OFFSET remains valid (anchored to GPSDO).
-            # The UNCERTAINTY grows at the GPSDO holdover drift rate.
-            # This is the metrologically correct approach.
-            
+            # The fused output coasts on the last LOCKED estimate (S2); the
+            # per-broadcast Kalman banks retain their own state. Only the
+            # UNCERTAINTY changes — it grows at the GPSDO holdover drift rate.
+            holdover_anchor = (
+                self.last_locked_d_clock
+                if self.last_locked_d_clock is not None
+                else fused_d_clock  # never locked yet — best available
+            )
+
             if not self.holdover_mode and self.last_valid_fusion_time > 0:
                 logger.info(
                     f"Entering HOLDOVER mode: {n_stations_now} station(s), {n_broadcasts_now} broadcast(s). "
-                    f"Offset remains at {self.kalman_state[0]:+.3f}ms, uncertainty will grow."
+                    f"Offset coasts at {holdover_anchor:+.3f}ms, uncertainty will grow."
                 )
             self.holdover_mode = True
-            
+
             # Calculate time since last valid multi-station fusion
             if self.last_valid_fusion_time > 0:
                 holdover_duration_min = (current_time - self.last_valid_fusion_time) / 60.0
             else:
                 # No valid fusion yet - use bootstrap uncertainty
                 holdover_duration_min = 0.0
-            
+
             # Uncertainty grows as sqrt(σ²_last + (drift_rate × Δt)²)
             # This is the proper uncertainty propagation for a drifting reference
             drift_uncertainty = self.gpsdo_holdover_drift_rate * holdover_duration_min
-            
+
             base_uncertainty = self.last_valid_fusion_uncertainty if self.last_valid_fusion_time > 0 else 1.0
             holdover_uncertainty = np.sqrt(base_uncertainty**2 + drift_uncertainty**2)
-            
-            # Apply station count scaling (single station = higher systematic uncertainty)
-            # Even in holdover, if we have measurements, they provide some validation
-            if n_stations_now >= 1 and n_broadcasts_now >= 1:
-                # We have some measurements - use them to bound uncertainty growth
-                # but don't update the Kalman state (offset remains anchored)
+
+            # Apply station count scaling (single station = higher systematic uncertainty).
+            # A leap-second hold is NOT a measurement-quality problem, so the raw
+            # measurement uncertainty must not be allowed to tighten the bound.
+            if not leap_second_hold and n_stations_now >= 1 and n_broadcasts_now >= 1:
                 holdover_uncertainty = min(holdover_uncertainty, measurement_uncertainty * station_scale)
-            
+
             # Cap holdover uncertainty at reasonable maximum (10ms = ~10 hours of holdover)
             holdover_uncertainty = min(holdover_uncertainty, 10.0)
-            
-            # DO NOT update Kalman state - offset remains anchored to last valid fusion
-            # Only the uncertainty changes
-            kalman_uncertainty = holdover_uncertainty
+
+            # Coast the fused output on the last LOCKED estimate — do NOT emit
+            # this cycle's raw mean (it may be a single noisy broadcast, or a
+            # leap-second-stepped measurement).
+            fused_d_clock = holdover_anchor
             uncertainty = holdover_uncertainty
-            
+
             # Determine reason for holdover
-            if n_stations_now < 2:
+            if leap_second_hold:
+                reason = "leap-second hold (CHU FSK TAI-UTC change)"
+            elif n_stations_now < 2:
                 reason = f"single-station ({n_stations_now})"
             elif n_broadcasts_now < 2:
                 reason = f"insufficient broadcasts ({n_broadcasts_now})"
             else:
                 reason = f"poor measurement quality ({measurement_uncertainty:.2f}ms)"
-            
+
             logger.warning(
-                f"HOLDOVER: {reason}. Offset={self.kalman_state[0]:+.3f}ms (stable), "
+                f"HOLDOVER: {reason}. Offset={fused_d_clock:+.3f}ms (coasting), "
                 f"uncertainty={uncertainty:.3f}ms (growing at {self.gpsdo_holdover_drift_rate:.4f}ms/min), "
                 f"holdover_duration={holdover_duration_min:.1f}min"
             )
@@ -4451,12 +4277,28 @@ class MultiBroadcastFusion:
             )
         
         # ====================================================================
-        # v6.0 ARCHITECTURE: WLS Fusion (No L3 Kalman)
+        # FINAL UNCERTAINTY BUDGET (M-H15)
         # ====================================================================
-        # Per-broadcast Kalmans have already smoothed measurements.
-        # We use the measurement uncertainty directly without additional filtering.
-        # This preserves ionospheric science signal and avoids false smoothing.
-        uncertainty = measurement_uncertainty
+        # The LOCKED/holdover branch above set `uncertainty` to the fusion
+        # statistical term — the WLS uncertainty of the weighted mean when
+        # LOCKED, or the dropout-grown holdover uncertainty otherwise. Combine
+        # it (RSS, per ISO GUM) with the non-statistical budget components.
+        #
+        # This line previously read `uncertainty = measurement_uncertainty`,
+        # which DISCARDED the branch result: holdover uncertainty never grew at
+        # Chrony during a dropout, and the WLS uncertainty was inert. The crude
+        # statistical term inside `measurement_uncertainty` is intentionally not
+        # re-added here — the branch value is the better estimate and supersedes
+        # it (RSS-ing both would double-count the statistical contribution).
+        uncertainty = float(np.sqrt(
+            uncertainty**2 +                       # WLS / holdover statistical term
+            systematic_uncertainty**2 +            # Calibration convergence
+            propagation_uncertainty**2 +           # Mode-dependent ionospheric
+            rtp_jitter_ms**2 +                     # RTP timestamp jitter
+            tone_detection_uncertainty**2 +        # Phase ambiguity (SNR-dependent)
+            multipath_uncertainty**2               # Delay spread
+        ))
+        uncertainty = max(uncertainty_floor, uncertainty)
         
         # ====================================================================
         # SINGLE-STATION MODE SAFEGUARDS (CRITICAL FIX 2026-01-10)
@@ -4510,7 +4352,40 @@ class MultiBroadcastFusion:
         else:
             dominant_propagation_mode = None
         
-        # Compute Kalman state string
+        # D_clock monotonicity check (P3.2) — guards the FINAL fused output,
+        # after any holdover/leap-second coast. Large jumps (>5ms) indicate tone
+        # misidentification or calibration error. last_fused_d_clock tracks the
+        # value actually emitted, so it stays consistent with what chrony sees.
+        #
+        # M-M12: previously the jump was logged but `last_fused_d_clock`
+        # advanced anyway — a transient outlier propagated straight to
+        # chrony.  Now: on the first cycle a >5 ms jump is seen we coast
+        # on the previous value (and don't advance `last_fused_d_clock`);
+        # if the new value persists on the next cycle the jump is treated
+        # as a genuine reference shift and accepted.
+        _DCLOCK_JUMP_MS = 5.0
+        if hasattr(self, 'last_fused_d_clock'):
+            delta = abs(fused_d_clock - self.last_fused_d_clock)
+            held_last_cycle = getattr(self, '_d_clock_held_prev', False)
+            if delta > _DCLOCK_JUMP_MS and not held_last_cycle:
+                logger.error(
+                    f"D_clock jumped {delta:.1f}ms (from {self.last_fused_d_clock:+.3f}ms "
+                    f"to {fused_d_clock:+.3f}ms) - holding one cycle (M-M12)"
+                )
+                fused_d_clock = self.last_fused_d_clock
+                self._d_clock_held_prev = True
+            else:
+                if delta > _DCLOCK_JUMP_MS:
+                    logger.warning(
+                        f"D_clock jump persists across two cycles "
+                        f"({delta:.1f}ms); accepting new value as genuine "
+                        f"reference shift"
+                    )
+                self._d_clock_held_prev = False
+        self.last_fused_d_clock = fused_d_clock
+
+        # Fusion status string: LOCKED once the WLS branch has converged;
+        # ACQUIRING/REACQUIRING during the first fusion cycles after a (re)start.
         _kalman_state_str = 'LOCKED' if self.kalman_converged else ('ACQUIRING' if self.kalman_n_updates >= 10 else 'REACQUIRING')
         
         result = FusedResult(
@@ -4872,13 +4747,16 @@ def run_fusion_service(
             quality diagnostics.  Consumed by wd-ka9q-record to align wav
             start times.
     """
-    # Determine timing authority from config (same logic as bootstrap gate below)
+    # Determine timing authority + [storage] backend selection from config
+    # (same logic as bootstrap gate below)
     _is_rtp_authority = True
+    _storage_config = {}
     try:
         import toml as _toml_fs
         _cfg_path = Path('/etc/hf-timestd/timestd-config.toml')
         if _cfg_path.exists():
             _cfg_fs = _toml_fs.load(_cfg_path)
+            _storage_config = _cfg_fs.get('storage', {}) or {}
             _auth = _cfg_fs.get('timing', {}).get('authority', 'rtp')
             _is_rtp_authority = (_auth == 'rtp')
             logger.info(f"[FUSION] Timing authority: {_auth} → is_rtp_authority={_is_rtp_authority}")
@@ -4890,7 +4768,8 @@ def run_fusion_service(
         receiver_lat=receiver_lat,
         receiver_lon=receiver_lon,
         timing_authority_level=timing_authority_level,
-        is_rtp_authority=_is_rtp_authority
+        is_rtp_authority=_is_rtp_authority,
+        storage_config=_storage_config
     )
     
     # Initialize dual Chrony SHM outputs if enabled
@@ -5132,9 +5011,10 @@ def run_fusion_service(
     EMPTY_CYCLE_ERROR_THRESHOLD = 15   # Error after 15 consecutive empty cycles (~2 min at 8s interval)
     last_successful_fusion_time = time.time()
     
-    # Track chrony updates for discontinuity filtering
+    # Track chrony updates for discontinuity filtering. last_chrony_d_clock is
+    # advanced every cycle (see the "always advance" block in the feed loop),
+    # so the discontinuity reference can never go stale.
     last_chrony_d_clock = None
-    last_chrony_update_time = None
 
     # SHM reconnection state — retry every 30s if initial connect failed
     _shm_reconnect_interval = 30.0
@@ -5255,10 +5135,11 @@ def run_fusion_service(
             # ================================================================
             # METROLOGICAL TRACKING: Populate L1/L2 comparison fields (v6.2)
             # ================================================================
-            # CRITICAL: Use d_clock_raw_ms (weighted mean before Kalman), NOT d_clock_fused_ms
-            # 
-            # d_clock_fused_ms = self.kalman_state[0] (same for both L1 and L2!)
-            # d_clock_raw_ms = weighted mean of measurements (different for L1 vs L2)
+            # CRITICAL: Use d_clock_raw_ms (raw per-feed mean), NOT d_clock_fused_ms
+            #
+            # d_clock_fused_ms = WLS weighted mean of CALIBRATED D_clocks; in
+            #   holdover / leap-second hold it is coasted on the last LOCKED value
+            # d_clock_raw_ms = raw mean of measurements (different for L1 vs L2)
             #
             # The L1-L2 difference reveals propagation correction quality:
             #   L1: D_clock = raw_toa - (light_time + 1.5ms)  [geometric fallback]
@@ -5398,15 +5279,14 @@ def run_fusion_service(
                     # and ionospheric variations while still protecting against major errors
                     discontinuity_ok = True
                     
-                    # Reset discontinuity check if no update for >5 minutes (allows recovery)
-                    if last_chrony_update_time is not None:
-                        time_since_update = time.time() - last_chrony_update_time
-                        if time_since_update > 300:  # 5 minutes
-                            logger.info(
-                                f"Chrony feed: Resetting discontinuity check after {time_since_update:.0f}s "
-                                f"without updates (allows recovery from stuck state)"
-                            )
-                            last_chrony_d_clock = None
+                    # No time-based recovery reset is needed: last_chrony_d_clock
+                    # is advanced unconditionally every cycle by the "always
+                    # advance" block below, so the discontinuity reference can
+                    # never latch on a stale value (M-C2 fix, 2026-05-17). The
+                    # prior reset keyed off last_chrony_update_time, which only
+                    # advanced on a *successful* write — desynchronising the two
+                    # references and causing both spurious resets and missed
+                    # recovery.
                     
                     if last_chrony_d_clock is not None:
                         delta = abs(result.d_clock_fused_ms - last_chrony_d_clock)
@@ -5493,13 +5373,9 @@ def run_fusion_service(
                                 else:
                                     logger.warning("Chrony SHM L2 write failed")
                             
-                            # Update last value and timestamp for discontinuity check (use L2 as primary)
-                            if result_l2:
-                                last_chrony_d_clock = result_l2.d_clock_fused_ms
-                                last_chrony_update_time = time.time()
-                            elif result_l1:
-                                last_chrony_d_clock = result_l1.d_clock_fused_ms
-                                last_chrony_update_time = time.time()
+                            # (the discontinuity reference last_chrony_d_clock is
+                            # advanced unconditionally by the "always advance"
+                            # block below — no per-success update is needed here)
                                 
                         except Exception as e:
                             logger.error(f"Chrony SHM update exception: {e}")
@@ -5632,14 +5508,15 @@ def run_fusion_service(
             time.sleep(interval_sec)
     
     # CRITICAL FIX (2026-01-20): Save calibration on clean shutdown
-    # This ensures the converged Kalman state is preserved for the next restart
+    # This persists the broadcast calibrations + per-broadcast Kalman state so
+    # the next restart resumes without a re-convergence transient.
     logger.info("Saving calibration before shutdown...")
     try:
         if fusion.kalman_converged:
             fusion._save_calibration()
-            logger.info(f"Calibration saved: offset={fusion.kalman_state[0]:.3f}ms, converged=True")
+            logger.info(f"Calibration saved: offset={getattr(fusion, 'last_fused_d_clock', 0.0):.3f}ms, converged=True")
         else:
-            logger.warning(f"Kalman not converged (n_updates={fusion.kalman_n_updates}), skipping calibration save to preserve previous state")
+            logger.warning(f"Fusion not converged (n_updates={fusion.kalman_n_updates}), skipping calibration save to preserve previous state")
     except Exception as e:
         logger.error(f"Failed to save calibration on shutdown: {e}")
     

@@ -45,6 +45,11 @@ except Exception:
 from hf_timestd.core.tick_matched_filter import TickMatchedFilter, StationType
 from hf_timestd.core.decoder_config import get_decoder_config, DecoderConfig, DecoderComparisonTracker
 from hf_timestd.core.tick_edge_detector import TickEdgeDetector
+from hf_timestd.core.hop_geometry import (
+    hop_geometry,
+    n_hops_for_distance,
+)
+from hf_timestd.core.snr import peak_snr_db_envelope
 from hf_timestd.core.fusion_timing_state import FusionTimingState, LockTier
 from hf_timestd.core.bootstrap_state import BootstrapStateWriter
 from hf_timestd.core.timing_consistency_validator import TimingConsistencyValidator
@@ -58,6 +63,72 @@ SAMPLE_RATE_FULL = 24000
 MAX_EXPECTED_AMPLITUDE = 1.0
 AMPLITUDE_WARNING_THRESHOLD = 10.0
 SPEED_OF_LIGHT_KM_MS = 299.792458
+# Convert SPEED_OF_LIGHT_KM_MS to the seconds-based units the hop-geometry
+# helpers use.  Keeping both forms here avoids a unit-conversion bug at the
+# call site.
+SPEED_OF_LIGHT_KM_S = SPEED_OF_LIGHT_KM_MS * 1000.0  # 299792.458
+# F-layer reference height used by the vacuum/no-model fallback (M-M5).
+# Matches `propagation_engine.F2_LAYER_HEIGHT_KM`.
+_FALLBACK_F2_HEIGHT_KM = 300.0
+# Nominal slant-TEC per hop for the 40.3/f² ionospheric delay term
+# (matches `propagation_engine.NOMINAL_SLANT_TEC_PER_HOP_TECU`).
+_FALLBACK_SLANT_TEC_PER_HOP_TECU = 30.0
+# 40.3·10¹⁶ / c (m/s → km/s, TECU → 10¹⁶ el/m²), giving group delay in ms.
+# Same value as `propagation_engine.IONO_DELAY_CONSTANT_MS`.
+_IONO_DELAY_CONSTANT_MS = 40.3 / SPEED_OF_LIGHT_KM_S * 1e16 / 1e12
+
+
+def _great_circle_km(lat1_deg: float, lon1_deg: float,
+                     lat2_deg: float, lon2_deg: float) -> float:
+    """Spherical-Earth great-circle distance (km).  Pulled out so the
+    vacuum-fallback helper below stays a pure function of its inputs."""
+    from .wwv_constants import EARTH_RADIUS_KM
+    dlat = math.radians(lat2_deg - lat1_deg)
+    dlon = math.radians(lon2_deg - lon1_deg)
+    a = (math.sin(dlat / 2) ** 2
+         + math.cos(math.radians(lat1_deg))
+         * math.cos(math.radians(lat2_deg))
+         * math.sin(dlon / 2) ** 2)
+    c = 2 * math.asin(math.sqrt(a))
+    return EARTH_RADIUS_KM * c
+
+
+def _vacuum_hop_fallback_delay(dist_km: float, frequency_hz: float) -> Tuple[float, float]:
+    """Geometric + climatological-iono propagation delay (M-M5).
+
+    Returns ``(expected_delay_ms, uncertainty_1sigma_ms)`` for a great-
+    circle distance ``dist_km`` at carrier ``frequency_hz``.  Uses the
+    shared spherical-Earth hop model (S2) for the geometric slant and a
+    40.3/f² group-delay term against a nominal slant TEC per hop for
+    the dispersive ionospheric contribution.  Uncertainty is the per-hop
+    geometric uncertainty plus the (uncertain) climatological iono term.
+
+    Replaces the previous ``light_time × 1.15`` heuristic, which had no
+    physical basis and was frequency-blind.
+    """
+    if dist_km <= 0:
+        return 0.0, 15.0
+
+    hops = n_hops_for_distance(dist_km, _FALLBACK_F2_HEIGHT_KM)
+    geom = hop_geometry(dist_km, _FALLBACK_F2_HEIGHT_KM, hops)
+    geometric_delay_ms = geom.path_length_km / SPEED_OF_LIGHT_KM_S * 1000.0
+
+    f_mhz = frequency_hz / 1e6
+    if f_mhz > 0:
+        iono_delay_ms = (
+            _IONO_DELAY_CONSTANT_MS
+            * _FALLBACK_SLANT_TEC_PER_HOP_TECU * hops
+            / (f_mhz ** 2)
+        )
+    else:
+        iono_delay_ms = 0.0
+
+    total_delay_ms = geometric_delay_ms + iono_delay_ms
+    # Carry the climatological iono term as its own uncertainty — TEC
+    # routinely varies by its own magnitude across the day.
+    uncertainty_ms = 3.0 * hops + iono_delay_ms
+    return total_delay_ms, uncertainty_ms
+
 
 class MetrologyEngine:
     """
@@ -457,40 +528,47 @@ class MetrologyEngine:
                     return (
                         prediction.primary_delay_ms,
                         prediction.distance_km,
-                        prediction.primary_uncertainty_ms  # Already 1-sigma
+                        prediction.primary_uncertainty_1sigma_ms  # explicit 1-sigma (P-H13)
                     )
             except Exception as e:
                 logger.debug(f"HFPropagationModel fallback failed: {e}")
         
-        # Last resort: simple light-speed calculation
+        # Last resort: 1-hop slant-range geometric fallback (M-M5).
+        #
+        # The previous "light_time × 1.15" heuristic fabricated a 15 %
+        # propagation overhead that has no physical basis — both the
+        # geometric slant and the ionospheric delay depend on path length
+        # and (for the iono term) on frequency, neither of which the
+        # ×1.15 multiplier captures. A 500 km path overstated delay by
+        # ~1.5 ms; a 5000 km path understated it by ~5 ms; and the
+        # frequency-blind iono part scaled wrong by ~25× across the
+        # 2.5–25 MHz broadcast bands.
+        #
+        # Use the shared spherical-Earth hop model and the standard
+        # 40.3/f² group-delay term against a climatological slant TEC
+        # per hop — same recipe as `propagation_engine._estimate_geometric`
+        # (P-M19), so the fallback agrees with the primary path when
+        # both run on the same geometry.
         from .wwv_constants import STATION_LOCATIONS
         STATIONS = {k: {'lat': v['lat'], 'lon': v['lon']} for k, v in STATION_LOCATIONS.items()}
-        
+
         if station not in STATIONS or self.precise_lat is None or self.precise_lon is None:
             return 0.0, 0.0, 500.0  # Blind fallback
-            
+
         st = STATIONS[station]
-        
-        # Haversine
-        R = 6371.0
-        dlat = math.radians(st['lat'] - self.precise_lat)
-        dlon = math.radians(st['lon'] - self.precise_lon)
-        a = math.sin(dlat/2)**2 + math.cos(math.radians(self.precise_lat)) * \
-            math.cos(math.radians(st['lat'])) * math.sin(dlon/2)**2
-        c = 2 * math.asin(math.sqrt(a))
-        dist_km = R * c
-        
-        light_time_ms = dist_km / SPEED_OF_LIGHT_KM_MS
-        
-        # Simple ionospheric overhead estimate (~10-20% longer than light time)
-        expected_delay_ms = light_time_ms * 1.15
-        
+        dist_km = _great_circle_km(
+            self.precise_lat, self.precise_lon, st['lat'], st['lon']
+        )
+        expected_delay_ms, uncertainty_ms = _vacuum_hop_fallback_delay(
+            dist_km, self.frequency_hz
+        )
+
         self._last_prediction_meta = {
             'data_source': 'vacuum_fallback',
             'model_confidence': 0.0,
             'propagation_mode': 'vacuum',
         }
-        return expected_delay_ms, dist_km, 15.0  # 15ms 1-sigma uncertainty
+        return expected_delay_ms, dist_km, uncertainty_ms
 
     @staticmethod
     def _get_tone_duration(station_name: str, sec_in_minute: int, minute_in_hour: int = 0) -> float:
@@ -612,27 +690,52 @@ class MetrologyEngine:
         self,
         correlation: np.ndarray,
         dominant_peak_idx: int,
-        noise_floor: float,
+        noise_envelope: np.ndarray,
         n_template: int,
         start_sample: int,
-        min_corr_snr_db: float = 6.0,
-        max_peaks: int = 6
+        min_corr_snr_db: float = 7.42,  # S4-finish: bumped 1.42 dB to match
+                                        # the median→σ shift; preserves the
+                                        # historical 6 dB-in-peak/median gate.
+        max_peaks: int = 6,
+        mainlobe_samples: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """
         Find all significant peaks in the correlation envelope.
 
         Each peak represents a distinct propagation path (e.g. 2F2, 3F2, 4F2
-        arriving at different delays).  Peaks are separated by at least one
-        template length so they represent independent arrivals, not sidelobes.
+        arriving at different delays).  Peaks are separated by at least
+        ``mainlobe_samples`` so a single arrival's autocorrelation lobe is
+        not re-detected as multiple peaks.
 
         Args:
             correlation:       Full correlation envelope (already computed).
             dominant_peak_idx: Index of the already-identified dominant peak.
-            noise_floor:       Noise floor estimate (same units as correlation).
-            n_template:        Template length in samples (minimum peak separation).
+            noise_envelope:    1-D noise-region slice of ``correlation`` —
+                               a Rayleigh envelope.  σ̂ is recovered via
+                               :func:`core.snr.peak_snr_db_envelope` (S4-finish)
+                               so this site reports SNR consistently with
+                               the rest of the codebase.
+            n_template:        Template length in samples.
             start_sample:      Offset of measurement_region from audio_signal start.
             min_corr_snr_db:   Minimum corr SNR for a secondary peak to be recorded.
             max_peaks:         Maximum number of peaks to return (including dominant).
+            mainlobe_samples:  Half-width (in samples) of the suppression
+                               region around each found peak.  Defaults to
+                               ``n_template // 2`` — the half-amplitude
+                               width of the autocorrelation main lobe for
+                               a windowed sinusoidal template (M-M8).
+
+                               The previous default of ``n_template``
+                               (full main-lobe radius) erased every
+                               multipath arrival closer than the template
+                               duration — for the 800 ms minute marker,
+                               that meant 1–800 ms multipath was
+                               unreportable.  ``n_template // 2`` is the
+                               Rayleigh-resolution criterion; closer
+                               multipath fundamentally requires CLEAN
+                               deconvolution (see
+                               :meth:`TickEdgeDetector._clean_deconvolve`),
+                               which this plain peak finder does not do.
 
         Returns:
             List of dicts, each with keys:
@@ -642,38 +745,37 @@ class MetrologyEngine:
                 corr_snr_db      float correlation SNR of this peak
                 peak_value       float raw correlation value
         """
-        if noise_floor <= 0 or len(correlation) == 0:
+        if len(correlation) == 0 or len(noise_envelope) == 0:
             return []
 
-        peaks = []
+        if mainlobe_samples is None:
+            mainlobe_samples = max(1, n_template // 2)
+
+        peaks: List[Dict[str, Any]] = []
         suppressed = np.zeros(len(correlation), dtype=bool)
 
-        # Suppress a region of ±n_template around each found peak so the next
-        # search cannot pick up sidelobes of the same arrival.
         for rank in range(max_peaks):
-            # Mask already-suppressed samples
             search = np.where(suppressed, 0.0, correlation)
             if search.max() <= 0:
                 break
 
             idx = int(np.argmax(search))
-            val = correlation[idx]
-            snr_db = 20 * math.log10(val / noise_floor) if noise_floor > 0 else 0.0
+            val = float(correlation[idx])
+            snr_db = peak_snr_db_envelope(val, noise_envelope)
 
-            if snr_db < min_corr_snr_db:
-                break  # All remaining peaks are below threshold
+            if not np.isfinite(snr_db) or snr_db < min_corr_snr_db:
+                break
 
             peaks.append({
                 'peak_rank': rank,
                 'peak_idx': idx,
                 'arrival_sample': start_sample + idx,
                 'corr_snr_db': float(snr_db),
-                'peak_value': float(val),
+                'peak_value': val,
             })
 
-            # Suppress ±n_template around this peak
-            lo = max(0, idx - n_template)
-            hi = min(len(suppressed), idx + n_template + 1)
+            lo = max(0, idx - mainlobe_samples)
+            hi = min(len(suppressed), idx + mainlobe_samples + 1)
             suppressed[lo:hi] = True
 
         return peaks
@@ -855,33 +957,47 @@ class MetrologyEngine:
             correlation[min(len(correlation), peak_idx + exclusion):]
         ])
         
+        # S4-finish: use the canonical Rayleigh-envelope SNR helper so
+        # this site agrees with `tick_edge_detector` and
+        # `tick_matched_filter._correlate_tick_iq` (both migrated under
+        # the M-M1/M-M3 cluster).  The previous ``20·log10(peak/median)``
+        # absorbed the 1.1774× median-to-σ factor implicitly and reported
+        # an SNR ~1.4 dB lower than the canonical definition; the
+        # `MIN_CORR_SNR_DB = 8.0` gate below was tuned against that
+        # offset and now sees the canonical value.
         if len(noise_region) > 10:
-            # Use MAD-based noise estimate for robustness.
-            # The correlation envelope follows a Rayleigh distribution;
-            # median(Rayleigh) ≈ σ√(2·ln2).  MAD is more robust against
-            # outliers (other peaks in the noise region).
-            noise_median = np.median(noise_region)
-            noise_mad = np.median(np.abs(noise_region - noise_median))
-            # Reconstruct a robust noise level: median + 0 (use median directly)
-            # but penalize if MAD is large relative to median (noisy estimate)
-            noise_floor = noise_median
+            snr_noise_region = noise_region
         else:
-            # Not enough noise-only samples — use 25th percentile of full
-            # correlation as a conservative noise estimate.
-            noise_floor = np.percentile(correlation, 25) if len(correlation) > 0 else 1.0
-        
-        # Calculate correlation SNR
-        if noise_floor > 0:
-            corr_snr_db = 20 * np.log10(peak_val / noise_floor)
-        else:
+            # Not enough noise-only samples — fall back to the lower
+            # half of the full correlation, which is dominated by noise
+            # for any real peak.
+            if len(correlation) > 0:
+                cutoff = np.percentile(correlation, 50)
+                snr_noise_region = correlation[correlation <= cutoff]
+                if len(snr_noise_region) == 0:
+                    snr_noise_region = correlation
+            else:
+                snr_noise_region = np.asarray([1.0])
+
+        corr_snr_db = peak_snr_db_envelope(float(peak_val), snr_noise_region)
+        if not np.isfinite(corr_snr_db):
             corr_snr_db = 0.0
+        # `noise_floor` is retained for diagnostic logging/threshold display below.
+        noise_floor = float(np.median(snr_noise_region)) if len(snr_noise_region) > 0 else 1.0
         
         # Fixed correlation SNR threshold for all tone durations.
         # Templates are normalized to unit energy, so peak height does NOT
         # scale with duration.  The old duration-scaled threshold (8 + 10*log10(dur/0.1))
         # was killing the 800ms minute marker (required 17 dB, measured 2.6 dB)
         # because the noise floor was contaminated by the signal itself.
-        MIN_CORR_SNR_DB = 8.0
+        #
+        # S4-finish recalibration: the historical 8.0 dB gate was in
+        # ``peak/median(env)`` units; the migration to the canonical
+        # ``peak/σ̂`` definition (σ̂ = median/√(2 ln 2)) shifts the
+        # reported value up by 20·log10(1.1774) ≈ 1.42 dB.  Bumping the
+        # gate by the same 1.42 dB keeps the underlying false-rejection
+        # rate identical to pre-migration behaviour.
+        MIN_CORR_SNR_DB = 9.42
         if corr_snr_db < MIN_CORR_SNR_DB:
             logger.info(f"{station_name}: Correlation too weak "
                         f"(corr_SNR={corr_snr_db:.1f}dB < {MIN_CORR_SNR_DB:.1f}dB, expected={expected_delay_ms:.1f}ms, "
@@ -1089,7 +1205,7 @@ class MetrologyEngine:
             all_arrivals = self._find_all_correlation_peaks(
                 correlation=correlation,
                 dominant_peak_idx=peak_idx,
-                noise_floor=noise_floor,
+                noise_envelope=snr_noise_region,
                 n_template=n_template,
                 start_sample=start_sample,
             )
@@ -1153,9 +1269,21 @@ class MetrologyEngine:
             buffer_timing: BufferTiming object mapping samples to UTC.
                           If provided, overrides system_time for all timing.
         """
-        minute_boundary = round(system_time / 60) * 60
+        # Derive the minute boundary from the authoritative timing source
+        # (M-M6).  `system_time` is the writer's start-of-buffer wall-clock
+        # estimate from its OWN (possibly stale) GPS/RTP mapping; if a
+        # radiod restart left that mapping seconds-wrong, every
+        # `process_minute` call inherited that drift and tone-schedule
+        # decisions — including BPM UT1-vs-UTC second classification —
+        # would slip.  When buffer_timing is present, use the RTP-anchored
+        # sample0 UTC instead.
+        if buffer_timing is not None:
+            buffer_anchor_utc = buffer_timing.sample_to_utc(0)
+        else:
+            buffer_anchor_utc = system_time
+        minute_boundary = round(buffer_anchor_utc / 60) * 60
         minute_number = int((minute_boundary // 60) % 60)
-        
+
         iq_samples, _ = self._validate_input(iq_samples)
         
         # Buffer mid-time for timestamp calculations
@@ -1487,12 +1615,22 @@ class MetrologyEngine:
                         
                         # The ensemble timing_error is relative to expected
                         # propagation delay.  Convert to arrival_ms from
-                        # buffer start, matching the correlation output format.
-                        # Use the middle of the buffer as reference point.
+                        # buffer start, matching the correlation output
+                        # format.  Use the buffer midpoint as the reference
+                        # tick second, *without* truncating to a whole
+                        # second — the prior `int(mid_utc)` (M-M7) discarded
+                        # up to 0.5 s of fractional offset, so the recorded
+                        # `arrival_ms` and `timing_error_ms` disagreed on
+                        # the on-time marker by ±0.5 s.  `utc_second` is
+                        # still an integer label for the tick (closest
+                        # second, via round, not floor).
                         mid_utc = (buf_start_utc + buf_end_utc) / 2.0
-                        mid_sec = int(mid_utc)
-                        # Synthetic arrival = expected + ensemble offset
-                        synth_arrival_utc = mid_sec + prop_delay_sec + edge_result.ensemble_timing_error_ms / 1000.0
+                        utc_second = int(round(mid_utc))
+                        synth_arrival_utc = (
+                            mid_utc
+                            + prop_delay_sec
+                            + edge_result.ensemble_timing_error_ms / 1000.0
+                        )
                         synth_arrival_sample = buffer_timing.utc_to_sample(synth_arrival_utc)
                         synth_arrival_ms = synth_arrival_sample * 1000 / self.sample_rate
                         
@@ -1508,7 +1646,7 @@ class MetrologyEngine:
                             'peak_correlation': 0.0,
                             'detected': True,
                             'rejection_reason': None,
-                            'utc_second': mid_sec,
+                            'utc_second': utc_second,
                             'tone_duration_sec': 0.005,
                             'arrival_utc': synth_arrival_utc,
                             'detection_method': 'edge_ensemble',

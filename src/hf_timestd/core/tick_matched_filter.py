@@ -96,6 +96,8 @@ from scipy import signal as scipy_signal
 from scipy.signal import correlate, butter, sosfiltfilt
 from scipy.signal.windows import tukey
 
+from .snr import peak_snr_db_envelope, peak_snr_db_signed
+
 logger = logging.getLogger(__name__)
 
 
@@ -605,16 +607,18 @@ class TickMatchedFilter:
             envelope[:peak_start],
             envelope[peak_end:]
         ])
+        # SNR via the shared canonical, Rayleigh-envelope branch
+        # (review items S4 + M-M3). The previous ``std(envelope)``
+        # estimator over-reported SNR by ~3.7 dB on a Rayleigh
+        # distribution, and its ``noise_std == 0`` branch returned a
+        # 40 dB sentinel that let artefacts pass downstream 8 dB gates.
         if len(noise_region) > 10:
-            noise_std = np.std(noise_region)
-            if noise_std > 0:
-                snr_linear = peak_value / noise_std
-                snr_db = 20 * np.log10(max(snr_linear, 1e-10))
-            else:
-                snr_db = 40.0 if peak_value > 1e-6 else 0.0
+            snr_db = peak_snr_db_envelope(peak_value, noise_region)
+            if not np.isfinite(snr_db):
+                snr_db = float('nan')
         else:
-            snr_db = 0.0
-        
+            snr_db = float('nan')
+
         return offset_samples, float(peak_value), snr_db
     
     def _bandpass_iq(self, iq_samples: np.ndarray) -> np.ndarray:
@@ -715,15 +719,19 @@ class TickMatchedFilter:
             corr[:peak_start],
             corr[peak_end:]
         ])
+        # SNR via the shared canonical, signed-Gaussian branch (review
+        # items S4 + M-M3). The AM correlation is a real-valued signed
+        # signal whose noise std *directly* estimates σ — same number as
+        # before. What changed is the ``noise_std == 0`` sentinel: it
+        # used to return 40 dB whenever ``peak_value > 1e-6``, letting
+        # artefacts pass downstream 8 dB gates. ``peak_snr_db_signed``
+        # returns NaN so callers see "unknown" instead.
         if len(noise_region) > 10:
-            noise_std = np.std(noise_region)
-            if noise_std > 0:
-                snr_linear = peak_value / noise_std
-                snr_db = 20 * np.log10(max(snr_linear, 1e-10))
-            else:
-                snr_db = 40.0 if peak_value > 1e-6 else 0.0
+            snr_db = peak_snr_db_signed(peak_value, noise_region)
+            if not np.isfinite(snr_db):
+                snr_db = float('nan')
         else:
-            snr_db = 0.0
+            snr_db = float('nan')
         
         return offset_samples, float(peak_value), snr_db
     

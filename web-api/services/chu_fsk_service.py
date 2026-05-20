@@ -18,6 +18,8 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 import logging
 
+from config import config
+
 logger = logging.getLogger(__name__)
 
 FSK_RESULTS_DIR = Path('/dev/shm/timestd/fsk_results')
@@ -350,7 +352,7 @@ class CHUFSKService:
         """
         import sys
         sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'src'))
-        from hf_timestd.io.hdf5_reader import DataProductReader
+        from hf_timestd.io import make_data_product_reader
 
         timestamps = []
         dut1_values = []
@@ -365,11 +367,12 @@ class CHUFSKService:
             if not channel_dir.exists():
                 continue
             try:
-                reader = DataProductReader(
+                reader = make_data_product_reader(
                     data_dir=channel_dir,
                     product_level='L2',
                     product_name='chu_fsk',
                     channel=channel,
+                    storage_config=config.storage,
                 )
                 measurements = reader.read_time_range(
                     start=start.strftime('%Y-%m-%dT%H:%M:%S.%fZ'),

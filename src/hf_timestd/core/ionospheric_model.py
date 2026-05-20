@@ -103,6 +103,7 @@ REVISION HISTORY
 
 import logging
 import math
+import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Tuple
 from dataclasses import dataclass
@@ -111,6 +112,9 @@ from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
+
+from hf_timestd.core.ionex_parser import IONEXParser
+from hf_timestd.core.hop_geometry import C_LIGHT_KM_MS, height_from_path
 
 try:
     import xarray as xr  # type: ignore
@@ -178,6 +182,12 @@ class LayerHeights:
     # report no feasible mode → vacuum_fallback → cross-frequency validation
     # failures of 5–18 ms.
     foF2: Optional[float] = None
+
+    # Vertical TEC (TECU) — IRI-2020 outputs this directly. Surfaced so the
+    # propagation model's IRI tier uses real TEC instead of a fixed 20 TECU
+    # placeholder (P-M13). None when the providing tier (parametric/static)
+    # or the IRI build did not supply it.
+    tec_tecu: Optional[float] = None
 
 
 @dataclass
@@ -258,16 +268,22 @@ class IonosphericModel:
         # boundaries (the date-based key prevents reuse of yesterday's
         # entries but they never get evicted). With ~10-20 IRI queries per
         # fusion cycle × ~7 cycles/min, growth was ~5000 entries/hour at
-        # ~300 bytes each — a known contributor to the fusion memory
-        # leak. FIFO eviction at a generous cap (5000 ~= 1 day at typical
-        # query rate) keeps in-window reuse healthy while bounding RSS.
+        # ~300 bytes each — a known contributor to the fusion memory leak.
+        # LRU eviction at a generous cap (5000 ~= 1 day at typical query
+        # rate) keeps in-window reuse healthy while bounding RSS.
+        #
+        # No TTL (P-M11): the key already encodes the query's 5-minute
+        # slot, and IRI is deterministic for a fixed (slot, lat, lon), so
+        # a cache hit is the exact value for that slot — it never goes
+        # stale. The previous wall-clock TTL only forced needless
+        # recomputes, and was incoherent under reanalysis, where the query
+        # time and wall-clock time are unrelated.
         self._iri_cache: 'OrderedDict[str, LayerHeights]' = OrderedDict()
         self._iri_cache_max_size = 5000
-        self._cache_ttl_seconds = 300  # 5 minute cache
         
         # IONEX support for global VTEC maps
         self.ionex_dir = Path(ionex_dir) if ionex_dir else Path('/var/lib/timestd/ionex')
-        self._ionex_cache: Dict[str, 'IONEXParser'] = {}  # Cache parsed IONEX files
+        self._ionex_cache: Dict[str, Tuple[IONEXParser, float]] = {}  # (parser, cached_at)
         self._ionex_cache_max_age = 86400  # 24 hours
         
         # Statistics
@@ -457,6 +473,40 @@ class IonosphericModel:
         
         return lat_mid, lon_mid
     
+    def _find_ionex_file(self, timestamp: datetime) -> Optional[Path]:
+        """
+        Locate the IONEX GIM file for the exact UTC date of `timestamp`.
+
+        IONEX GIMs are daily products, so the file must match both the year
+        and the day-of-year (P-H17). Globbing on the year alone returned
+        whichever same-year file happened to be downloaded most recently —
+        almost never the right day. Supports the modern
+        (IGS0OPSFIN_YYYYDDD0000_..._GIM.INX.gz) and legacy (igsgDDD0.YYi.Z)
+        filename patterns.
+        """
+        if not self.ionex_dir.exists():
+            return None
+
+        yyyy = timestamp.strftime('%Y')
+        yy = timestamp.strftime('%y')
+        ddd = f"{timestamp.timetuple().tm_yday:03d}"
+
+        # Modern: ...YYYYDDD0000...   Legacy: ...DDD0.YYi...
+        patterns = (
+            f"*{yyyy}{ddd}*",
+            f"*{ddd}0.{yy}i*",
+            f"*{ddd}0.{yy}I*",
+        )
+        matches = sorted({
+            f for pat in patterns for f in self.ionex_dir.glob(pat)
+        })
+        if not matches:
+            return None
+
+        # The same day may have several products (final vs rapid, or a
+        # re-download); take the most recently written.
+        return max(matches, key=lambda p: p.stat().st_mtime)
+
     def get_ionex_vtec(
         self,
         lat: float,
@@ -477,66 +527,41 @@ class IonosphericModel:
         Returns:
             (vtec_tecu, source_file) or None if unavailable
         """
-        if not self.ionex_dir.exists():
-            logger.debug(f"IONEX directory does not exist: {self.ionex_dir}")
+        # Find the IONEX file for this exact UTC date (P-H17 — year+day-of-year,
+        # not year alone).
+        ionex_file = self._find_ionex_file(timestamp)
+        if ionex_file is None:
+            logger.debug(
+                f"No IONEX file for {timestamp.strftime('%Y-%m-%d')} "
+                f"in {self.ionex_dir}"
+            )
             return None
         
-        # Find IONEX file for this date
-        date_str = timestamp.strftime('%Y%m%d')
-        
-        # Try to find matching IONEX file
-        # Modern format: IGS0OPSFIN_YYYYDDD0000_01D_02H_GIM.INX.gz
-        # Legacy format: igsgDDD0.YYi.Z
-        ionex_files = list(self.ionex_dir.glob(f"*{date_str[:4]}*"))
-        
-        if not ionex_files:
-            logger.debug(f"No IONEX files found for date {date_str}")
-            return None
-        
-        # Use the most recent file (in case multiple exist)
-        ionex_file = max(ionex_files, key=lambda p: p.stat().st_mtime)
-        
-        # Check cache
+        # Check the parsed-IONEX cache, honouring _ionex_cache_max_age (P-H18).
+        # An IONEX file on disk can be replaced by a re-download with corrected
+        # data, so a cached parser older than max_age is treated as stale.
         cache_key = str(ionex_file)
-        if cache_key in self._ionex_cache:
-            parser = self._ionex_cache[cache_key]
+        cached = self._ionex_cache.get(cache_key)
+        if cached is not None and (time.time() - cached[1]) < self._ionex_cache_max_age:
+            parser = cached[0]
             self.stats['ionex_cache_hits'] += 1
         else:
-            # Parse IONEX file
+            # Parse the IONEX file. IONEXParser is imported once at module
+            # load (P-H18); the old code re-exec'd scripts/ionex_integration.py
+            # on every cache miss, which also broke under a wheel install.
             try:
-                # Import IONEXParser from ionex_integration script
-                # Path: src/hf_timestd/core/ionospheric_model.py -> scripts/ionex_integration.py
-                import sys
-                import importlib.util
-                
-                # Get project root (3 levels up from this file)
-                project_root = Path(__file__).parent.parent.parent.parent
-                ionex_script_path = project_root / "scripts" / "ionex_integration.py"
-                
-                if not ionex_script_path.exists():
-                    logger.warning(f"IONEX integration script not found: {ionex_script_path}")
-                    return None
-                
-                spec = importlib.util.spec_from_file_location(
-                    "ionex_integration",
-                    ionex_script_path
-                )
-                ionex_module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(ionex_module)
-                
-                parser = ionex_module.IONEXParser(ionex_file)
-                self._ionex_cache[cache_key] = parser
+                parser = IONEXParser(ionex_file)
+                self._ionex_cache[cache_key] = (parser, time.time())
                 self.stats['ionex_calls'] += 1
-                
+
                 # Limit cache size
                 if len(self._ionex_cache) > 7:  # Keep last week
                     oldest_key = next(iter(self._ionex_cache))
                     del self._ionex_cache[oldest_key]
-                    
             except Exception as e:
                 logger.warning(f"Failed to parse IONEX file {ionex_file}: {e}")
                 return None
-        
+
         # Interpolate VTEC
         try:
             vtec = parser.interpolate(lat, lon, timestamp)
@@ -550,37 +575,6 @@ class IonosphericModel:
             logger.warning(f"IONEX VTEC interpolation failed: {e}")
             return None
     
-    
-    def _calculate_cache_ttl(self, timestamp: datetime, latitude: float) -> float:
-        """
-        Calculate adaptive cache TTL based on ionospheric conditions.
-        
-        Ionosphere is more stable during daytime quiet conditions (longer TTL acceptable),
-        but more variable at night and during disturbed conditions (shorter TTL needed).
-        
-        Args:
-            timestamp: UTC timestamp
-            latitude: Geographic latitude in degrees
-            
-        Returns:
-            Cache TTL in seconds
-        """
-        # Calculate local solar time (approximate)
-        # For more accuracy, could use longitude, but hour-level precision is sufficient
-        hour = timestamp.hour
-        
-        # Daytime (06:00-18:00 UTC, approximate): longer TTL (ionosphere more stable)
-        # Nighttime: shorter TTL (more variable, especially near sunrise/sunset)
-        if 6 <= hour < 18:
-            base_ttl = 1800  # 30 minutes daytime
-        else:
-            base_ttl = 300   # 5 minutes nighttime
-        
-        # Future enhancement: reduce TTL during disturbed conditions
-        # if hasattr(self, 'ap') and self.ap and self.ap > 30:  # Disturbed
-        #     base_ttl = min(base_ttl, 300)
-        
-        return base_ttl
     
     def _get_iri_heights(
         self,
@@ -596,16 +590,14 @@ class IonosphericModel:
         if not self._iri_available or self._iri_module is None:
             return None
         
-        # Check cache first
+        # Check cache first. The key encodes the query's 5-minute slot and
+        # IRI is deterministic per (slot, lat, lon), so any hit is valid —
+        # no staleness check (P-M11). move_to_end keeps eviction LRU.
         cache_key = self._location_key(latitude, longitude, timestamp)
         if cache_key in self._iri_cache:
             self.stats['iri_cache_hits'] += 1
-            cached = self._iri_cache[cache_key]
-            # Verify cache not stale (using adaptive TTL)
-            age_seconds = (datetime.now(timezone.utc) - cached.timestamp).total_seconds()
-            cache_ttl = self._calculate_cache_ttl(timestamp, latitude)
-            if age_seconds < cache_ttl:
-                return cached
+            self._iri_cache.move_to_end(cache_key)
+            return self._iri_cache[cache_key]
         
         try:
             self.stats['iri_calls'] += 1
@@ -619,15 +611,18 @@ class IonosphericModel:
                 glon=longitude
             )
             
-            # Extract peak heights + foF2 from IRI output. IRI returns
-            # hmF2, hmF1, hmE as single values; foF2 is the F2 critical
-            # frequency in MHz, needed by HFPropagationModel for the MUF
-            # check (omitting it left the propagation model on a hardcoded
-            # 8.0 MHz default).
+            # Extract peak heights + foF2 + TEC from IRI output. IRI
+            # returns hmF2, hmF1, hmE as single values; foF2 is the F2
+            # critical frequency in MHz, needed by HFPropagationModel for
+            # the MUF check (omitting it left the propagation model on a
+            # hardcoded 8.0 MHz default); TEC is the vertical TEC in TECU,
+            # surfaced so the propagation model's IRI tier uses real TEC
+            # rather than a fixed placeholder (P-M13).
             hmF2 = self._extract_scalar(result.get('hmF2'), DEFAULT_F2_LAYER_HEIGHT_KM)
             hmF1 = self._extract_scalar(result.get('hmF1'), DEFAULT_F1_LAYER_HEIGHT_KM)
             hmE = self._extract_scalar(result.get('hmE'), DEFAULT_E_LAYER_HEIGHT_KM)
             foF2 = self._extract_scalar(result.get('foF2'), None)
+            tec_tecu = self._extract_scalar(result.get('TEC'), None)
 
             # Sanity check on values
             if not (150 < hmF2 < 500):
@@ -645,13 +640,13 @@ class IonosphericModel:
                 timestamp=datetime.now(timezone.utc),
                 location=(latitude, longitude),
                 hmF2_uncertainty_km=25.0 if self._iri_version == "2020" else 28.0,  # IRI-2020 slightly better
-                foF2=foF2 if foF2 is not None and 1.0 < foF2 < 30.0 else None
+                foF2=foF2 if foF2 is not None and 1.0 < foF2 < 30.0 else None,
+                tec_tecu=tec_tecu if tec_tecu is not None and 1.0 < tec_tecu < 500.0 else None,
             )
             
-            # Cache result with FIFO eviction at _iri_cache_max_size.
-            # OrderedDict.move_to_end on lookup + popitem(last=False) gives
-            # us LRU-with-cap; combined with the per-entry TTL check above
-            # the working set stays compact across long-running fusion.
+            # Cache result with LRU eviction at _iri_cache_max_size:
+            # move_to_end on every lookup hit + popitem(last=False) here
+            # keeps the working set compact across long-running fusion.
             self._iri_cache[cache_key] = heights
             if len(self._iri_cache) > self._iri_cache_max_size:
                 self._iri_cache.popitem(last=False)
@@ -706,11 +701,14 @@ class IonosphericModel:
         diurnal_phase = 2 * math.pi * (local_solar_time - 14.0) / 24.0
         diurnal_term = -HMF2_DIURNAL_AMP_KM * math.cos(diurnal_phase)
         
-        # Solar activity term (if F10.7 available)
-        # Higher solar flux → denser ionosphere → lower hmF2
-        # Typical range: F10.7 = 70 (solar min) to 250 (solar max)
+        # Solar activity term (if F10.7 available).
+        # Higher solar flux RAISES hmF2: the F2 peak moves up as the layer
+        # expands with increased ionization (P-H16 — the sign was inverted,
+        # which contradicted HMF2_SOLAR_FACTOR's own "height increase" comment
+        # and under-predicted hmF2 by ~30-50 km at solar maximum).
+        # Typical range: F10.7 = 70 (solar min) to 250 (solar max).
         if f107 is not None:
-            solar_term = -HMF2_SOLAR_FACTOR * (f107 - 100)
+            solar_term = HMF2_SOLAR_FACTOR * (f107 - 100)
         else:
             solar_term = 0.0  # Assume moderate activity
         
@@ -832,6 +830,8 @@ class IonosphericModel:
         logger.debug(f"Calibration applied: {heights.hmF2:.1f} km + {weighted_offset:+.1f} km "
                     f"= {calibrated_hmF2:.1f} km (from {len(recent)} measurements)")
         
+        # Calibration adjusts only the F2 height; foF2 and TEC are carried
+        # through unchanged (a height calibration says nothing about them).
         return LayerHeights(
             hmE=heights.hmE,
             hmF1=heights.hmF1,
@@ -842,7 +842,9 @@ class IonosphericModel:
             hmF2_uncertainty_km=max(15.0, heights.hmF2_uncertainty_km - 10.0),  # Reduced uncertainty
             calibration_offset_km=weighted_offset,
             f107=heights.f107,
-            ap=heights.ap
+            ap=heights.ap,
+            foF2=heights.foF2,
+            tec_tecu=heights.tec_tecu,
         )
     
     def get_layer_heights(
@@ -914,18 +916,20 @@ class IonosphericModel:
         
         DERIVATION:
         -----------
-        For a single F-layer hop at distance D with layer height h:
-            delay = (path_length / c) × 1000  [ms]
-            path_length = 2 × sqrt((D/2)² + h²)  [km]
-        
-        Solving for h given delay and D:
-            path_length = delay × c / 1000
-            sqrt((D/2)² + h²) = path_length / 2
-            h = sqrt((path_length/2)² - (D/2)²)
-        
+        A delay converts to a total slant path length, ``path = delay * c``.
+        ``hop_geometry.height_from_path()`` inverts the spherical-Earth
+        law-of-cosines hop geometry to recover the layer height that path
+        implies, for the given ground distance and hop count.
+
         The calibration offset is:
             offset = implied_h - predicted_h
-        
+        with ``implied_h`` inverted from the *observed* delay and
+        ``predicted_h`` from the model-*predicted* delay. Both go through
+        the same spherical geometry (review item P-M12) — the previous
+        flat-triangle inverse here disagreed with the spherical forward
+        predictors, so ``offset_km`` conflated a real height error with a
+        flat-vs-spherical geometry artefact.
+
         Args:
             latitude, longitude: Location of this measurement
             timestamp: When measurement was taken
@@ -947,49 +951,31 @@ class IonosphericModel:
             return  # Can't calibrate from ground wave or low-confidence/NaN
         
         self.stats['calibration_updates'] += 1
-        
-        # Speed of light in km/s
-        c_km_s = 299792.458
-        
-        # Calculate implied layer height from observed delay
-        # path_length_km = delay_ms × c / 1000
-        observed_path_km = observed_delay_ms * c_km_s / 1000.0
-        predicted_path_km = predicted_delay_ms * c_km_s / 1000.0
-        
-        # For N-hop path: each hop covers (ground_distance / N)
-        hop_distance = ground_distance_km / n_hops
-        half_hop = hop_distance / 2.0
-        
-        # Solve for height: h = sqrt((path_per_hop/2)² - half_hop²)
-        # path_per_hop = total_path / n_hops
-        observed_path_per_hop = observed_path_km / n_hops
-        predicted_path_per_hop = predicted_path_km / n_hops
-        
-        # Each hop: path = 2 × slant_range, slant_range = path_per_hop / 2
-        observed_slant = observed_path_per_hop / 2.0
-        predicted_slant = predicted_path_per_hop / 2.0
-        
-        # h = sqrt(slant² - half_hop²)
-        try:
-            implied_h_sq = observed_slant ** 2 - half_hop ** 2
-            predicted_h_sq = predicted_slant ** 2 - half_hop ** 2
-            
-            if implied_h_sq < 0 or predicted_h_sq < 0:
-                logger.debug(f"Calibration: geometry invalid (negative under sqrt)")
-                return
-            
-            implied_hmF2 = math.sqrt(implied_h_sq)
-            predicted_hmF2 = math.sqrt(predicted_h_sq)
-            
-            offset_km = implied_hmF2 - predicted_hmF2
-            
-            # Sanity check: offset shouldn't be extreme
-            if abs(offset_km) > 150:
-                logger.debug(f"Calibration: offset {offset_km:.1f} km too large, ignoring")
-                return
-            
-        except (ValueError, ZeroDivisionError) as e:
-            logger.debug(f"Calibration: calculation error: {e}")
+
+        # Delay (ms) → total slant path length (km): path = delay * c,
+        # with c expressed in km/ms.
+        observed_path_km = observed_delay_ms * C_LIGHT_KM_MS
+        predicted_path_km = predicted_delay_ms * C_LIGHT_KM_MS
+
+        # Invert the shared spherical hop geometry to recover the layer
+        # height each path implies. height_from_path returns None when the
+        # path is too short to close the triangle for this ground distance
+        # and hop count.
+        implied_hmF2 = height_from_path(observed_path_km, ground_distance_km, n_hops)
+        predicted_hmF2 = height_from_path(predicted_path_km, ground_distance_km, n_hops)
+
+        if implied_hmF2 is None or predicted_hmF2 is None:
+            logger.debug(
+                "Calibration: geometry invalid (path too short for "
+                f"ground distance {ground_distance_km:.0f} km, n_hops={n_hops})"
+            )
+            return
+
+        offset_km = implied_hmF2 - predicted_hmF2
+
+        # Sanity check: offset shouldn't be extreme
+        if abs(offset_km) > 150:
+            logger.debug(f"Calibration: offset {offset_km:.1f} km too large, ignoring")
             return
         
         # Store calibration entry
@@ -1046,16 +1032,20 @@ class IonosphericModel:
             measured_hmF2_km: The true F2 layer peak height from the ionogram
             confidence: Weight for this calibration point (0-1), default 1.0 for hard anchors
         """
-        # Get what the model *would* have predicted before calibration
-        base_heights = self.get_layer_heights(latitude, longitude, timestamp)
-        predicted_hmF2_km = base_heights.hmF2_km
-        
+        # Get what the model *would* have predicted before calibration.
+        # get_layer_heights signature is (timestamp, latitude, longitude,
+        # f107) — pass by keyword so the positions cannot be transposed.
+        base_heights = self.get_layer_heights(
+            timestamp=timestamp, latitude=latitude, longitude=longitude
+        )
+        predicted_hmF2_km = base_heights.hmF2
+
         offset_km = measured_hmF2_km - predicted_hmF2_km
-        
-        # We don't want extreme outliers to break the model
-        # Limit the offset to ±150 km
+
+        # We don't want extreme outliers to break the model.
+        # Limit the offset to ±150 km.
         offset_km = max(-150.0, min(150.0, offset_km))
-        
+
         entry = CalibrationEntry(
             timestamp=timestamp,
             predicted_hmF2_km=predicted_hmF2_km,
@@ -1063,31 +1053,29 @@ class IonosphericModel:
             offset_km=offset_km,
             confidence=confidence
         )
-        
-        # Add to calibration history
-        grid_key = self._get_grid_key(latitude, longitude)
-        
-        if grid_key not in self.calibration_history:
-            self.calibration_history[grid_key] = []
-            
-        self.calibration_history[grid_key].append(entry)
-        
-        # Maintain history size (keep last 24 hours of calibrations, max ~100)
-        cutoff = timestamp.timestamp() - self.calibration_window_hours * 3600
-        
-        valid_history = []
-        for e in self.calibration_history[grid_key]:
-            if e.timestamp.timestamp() > cutoff:
-                valid_history.append(e)
-                
-        # Keep manageable size
-        if len(valid_history) > 100:
-            valid_history = valid_history[-100:]
-            
-        self.calibration_history[grid_key] = valid_history
-        
-        logger.info(f"Ionogram Anchor at {grid_key}: Measured hmF2={measured_hmF2_km:.1f}km, "
-                   f"Predicted={predicted_hmF2_km:.1f}km, Offset={offset_km:.1f}km")
+
+        # Store in the shared per-location calibration store — the same LRU
+        # OrderedDict that update_calibration() writes to. Ionogram anchors
+        # MUST land here: get_layer_heights() applies calibration from
+        # _calibration_data, so a separate store would never take effect.
+        loc_key = f"{round(latitude)}_{round(longitude)}"
+        if loc_key not in self._calibration_data:
+            # Evict oldest location if at capacity
+            if len(self._calibration_data) >= self.max_locations:
+                oldest_key = next(iter(self._calibration_data))
+                del self._calibration_data[oldest_key]
+            self._calibration_data[loc_key] = []
+
+        self._calibration_data[loc_key].append(entry)
+        self._calibration_data.move_to_end(loc_key)  # mark recently used
+
+        # Trim to max entries (keep most recent)
+        if len(self._calibration_data[loc_key]) > self.max_calibration_entries:
+            self._calibration_data[loc_key] = \
+                self._calibration_data[loc_key][-self.max_calibration_entries:]
+
+        logger.info(f"Ionogram anchor at {loc_key}: measured hmF2={measured_hmF2_km:.1f}km, "
+                    f"predicted={predicted_hmF2_km:.1f}km, offset={offset_km:+.1f}km")
 
     def get_calibration_stats(self, latitude: float, longitude: float) -> Dict:
         """Get calibration statistics for a location."""
@@ -1244,8 +1232,10 @@ class IonosphericDelayCalculator:
                         glat=latitude or 40.0,
                         glon=longitude or -105.0
                     )
-                    # IRI returns TEC in TECU
-                    tec = self._extract_scalar(result.get('TEC'), None)
+                    # IRI returns TEC in TECU. _extract_scalar is a static
+                    # method of IonosphericModel, not of this class — call it
+                    # via the iono_model instance (non-None inside this branch).
+                    tec = self.iono_model._extract_scalar(result.get('TEC'), None)
                     if tec is not None and 1 < tec < 500:
                         tier = IonosphericModelTier.IRI_2020 if self.iono_model._iri_version == "2020" else IonosphericModelTier.IRI_2016
                         return float(tec), tier
