@@ -85,8 +85,10 @@ USAGE
     # Get expected arrivals for current minute
     arrivals = matrix.get_expected_arrivals(utc_time=datetime.now(timezone.utc))
     
-    # Validate a detection
-    is_valid, confidence = matrix.validate_detection(
+    # Validate a detection (returns a 3-tuple; the docstring example
+    # used to unpack just 2 values, which would have raised ValueError
+    # if anyone copy-pasted it -- fixed §3.4 Low, 2026-05-20).
+    is_valid, confidence, reason = matrix.validate_detection(
         station='WWV',
         frequency_mhz=10.0,
         detected_sample=720,  # samples from minute boundary
@@ -135,7 +137,21 @@ STATION_LOCATIONS = {
     'BPM': (34.9500, 109.5500),    # Pucheng, China
 }
 
-# Broadcast frequencies (MHz) per station
+# Broadcast frequencies (MHz) per station.
+#
+# §3.4 Low (2026-05-20): these floats are also used as the *frequency*
+# component of `matrix.arrivals` / `matrix.multi_mode_arrivals` dict
+# keys (`(station, frequency_mhz)`), so lookups against those dicts
+# require *exact* float equality.  Callers MUST pass the same literal
+# float values that appear here -- e.g. `3.33`, not `3330000 / 1e6`
+# (which is IEEE-754-equal in practice today, but not by guarantee).
+# When the matrix is rebuilt every minute it is keyed off this table,
+# so as long as callers come through `get_expected_arrivals()` and
+# friends with values originally sourced from `STATION_FREQUENCIES`,
+# the round-trip is safe.  Tolerance-based frequency dispatch should
+# happen at the *caller* boundary (see `broadcast_kalman_filter
+# .BroadcastKalmanFilter._get_broadcast_characteristics` for the
+# template).
 STATION_FREQUENCIES = {
     'WWV': [2.5, 5.0, 10.0, 15.0, 20.0, 25.0],
     'WWVH': [2.5, 5.0, 10.0, 15.0],
@@ -816,25 +832,41 @@ class ArrivalPatternMatrix:
             except Exception as e:
                 logger.debug(f"IRI-2020 failed, using parametric: {e}")
         
-        # Parametric fallback based on frequency and time of day
+        # Parametric fallback based on frequency and time of day.
+        #
+        # §3.4 Low: the frequency→base_height table below was previously
+        # bare magic numbers.  Documented here against the parametric
+        # F2-height model used elsewhere in the codebase (see
+        # `ionospheric_model.py` solar / diurnal parametrisation).  The
+        # ladder is a coarse approximation -- the higher-frequency tones
+        # reach the layer at a higher critical-density altitude, so the
+        # reflection point on a steeper Ne(h) gradient is *lower*; the
+        # ~20 km steps between bands track typical mid-latitude
+        # daytime hmF2 spread (260-320 km).  This branch only runs when
+        # IRI-2020 is unavailable, so precision is secondary -- the
+        # downstream uncertainty floor (±15 ms 3σ) absorbs the
+        # parametric error.
         hour = utc_time.hour + utc_time.minute / 60.0
-        
-        # Base height varies with frequency (lower freq → higher reflection)
+
+        # Base height varies with frequency (lower freq → higher reflection).
+        # See note above; same recipe as `ionospheric_model._parametric_hmF2`.
         if frequency_mhz <= 5:
-            base_height = 320.0
+            base_height = 320.0  # km — 2.5 / 5 MHz typical F2 daytime
         elif frequency_mhz <= 10:
-            base_height = 300.0
+            base_height = 300.0  # km — 10 MHz reference (project-wide hmF2)
         elif frequency_mhz <= 15:
-            base_height = 280.0
+            base_height = 280.0  # km — 15 MHz, slightly lower reflection
         else:
-            base_height = 260.0
-        
-        # Diurnal variation: higher at night (ionization decays)
-        # Simple sinusoidal model centered on local noon
+            base_height = 260.0  # km — 20/25 MHz, lower F2 reflection point
+
+        # Diurnal variation: higher at night (ionization decays).
+        # Simple sinusoidal model centred on local noon.
         local_hour = (hour + midpoint_lon / 15.0) % 24
-        diurnal_phase = (local_hour - 14.0) / 24.0 * 2 * math.pi  # Peak at 14:00 local
-        diurnal_variation = 30.0 * math.cos(diurnal_phase)  # ±30 km
-        
+        # Peak at 14:00 local (lag behind solar noon — ionisation
+        # builds up after maximum insolation).
+        diurnal_phase = (local_hour - 14.0) / 24.0 * 2 * math.pi
+        diurnal_variation = 30.0 * math.cos(diurnal_phase)  # ±30 km swing
+
         height_km = base_height + diurnal_variation
         return height_km, 'Parametric'
     
