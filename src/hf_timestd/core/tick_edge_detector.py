@@ -632,6 +632,16 @@ class TickEdgeDetector:
             # ~1.4 dB (review items S4 + M-M1).
             noise_envelope = noise_region if len(noise_region) > 5 else corr_env
             corr_snr_db = peak_snr_db_envelope(peak_val, noise_envelope)
+            # Raw median noise level — consumed by _clean_deconvolve below
+            # (line ~706).  The canonical SNR refactor (S4 + M-M1) switched
+            # to peak_snr_db_envelope() and dropped this assignment, but
+            # _clean_deconvolve still expects a noise_floor scalar; without
+            # it, the dedicated WWV channels NameError on every minute.
+            noise_floor = (
+                float(np.median(noise_envelope))
+                if len(noise_envelope) > 0
+                else 1e-10
+            )
             if not np.isfinite(corr_snr_db):
                 corr_snr_db = 0.0
             
