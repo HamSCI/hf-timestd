@@ -5,7 +5,13 @@
 # Runs every 5 minutes via systemd timer. Checks each service for:
 #   1. Is it supposed to be running? (enabled)
 #   2. Is it actually running? (active)
-#   3. Is it producing fresh output? (file mtime checks)
+#   3. Is it producing fresh output?
+#        - Recorder: newest binary chunk under raw_buffer (mtime check)
+#        - Metrology / Fusion / Physics: newest row in the corresponding
+#          SQLite table at $SQLITE_DB (post-Phase-3b: SQLite is the sole
+#          writer; HDF5 mtimes are frozen and cannot indicate liveness)
+#        - L2 calibration: state-file mtime
+#        - Web API: HTTP /health
 #
 # If a service is running but its output is stale beyond the threshold,
 # the watchdog restarts it. This catches "zombie" services that appear
@@ -20,6 +26,7 @@ set -uo pipefail
 
 # ── Paths ──
 DATA_ROOT="/var/lib/timestd"
+SQLITE_DB="${SQLITE_DB:-$DATA_ROOT/phase2/timestd.db}"
 LOG_TAG="timestd-watchdog"
 DRY_RUN=false
 
@@ -60,6 +67,51 @@ newest_file_age() {
     # newest is epoch float, truncate to int
     local newest_int=${newest%%.*}
     echo $(( $(date +%s) - newest_int ))
+}
+
+# Age in seconds of the newest row in a SQLite table, filtered to a time
+# column that holds UNIX epoch seconds.  Returns 999999 if the DB is
+# missing, the query fails, or the table has no rows newer than "future
+# grace".
+#
+# Phase 3b cutover (2026-05-20): SQLite is the sole writer for the
+# pipeline data products, so freshness lives here, not on HDF5 mtimes.
+# The future-grace clause guards against historical L1_metrology rows
+# with minute_boundary_utc dated ~20 min ahead of real time (relics of
+# an earlier clock-confused run, rowids ~186k vs current ~221k) — those
+# would otherwise mask any genuine stall by reporting a negative age.
+#
+# $1: table name
+# $2: time column name (must be INTEGER epoch seconds — minute_boundary
+#     or minute_boundary_utc on the current schemas)
+# $3: optional extra WHERE clause (e.g., "channel='CHU_3330'"), no
+#     leading AND.  Caller is responsible for shell-quoting; callers
+#     here only pass channel names matching [A-Z0-9_]+ from the
+#     filesystem listing or the case statement above.
+sqlite_age() {
+    local table="$1"
+    local time_col="$2"
+    local extra_where="${3:-}"
+    if [[ ! -f "$SQLITE_DB" ]]; then
+        echo 999999
+        return
+    fi
+    local where="WHERE $time_col <= strftime('%s','now') + 120"
+    [[ -n "$extra_where" ]] && where="$where AND $extra_where"
+    local age
+    age=$(sqlite3 -readonly "$SQLITE_DB" \
+            "SELECT CAST(strftime('%s','now') - max($time_col) AS INTEGER) FROM $table $where;" \
+            2>/dev/null)
+    # NULL (empty table) or any sqlite error → stale.
+    if [[ -z "$age" ]] || ! [[ "$age" =~ ^-?[0-9]+$ ]]; then
+        echo 999999
+        return
+    fi
+    # Negative ages can still appear inside the future-grace window
+    # (rows dated up to 120 s ahead) — clamp so the threshold compare
+    # below behaves as "fresh".
+    (( age < 0 )) && age=0
+    echo "$age"
 }
 
 # Check if a systemd unit is enabled and supposed to be running
@@ -167,10 +219,20 @@ check_metrology() {
             continue
         fi
 
+        # Validate channel name before string-composing it into SQL.
+        # Channel dirs are produced by the recorder/metrology services
+        # and the case-statement above already filters non-channel
+        # entries; this is belt-and-suspenders.
+        if ! [[ "$channel" =~ ^[A-Za-z0-9_]+$ ]]; then
+            log_warn "skipping channel with unexpected name: $channel"
+            continue
+        fi
+
         local age
-        age=$(newest_file_age "$channel_dir" "*.h5")
+        age=$(sqlite_age "L1_metrology_measurements" "minute_boundary_utc" \
+                        "channel='$channel'")
         if [[ $age -gt $METROLOGY_STALE ]]; then
-            do_restart "$unit" "running but HDF5 stale for ${age}s (threshold: ${METROLOGY_STALE}s)"
+            do_restart "$unit" "running but L1_metrology row for $channel stale for ${age}s (threshold: ${METROLOGY_STALE}s)"
             RESTARTS=$((RESTARTS + 1))
         fi
     done
@@ -190,9 +252,9 @@ check_fusion() {
     fi
 
     local age
-    age=$(newest_file_age "$DATA_ROOT/phase2/fusion" "*.h5")
+    age=$(sqlite_age "L3_fusion_timing" "minute_boundary")
     if [[ $age -gt $FUSION_STALE ]]; then
-        do_restart "$unit" "running but fusion HDF5 stale for ${age}s (threshold: ${FUSION_STALE}s)"
+        do_restart "$unit" "running but L3_fusion_timing stale for ${age}s (threshold: ${FUSION_STALE}s)"
         RESTARTS=$((RESTARTS + 1))
     fi
 }
@@ -210,10 +272,12 @@ check_physics() {
         return
     fi
 
+    # L3_tec covers both AGGREGATED and REANALYZED channels — physics
+    # producing either keeps the table fresh, so no channel filter.
     local age
-    age=$(newest_file_age "$DATA_ROOT/phase2/science" "*.h5")
+    age=$(sqlite_age "L3_tec" "minute_boundary")
     if [[ $age -gt $PHYSICS_STALE ]]; then
-        do_restart "$unit" "running but TEC HDF5 stale for ${age}s (threshold: ${PHYSICS_STALE}s)"
+        do_restart "$unit" "running but L3_tec stale for ${age}s (threshold: ${PHYSICS_STALE}s)"
         RESTARTS=$((RESTARTS + 1))
     fi
 }
