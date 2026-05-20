@@ -100,13 +100,20 @@ class TestSingleHopRestriction(unittest.TestCase):
             IonoTomography().solve(paths, solar_elevation_deg=45.0))
 
     def test_multihop_paths_excluded_from_the_solve(self):
-        # Two single-hop + two multi-hop, all with wide elevation spread.
-        # The solve runs on the single-hop pair only.
-        paths = [_path(10, 28, n_hops=1), _path(50, 16, n_hops=1),
-                 _path(8, 40, n_hops=2), _path(30, 30, n_hops=3)]
+        # Three single-hop + two multi-hop, all with wide elevation
+        # spread.  The solve runs on the single-hop subset only.
+        # (§4.4 Low: bumped from 2 to 3 single-hop paths -- the
+        # solve now requires N >= 3 so that residuals have ≥1 DOF.)
+        paths = [
+            _path(10, 28, n_hops=1),
+            _path(30, 22, n_hops=1),
+            _path(50, 16, n_hops=1),
+            _path(8, 40, n_hops=2),
+            _path(30, 30, n_hops=3),
+        ]
         r = IonoTomography().solve(paths, solar_elevation_deg=45.0)
         self.assertIsNotNone(r)
-        self.assertEqual(r.n_paths, 2)
+        self.assertEqual(r.n_paths, 3)
 
 
 class TestGeometryNotFabricated(unittest.TestCase):

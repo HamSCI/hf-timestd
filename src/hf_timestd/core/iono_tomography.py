@@ -77,8 +77,14 @@ class TomographyResult:
     tec_f_tecu: float           # F-layer TEC
     tec_total_tecu: float       # E + F total
     
-    # Layer parameters
-    effective_hmF2_km: float    # Effective F-layer peak height
+    # Layer parameters.  §4.4 Low note: ``effective_hmF2_km`` is the
+    # **input** F-shell height the tomography assumed, echoed back on
+    # the result for traceability -- *not* a fitted "effective" value.
+    # The tomography has no DOF to constrain hmF2 (it carries one
+    # column of unknowns per layer and uses a single height as a
+    # geometric anchor); a real effective-hmF2 estimate would require
+    # multi-shell ray bending.
+    effective_hmF2_km: float    # Input F-shell height (echoed; see note above)
     e_f_ratio: float            # TEC_E / TEC_F ratio
     
     # Quality metrics
@@ -159,14 +165,24 @@ class IonoTomography:
         Returns:
             TomographyResult or None if insufficient data
         """
-        # Need at least 2 paths with different elevation angles
-        if len(paths) < 2:
-            logger.debug("Tomography needs at least 2 paths")
+        # §4.4 Low: require at least 3 paths.  With the 2-layer (E, F)
+        # model, 2 paths give an exactly-determined system and the
+        # residuals are by construction zero — meaningless as a quality
+        # signal.  ≥3 leaves at least one DOF for residuals.  The
+        # elevation-diversity gate below independently guards against
+        # near-singular geometry.
+        _MIN_PATHS_FOR_RESIDUAL_DOF = 3
+
+        if len(paths) < _MIN_PATHS_FOR_RESIDUAL_DOF:
+            logger.debug(
+                f"Tomography needs at least {_MIN_PATHS_FOR_RESIDUAL_DOF} "
+                f"paths (got {len(paths)}; need >=1 residual DOF)"
+            )
             return None
-        
+
         # Filter to paths with valid sTEC
         valid_paths = [p for p in paths if p.stec_tecu > 0 and p.uncertainty_tecu > 0]
-        if len(valid_paths) < 2:
+        if len(valid_paths) < _MIN_PATHS_FOR_RESIDUAL_DOF:
             return None
 
         # P-M9: restrict the E/F tomography to SINGLE-HOP paths. A multi-hop
@@ -176,8 +192,11 @@ class IonoTomography:
         # the ionosphere is horizontally uniform over the whole multi-thousand-
         # km track. Single-hop paths sample one column, where that holds.
         valid_paths = [p for p in valid_paths if p.n_hops == 1]
-        if len(valid_paths) < 2:
-            logger.debug("Tomography needs >= 2 single-hop paths")
+        if len(valid_paths) < _MIN_PATHS_FOR_RESIDUAL_DOF:
+            logger.debug(
+                f"Tomography needs >= {_MIN_PATHS_FOR_RESIDUAL_DOF} "
+                f"single-hop paths"
+            )
             return None
 
         # Check elevation diversity
@@ -282,10 +301,16 @@ class IonoTomography:
         except np.linalg.LinAlgError:
             cond = 1e6
         
-        # Per-path residuals
-        path_residuals = {}
+        # Per-path residuals.  §4.4 Low: include mode and use 2-decimal
+        # frequency precision so that (a) two paths from the same
+        # channel but different propagation modes don't collide on the
+        # key, and (b) CHU's fractional-MHz channels (3.33, 7.85, 14.67)
+        # don't all collapse to the same integer key.  Falls back to
+        # n_hops-as-string when path.mode is absent.
+        path_residuals: Dict[str, float] = {}
         for i, path in enumerate(valid_paths):
-            key = f"{path.station}_{path.frequency_mhz:.0f}"
+            mode_tag = getattr(path, 'mode', None) or f"{getattr(path, 'n_hops', 1)}F"
+            key = f"{path.station}_{path.frequency_mhz:.2f}_{mode_tag}"
             path_residuals[key] = float(residuals[i])
         
         # Posterior-vs-prior variance reduction for the E/F split (P-H11).
