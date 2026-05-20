@@ -818,22 +818,14 @@ class IonoDataService:
                 return self._parse_wamipe_netcdf(cache_file)
         return None
     
-    def _save_grid_cache(self, grid: IonoGrid):
-        """Save grid to cache for offline use."""
-        # The NetCDF file is already saved during download
-        # This method saves metadata
-        meta_file = self.cache_dir / "grid_meta.txt"
-        try:
-            meta_file.write_text(
-                f"timestamp={grid.timestamp.isoformat()}\n"
-                f"source={grid.source}\n"
-                f"model_cycle={grid.model_cycle}\n"
-                f"nlat={len(grid.lats)}\n"
-                f"nlon={len(grid.lons)}\n"
-            )
-        except Exception as e:
-            logger.debug(f"Failed to save grid metadata: {e}")
-    
+    # §4.4 Low (2026-05-20): `_save_grid_cache(self, grid)` lived here.
+    # It was never called -- the NetCDF file is persisted by the
+    # download path itself, and the bare "grid_meta.txt" sidecar this
+    # method wrote had no readers anywhere in the tree.  Removed; if a
+    # metadata-on-disk format is needed in the future, build it
+    # alongside the data product (HDF5 sidecar / JSON next to the .nc)
+    # rather than a free-floating text file in the cache directory.
+
     # =========================================================================
     # GIRO DATA FETCHING
     # =========================================================================
