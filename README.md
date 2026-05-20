@@ -6,6 +6,11 @@
 
 ## Overview
 
+> **New to this project?** Read [`docs/OVERVIEW.md`](docs/OVERVIEW.md) first
+> — a 5-minute mental model of what hf-timestd does, the two pipelines
+> (metrology vs physics), the two operating modes (RTP vs Fusion), and
+> a terminology cheatsheet that resolves cross-document drift.
+
 HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/CHU/BPM time standard broadcasts via ka9q-radio and produces precise timing measurements (D_clock) for UTC alignment and system clock discipline via Chrony.
 
 **Key Capabilities:**
@@ -268,10 +273,12 @@ The system has an eight-service core pipeline plus a set of housekeeping units (
 
 ## Detailed Documentation
 
+- **[docs/OVERVIEW.md](docs/OVERVIEW.md)** — start here: 5-minute mental model, pipelines vs modes, terminology cheatsheet.
 - **[INSTALLATION.md](INSTALLATION.md)** — setup and deployment (standalone + Pattern A editable-venv).
 - **[docs/DEBUGGING.md](docs/DEBUGGING.md)** — operator troubleshooting runbook: log access, stage-by-stage triage, failure recipes, diagnostic bundle.
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — system design and data flow.
 - **[docs/METROLOGY.md](docs/METROLOGY.md)** — RTP-to-UTC calibration, timing bootstrap, error budget.
+- **[docs/PHYSICS.md](docs/PHYSICS.md)** — ionospheric capabilities with ✅/⚠️/❌ honesty markers per feature (the canonical capability inventory; supersedes the legacy `SCIENTIFIC_CAPABILITIES.md`).
 - **[docs/TECHNICAL_REFERENCE.md](docs/TECHNICAL_REFERENCE.md)** — algorithms, data formats, physics models.
 - **[docs/PIPELINE_VERIFICATION.md](docs/PIPELINE_VERIFICATION.md)** — end-to-end health gates.
 
