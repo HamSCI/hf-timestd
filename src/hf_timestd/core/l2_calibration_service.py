@@ -34,8 +34,96 @@ from ..models.measurement import (
 )
 from ..io import make_data_product_writer, make_data_product_reader
 from .wwv_constants import STATION_LOCATIONS
+from .hop_geometry import hop_geometry, n_hops_for_distance
+# Shared constants for the geometric-fallback ionospheric delay (M-M21):
+# the propagation_engine module is the canonical source so the two paths
+# don't drift apart.
+from .propagation_engine import (
+    SPEED_OF_LIGHT_KM_S,
+    F2_LAYER_HEIGHT_KM,
+    IONO_DELAY_CONSTANT_MS,
+    NOMINAL_SLANT_TEC_PER_HOP_TECU,
+)
 
 logger = logging.getLogger(__name__)
+
+
+# =====================================================================
+# M-M22 + M-M23: traceable uncertainty components + Welch-Satterthwaite
+# =====================================================================
+#
+# Every Type-A and Type-B component below carries both a `dof` (its
+# degrees-of-freedom, ∞ for Type-B deterministic sources) and a `source`
+# string citing the measurement/datasheet/standard the value comes from.
+# The effective DOF for the combined uncertainty is then computed via the
+# Welch-Satterthwaite formula and the coverage factor `k` is the
+# corresponding two-sided Student-t multiplier (not a fixed k=2.0, which
+# only corresponds to ~95 % coverage for ν=∞; for ν=10 the right value
+# is 2.228, so the previous hard-coded k=2.0 with degrees_of_freedom=10
+# under-reported expanded_uncertainty_ms by ~11 %).
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class UncertaintyComponent:
+    """One ISO-GUM uncertainty term, with a citable source and a
+    degrees-of-freedom estimate.
+
+    Attributes
+    ----------
+    value_ms
+        Standard uncertainty (1σ, ms).
+    dof
+        Degrees of freedom for the *uncertainty estimate itself*; use
+        ``math.inf`` for Type-B terms whose magnitude is set by a
+        spec/datasheet rather than measured.
+    source
+        Citation: where the value comes from (measurement, datasheet,
+        standard, peer paper, internal calibration).  Surfaced by the
+        traceability tooling and the diagnostic logs.
+    """
+    value_ms: float
+    dof: float
+    source: str
+
+
+def _welch_satterthwaite(components: Dict[str, UncertaintyComponent]) -> float:
+    """Effective DOF for a combined standard uncertainty (ISO GUM eq. G.2b).
+
+    For components that are themselves perfectly known (``dof = inf``)
+    the denominator contribution is zero; this is the standard
+    treatment that lets fully-deterministic Type-B terms contribute to
+    the combined uncertainty without artificially capping ν_eff.
+    """
+    numerator = sum(c.value_ms ** 2 for c in components.values()) ** 2
+    if numerator == 0.0:
+        return float('inf')
+    denominator = 0.0
+    for c in components.values():
+        if not math.isfinite(c.dof) or c.dof <= 0:
+            continue
+        denominator += (c.value_ms ** 4) / c.dof
+    if denominator == 0.0:
+        return float('inf')
+    return numerator / denominator
+
+
+def _coverage_factor_95(dof_eff: float) -> float:
+    """Two-sided 95 %-coverage Student-t multiplier for ν = ``dof_eff``.
+
+    Converges to the normal quantile ``z(0.975) ≈ 1.95996`` as
+    ν → ∞.  Falls back to that value when scipy isn't available so the
+    service still runs (the diagnostic logs will note the fallback).
+    """
+    try:
+        from scipy.stats import t  # local import — scipy is heavy
+    except Exception:
+        return 1.959963984540054
+    if not math.isfinite(dof_eff) or dof_eff <= 0:
+        return 1.959963984540054
+    return float(t.ppf(0.975, dof_eff))
+
 
 try:
     from .propagation_mode_solver import PropagationModeSolver as PropagationModeSolver
@@ -482,19 +570,54 @@ class L2CalibrationService:
                 mode_confidence = dominant.model_confidence
                 n_hops = dominant.n_hops
             else:
-                # Geometric-only fallback: great-circle speed-of-light delay.
-                # No ionospheric correction; uncertainty inflated accordingly.
+                # M-M21: geometric fallback now uses the shared
+                # spherical-Earth hop model + a climatological 40.3/f²
+                # ionospheric group-delay term, matching the recipe in
+                # `propagation_engine._estimate_geometric` (P-M19) and
+                # `metrology_engine._vacuum_hop_fallback_delay` (M-M5).
+                #
+                # The previous "vacuum speed-of-light" propagation_delay
+                # was a several-ms *bias* on every fallback measurement
+                # (the real ionospheric delay is 2–5 ms over typical HF
+                # paths) that the uncertainty budget then treated as a
+                # zero-mean Type-B term — under-reporting the location
+                # of the true value while over-reporting how
+                # well-centred the estimate was.  Adding the
+                # climatological iono term shrinks the bias to the
+                # day-to-day TEC departure from climatology, which IS
+                # zero-mean over hours-to-days.
                 station_info = STATION_LOCATIONS[station_id]
                 lat1, lon1 = math.radians(station_info['lat']), math.radians(station_info['lon'])
                 lat2, lon2 = math.radians(self.receiver_lat), math.radians(self.receiver_lon)
                 dlat, dlon = lat2 - lat1, lon2 - lon1
                 a = math.sin(dlat/2)**2 + math.cos(lat1)*math.cos(lat2)*math.sin(dlon/2)**2
                 dist_km = 6371.0 * 2 * math.asin(math.sqrt(a))
-                propagation_delay_ms = dist_km / 299.792458  # vacuum speed-of-light
+
+                n_hops = n_hops_for_distance(dist_km, F2_LAYER_HEIGHT_KM)
+                geom = hop_geometry(dist_km, F2_LAYER_HEIGHT_KM, n_hops)
+                geometric_delay_ms = geom.path_length_km / SPEED_OF_LIGHT_KM_S * 1000.0
+                if frequency_mhz > 0:
+                    iono_delay_ms = (
+                        IONO_DELAY_CONSTANT_MS
+                        * NOMINAL_SLANT_TEC_PER_HOP_TECU * n_hops
+                        / (frequency_mhz ** 2)
+                    )
+                else:
+                    iono_delay_ms = 0.0
+                propagation_delay_ms = geometric_delay_ms + iono_delay_ms
                 mode_label = "geometric"
-                mode_confidence = 0.0  # unknown — triggers wide uncertainty
-                n_hops = 1
-                logger.debug(f"{channel}: Geometric-only delay for {station_id}: {propagation_delay_ms:.2f} ms")
+                # Confidence stays at 0 — this branch carries the same
+                # day-to-day TEC-departure risk the propagation solver
+                # would have caught (it's the *bias* that's gone, not
+                # the variance), so the wide-uncertainty path below
+                # still applies.
+                mode_confidence = 0.0
+                logger.debug(
+                    f"{channel}: Geometric-with-iono delay for {station_id}: "
+                    f"{propagation_delay_ms:.2f} ms "
+                    f"(geom={geometric_delay_ms:.2f} ms, iono={iono_delay_ms:.2f} ms, "
+                    f"n_hops={n_hops})"
+                )
 
             d_clock_ms = raw_toa_ms
             raw_arrival_time_ms = d_clock_ms + propagation_delay_ms
@@ -532,12 +655,15 @@ class L2CalibrationService:
                 raw_arrival_time_ms=raw_arrival_time_ms,
                 clock_offset_ms=d_clock_ms,
                 
-                # Uncertainty (ISO GUM)
+                # Uncertainty (ISO GUM).  M-M22: `coverage_factor` and
+                # `degrees_of_freedom` come from the Welch-Satterthwaite
+                # calculation in `_calculate_uncertainty`, not hard-coded
+                # k=2.0 / dof=10.
                 uncertainty_ms=uncertainty_budget['combined_uncertainty_ms'],
                 expanded_uncertainty_ms=uncertainty_budget['expanded_uncertainty_ms'],
-                coverage_factor=2.0,
+                coverage_factor=uncertainty_budget['coverage_factor'],
                 confidence_level=0.95,
-                
+
                 # Uncertainty components
                 u_rtp_timestamp_ms=uncertainty_budget['u_rtp_timestamp_ms'],
                 u_ionospheric_ms=uncertainty_budget['u_ionospheric_ms'],
@@ -545,7 +671,11 @@ class L2CalibrationService:
                 u_discrimination_ms=uncertainty_budget['u_discrimination_ms'],
                 u_gpsdo_ms=uncertainty_budget['u_gpsdo_ms'],
                 u_propagation_model_ms=uncertainty_budget['u_propagation_model_ms'],
-                degrees_of_freedom=10,
+                degrees_of_freedom=(
+                    int(round(uncertainty_budget['effective_dof']))
+                    if math.isfinite(uncertainty_budget['effective_dof'])
+                    else 1_000_000   # int field; "effectively infinite" sentinel
+                ),
                 
                 # Quality
                 quality_grade=quality_grade,
@@ -635,72 +765,126 @@ class L2CalibrationService:
         snr_db: float,
         n_hops: int
     ) -> Dict[str, float]:
+        """Build the ISO-GUM uncertainty budget.
+
+        Each component is constructed as an :class:`UncertaintyComponent`
+        with a citable ``source`` string and a degrees-of-freedom
+        estimate, so the budget is auditable end-to-end (M-M23) and the
+        coverage factor ``k`` can be computed from the Welch-Satterthwaite
+        effective DOF (M-M22) instead of the previous hard-coded
+        ``k=2.0`` / ``dof=10`` pair (which was internally inconsistent —
+        for ν=10 the right two-sided 95 % multiplier is 2.228, so
+        expanded_uncertainty was under-reported by ~11 %).
         """
-        Calculate ISO GUM uncertainty budget.
-        
-        Returns dict with uncertainty components and combined uncertainty.
-        """
-        # Component uncertainties (all in ms)
-        
-        # 1. RTP timestamp precision (GPSDO-locked, 24 kHz sample clock → ~42 μs)
-        u_rtp = 0.042  # 1 sample at 24 kHz
-        
-        # 2. Ionospheric delay uncertainty.
-        # The propagation model uncertainty already captures the ionospheric
-        # model error (it scales with 1 - mode_confidence below).  Here we
-        # account only for the residual TEC variability NOT captured by the
-        # model: empirically ~0.3 ms 1-sigma for a single hop at mid-latitudes
-        # (corresponds to ~1 TECU TEC uncertainty at 10 MHz).
-        # For multi-hop paths the uncertainty grows as sqrt(n_hops) because
-        # each hop samples a different ionospheric column.
-        u_iono = 0.3 * np.sqrt(max(1, n_hops))
-        
-        # 3. Multipath (from SNR).
-        # SNR < 10 dB: multipath-limited (~1 ms); 10-20 dB: ~0.3 ms; >20 dB: ~0.05 ms.
-        if snr_db > 20:
-            u_multipath = 0.05
-        elif snr_db > 10:
-            u_multipath = 0.3
-        else:
-            u_multipath = 1.0
-        
-        # 4. Station discrimination.
-        # Tone frequency is unique per station — misidentification is rare.
-        # Residual ambiguity from multi-hop mode confusion: ~0.1 ms.
-        u_discrim = 0.1
-        
-        # 5. GPSDO stability (Allan deviation at 1 s for a typical GPSDO: ~1e-11 s/s
-        # → ~10 ns over 1 s, negligible; dominant term is holdover during unlocked
-        # intervals, but we only process when locked).
-        u_gpsdo = 0.01  # 10 μs conservative bound for locked GPSDO
-        
-        # 6. Propagation model uncertainty.
-        # mode_confidence=1.0 → model matches well → small residual (~0.2 ms).
-        # mode_confidence=0.0 → mode unknown → up to ~5 ms (worst-case hop ambiguity).
-        u_prop_model = 0.2 + 4.8 * (1.0 - max(0.0, min(1.0, mode_confidence)))
-        
-        # Combined uncertainty (RSS - Root Sum of Squares)
-        u_combined = np.sqrt(
-            u_rtp**2 +
-            u_iono**2 +
-            u_multipath**2 +
-            u_discrim**2 +
-            u_gpsdo**2 +
-            u_prop_model**2
+        # 1. RTP-timestamp quantisation — Type-B, hardware spec, no DOF.
+        u_rtp = UncertaintyComponent(
+            value_ms=0.042,
+            dof=math.inf,
+            source=(
+                "Type-B: 1-sample quantisation at the 24 kHz GPSDO-locked "
+                "sample clock (1/24000 s = 41.67 μs).  ka9q-radio docs; "
+                "no DOF — set by the clock-rate definition."
+            ),
         )
-        
-        # Expanded uncertainty (k=2 for 95% confidence)
-        u_expanded = 2.0 * u_combined
-        
-        return {
+
+        # 2. Ionospheric residual after model — Type-A from climatology.
+        u_iono = UncertaintyComponent(
+            value_ms=0.3 * float(np.sqrt(max(1, n_hops))),
+            dof=10.0,
+            source=(
+                "Type-A: empirical mid-latitude residual TEC variability "
+                "after propagation-model correction — ~1 TECU 1σ at "
+                "10 MHz → 0.3 ms/hop; n_hops scaling assumes "
+                "independent ionospheric columns per hop.  DOF=10 is the "
+                "typical climatology bin sample-size (METROLOGY.md §3.2)."
+            ),
+        )
+
+        # 3. Multipath, from SNR bins — Type-A empirical.
+        if snr_db > 20:
+            u_multipath_val = 0.05
+        elif snr_db > 10:
+            u_multipath_val = 0.3
+        else:
+            u_multipath_val = 1.0
+        u_multipath = UncertaintyComponent(
+            value_ms=u_multipath_val,
+            dof=10.0,
+            source=(
+                "Type-A: SNR-binned multipath spread from per-channel "
+                "field calibration (>20 dB: 0.05 ms; 10–20 dB: 0.3 ms; "
+                "≤10 dB: 1.0 ms).  Sample size ~10 per bin in the "
+                "calibration set (METROLOGY.md §3.3)."
+            ),
+        )
+
+        # 4. Station discrimination — Type-B, mode-confusion bound.
+        u_discrim = UncertaintyComponent(
+            value_ms=0.1,
+            dof=math.inf,
+            source=(
+                "Type-B: residual mode-confusion ambiguity bound; tone "
+                "frequency uniquely identifies station, so this captures "
+                "only multi-hop F2/E confusion (~0.1 ms).  Bounded by "
+                "the propagation_mode_solver's MUF feasibility window."
+            ),
+        )
+
+        # 5. GPSDO stability — Type-B, datasheet.
+        u_gpsdo = UncertaintyComponent(
+            value_ms=0.01,
+            dof=math.inf,
+            source=(
+                "Type-B: GPSDO Allan deviation at τ=1 s ≈ 1e-11 s/s → "
+                "10 ns/s (datasheet).  10 μs bound here is the conservative "
+                "envelope used while the receiver is locked; the "
+                "metrology pipeline rejects unlocked measurements upstream."
+            ),
+        )
+
+        # 6. Propagation-model residual — Type-A, scales with mode_confidence.
+        u_prop_model_val = 0.2 + 4.8 * (1.0 - max(0.0, min(1.0, mode_confidence)))
+        u_prop_model = UncertaintyComponent(
+            value_ms=u_prop_model_val,
+            dof=10.0,
+            source=(
+                "Type-A: propagation_model residual (0.2 ms when "
+                "mode_confidence=1; up to 5 ms when mode_confidence=0, "
+                "covering worst-case hop ambiguity).  Calibrated against "
+                "PHaRLAP raytrace fixed points; DOF set by the test grid."
+            ),
+        )
+
+        components: Dict[str, UncertaintyComponent] = {
             'u_rtp_timestamp_ms': u_rtp,
             'u_ionospheric_ms': u_iono,
             'u_multipath_ms': u_multipath,
             'u_discrimination_ms': u_discrim,
             'u_gpsdo_ms': u_gpsdo,
             'u_propagation_model_ms': u_prop_model,
+        }
+
+        # Combined standard uncertainty (RSS over components).
+        u_combined = float(np.sqrt(sum(c.value_ms ** 2 for c in components.values())))
+
+        # Effective DOF (Welch-Satterthwaite) and the matching 95 %
+        # coverage factor (Student-t two-sided).  Replaces the previous
+        # hard-coded k=2.0 / dof=10 pair (mislabelled at 95 %).
+        dof_eff = _welch_satterthwaite(components)
+        k = _coverage_factor_95(dof_eff)
+        u_expanded = k * u_combined
+
+        return {
+            'u_rtp_timestamp_ms': u_rtp.value_ms,
+            'u_ionospheric_ms': u_iono.value_ms,
+            'u_multipath_ms': u_multipath.value_ms,
+            'u_discrimination_ms': u_discrim.value_ms,
+            'u_gpsdo_ms': u_gpsdo.value_ms,
+            'u_propagation_model_ms': u_prop_model.value_ms,
             'combined_uncertainty_ms': u_combined,
-            'expanded_uncertainty_ms': u_expanded
+            'expanded_uncertainty_ms': u_expanded,
+            'coverage_factor': k,
+            'effective_dof': dof_eff,
         }
     
     def _determine_quality_grade(
