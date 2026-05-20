@@ -69,18 +69,28 @@ logger = logging.getLogger(__name__)
 # Chapman layer model parameters for foF2 estimation
 # foF2 ≈ foF2_noon * cos^0.25(χ) where χ is solar zenith angle
 # Typical midlatitude foF2_noon: 8-12 MHz at solar max, 4-7 MHz at solar min
-# We use a moderate value; this is approximate but far better than nothing.
-FOF2_NOON_MHZ = 9.0  # Moderate solar activity estimate
-
-# Nighttime foF2 floor (F2 layer persists at night but weakens)
-FOF2_NIGHT_FLOOR_MHZ = 3.0
+#
+# §4.4 Low: previously a bare `FOF2_NOON_MHZ = 9.0` constant ignored
+# the solar cycle entirely.  Derived now from `R12_MODERATE` via the
+# textbook empirical relation `foF2_noon ≈ 6 + 0.07·R12` (MHz) -- at
+# R12=70 this gives ~10.9 MHz; at R12=0 (solar min) 6 MHz; at R12=150
+# (solar max) 16.5 MHz.  When a real solar-index feed lands
+# (cf. P-M17), bumping `R12_MODERATE` flows through to both foF2 and
+# foE consistently, instead of having to track the cycle in two
+# unrelated magic numbers.
 
 # E-layer model parameters (P-M23 — replaces an unphysical foE = 0.3·foF2
 # day / 0.5 MHz night with the ITU-R P.1239 / Muggleton (1975) foE
 # formula).  R12 is the 12-month smoothed sunspot number; a moderate
-# value, consistent with FOF2_NOON_MHZ = 9.0, is used as a climatological
-# anchor — the codebase has no separate solar-index feed (cf. P-M17).
+# value is used as a climatological anchor — the codebase has no
+# separate solar-index feed (cf. P-M17).
 R12_MODERATE = 70.0
+
+# Foundational noon foF2 derived from R12 (see Chapman block above).
+FOF2_NOON_MHZ = 6.0 + 0.07 * R12_MODERATE  # ≈ 10.9 MHz at R12=70
+
+# Nighttime foF2 floor (F2 layer persists at night but weakens)
+FOF2_NIGHT_FLOOR_MHZ = 3.0
 # Residual night-time foE (MHz): the E layer nearly vanishes after dusk;
 # this is a small meteoric / residual-ionisation floor.
 FOE_NIGHT_FLOOR_MHZ = 0.5
