@@ -17,6 +17,7 @@ Architecture:
 
 import logging
 import math
+import os
 import time
 import signal
 from pathlib import Path
@@ -411,16 +412,33 @@ class L2CalibrationService:
         l1_dir = self.data_root / "phase2" / channel / "metrology"
         if not l1_dir.exists():
             return False, float('inf')
-        
-        # Find most recent HDF5 file
-        h5_files = list(l1_dir.glob("*.h5"))
-        if not h5_files:
+
+        # Find the newest *.h5 mtime without materialising a full list
+        # (§3.4 Low: previously `list(l1_dir.glob("*.h5"))` happened on
+        # every channel on every poll cycle -- ~9 globs/min, each
+        # allocating a Path object per daily file in the metrology
+        # directory).  `os.scandir` is the same syscall budget but
+        # avoids the Path-object churn and lets us short-circuit on
+        # the first newer-than-threshold entry below.
+        newest_mtime = -1.0
+        try:
+            with os.scandir(l1_dir) as it:
+                for entry in it:
+                    if not entry.name.endswith('.h5'):
+                        continue
+                    try:
+                        m = entry.stat().st_mtime
+                    except OSError:
+                        continue
+                    if m > newest_mtime:
+                        newest_mtime = m
+        except OSError:
             return False, float('inf')
-        
-        # Get modification time of newest file
-        newest_mtime = max(f.stat().st_mtime for f in h5_files)
+
+        if newest_mtime < 0:
+            return False, float('inf')
+
         age_seconds = time.time() - newest_mtime
-        
         return age_seconds < self.max_data_age_seconds, age_seconds
     
     def _process_channel(self, channel: str):
