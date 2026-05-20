@@ -171,22 +171,49 @@ class PropagationEngine:
         )
 
     def _estimate_heuristic(self, dist_km: float) -> PropagationResult:
-        """Legacy distance-based heuristic."""
-        # Speed of light typical overhead
+        """Legacy distance-based heuristic.
+
+        Returns a delay of ``(dist_km / c) × propagation_factor``, where
+        ``propagation_factor`` is the combined geometric-slant + iono
+        overhead expressed as a path-length multiplier over the great-
+        circle ground distance.
+
+        §4.4 Low: the factors below are bounded **> 1** (the radio
+        path is always longer than the great-circle ground distance --
+        it goes up to the ionosphere and back), so a "superluminal"
+        reading of the 1.05 long-path factor is not actually possible:
+        the implied propagation speed is ``c / propagation_factor < c``.
+        The values are calibrated from the older single-hop /
+        multi-hop empirical fit:
+
+          dist_km   factor   notes
+          --------  -------  -------------------------------------------
+          < 3000    1.15     1-hop F2 -- steep elevation, large geometric
+                             zig-zag overhead, iono delay carries weight
+          > 10000   1.05     multi-hop F2 -- shallow elevations, small
+                             per-hop overhead, iono averages out across
+                             many independent ionospheric columns
+          interp    1.15 -> 1.05 linear between
+
+        For real geometry use the `_estimate_geometric` path
+        (`hop_geometry` + 40.3/f² iono); this heuristic is a fallback
+        when no model is available and no frequency is in scope.
+        """
+        # Combined geometric + iono path-length multiplier; see docstring.
         if dist_km < 3000.0:
             propagation_factor = 1.15  # High angle / multi-hop overhead
             uncertainty = 5.0
         elif dist_km > 10000.0:
-            propagation_factor = 1.05  # Efficient ducting / long path
+            propagation_factor = 1.05  # Long path -- per-hop overhead small
             uncertainty = 10.0
         else:
             # Linear interp between 3000 (1.15) and 10000 (1.05)
             slope = (1.05 - 1.15) / (10000.0 - 3000.0)
             propagation_factor = 1.15 + slope * (dist_km - 3000.0)
             uncertainty = 7.0
-            
+
         delay_ms = (dist_km / SPEED_OF_LIGHT_KM_S) * propagation_factor * 1000.0
-        
+
         return PropagationResult(
             delay_ms=delay_ms,
             uncertainty_ms=uncertainty,
