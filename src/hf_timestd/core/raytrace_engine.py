@@ -78,6 +78,19 @@ _pylap_raytrace_2d = None
 _pylap_iri2016 = None
 
 def _try_import_pylap() -> bool:
+    """Lazy import of `pylap` modules.
+
+    §4.4 Low note: this helper mutates `sys.path` at import attempt
+    time when `PYLAP_MODULES` (or its derived fallback path) points
+    at a directory not already on the path.  This is intentional --
+    PHaRLAP's Python bindings ship as a standalone tree outside any
+    site-packages -- but it IS surprising state.  Confined the
+    mutation to this helper (rather than at module top-level) and
+    documented so future "why is sys.path different now?" debugging
+    has a place to land.  The legitimate alternative -- installing
+    pylap as a regular package -- is not currently practical because
+    PHaRLAP itself is closed-source.
+    """
     global _PYLAP_AVAILABLE, _PYLAP_ERROR, _pylap_raytrace_2d, _pylap_iri2016
 
     pylap_path = os.environ.get('PYLAP_MODULES',
@@ -304,7 +317,14 @@ def _build_iri_grid(tx_lat: float, tx_lon: float,
                 height_start, height_step, num_heights, iri_options_dict)
     Returns: (outf_2d, oarr_1d)
         outf_2d[0, :] = electron density profile (m^-3)
-        oarr_1d[0]    = foF2 (MHz),  oarr_1d[1] = hmF2 (km)
+        oarr_1d[0]    = NmF2 (peak F2 electron density, el/m³)
+        oarr_1d[1]    = hmF2 (km)
+
+    (§4.4 Low: docstring used to say oarr_1d[0] was "foF2 (MHz)" --
+    that contradicted the code below, which reads `oarr[0]` as NmF2
+    and applies the NmF2→foF2 conversion `foF2 ≈ 8.98·√NmF2 / 1e6`.
+    Standard IRI2016 output convention is NmF2; the code is right
+    and the previous docstring was wrong.)
 
     Returns a dict ready to pass to pylap.raytrace_2d, or None on failure.
     """
