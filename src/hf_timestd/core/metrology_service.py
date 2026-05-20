@@ -91,6 +91,13 @@ class MetrologyService:
         self.last_minute_unix = None
         self.start_time = time.time()
         self.status_file = self.output_dir / "status.json"
+
+        # M-M19: rate-limited per-product warning timestamps for data-
+        # product write failures.  The contract requires WARNING (not
+        # DEBUG) for these; the rate-limit keeps a stuck backend from
+        # spamming the journal at 50+ records/min/channel.
+        self._last_write_warn_ts: Dict[str, float] = {}
+        self._WRITE_WARN_INTERVAL_SEC = 60.0
         
         # RTP Offset Learning
         self._rtp_to_unix_offset = None
@@ -511,7 +518,9 @@ class MetrologyService:
                     )
                     if success:
                         self.processed_minutes.add(next_minute)
-                        self._cleanup_processed_set()
+                        # M-M20: prune the processed-minute set against
+                        # ring-derived UTC, not the OS clock.
+                        self._cleanup_processed_set(now_utc=head_utc)
                         logger.info(
                             f"[{self.channel_name}] minute {next_minute} "
                             f"processed successfully"
@@ -697,15 +706,19 @@ class MetrologyService:
                             self.tick_phase_writer.write_measurements_batch(phase_batch)
                             logger.debug(f"Tick phase written: {len(phase_batch)} windows")
                         except Exception as ph_err:
-                            logger.debug(f"Failed to write tick phase batch: {ph_err}")
+                            self._warn_write_failure("tick_phase", ph_err)
 
-            # Write detection attempts (every measurement attempt for threshold calibration)
+            # Write detection attempts (every measurement attempt for threshold calibration).
+            # M-M18: batched.  Each minute generates ~50+ attempt rows per
+            # channel; per-record write_measurement() calls were the same
+            # heap-corruption risk the data contract already calls out
+            # for tick_phase.
             if self.attempts_writer and hasattr(self.engine, '_last_rtp_attempts'):
                 rtp_attempts = self.engine._last_rtp_attempts
                 if rtp_attempts:
                     now_iso = datetime.now(timezone.utc).isoformat()
-                    for attempt in rtp_attempts:
-                        attempt_rec = {
+                    attempt_batch = [
+                        {
                             'timestamp_utc': now_iso,
                             'minute_boundary_utc': minute_boundary,
                             'channel': self.channel_name,
@@ -723,25 +736,32 @@ class MetrologyService:
                             'corr_snr_db': attempt.get('corr_snr_db', -99),
                             'peak_correlation': attempt.get('peak_correlation', 0),
                             'processed_at': now_iso,
-                            'processing_version': "1.0.0"
+                            'processing_version': "1.0.0",
                         }
+                        for attempt in rtp_attempts
+                    ]
+                    if attempt_batch:
                         try:
-                            self.attempts_writer.write_measurement(attempt_rec)
+                            self.attempts_writer.write_measurements_batch(attempt_batch)
                         except Exception as att_err:
-                            logger.debug(f"Failed to write attempt record: {att_err}")
-                    
+                            self._warn_write_failure("detection_attempts", att_err)
+
                     n_det = sum(1 for a in rtp_attempts if a.get('detected'))
                     logger.debug(f"Detection attempts written: {len(rtp_attempts)} total, "
                                 f"{n_det} detected, {len(rtp_attempts) - n_det} rejected")
             
-            # Write all-arrivals (multi-path physics product)
-            # For each detected attempt that has secondary correlation peaks,
-            # write one row per arrival path.  This is purely additive — the
-            # metrology pipeline is unaffected.
+            # Write all-arrivals (multi-path physics product).
+            # For each detected attempt that has secondary correlation
+            # peaks, build one row per arrival path; batch them under
+            # M-M18 to avoid the per-record write pattern flagged in
+            # the data contract for tick_phase.  This is purely additive —
+            # the metrology pipeline is unaffected.
             if self.all_arrivals_writer and hasattr(self.engine, '_last_rtp_attempts'):
                 rtp_attempts = self.engine._last_rtp_attempts
                 if rtp_attempts:
                     now_iso = datetime.now(timezone.utc).isoformat()
+                    freq_mhz = self.frequency_hz / 1e6
+                    arrival_batch: List[Dict[str, Any]] = []
                     n_multipath = 0
                     for attempt in rtp_attempts:
                         if not attempt.get('detected'):
@@ -751,10 +771,9 @@ class MetrologyService:
                             continue
                         utc_sec = attempt.get('utc_second', 0)
                         station = attempt.get('station', '')
-                        freq_mhz = self.frequency_hz / 1e6
                         expected_ms = attempt.get('expected_delay_ms', 0.0)
                         for arr in arrivals:
-                            rec = {
+                            arrival_batch.append({
                                 'timestamp_utc': now_iso,
                                 'minute_boundary_utc': minute_boundary,
                                 'channel': self.channel_name,
@@ -772,13 +791,14 @@ class MetrologyService:
                                 'sec_in_minute': int(utc_sec % 60) if utc_sec else 0,
                                 'processed_at': now_iso,
                                 'processing_version': "2.0.0",
-                            }
-                            try:
-                                self.all_arrivals_writer.write_measurement(rec)
-                                if arr.get('peak_rank', 0) > 0:
-                                    n_multipath += 1
-                            except Exception as arr_err:
-                                logger.debug(f"Failed to write all_arrivals record: {arr_err}")
+                            })
+                            if arr.get('peak_rank', 0) > 0:
+                                n_multipath += 1
+                    if arrival_batch:
+                        try:
+                            self.all_arrivals_writer.write_measurements_batch(arrival_batch)
+                        except Exception as arr_err:
+                            self._warn_write_failure("all_arrivals", arr_err)
                     if n_multipath > 0:
                         logger.info(f"All-arrivals: {n_multipath} secondary path(s) recorded")
 
@@ -789,9 +809,16 @@ class MetrologyService:
             # propagation delay residual.  Multipath modes show as distinct
             # clusters in the (delay, phase) plane even when temporally unresolved.
             if self.all_arrivals_writer and edge_results:
+                # M-M18: edge ticks + CLEAN multipath share one batch.
+                # The old code emitted one HDF5 write per detected tick
+                # *and* per CLEAN component — 50+ rows/min/channel — the
+                # same per-record pattern the data contract calls out as
+                # heap-corruption-risky for tick_phase.
                 now_iso = datetime.now(timezone.utc).isoformat()
                 freq_mhz = self.frequency_hz / 1e6
+                edge_batch: List[Dict[str, Any]] = []
                 n_edge_ticks = 0
+                n_clean_multipath = 0
                 for station_name, edge_result in edge_results.items():
                     if not edge_result.edges:
                         continue
@@ -804,11 +831,10 @@ class MetrologyService:
                         except Exception as e:
                             logger.debug(f"Ignored exception: {e}")
                             pass
-                    n_clean_multipath = 0
                     for tick in edge_result.edges:
                         if not tick.detected:
                             continue
-                        rec = {
+                        edge_batch.append({
                             'timestamp_utc': now_iso,
                             'minute_boundary_utc': minute_boundary,
                             'channel': self.channel_name,
@@ -826,19 +852,15 @@ class MetrologyService:
                             'sec_in_minute': tick.sec_in_minute,
                             'processed_at': now_iso,
                             'processing_version': "2.0.0",
-                        }
-                        try:
-                            self.all_arrivals_writer.write_measurement(rec)
-                            n_edge_ticks += 1
-                        except Exception as edge_err:
-                            logger.debug(f"Failed to write edge tick record: {edge_err}")
-                        
-                        # Write CLEAN multipath arrivals (rank >= 1 only;
-                        # rank 0 is the same as the edge_tick primary above).
+                        })
+                        n_edge_ticks += 1
+
+                        # Append CLEAN multipath arrivals (rank >= 1
+                        # only; rank 0 is the edge_tick primary above).
                         for comp in tick.clean_arrivals:
                             if comp.peak_rank == 0:
                                 continue
-                            clean_rec = {
+                            edge_batch.append({
                                 'timestamp_utc': now_iso,
                                 'minute_boundary_utc': minute_boundary,
                                 'channel': self.channel_name,
@@ -856,12 +878,13 @@ class MetrologyService:
                                 'sec_in_minute': tick.sec_in_minute,
                                 'processed_at': now_iso,
                                 'processing_version': "2.0.0",
-                            }
-                            try:
-                                self.all_arrivals_writer.write_measurement(clean_rec)
-                                n_clean_multipath += 1
-                            except Exception as clean_err:
-                                logger.debug(f"Failed to write CLEAN record: {clean_err}")
+                            })
+                            n_clean_multipath += 1
+                if edge_batch:
+                    try:
+                        self.all_arrivals_writer.write_measurements_batch(edge_batch)
+                    except Exception as edge_err:
+                        self._warn_write_failure("all_arrivals", edge_err)
                 if n_edge_ticks > 0:
                     logger.info(f"All-arrivals: {n_edge_ticks} edge tick(s) written "
                                f"for Doppler-Delay analysis")
@@ -1024,10 +1047,49 @@ class MetrologyService:
         except Exception as e:
             logger.error(f"Status write failed: {e}")
     
-    def _cleanup_processed_set(self):
-        """Keep processed set small."""
-        now_min = (int(time.time()) // 60) * 60
-        old_mins = [m for m in self.processed_minutes if m < now_min - 3600]
+    def _warn_write_failure(self, product: str, exc: Exception) -> None:
+        """Emit a rate-limited WARNING for a data-product write failure (M-M19).
+
+        The contract calls for these to be WARNING-level (so a stuck
+        backend is visible in operations), not DEBUG.  Rate-limiting
+        keeps the journal sane if a backend goes hard down: one
+        WARNING per product per ``_WRITE_WARN_INTERVAL_SEC``, with the
+        suppressed count surfaced on the next emitted line so nothing
+        is silently hidden.
+        """
+        now = time.time()
+        suppressed_key = f"{product}::suppressed"
+        last = self._last_write_warn_ts.get(product, 0.0)
+        if now - last >= self._WRITE_WARN_INTERVAL_SEC:
+            suppressed = int(self._last_write_warn_ts.get(suppressed_key, 0))
+            extra = f" (suppressed {suppressed} similar in last interval)" if suppressed else ""
+            logger.warning(
+                f"[{self.channel_name}] Failed to write {product}: {exc}{extra}"
+            )
+            self._last_write_warn_ts[product] = now
+            self._last_write_warn_ts[suppressed_key] = 0
+        else:
+            self._last_write_warn_ts[suppressed_key] = (
+                int(self._last_write_warn_ts.get(suppressed_key, 0)) + 1
+            )
+
+    def _cleanup_processed_set(self, now_utc: Optional[float] = None) -> None:
+        """Drop minutes older than 1 h from ``self.processed_minutes``.
+
+        M-M20: the horizon is computed from ``now_utc`` — the caller's
+        ring-derived UTC (``head_utc``) — *not* ``time.time()``.  In
+        Fusion mode the OS clock can be hours off the RTP-derived UTC
+        that the minutes are keyed by; using ``time.time()`` would
+        either prune live minutes (causing them to be reprocessed) or
+        let the set grow unbounded.  Falls back to ``time.time()`` only
+        when the caller didn't pass an authoritative value (legacy
+        paths and tests).
+        """
+        if now_utc is None:
+            now_utc = time.time()
+        now_min = (int(now_utc) // 60) * 60
+        horizon = now_min - 3600
+        old_mins = [m for m in self.processed_minutes if m < horizon]
         for m in old_mins:
             self.processed_minutes.remove(m)
 
