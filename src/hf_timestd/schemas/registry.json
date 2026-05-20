@@ -1,7 +1,7 @@
 {
-    "registry_version": "1.1.0",
+    "registry_version": "1.2.0",
     "description": "Schema registry mapping data products to schema versions",
-    "last_updated": "2026-02-20T01:00:00Z",
+    "last_updated": "2026-05-20T19:30:00Z",
     "data_dictionary": "data_dictionary.json",
     "data_products": {
         "L1A_channel_observables": {
@@ -98,12 +98,24 @@
             "schema_file": "l3_dtec_diff_v1.json",
             "description": "Per-minute differential dTEC RMS between frequency pairs for the same station",
             "replaces": []
+        },
+        "DIAG_chrony_stats": {
+            "current_version": "v1",
+            "schema_file": "diag_chrony_stats_v1.json",
+            "description": "Diagnostic snapshot of chronyd source comparison (one row per source per ~1/min snapshot); replaces the Phase-3-era chrony_sources HDF5 group written by core/chrony_stats.py.",
+            "replaces": [
+                "chrony_sources (HDF5 group in phase2/fusion/chrony_stats_YYYYMMDD.h5)"
+            ]
         }
     },
     "version_history": {
         "1.0.0": {
             "date": "2025-12-24",
             "changes": "Initial schema registry creation"
+        },
+        "1.2.0": {
+            "date": "2026-05-20",
+            "changes": "Phase 4 Step 1: add DIAG_chrony_stats (chrony diagnostic snapshot, SQLite-only)"
         }
     }
 }

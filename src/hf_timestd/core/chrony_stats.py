@@ -5,7 +5,12 @@ Parses chronyc output to collect source comparison data for metrology validation
 Runs periodically from the fusion service to track how TSL1/TSL2 compare against
 NTP and GPS sources over time.
 
-Data is written to HDF5 for historical analysis and exposed via the web API.
+Snapshots are written to the ``DIAG_chrony_stats`` SQLite table (one row per
+source per snapshot) via :func:`make_data_product_writer` and exposed via the
+web API from the in-memory circular buffer. Backend selection is governed by
+``[storage] write_hdf5 / write_sqlite`` in ``timestd-config.toml`` — the
+factory raises if both are off, so this module no longer carries an
+HDF5-specific gate of its own.
 """
 
 import logging
@@ -334,7 +339,10 @@ class ChronyStatsCollector:
 
     Call collect() from the fusion main loop. It rate-limits to
     at most once per `interval_sec` seconds. Results are stored
-    in a circular buffer and optionally written to HDF5.
+    in a circular buffer and persisted as one row per chrony source
+    per snapshot in the ``DIAG_chrony_stats`` SQLite table (Phase 4
+    Step 1 — previously a custom HDF5 group bypassing the schema
+    registry).
     """
 
     def __init__(
@@ -349,15 +357,14 @@ class ChronyStatsCollector:
         self._history: List[ChronySnapshot] = []
         self._history_maxlen = history_size
         self._data_root = data_root
-        # chrony_stats is a diagnostic-only product outside the schema
-        # registry — it bypasses make_data_product_writer and writes
-        # HDF5 directly via h5py. Honour the [storage] write_hdf5 flag
-        # here so Phase 3b actually stops HDF5 writes site-wide.
-        # Phase 4 follow-up: convert this to a proper schema-based
-        # product with SQLite parity.
-        self._write_hdf5_enabled = bool(
-            (storage_config or {}).get('write_hdf5', True)
-        )
+        # Backend selection is now governed by [storage] write_hdf5 /
+        # write_sqlite in timestd-config.toml via the writer factory.
+        # We hold onto storage_config so the writer can be constructed
+        # lazily on the first successful snapshot (delays the SQLite
+        # connection until we know chronyd is reachable).
+        self._storage_config = storage_config
+        self._writer = None  # Lazy — see _ensure_writer().
+        self._writer_init_attempted = False
         self._available = None  # None = not checked yet
 
     def collect(self, force: bool = False) -> Optional[ChronySnapshot]:
@@ -394,9 +401,10 @@ class ChronyStatsCollector:
         # Log summary
         self._log_snapshot(snapshot)
 
-        # Write to HDF5 (gated by [storage] write_hdf5 — see __init__)
-        if self._data_root and self._write_hdf5_enabled:
-            self._write_hdf5(snapshot)
+        # Persist (SQLite via make_data_product_writer; backend choice
+        # comes from [storage] in timestd-config.toml — see __init__).
+        if self._data_root is not None:
+            self._write_snapshot(snapshot)
 
         return snapshot
 
@@ -419,111 +427,101 @@ class ChronyStatsCollector:
             )
         logger.info(f"[CHRONY] {' | '.join(parts)}")
 
-    def _write_hdf5(self, snap: ChronySnapshot):
-        """Append chrony snapshot to daily HDF5 file."""
-        try:
-            import h5py
-            import numpy as np
+    def _ensure_writer(self):
+        """Lazily construct the SQLite writer on first use.
 
-            date_str = datetime.now(timezone.utc).strftime('%Y%m%d')
+        Deferred until the first successful chrony snapshot so a missing
+        chronyd doesn't leave a stray DB file behind, and so init-time
+        failures don't crash the fusion service startup. Returns the
+        writer or None — a None return is permanent for this collector
+        instance (we don't retry on every snapshot).
+        """
+        if self._writer is not None or self._writer_init_attempted:
+            return self._writer
+        self._writer_init_attempted = True
+        if self._data_root is None:
+            return None
+        try:
+            from hf_timestd.io.dual_writer import make_data_product_writer
             fusion_dir = self._data_root / 'phase2' / 'fusion'
             fusion_dir.mkdir(parents=True, exist_ok=True)
-            h5_path = fusion_dir / f'chrony_stats_{date_str}.h5'
-
-            # Create file with libver='latest' on first use so SWMR works.
-            # Then open r+ and enable swmr_mode before appending, consistent
-            # with the rest of the codebase.
-            if not h5_path.exists():
-                with h5py.File(h5_path, 'w', libver='latest') as _init:
-                    _init.require_group('chrony_sources')
-
-            with h5py.File(h5_path, 'r+', libver='latest') as f:
-                f.swmr_mode = True
-                # Flat table: one row per source per snapshot
-                grp = f.require_group('chrony_sources')
-
-                # Determine next row index
-                if 'timestamp_utc' in grp:
-                    n_existing = len(grp['timestamp_utc'])
-                else:
-                    n_existing = 0
-
-                n_new = len(snap.sources)
-                if n_new == 0:
-                    return
-
-                # Column arrays for this batch
-                timestamps = [snap.timestamp_utc] * n_new
-                unix_times = [snap.unix_time] * n_new
-                names = [s.name for s in snap.sources]
-                modes = [s.mode for s in snap.sources]
-                states = [s.state for s in snap.sources]
-                stratums = [s.stratum for s in snap.sources]
-                offsets_us = [s.offset_us for s in snap.sources]
-                errors_us = [s.error_us for s in snap.sources]
-                n_samples = [s.n_samples for s in snap.sources]
-                freq_ppms = [s.frequency_ppm for s in snap.sources]
-                freq_skews = [s.freq_skew_ppm for s in snap.sources]
-                std_devs = [s.std_dev_us for s in snap.sources]
-                reaches = [s.reach for s in snap.sources]
-
-                # Tracking fields (repeated per source row for easy joins)
-                if snap.tracking:
-                    sys_offsets = [snap.tracking.system_time_offset_s] * n_new
-                    rms_offsets = [snap.tracking.rms_offset_s] * n_new
-                    ref_ids = [snap.tracking.reference_id] * n_new
-                else:
-                    sys_offsets = [float('nan')] * n_new
-                    rms_offsets = [float('nan')] * n_new
-                    ref_ids = [''] * n_new
-
-                # Write columns (create or append).
-                # Fixed-length byte strings (S-type) are required for SWMR mode.
-                # Variable-length strings use the HDF5 heap and are incompatible
-                # with SWMR — using them silently corrupts writes.
-                _STR_DTYPE = 'S64'  # 64 bytes covers all chrony stat string fields
-                columns = {
-                    'timestamp_utc': (timestamps, _STR_DTYPE),
-                    'unix_time': (unix_times, 'f8'),
-                    'source_name': (names, _STR_DTYPE),
-                    'source_mode': (modes, _STR_DTYPE),
-                    'source_state': (states, _STR_DTYPE),
-                    'stratum': (stratums, 'i4'),
-                    'offset_us': (offsets_us, 'f8'),
-                    'error_us': (errors_us, 'f8'),
-                    'n_samples': (n_samples, 'i4'),
-                    'frequency_ppm': (freq_ppms, 'f8'),
-                    'freq_skew_ppm': (freq_skews, 'f8'),
-                    'std_dev_us': (std_devs, 'f8'),
-                    'reach': (reaches, 'i4'),
-                    'sys_offset_s': (sys_offsets, 'f8'),
-                    'rms_offset_s': (rms_offsets, 'f8'),
-                    'reference_id': (ref_ids, _STR_DTYPE),
-                }
-
-                for col_name, (data, dtype) in columns.items():
-                    if dtype == _STR_DTYPE:
-                        arr = np.array(
-                            [v.encode('utf-8')[:64] for v in data],
-                            dtype=_STR_DTYPE
-                        )
-                    else:
-                        arr = np.array(data, dtype=dtype)
-                    if col_name in grp:
-                        ds = grp[col_name]
-                        ds.resize(n_existing + n_new, axis=0)
-                        ds[n_existing:] = arr
-                    else:
-                        grp.create_dataset(
-                            col_name, data=arr,
-                            maxshape=(None,), chunks=True,
-                            dtype=dtype,
-                        )
-
-        except ImportError:
-            pass  # h5py not available
+            self._writer = make_data_product_writer(
+                output_dir=fusion_dir,
+                product_level='DIAG',
+                product_name='chrony_stats',
+                # chrony sees the whole system, not per-RF-channel data;
+                # tag rows with 'fusion' (the service that owns this
+                # collector) so the writer's required channel column
+                # carries useful provenance.
+                channel='fusion',
+                storage_config=self._storage_config,
+            )
         except Exception as e:
-            logger.debug(f"Failed to write chrony stats HDF5: {e}")
+            logger.warning(f"chrony stats writer init failed: {e}")
+            self._writer = None
+        return self._writer
+
+    def _write_snapshot(self, snap: ChronySnapshot):
+        """Persist one snapshot as one row per chrony source.
+
+        Tracking fields are denormalised across every row of the snapshot
+        so per-source queries can read tracking context without a join —
+        same shape the HDF5 group used to carry. If tracking parsing
+        failed, the corresponding row columns are written as NULL.
+        """
+        if not snap.sources:
+            return
+        writer = self._ensure_writer()
+        if writer is None:
+            return
+
+        if snap.tracking:
+            sys_offset_s = snap.tracking.system_time_offset_s
+            rms_offset_s = snap.tracking.rms_offset_s
+            reference_id = snap.tracking.reference_id
+        else:
+            sys_offset_s = None
+            rms_offset_s = None
+            reference_id = None
+
+        rows: List[Dict[str, Any]] = []
+        for src in snap.sources:
+            row = {
+                'timestamp_utc': snap.timestamp_utc,
+                'unix_time': snap.unix_time,
+                'source_name': src.name,
+                'source_mode': src.mode,
+                'source_state': src.state,
+                'stratum': src.stratum,
+                'reach': src.reach,
+                'offset_us': src.offset_us,
+                'error_us': src.error_us,
+                'n_samples': src.n_samples,
+                'frequency_ppm': src.frequency_ppm,
+                'freq_skew_ppm': src.freq_skew_ppm,
+                'std_dev_us': src.std_dev_us,
+            }
+            # Only include tracking columns when we actually have values;
+            # the schema marks them not-required so omission writes NULL.
+            if sys_offset_s is not None:
+                row['sys_offset_s'] = sys_offset_s
+                row['rms_offset_s'] = rms_offset_s
+                row['reference_id'] = reference_id
+            rows.append(row)
+
+        try:
+            writer.write_measurements_batch(rows)
+        except Exception as e:
+            logger.debug(f"Failed to write chrony stats: {e}")
+
+    def close(self) -> None:
+        """Release the SQLite writer (call on service shutdown)."""
+        if self._writer is not None:
+            try:
+                self._writer.close()
+            except Exception as e:
+                logger.debug(f"Error closing chrony stats writer: {e}")
+            self._writer = None
 
     @property
     def available(self) -> bool:

@@ -1,0 +1,125 @@
+{
+    "schema_version": "1.0.0",
+    "data_product": "DIAG_chrony_stats",
+    "description": "Diagnostic snapshot of chronyd source comparison (one row per chrony source per snapshot, ~1/min from the fusion service). Per-source fields come from `chronyc sources` + `chronyc sourcestats`; the trailing `*_offset_s` and `reference_id` columns are denormalised from `chronyc tracking` and repeated across every row of the snapshot so per-source queries can read tracking context without a join.",
+    "cadence_seconds": 60,
+    "processing_level": "DIAG",
+    "reference": "chronyd internal state (queried via chronyc)",
+    "quality_flags": {
+        "GOOD": "Not used — this is a diagnostic product. chrony's own selection state (source_state column) is the quality signal."
+    },
+    "fields": [
+        {
+            "name": "timestamp_utc",
+            "type": "string",
+            "format": "iso8601",
+            "required": true,
+            "description": "Snapshot wall-clock UTC timestamp"
+        },
+        {
+            "name": "unix_time",
+            "type": "float",
+            "required": true,
+            "description": "Snapshot wall-clock UTC as seconds since the Unix epoch (joinable with other products' minute_boundary_utc)",
+            "units": "seconds"
+        },
+        {
+            "name": "source_name",
+            "type": "string",
+            "required": true,
+            "description": "chrony source name or IP (e.g. 'TSL1', '192.168.0.203')"
+        },
+        {
+            "name": "source_mode",
+            "type": "string",
+            "required": true,
+            "description": "chrony source mode character: '#' refclock, '^' server, '=' peer"
+        },
+        {
+            "name": "source_state",
+            "type": "string",
+            "required": true,
+            "description": "chrony selection state character: '*' selected, '+' combined, '-' not combined, 'x' falseticker, '~' too variable, '?' unusable"
+        },
+        {
+            "name": "stratum",
+            "type": "integer",
+            "required": true,
+            "description": "Source stratum"
+        },
+        {
+            "name": "reach",
+            "type": "integer",
+            "required": true,
+            "description": "Reachability register (chronyc displays octal; stored here as the integer value)"
+        },
+        {
+            "name": "offset_us",
+            "type": "float",
+            "required": true,
+            "allow_nan": true,
+            "description": "Adjusted offset measured from this source",
+            "units": "microseconds"
+        },
+        {
+            "name": "error_us",
+            "type": "float",
+            "required": true,
+            "allow_nan": true,
+            "description": "Estimated error of this source",
+            "units": "microseconds"
+        },
+        {
+            "name": "n_samples",
+            "type": "integer",
+            "required": true,
+            "description": "Number of sourcestats samples retained in chrony's window"
+        },
+        {
+            "name": "frequency_ppm",
+            "type": "float",
+            "required": true,
+            "allow_nan": true,
+            "description": "Estimated frequency offset of this source vs the local clock",
+            "units": "ppm"
+        },
+        {
+            "name": "freq_skew_ppm",
+            "type": "float",
+            "required": true,
+            "allow_nan": true,
+            "description": "Estimated standard deviation of the source frequency",
+            "units": "ppm"
+        },
+        {
+            "name": "std_dev_us",
+            "type": "float",
+            "required": true,
+            "allow_nan": true,
+            "description": "Standard deviation of source samples (sourcestats)",
+            "units": "microseconds"
+        },
+        {
+            "name": "sys_offset_s",
+            "type": "float",
+            "required": false,
+            "allow_nan": true,
+            "description": "From `chronyc tracking`: system clock offset right after the last update. Broadcast to every row of this snapshot; NULL if tracking parse failed.",
+            "units": "seconds"
+        },
+        {
+            "name": "rms_offset_s",
+            "type": "float",
+            "required": false,
+            "allow_nan": true,
+            "description": "From `chronyc tracking`: long-term RMS of offsets. Broadcast to every row of this snapshot; NULL if tracking parse failed.",
+            "units": "seconds"
+        },
+        {
+            "name": "reference_id",
+            "type": "string",
+            "required": false,
+            "description": "From `chronyc tracking`: synced-from reference ID. Broadcast to every row of this snapshot; NULL if tracking parse failed."
+        }
+    ]
+}
