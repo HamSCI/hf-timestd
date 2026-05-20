@@ -184,7 +184,7 @@ HFPropagationModel.predict(station, frequency, utc_time) → {
 
 ## 5. Known Deviations (current code vs. this contract)
 
-Recorded 2026-05-17 from the code review (`docs/CODE_REVIEW_2026-05-17_METROLOGY_PHYSICS.md`). These are points where the **current code does not yet meet the contract above**. The contract states the intended design; this section is the honest gap list. Each item should be resolved by either fixing the code or — if the clause itself is wrong — amending the clause.
+Recorded 2026-05-17 from the code review (`docs/CODE_REVIEW_2026-05-17_METROLOGY_PHYSICS.md`); re-reconciled 2026-05-20 after the remediation pass. These are points where the **current code does not yet meet the contract above**. The contract states the intended design; this section is the honest gap list. Each item should be resolved by either fixing the code or — if the clause itself is wrong — amending the clause.
 
 | # | Contract clause | 2026-05-17 reality | 2026-05-20 status | Review ref |
 |---|-----------------|--------------------|-------------------|------------|
