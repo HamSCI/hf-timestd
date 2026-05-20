@@ -315,14 +315,30 @@ class BroadcastKalmanFilter:
     def update(self, measurement_ms: float, snr_db: float) -> Tuple[float, float]:
         """
         Update filter with new measurement.
-        
+
         Args:
             measurement_ms: Measured ToF in milliseconds
             snr_db: Signal-to-noise ratio in dB
-            
+
         Returns:
             (tof_ms, uncertainty_ms)
         """
+        # M-M15: NaN/Inf guard.  Either input being non-finite poisons
+        # the state covariance instantly (the L3 NaN filter in the fusion
+        # service runs downstream, so it couldn't catch corruption that
+        # had already landed in `self.P` here).  Refuse the update and
+        # return the current state/uncertainty so the caller sees a
+        # well-defined "no-op" answer rather than NaN.  ~10⁶ updates/week
+        # means we cannot rely on upstream cleanliness for safety.
+        if not (np.isfinite(measurement_ms) and np.isfinite(snr_db)):
+            logger.warning(
+                f"{self.broadcast_id}: non-finite Kalman input rejected "
+                f"(measurement_ms={measurement_ms!r}, snr_db={snr_db!r})"
+            )
+            if not self.initialized:
+                return float('nan'), float('nan')
+            return float(self.state[0]), float(np.sqrt(self.P[0, 0]))
+
         # Initialize on first measurement
         if not self.initialized:
             self.state[0] = measurement_ms
@@ -330,14 +346,14 @@ class BroadcastKalmanFilter:
             self.initialized = True
             self.n_updates = 1
             self.last_update_time = datetime.now(timezone.utc)
-            
+
             uncertainty = np.sqrt(self.P[0, 0])
             logger.info(
                 f"{self.broadcast_id} initialized: "
                 f"tof={measurement_ms:.3f}ms, uncertainty={uncertainty:.3f}ms"
             )
             return measurement_ms, uncertainty
-        
+
         # PREDICT (state) — F advances tof by doppler·dt. The covariance
         # predict is deferred until the adaptive Q is known (below).
         self.state = self.F @ self.state
@@ -375,15 +391,34 @@ class BroadcastKalmanFilter:
 
         # Update step (same innovation derived above)
         self.state = self.state + K.flatten() * innovation
-        self.P = (np.eye(2) - K @ self.H) @ self.P
-        
+
+        # M-M14: Joseph-form covariance update.
+        #
+        #     P = (I − K H) P (I − K H)ᵀ + K R Kᵀ
+        #
+        # The short form `P = (I − K H) P` is mathematically equivalent
+        # in exact arithmetic, but at finite precision it neither
+        # preserves symmetry nor guarantees positive-definiteness — both
+        # of which the Kalman gain on the *next* cycle needs.  With ~10⁶
+        # updates per week per broadcast bank, asymmetry and tiny
+        # negative eigenvalues accumulate; this filter would eventually
+        # produce NaN gains or negative-variance states.  The Joseph
+        # form is symmetric by construction (a congruence transform of a
+        # symmetric P plus a symmetric outer product) and remains PD as
+        # long as P was PD and R > 0.  A belt-and-braces explicit
+        # symmetrisation (½(P + Pᵀ)) cleans up the last bits of
+        # asymmetry the asymmetric subtraction `I − KH` can shed.
+        IKH = np.eye(2) - K @ self.H
+        self.P = IKH @ self.P @ IKH.T + (K @ K.T) * float(R)
+        self.P = 0.5 * (self.P + self.P.T)
+
         # Increment counter
         self.n_updates += 1
         self.last_update_time = datetime.now(timezone.utc)
-        
+
         # Extract uncertainty
         uncertainty = np.sqrt(self.P[0, 0])
-        
+
         return self.state[0], uncertainty
     
     def _get_measurement_noise(self, snr_db: float) -> float:
