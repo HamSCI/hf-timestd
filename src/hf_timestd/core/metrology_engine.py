@@ -1679,7 +1679,7 @@ class MetrologyEngine:
                     elif station_name in stations_with_corr and edge_result.ensemble_n_edges >= 5:
                         # Station already has correlation detection.
                         # Log the edge ensemble as a cross-check.
-                        corr_err = [m['timing_error_ms'] for m in measurements 
+                        corr_err = [m['timing_error_ms'] for m in measurements
                                    if m['station'] == station_name]
                         if corr_err:
                             delta = edge_result.ensemble_timing_error_ms - corr_err[0]
@@ -1689,6 +1689,95 @@ class MetrologyEngine:
                                 f"edge={edge_result.ensemble_timing_error_ms:+.3f}ms, "
                                 f"Δ={delta:+.3f}ms "
                                 f"({edge_result.ensemble_n_edges} edges)")
+
+                            # Override the corr row(s) with an edge synth when
+                            # the two disagree by more than EDGE_CORR_OVERRIDE_MS.
+                            # The edge ensemble (typically 50+ per-second ticks
+                            # passed through a MAD consistency filter) is the
+                            # more robust source — a 50 ms+ disagreement means
+                            # the correlator has locked onto a sidelobe of the
+                            # 800 ms minute marker or a multipath echo and would
+                            # be physics-rejected anyway at line ~2069 (5σ
+                            # hard cutoff).  Without this override the L1 row
+                            # is dropped entirely and the good edge timing is
+                            # wasted on the no-corr synth gate above (the
+                            # corr "detection" puts the station into
+                            # stations_with_corr, which suppresses synth
+                            # promotion).
+                            #
+                            # First observed on bee1 2026-05-20 18:29:01 UTC
+                            # when high-frequency WWV channels (≥10 MHz) all
+                            # started reporting corr -370 to -390 ms / edge
+                            # +15 to +17 ms simultaneously — a propagation
+                            # regime shift, not a code regression.  Without
+                            # the override these channels write zero L1 rows
+                            # for the duration of the regime.
+                            #
+                            # BPM excluded for the same reason as the no-corr
+                            # synth gate above: tick-duration discrimination
+                            # collapses on shared frequencies.
+                            EDGE_CORR_OVERRIDE_MS = 50.0
+                            if (station_name != 'BPM'
+                                    and abs(delta) > EDGE_CORR_OVERRIDE_MS):
+                                mid_utc = (buf_start_utc + buf_end_utc) / 2.0
+                                utc_second = int(round(mid_utc))
+                                synth_arrival_utc = (
+                                    mid_utc
+                                    + prop_delay_sec
+                                    + edge_result.ensemble_timing_error_ms / 1000.0
+                                )
+                                synth_arrival_sample = buffer_timing.utc_to_sample(synth_arrival_utc)
+                                synth_arrival_ms = synth_arrival_sample * 1000 / self.sample_rate
+
+                                # Mirror the no-corr synth dict layout so
+                                # downstream code (the L1MetrologyMeasurement
+                                # construction loop, the per-station best
+                                # selector, ToneDetectionResult conversion)
+                                # can't tell the two paths apart, beyond the
+                                # diagnostic detection_method tag.
+                                synth_measurement = {
+                                    'station': station_name,
+                                    'frequency_hz': tone_freq,
+                                    'arrival_ms': synth_arrival_ms,
+                                    'expected_delay_ms': prop_delay_ms,
+                                    'timing_error_ms': edge_result.ensemble_timing_error_ms,
+                                    'snr_db': edge_result.mean_edge_snr_db,
+                                    'corr_snr_db': edge_result.mean_edge_snr_db,
+                                    'tone_power': 0.0,
+                                    'peak_correlation': 0.0,
+                                    'detected': True,
+                                    'rejection_reason': None,
+                                    'utc_second': utc_second,
+                                    'tone_duration_sec': 0.005,
+                                    'arrival_utc': synth_arrival_utc,
+                                    'detection_method': 'edge_ensemble_corr_override',
+                                    'edge_n': edge_result.ensemble_n_edges,
+                                    'edge_uncertainty_ms': edge_result.ensemble_uncertainty_ms,
+                                    'edge_confidence': edge_result.confidence,
+                                }
+
+                                # Drop ALL corr rows for this station — the
+                                # per-second loop tries up to 15 candidates so
+                                # there can be more than one — and append the
+                                # single edge synth as the authoritative row.
+                                n_replaced = sum(
+                                    1 for m in measurements
+                                    if m['station'] == station_name
+                                )
+                                measurements[:] = [
+                                    m for m in measurements
+                                    if m['station'] != station_name
+                                ]
+                                measurements.append(synth_measurement)
+                                logger.info(
+                                    f"{self.channel_name}: {station_name} EDGE OVERRIDE: "
+                                    f"|Δ|={abs(delta):.1f}ms > {EDGE_CORR_OVERRIDE_MS:.0f}ms "
+                                    f"threshold; replacing {n_replaced} corr row(s) with "
+                                    f"edge synth (timing="
+                                    f"{edge_result.ensemble_timing_error_ms:+.3f}"
+                                    f"±{edge_result.ensemble_uncertainty_ms:.3f}ms, "
+                                    f"{edge_result.ensemble_n_edges} edges, "
+                                    f"conf={edge_result.confidence:.2f})")
             
             # Store edge results for caller to retrieve
             self._last_edge_results = edge_results
