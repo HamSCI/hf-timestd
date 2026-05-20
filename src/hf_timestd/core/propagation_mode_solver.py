@@ -105,6 +105,20 @@ STATION_LOCATIONS = {
 # Typical midlatitude daytime: ~1-3 µs/MHz² (we use average)
 IONO_DELAY_COEFF_US_MHZ2 = 2.0  # µs per MHz² (approximate)
 
+# Climatological critical frequencies for the Tier-2 (no real-time iono
+# data) MUF check (M-M30).  Mid-latitude daytime averages — chosen
+# conservative so we don't reject genuinely-feasible modes.  Tier-1
+# (HFPropagationModel) uses real-time foF2/hmF2 and its own MUF gate;
+# this is only the fallback path's climatology.
+NOMINAL_FOF2_MHZ = 8.0   # F2 critical frequency: ~6-12 MHz day, ~3-5 night
+NOMINAL_FOE_MHZ = 3.0    # E critical frequency: ~2-4 MHz daytime
+
+# E-layer TEC is climatologically ~10 % of F2 TEC (Schunk & Nagy 2009),
+# so the E-layer 1/f² group-delay contribution is ~0.1× the F2 value.
+# The previous ×0.5 "less dense" fudge (M-M32) was unphysical and
+# overstated E-layer group delay by ~5×.
+E_TO_F2_TEC_RATIO = 0.1
+
 
 class PropagationMode(Enum):
     """Ionospheric propagation modes"""
@@ -402,13 +416,13 @@ class PropagationModeSolver:
     def _ionospheric_group_delay_ms(self, frequency_mhz: float) -> float:
         """
         Calculate ionospheric group delay.
-        
+
         Group delay varies as 1/f² and depends on TEC.
         Higher frequencies have less delay.
-        
+
         Args:
             frequency_mhz: Signal frequency in MHz
-            
+
         Returns:
             Group delay in milliseconds
         """
@@ -417,6 +431,42 @@ class PropagationModeSolver:
         # Delay ∝ 1/f²
         delay_us = IONO_DELAY_COEFF_US_MHZ2 / (frequency_mhz**2) * 1000
         return delay_us / 1000.0  # Convert to ms
+
+    @staticmethod
+    def _oblique_muf_mhz(critical_freq_mhz: float,
+                        elevation_deg: float,
+                        layer_height_km: float,
+                        earth_radius_km: float = EARTH_RADIUS_KM) -> float:
+        """Oblique maximum-usable-frequency (MUF) at the given elevation (M-M30).
+
+        Uses the standard secant law on a spherical Earth:
+
+            MUF_obl = foF2 / cos(φ_refl)
+
+        where ``φ_refl`` is the angle of incidence at the reflection
+        layer, related to the launch elevation ``β`` and the layer
+        height ``h`` by
+
+            sin(φ_refl) = R · cos(β) / (R + h)
+
+        ``cos(β) = 1`` at horizon, so for β=0 we get the "M-factor" sec
+        of arcsin(R/(R+h)) ≈ 3.4 at h=300 km — the textbook upper bound
+        on F2 obliquity.  For higher elevations the M-factor drops
+        toward 1.0.
+
+        Returns ``+inf`` for impossible inputs so the caller doesn't
+        spuriously reject candidates because the geometry was degenerate.
+        """
+        if critical_freq_mhz <= 0 or layer_height_km < 0:
+            return float('inf')
+        beta = math.radians(elevation_deg)
+        sin_phi = earth_radius_km * math.cos(beta) / (earth_radius_km + layer_height_km)
+        # Numerical guard: sin_phi must be in [0, 1].
+        sin_phi = max(0.0, min(1.0, sin_phi))
+        cos_phi = math.sqrt(max(0.0, 1.0 - sin_phi * sin_phi))
+        if cos_phi <= 0.0:
+            return float('inf')
+        return critical_freq_mhz / cos_phi
     
     def _hf_model_candidates(
         self,
@@ -544,32 +594,42 @@ class PropagationModeSolver:
             path_length, elev_angle = self._hop_geometry(
                 ground_distance, self.f2_height_km, n
             )
-            
+
             # Check if geometry is viable (elevation > 0°)
             if elev_angle < 5:  # Too low angle
                 continue
-            
+
+            # M-M30: oblique MUF check against the climatological foF2.
+            # Frequencies above the F2 MUF cannot reflect from the F2
+            # layer at this geometry — they punch through.  Tier-1 has
+            # real foF2 and does its own gate; this is the Tier-2
+            # fallback.
+            muf_f2 = self._oblique_muf_mhz(
+                NOMINAL_FOF2_MHZ, elev_angle, self.f2_height_km,
+            )
+            muf_limited = frequency_mhz > muf_f2
+
             # Geometric delay
             geo_delay_ms = path_length / SPEED_OF_LIGHT_KM_S * 1000
-            
+
             # Ionospheric delay (per hop)
             iono_delay_ms = self._ionospheric_group_delay_ms(frequency_mhz) * n
-            
+
             # Total delay
             total_delay_ms = geo_delay_ms + iono_delay_ms
-            
+
             # Uncertainty increases with hops (layer height variability)
             # F2 layer height varies ±50 km typically
             height_uncertainty_km = 50.0
             delay_uncertainty_ms = n * (height_uncertainty_km / SPEED_OF_LIGHT_KM_S * 1000)
-            
+
             mode = {
                 1: PropagationMode.F2_LAYER_1HOP,
                 2: PropagationMode.F2_LAYER_2HOP,
                 3: PropagationMode.F2_LAYER_3HOP,
                 4: PropagationMode.F2_LAYER_4HOP
             }.get(n, PropagationMode.UNKNOWN)
-            
+
             candidates.append(ModeCandidate(
                 mode=mode,
                 n_hops=n,
@@ -581,28 +641,44 @@ class PropagationModeSolver:
                 ionospheric_delay_ms=iono_delay_ms,
                 total_delay_ms=total_delay_ms,
                 delay_uncertainty_ms=delay_uncertainty_ms,
-                viable=True
+                viable=not muf_limited,
+                muf_limited=muf_limited,
             ))
-        
+
         # E layer modes (usually only 1-hop for short paths)
         if include_e_layer and ground_distance < 2000:
             for n in range(1, min(3, max_hops + 1)):
                 path_length, elev_angle = self._hop_geometry(
                     ground_distance, self.e_height_km, n
                 )
-                
+
                 if elev_angle < 10:  # E layer requires higher angles
                     continue
-                
+
+                # M-M30: oblique MUF gate against climatological foE.
+                muf_e = self._oblique_muf_mhz(
+                    NOMINAL_FOE_MHZ, elev_angle, self.e_height_km,
+                )
+                muf_limited = frequency_mhz > muf_e
+
                 geo_delay_ms = path_length / SPEED_OF_LIGHT_KM_S * 1000
-                iono_delay_ms = self._ionospheric_group_delay_ms(frequency_mhz) * n * 0.5  # E layer less dense
+                # M-M32: E-layer iono group delay scales as TEC_E / TEC_F2
+                # ≈ 0.1 (Schunk & Nagy 2009), not the previous unphysical
+                # ×0.5 fudge.  The 1/f² shape stays; only the magnitude
+                # ratio changes — both terms still share the same
+                # `_ionospheric_group_delay_ms` baseline so the
+                # coefficient calibration tracks together.
+                iono_delay_ms = (
+                    self._ionospheric_group_delay_ms(frequency_mhz)
+                    * n * E_TO_F2_TEC_RATIO
+                )
                 total_delay_ms = geo_delay_ms + iono_delay_ms
-                
+
                 mode = {
                     1: PropagationMode.E_LAYER_1HOP,
                     2: PropagationMode.E_LAYER_2HOP
                 }.get(n, PropagationMode.UNKNOWN)
-                
+
                 candidates.append(ModeCandidate(
                     mode=mode,
                     n_hops=n,
@@ -614,7 +690,8 @@ class PropagationModeSolver:
                     ionospheric_delay_ms=iono_delay_ms,
                     total_delay_ms=total_delay_ms,
                     delay_uncertainty_ms=0.2 * n,
-                    viable=True
+                    viable=not muf_limited,
+                    muf_limited=muf_limited,
                 ))
         
         # Sort by total delay
@@ -662,23 +739,34 @@ class PropagationModeSolver:
                 low_confidence=True
             )
         
-        # Find best-matching candidate
+        # M-M33: single Gaussian-likelihood metric for both selection
+        # and confidence.  Previously the *selection* objective was
+        # `residual / σ` (favours wide-σ modes — the wider the
+        # uncertainty, the smaller the weighted residual) while the
+        # *reported* confidence used the raw residual against the same
+        # σ (`1 - residual/(2σ)`).  The two objectives could pick a
+        # wide-σ mode as "best" and then report a high confidence
+        # backed only by a fortuitous residual, not by genuine model
+        # tightness.
+        #
+        # New objective: minimise z = |residual| / σ — equivalent to
+        # maximum likelihood under N(0, σ²).  The reported confidence
+        # is exp(-z²/2) — the same likelihood, evaluated at the
+        # selected candidate.  z=1σ → conf ≈ 0.61; z=2σ → 0.14;
+        # z=3σ → 0.011.  Wide-σ modes can still win selection, but
+        # they then report the lower confidence their wider σ implies.
         best_match: Optional[ModeCandidate] = None
-        best_residual = float('inf')
-        
+        best_z = float('inf')
+
         for candidate in candidates:
-            residual = abs(measured_delay_ms - candidate.total_delay_ms)
-            
-            # Weight by uncertainty (tighter uncertainty = better match)
-            weighted_residual = residual / max(candidate.delay_uncertainty_ms, 0.1)
-            
-            if weighted_residual < best_residual:
-                best_residual = weighted_residual
+            sigma = max(candidate.delay_uncertainty_ms, 0.1)
+            z = abs(measured_delay_ms - candidate.total_delay_ms) / sigma
+            if z < best_z:
+                best_z = z
                 best_match = candidate
-        
-        # Calculate confidence based on residual vs uncertainty
+
         residual = abs(measured_delay_ms - best_match.total_delay_ms)
-        confidence = max(0, 1.0 - (residual / (2 * best_match.delay_uncertainty_ms)))
+        confidence = math.exp(-0.5 * best_z * best_z)
         
         # Check for ambiguity (multiple modes within uncertainty)
         ambiguous_candidates = [
@@ -706,15 +794,19 @@ class PropagationModeSolver:
                 path_stability = max(0.3, 1.0 - doppler_std / 5.0)
                 confidence *= path_stability
             
-            # FSS can help discriminate high vs low hop count
-            # High FSS (attenuated highs) = more D-layer transits = more hops
+            # M-M34: FSS hop-discrimination is intentionally not used
+            # to *change* the selection — only to log the diagnostic.
+            # The previous version logged "FSS suggests higher hop
+            # count" and then did nothing (dead code).  A real upgrade
+            # would need a calibrated FSS→hop mapping and would re-run
+            # the Gaussian-likelihood selection on the higher-hop
+            # candidate; until that is built, we don't pretend.
             fss_db = channel_metrics.get('fss_db', 0)
             if ambiguous and fss_db > 5.0:
-                # FSS votes for higher hop count
-                higher_hop_candidates = [c for c in ambiguous_candidates if c.n_hops > best_match.n_hops]
-                if higher_hop_candidates:
-                    # Consider upgrading to higher hop
-                    logger.debug(f"FSS={fss_db:.1f} dB suggests higher hop count")
+                logger.debug(
+                    f"FSS={fss_db:.1f} dB suggests higher hop count "
+                    f"(diagnostic only — not used to change selection; see M-M34)"
+                )
         
         return ModeIdentificationResult(
             identified_mode=best_match.mode,
@@ -784,35 +876,75 @@ class PropagationModeSolver:
             confidence = mode_result.confidence
             accuracy_ms = abs(mode_result.residual_ms) + 0.1  # Base accuracy + residual
         else:
-            # Use most likely mode (1-hop F2 for typical HF paths)
-            # Find the first F2 1-hop mode
-            f2_1hop = next(
-                (c for c in candidates if c.mode == PropagationMode.F2_LAYER_1HOP),
-                candidates[0]
+            # M-M31: pick the path-appropriate F2 mode (lowest viable
+            # hop count), not a generic `candidates[0]` (shortest delay
+            # — could be a sporadic-E 1-hop on a 5000 km path, with
+            # 0.6 confidence reported as if it were the F2 primary).
+            #
+            # Order of preference:
+            #   1. 1F2 (typical short-to-medium HF link).
+            #   2. The lowest-N viable F2 mode (2F2 / 3F2 / 4F2) for
+            #      longer paths where 1F2 isn't geometrically possible.
+            #   3. UNKNOWN at low confidence when no F2 mode survives
+            #      — better to surface "we don't know" than to pretend
+            #      a different layer mode is the primary.
+            f2_modes = (
+                PropagationMode.F2_LAYER_1HOP,
+                PropagationMode.F2_LAYER_2HOP,
+                PropagationMode.F2_LAYER_3HOP,
+                PropagationMode.F2_LAYER_4HOP,
             )
-            propagation_delay_ms = f2_1hop.total_delay_ms
-            mode = f2_1hop.mode
-            n_hops = f2_1hop.n_hops
-            confidence = 0.6  # Moderate confidence without measured delay
-            accuracy_ms = f2_1hop.delay_uncertainty_ms
-        
+            viable_f2 = [c for c in candidates if c.mode in f2_modes and c.viable]
+            if viable_f2:
+                viable_f2.sort(key=lambda c: c.n_hops)
+                chosen = viable_f2[0]
+                propagation_delay_ms = chosen.total_delay_ms
+                mode = chosen.mode
+                n_hops = chosen.n_hops
+                # 1F2 retains the legacy moderate confidence; higher-N
+                # F2 modes are derated by 0.1 per extra hop to reflect
+                # the increased model error and ionospheric variability.
+                confidence = max(0.0, 0.6 - 0.1 * (chosen.n_hops - 1))
+                accuracy_ms = chosen.delay_uncertainty_ms
+            else:
+                # No F2 mode survived — surface the uncertainty rather
+                # than fabricating a primary mode from an unrelated layer.
+                propagation_delay_ms = candidates[0].total_delay_ms
+                mode = PropagationMode.UNKNOWN
+                n_hops = candidates[0].n_hops
+                confidence = 0.2
+                accuracy_ms = max(candidates[0].delay_uncertainty_ms, 1.0)
+
         # Back-calculate emission time
         emission_time_utc = arrival_time_utc - (propagation_delay_ms / 1000.0)
-        
+
         # Check alignment with second boundary
         # WWV/WWVH ticks occur at exact second boundaries
         fractional_second = emission_time_utc % 1.0
         if fractional_second > 0.5:
             fractional_second -= 1.0
         expected_offset_ms = fractional_second * 1000.0
-        
+
         # Consider aligned if within 2 ms of second boundary
         second_aligned = abs(expected_offset_ms) < 2.0
-        
-        # Boost confidence if aligned
-        if second_aligned:
+
+        # M-M35: the second-aligned confidence boost is only safe when
+        # the model uncertainty is much smaller than the ±2 ms
+        # alignment threshold — otherwise it's circular (the model
+        # delay we're validating *determines* the emission time we're
+        # checking against the second boundary, so a wide-σ model can
+        # trivially land within ±2 ms regardless of fit quality).
+        # Treat as diagnostic above that threshold.
+        ALIGNMENT_BOOST_SIGMA_MAX_MS = 0.5
+        if second_aligned and accuracy_ms < ALIGNMENT_BOOST_SIGMA_MAX_MS:
             confidence = min(1.0, confidence * 1.2)
             accuracy_ms *= 0.8  # Better accuracy when aligned
+        elif second_aligned:
+            logger.debug(
+                f"Second-aligned (offset={expected_offset_ms:+.2f} ms) but "
+                f"model σ={accuracy_ms:.2f} ms ≥ {ALIGNMENT_BOOST_SIGMA_MAX_MS} ms — "
+                f"alignment treated as diagnostic only (M-M35)"
+            )
         
         return EmissionTimeResult(
             emission_time_utc=emission_time_utc,
