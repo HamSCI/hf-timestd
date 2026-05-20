@@ -2059,11 +2059,18 @@ class MultiBroadcastFusion:
                 # that introduced station/frequency-dependent errors of 10-80ms.
                 
                 if l2_item:
-                    # Physics Available — use L2 propagation mode info
+                    # Physics Available — use L2 propagation mode info.
+                    # The L2 timing_measurements schema has 'confidence' (overall
+                    # measurement confidence), not 'model_confidence' — the latter
+                    # is a propagation_mode_solver / arrival_pattern_matrix field
+                    # on a different product (see schemas/l2_physics_v1.json).
+                    # Refactor 615a8b1 (2026-01-12) introduced the wrong key,
+                    # which left model_conf = 0 for every L2-augmented row →
+                    # bootstrap stuck in SEARCHING (gate is confidence>=0.6).
                     prop_delay = float(l2_item.get('propagation_delay_ms', 0))
                     mode = l2_item.get('propagation_mode', 'Unknown')
-                    model_conf = float(l2_item.get('model_confidence', 0))
-                    
+                    model_conf = float(l2_item.get('confidence', 0))
+
                     d_clock = raw_toa  # Already timing_error (arrival - prop_delay)
                     confidence = model_conf
                 else:
