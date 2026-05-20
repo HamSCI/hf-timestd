@@ -14,10 +14,14 @@ Group=timestd
 
 # Volatile state directory for the authority manager's contract file
 # /run/hf-timestd/fusion_status.json — see METROLOGY.md §4.5.
-# systemd creates /run/hf-timestd/ owned by timestd:timestd on start
-# and removes it on stop.
+# systemd creates /run/hf-timestd/ owned by timestd:timestd on start.
+# RuntimeDirectoryPreserve=yes keeps it alive across fusion restarts so
+# co-located services (timestd-core-recorder, which shares the same
+# RuntimeDirectory under ProtectSystem=strict) don't have their bind
+# mount of /run/hf-timestd orphaned when fusion stops.
 RuntimeDirectory=hf-timestd
 RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
 
 # Systemd Watchdog - service must send WATCHDOG=1 every 120 seconds
 # The fusion service sends watchdog notifications in its main loop

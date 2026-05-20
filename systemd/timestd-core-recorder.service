@@ -27,10 +27,14 @@ Environment=MALLOC_ARENA_MAX=2
 # Working directory (production installation path)
 WorkingDirectory=/opt/hf-timestd
 
-# /run/hf-timestd — tmpfs created by systemd, owned by User=timestd,
-# cleaned on stop.  Used by the QualitySnapshotWriter to write
-# quality.json for sigmond's `hf-timestd quality --json` to read.
+# /run/hf-timestd — tmpfs created by systemd, owned by User=timestd.
+# Used by the QualitySnapshotWriter to write quality.json for sigmond's
+# `hf-timestd quality --json` to read.  RuntimeDirectoryPreserve=yes
+# keeps the directory alive across stops so the bind mount into THIS
+# service's ProtectSystem=strict namespace doesn't get orphaned when
+# timestd-fusion (also RuntimeDirectory=hf-timestd) restarts.
 RuntimeDirectory=hf-timestd
+RuntimeDirectoryPreserve=yes
 
 # Ensure directories exist and have correct permissions
 ExecStartPre=+/bin/mkdir -p /var/lib/timestd/raw_buffer
