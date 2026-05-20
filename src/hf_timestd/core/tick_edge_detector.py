@@ -106,8 +106,12 @@ def is_clean_minute(station: str, minute: int) -> bool:
     Return True if the OTHER station's audio tone is silent this minute,
     meaning our station's ticks are free of cross-station intermod at
     the tick frequency.
-    
-    On dedicated channels (WWV_20000, WWV_25000), every minute is clean.
+
+    This helper is purely about audio-tone overlap and does **not** take a
+    channel parameter; the dedicated-channel exemption (WWV_20000 /
+    WWV_25000 are always clean because WWVH does not transmit at those
+    frequencies) is enforced at the caller via
+    ``is_dedicated_channel or is_clean_minute(station, minute)``.
     """
     if station == 'WWV':
         # WWV ticks are clean when WWVH has no audio tone
@@ -353,7 +357,7 @@ class TickEdgeDetector:
             # The PSF is the response of the matched filter to its own template —
             # this is what needs to be subtracted to reveal secondary arrivals.
             # Use the envelope (sqrt(sin²+cos²)) autocorrelation.
-            tick_duration_ms = STATION_TICK_DURATION_MS.get(station, 999)
+            tick_duration_ms = STATION_TICK_DURATION_MS.get(station, float('inf'))
             if tick_duration_ms <= self.CLEAN_MAX_TEMPLATE_MS:
                 # Create a unit-amplitude tick signal
                 unit_tick = np.sin(2 * np.pi * freq_hz * t)
@@ -405,8 +409,12 @@ class TickEdgeDetector:
         residual = corr_env.copy()
         components: List[CleanComponent] = []
         
-        # Primary arrival as rank 0
-        primary_front_edge = region_start + primary_peak_idx + half_template - half_template
+        # Primary arrival as rank 0.  The matched-filter peak's `peak_idx`
+        # is the *front-edge* offset in the search region — no half-template
+        # correction is needed here.  (The previous
+        # `+ half_template - half_template` round-trip was a no-op left
+        # over from an earlier centre-then-front-edge formulation.)
+        primary_front_edge = region_start + primary_peak_idx
         primary_timing_error_ms = (primary_front_edge - expected_sample) * 1000.0 / self.sample_rate
         
         # Extract carrier phase for primary (already done in main loop, but
@@ -461,9 +469,9 @@ class TickEdgeDetector:
             if abs(peak_idx - primary_peak_idx) <= 2:
                 continue
             
-            # This is a secondary arrival
-            # Compute its timing and phase
-            front_edge_sample = region_start + peak_idx + half_template - half_template
+            # This is a secondary arrival.  Same simplification as the
+            # primary above: `peak_idx` already names the front edge.
+            front_edge_sample = region_start + peak_idx
             timing_error_ms = (front_edge_sample - expected_sample) * 1000.0 / self.sample_rate
             delay_offset_ms = timing_error_ms - primary_timing_error_ms
             relative_amplitude = peak_val / max(primary_peak_val, 1e-10)
@@ -684,7 +692,7 @@ class TickEdgeDetector:
             # tick at the same frequency creates a systematic ±5ms offset
             # artifact that CLEAN incorrectly reports as multipath.
             clean_components: List[CleanComponent] = []
-            tick_duration_ms = STATION_TICK_DURATION_MS.get(station, 999)
+            tick_duration_ms = STATION_TICK_DURATION_MS.get(station, float('inf'))
             if (detected
                     and is_dedicated_channel
                     and tick_duration_ms <= self.CLEAN_MAX_TEMPLATE_MS
