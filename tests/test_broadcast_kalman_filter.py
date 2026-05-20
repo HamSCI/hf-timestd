@@ -133,29 +133,10 @@ class TestBroadcastKalmanFilter(unittest.TestCase):
         # Uncertainty should increase
         self.assertGreater(uncertainty_predict, 0)
     
-    def test_gpsdo_continuity_check(self):
-        """Test GPSDO temporal continuity checking."""
-        filter = BroadcastKalmanFilter(
-            broadcast_id="WWV_10000",
-            station="WWV",
-            frequency_mhz=10.0
-        )
-        
-        # First measurement
-        is_consistent, residual = filter.check_gpsdo_continuity(34.5)
-        self.assertTrue(is_consistent)  # First measurement always consistent
-        self.assertEqual(residual, 0.0)
-        
-        # Second measurement, small change (consistent)
-        is_consistent, residual = filter.check_gpsdo_continuity(34.7)
-        self.assertTrue(is_consistent)
-        self.assertLess(residual, 1.0)
-        
-        # Third measurement, large change (inconsistent - propagation change)
-        is_consistent, residual = filter.check_gpsdo_continuity(38.0)
-        self.assertFalse(is_consistent)
-        self.assertGreater(residual, 1.0)
-    
+    # test_gpsdo_continuity_check was removed alongside the
+    # `check_gpsdo_continuity` method (§3.4 Low, 2026-05-20): the
+    # method had no production callers; only this test exercised it.
+
     def test_snr_based_measurement_noise(self):
         """Test that measurement noise adapts to SNR."""
         filter = BroadcastKalmanFilter(

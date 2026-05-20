@@ -258,10 +258,17 @@ class BroadcastKalmanFilter:
             has_bcd = False
             has_test_signal = False
         
-        # Anchor channels (unambiguous station ID)
+        # Anchor channels (unambiguous station ID).  Tolerance-based
+        # comparison (§3.4 Low) so a frequency_mhz reconstructed via
+        # arithmetic — e.g. `f_hz / 1e6` — doesn't fail an `in [...]`
+        # exact-float check; 1 kHz tolerance is well below any HF
+        # channel spacing.
+        _ANCHOR_TOL_MHZ = 1e-3
+        def _is_anchor_freq(f: float, candidates: Tuple[float, ...]) -> bool:
+            return any(abs(f - c) < _ANCHOR_TOL_MHZ for c in candidates)
         is_anchor = (
-            (self.station == 'WWV' and self.frequency_mhz in [20.0, 25.0]) or
-            (self.station == 'CHU' and self.frequency_mhz in [3.33, 7.85, 14.67])
+            (self.station == 'WWV' and _is_anchor_freq(self.frequency_mhz, (20.0, 25.0)))
+            or (self.station == 'CHU' and _is_anchor_freq(self.frequency_mhz, (3.33, 7.85, 14.67)))
         )
         
         return BroadcastCharacteristics(
@@ -619,41 +626,6 @@ class BroadcastKalmanFilter:
         mode_stable = self._minutes_since_mode_change() > 3.0  # minutes
         
         return uncertainty_ok and innovation_ok and mode_stable
-    
-    def check_gpsdo_continuity(self, current_tof: float) -> Tuple[bool, float]:
-        """
-        Check consistency with previous measurement using GPSDO constraint.
-        
-        This is NOT Kalman prediction - it's direct comparison using the
-        GPSDO "steel ruler" to validate temporal continuity.
-        
-        Args:
-            current_tof: Current ToF measurement
-            
-        Returns:
-            (is_consistent, residual_ms)
-        """
-        if self.previous_tof is None:
-            # First measurement - can't check continuity
-            self.previous_tof = current_tof
-            self.previous_time = datetime.now(timezone.utc)
-            return True, 0.0
-        
-        # Expected ToF based on GPSDO temporal stability
-        # GPSDO hasn't drifted significantly in 1 minute
-        expected_tof = self.previous_tof
-        
-        # Residual
-        residual = abs(current_tof - expected_tof)
-        
-        # Update history
-        self.previous_tof = current_tof
-        self.previous_time = datetime.now(timezone.utc)
-        
-        # Consistency threshold (1 ms for good GPSDO stability)
-        is_consistent = residual < 1.0
-        
-        return is_consistent, residual
     
     def get_state(self) -> Dict[str, float]:
         """
