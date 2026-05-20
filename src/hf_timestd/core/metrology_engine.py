@@ -210,6 +210,14 @@ class MetrologyEngine:
         
         # Detection gap tracking: last physics-validated detection time per station.
         # Used to emit WARNING when a station goes dark for >5 minutes.
+        # §3.4 Low: the `_last_*` attributes below are per-channel state
+        # owned by exactly one writer thread -- the one driving
+        # ``process_minute`` -- and one reader (the metrology service's
+        # post-processing pass that runs synchronously after the same
+        # writer's call returns).  No re-entrancy or cross-thread
+        # mutation should reach these.  If a future change introduces a
+        # second writer, this contract needs an explicit lock; today
+        # the single-owner discipline is enforced by the caller.
         self._last_validated_detection: Dict[str, float] = {}  # station -> unix time
         self._gap_warning_emitted: Dict[str, float] = {}  # station -> last warning time
         self._DETECTION_GAP_THRESHOLD_S = 300.0  # 5 minutes
@@ -229,14 +237,13 @@ class MetrologyEngine:
         self._fsk_tai_utc_changed: bool = False               # True when leap second detected
         self._fsk_utc_mismatch_count: int = 0                 # Consecutive UTC mismatches
         
-        # Calibration state (Learned RTP offsets, etc.)
-        self.bpm_calibration = {
-            'calibrated': False,
-            'last_calibration_minute': None,
-            'path_gain_db': None,
-            'delay_offset_ms': None
-        }
-        self._load_calibration()
+        # NOTE (§3.4 Low): a `bpm_calibration` dict + `_load_calibration`
+        # / `_save_calibration` JSON round-trip lived here.  The dict was
+        # initialised, optionally loaded from disk, and the saver was
+        # never called -- the value was also never *read* anywhere
+        # downstream.  Removed; if a future BPM offset calibration is
+        # added it should land on a dedicated dataclass with explicit
+        # consumers, not a free-floating dict.
         
         # Fusion mode timing state (only used when is_rtp_authority=False)
         # This replaces the separate BootstrapService
@@ -2495,24 +2502,3 @@ class MetrologyEngine:
         except Exception as e:
             logger.warning(f"{self.channel_name}: coarse_time publish failed: {e}")
 
-    def _load_calibration(self):
-        """Simple calibration loader for BPM."""
-        try:
-            cal_file = self.output_dir / "timing_calibration.json"
-            if cal_file.exists():
-                with open(cal_file, 'r') as f:
-                    data = json.load(f)
-                    if 'bpm' in data:
-                        self.bpm_calibration.update(data['bpm'])
-        except (OSError, IOError, json.JSONDecodeError) as e:
-            logger.debug(f"Could not load calibration file: {e}")
-            
-    def _save_calibration(self):
-        """Simple saver."""
-        try:
-            cal_file = self.output_dir / "timing_calibration.json"
-            data = {'bpm': self.bpm_calibration}
-            with open(cal_file, 'w') as f:
-                json.dump(data, f)
-        except (OSError, IOError) as e:
-            logger.debug(f"Could not save calibration file: {e}")
