@@ -9,7 +9,7 @@ Chronyd Configuration:
 Add to /etc/chrony/chrony.conf:
 
     # HF Time Transfer via time-manager
-    refclock SHM 0 refid HF poll 6 precision 1e-4 offset 0.0 delay 0.2
+    refclock SHM 0 refid HF poll 4 precision 1e-3 offset 0.0 delay 0.2
     
 Restart: sudo systemctl restart chronyd
 
@@ -487,12 +487,15 @@ def install_chrony_config(unit: int = 0) -> str:
 # This refclock receives UTC from WWV/WWVH/CHU time broadcasts, providing
 # ~1ms accuracy. It can be used as a backup to GPS or as primary reference.
 
-refclock SHM {unit} refid HF poll 3 precision 1e-3
+refclock SHM {unit} refid HF poll 4 precision 1e-3
 
 # Explanation:
 #   SHM {unit}     - Shared memory unit {unit} (key 0x{SHM_KEY_BASE + unit:08x})
 #   refid HF       - Reference ID shown in 'chronyc sources' (HF = High Frequency)
-#   poll 3         - Poll interval 2^3 = 8 seconds
+#   poll 4         - Poll interval 2^4 = 16 seconds (matches
+#                    config/chrony-timestd-refclocks.conf and the
+#                    canonical example in this file's module docstring;
+#                    aligns with the ~16-s fusion interval)
 #   precision 1e-3 - 1 millisecond precision
 
 # To verify: run 'chronyc sources -v' and look for 'HF' reference
