@@ -114,13 +114,18 @@ class VTECMapper:
 
     def __init__(
         self,
-        receiver_lat: float = 38.92,
-        receiver_lon: float = -92.13,
+        receiver_lat: float,
+        receiver_lon: float,
         shell_height_km: float = THIN_SHELL_HEIGHT_KM,
         poly_degree: int = 2,
         grid_resolution_deg: float = 1.0,
         grid_extent_deg: float = 15.0,
     ):
+        # §4.4 Low: `receiver_lat`/`receiver_lon` used to default to
+        # 38.92 / -92.13 (a Missouri-area host).  The METROLOGY contract
+        # forbids hard-coded site coords because they silently corrupt
+        # geometry for every other host.  Required positional args now;
+        # callers must source coords from their config / station model.
         self.receiver_lat = receiver_lat
         self.receiver_lon = receiver_lon
         self.shell_height_km = shell_height_km
@@ -495,13 +500,24 @@ class VTECMapper:
             return None
 
     @staticmethod
-    def _build_poly_matrix(dlat: np.ndarray, dlon: np.ndarray, degree: int) -> np.ndarray:
+    def _poly_term_indices(degree: int) -> List[Tuple[int, int]]:
+        """Triangular enumeration of 2-D polynomial monomial indices.
+
+        Returns ``[(i, j)]`` pairs in the canonical fit/evaluate order:
+        ``i+j <= degree``, with ``i`` outer.  Used by both the design-
+        matrix builder and the point-evaluation loop so the term
+        ordering is defined in exactly one place (§4.4 Low).
+        """
+        return [
+            (i, j)
+            for i in range(degree + 1)
+            for j in range(degree + 1 - i)
+        ]
+
+    @classmethod
+    def _build_poly_matrix(cls, dlat: np.ndarray, dlon: np.ndarray, degree: int) -> np.ndarray:
         """Build design matrix for 2D polynomial of given degree."""
-        n = len(dlat)
-        cols = []
-        for i in range(degree + 1):
-            for j in range(degree + 1 - i):
-                cols.append(dlat ** i * dlon ** j)
+        cols = [dlat ** i * dlon ** j for i, j in cls._poly_term_indices(degree)]
         return np.column_stack(cols)
 
     def _evaluate_grid(
@@ -549,12 +565,12 @@ class VTECMapper:
                 dlat = lat - center_lat
                 dlon = lon - center_lon
                 val = 0.0
-                idx = 0
-                for ii in range(degree + 1):
-                    for jj in range(degree + 1 - ii):
-                        if idx < len(coeffs):
-                            val += coeffs[idx] * dlat ** ii * dlon ** jj
-                        idx += 1
+                # §4.4 Low: share the term enumeration with the
+                # design-matrix builder via `_poly_term_indices` so the
+                # two can't disagree on monomial ordering.
+                for idx, (ii, jj) in enumerate(self._poly_term_indices(degree)):
+                    if idx < len(coeffs):
+                        val += coeffs[idx] * dlat ** ii * dlon ** jj
                 row.append(max(0.0, val))  # vTEC >= 0
             grid.append(row)
 

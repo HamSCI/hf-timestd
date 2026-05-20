@@ -59,7 +59,7 @@ def _clustered_ipps(spread_deg, n=8, center_lat=39.0, center_lon=-92.0, seed=0):
 
 class TestConvexHullMasking:
     def test_cells_outside_ipp_hull_are_masked(self):
-        result = VTECMapper().generate_map(_hexagon_ipps())
+        result = VTECMapper(receiver_lat=38.92, receiver_lon=-92.13).generate_map(_hexagon_ipps())
         assert result is not None
         grid = np.array(result.grid_vtec, dtype=float)
 
@@ -78,7 +78,7 @@ class TestConvexHullMasking:
         assert 20.0 < grid[i, j] < 30.0
 
     def test_interpolated_cells_are_finite_and_nonnegative(self):
-        result = VTECMapper().generate_map(_hexagon_ipps())
+        result = VTECMapper(receiver_lat=38.92, receiver_lon=-92.13).generate_map(_hexagon_ipps())
         grid = np.array(result.grid_vtec, dtype=float)
         finite = grid[np.isfinite(grid)]
         assert finite.size > 0
@@ -89,7 +89,7 @@ class TestConvexHullMasking:
         # interpolation domain can be defined — the map must still return a
         # result and simply evaluate every cell.
         meas = [_ipp(38.0 + 0.5 * k, -92.0 + 0.5 * k, 25.0 + k) for k in range(5)]
-        result = VTECMapper().generate_map(meas)
+        result = VTECMapper(receiver_lat=38.92, receiver_lon=-92.13).generate_map(meas)
         assert result is not None
         grid = np.array(result.grid_vtec, dtype=float)
         assert np.isfinite(grid).all()
@@ -97,13 +97,13 @@ class TestConvexHullMasking:
 
 class TestConditioning:
     def test_condition_number_is_reported(self):
-        result = VTECMapper().generate_map(_hexagon_ipps())
+        result = VTECMapper(receiver_lat=38.92, receiver_lon=-92.13).generate_map(_hexagon_ipps())
         assert result.condition_number > 0.0
         assert math.isfinite(result.condition_number)
 
     def test_clustered_ipps_are_worse_conditioned_than_spread(self):
-        spread = VTECMapper().generate_map(_hexagon_ipps())
-        clustered = VTECMapper().generate_map(_clustered_ipps(0.02))
+        spread = VTECMapper(receiver_lat=38.92, receiver_lon=-92.13).generate_map(_hexagon_ipps())
+        clustered = VTECMapper(receiver_lat=38.92, receiver_lon=-92.13).generate_map(_clustered_ipps(0.02))
         assert clustered.condition_number > spread.condition_number
         assert clustered.condition_number > 1.0e3
         # Poor conditioning collapses the reported confidence.
@@ -117,7 +117,7 @@ class TestConditioning:
         meas = [_ipp(36.0 + 0.8 * k, -96.0 + 0.8 * k, 22.0 + 0.5 * k)
                 for k in range(8)]
         with caplog.at_level('WARNING'):
-            result = VTECMapper().generate_map(meas)
+            result = VTECMapper(receiver_lat=38.92, receiver_lon=-92.13).generate_map(meas)
         assert result is not None
         assert any('ill-conditioned' in r.message for r in caplog.records)
         assert result.condition_number > MAX_CONDITION_NUMBER
@@ -128,7 +128,7 @@ class TestRegularization:
     def test_ill_posed_fit_returns_bounded_coefficients(self):
         # A plain lstsq on clustered IPPs yields a wildly oscillating surface;
         # the ridge keeps every polynomial coefficient finite and bounded.
-        result = VTECMapper().generate_map(_clustered_ipps(0.05))
+        result = VTECMapper(receiver_lat=38.92, receiver_lon=-92.13).generate_map(_clustered_ipps(0.05))
         assert result is not None
         assert all(math.isfinite(c) for c in result.poly_coeffs)
         assert math.isfinite(result.rms_residual_tecu)
@@ -136,6 +136,6 @@ class TestRegularization:
     def test_well_conditioned_fit_recovers_the_plane(self):
         # On a clean plane with well-spread IPPs the ridge bias is negligible:
         # the fit is tight and confident.
-        result = VTECMapper().generate_map(_hexagon_ipps())
+        result = VTECMapper(receiver_lat=38.92, receiver_lon=-92.13).generate_map(_hexagon_ipps())
         assert result.rms_residual_tecu < 1.0
         assert result.confidence > 0.5

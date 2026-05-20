@@ -286,7 +286,7 @@ class TestVTECMapper(unittest.TestCase):
         """At zenith (90° elevation), vTEC = sTEC."""
         from hf_timestd.core.vtec_mapper import VTECMapper
 
-        mapper = VTECMapper()
+        mapper = VTECMapper(receiver_lat=38.92, receiver_lon=-92.13)
         vtec, mf = mapper.stec_to_vtec(20.0, 90.0)
         self.assertAlmostEqual(vtec, 20.0, delta=0.01)
         self.assertAlmostEqual(mf, 1.0, delta=0.01)
@@ -295,7 +295,7 @@ class TestVTECMapper(unittest.TestCase):
         """At low elevation, vTEC < sTEC (mapping factor > 1)."""
         from hf_timestd.core.vtec_mapper import VTECMapper
 
-        mapper = VTECMapper()
+        mapper = VTECMapper(receiver_lat=38.92, receiver_lon=-92.13)
         vtec, mf = mapper.stec_to_vtec(20.0, 30.0)
         self.assertLess(vtec, 20.0)
         self.assertGreater(mf, 1.0)
@@ -304,7 +304,7 @@ class TestVTECMapper(unittest.TestCase):
         """Generate a VTEC map from synthetic IPP measurements."""
         from hf_timestd.core.vtec_mapper import VTECMapper, IPPMeasurement
 
-        mapper = VTECMapper(grid_extent_deg=5.0, grid_resolution_deg=2.0)
+        mapper = VTECMapper(receiver_lat=38.92, receiver_lon=-92.13, grid_extent_deg=5.0, grid_resolution_deg=2.0)
 
         # Create synthetic IPP measurements spread around the receiver
         measurements = [
@@ -327,7 +327,7 @@ class TestVTECMapper(unittest.TestCase):
         import tempfile
         from hf_timestd.core.vtec_mapper import VTECMapper, IPPMeasurement
 
-        mapper = VTECMapper(grid_extent_deg=3.0, grid_resolution_deg=1.0)
+        mapper = VTECMapper(receiver_lat=38.92, receiver_lon=-92.13, grid_extent_deg=3.0, grid_resolution_deg=1.0)
         measurements = [
             IPPMeasurement('WWV', 10.0, 37.0, -95.0, 20.0, 18.0, 1.1, 25.0, 2.0),
             IPPMeasurement('CHU', 7.85, 42.0, -88.0, 18.0, 16.0, 1.1, 35.0, 1.5),
@@ -359,7 +359,7 @@ class TestVTECMapper(unittest.TestCase):
         leaves too few points, so the map cannot be cross-validated and
         cv_rms_residual_tecu is NaN."""
         from hf_timestd.core.vtec_mapper import VTECMapper
-        mapper = VTECMapper(grid_extent_deg=5.0, grid_resolution_deg=2.0)
+        mapper = VTECMapper(receiver_lat=38.92, receiver_lon=-92.13, grid_extent_deg=5.0, grid_resolution_deg=2.0)
         result = mapper.generate_map(self._spread_ipps(3), timestamp=1.0)
         self.assertIsNotNone(result)
         self.assertTrue(math.isnan(result.cv_rms_residual_tecu))
@@ -368,7 +368,7 @@ class TestVTECMapper(unittest.TestCase):
         """P-M8: with enough IPPs the leave-one-out residual is computed —
         an honest out-of-sample quality metric."""
         from hf_timestd.core.vtec_mapper import VTECMapper
-        mapper = VTECMapper(grid_extent_deg=6.0, grid_resolution_deg=2.0)
+        mapper = VTECMapper(receiver_lat=38.92, receiver_lon=-92.13, grid_extent_deg=6.0, grid_resolution_deg=2.0)
         result = mapper.generate_map(self._spread_ipps(8), timestamp=1.0)
         self.assertIsNotNone(result)
         self.assertTrue(math.isfinite(result.cv_rms_residual_tecu))
@@ -379,7 +379,7 @@ class TestVTECMapper(unittest.TestCase):
         grid the data rows use — declared from the actual evaluated grid."""
         import tempfile
         from hf_timestd.core.vtec_mapper import VTECMapper
-        mapper = VTECMapper(grid_extent_deg=4.0, grid_resolution_deg=2.0)
+        mapper = VTECMapper(receiver_lat=38.92, receiver_lon=-92.13, grid_extent_deg=4.0, grid_resolution_deg=2.0)
         result = mapper.generate_map(self._spread_ipps(6), timestamp=1.0)
         self.assertIsNotNone(result)
         with tempfile.NamedTemporaryFile('w+', suffix='.ionex', delete=True) as f:
@@ -396,7 +396,7 @@ class TestVTECMapper(unittest.TestCase):
         """Less than 3 IPPs should return None."""
         from hf_timestd.core.vtec_mapper import VTECMapper, IPPMeasurement
 
-        mapper = VTECMapper()
+        mapper = VTECMapper(receiver_lat=38.92, receiver_lon=-92.13)
         result = mapper.generate_map([
             IPPMeasurement('WWV', 10.0, 37.0, -95.0, 20.0, 18.0, 1.1, 25.0, 2.0),
         ])
