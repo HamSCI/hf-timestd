@@ -99,7 +99,17 @@ class ChronySHM:
         self.shm_map: Optional[mmap.mmap] = None
         self.count = 0
         self.connected = False
-        
+
+        # M-M17: consecutive-update-failure tracking.  A failed update()
+        # now also clears `connected` so the caller's reconnect path
+        # (see `multi_broadcast_fusion._loop`'s rate-limited reconnect
+        # block) fires on the next cycle.  After this many back-to-back
+        # failures we escalate the log level — silent failures here
+        # mean chrony has no refclock samples and the system clock
+        # silently degrades.
+        self._consecutive_update_failures = 0
+        self._UPDATE_FAILURE_ESCALATE_AT = 5
+
         logger.info(f"ChronySHM initialized: unit={unit}, key=0x{self.key:08x}")
     
     def connect(self) -> bool:
@@ -129,19 +139,32 @@ class ChronySHM:
     def _connect_sysv(self, sysv_ipc):
         """Connect using System V IPC shared memory.
 
-        Handles the chrony-creates-first race condition:
-        If chrony starts before fusion, it creates SHM segments as root:0600.
-        Fusion (running as timestd) can't write to them. We detect this and
-        remove/recreate the segment with correct permissions.
+        Handles the chrony-creates-first race condition: if chrony starts
+        before fusion, it creates SHM segments as root:0600.  Fusion
+        (running as timestd) can't write to them.  We detect that and
+        fix the permissions **in place** via `shmctl(IPC_SET)` (sysv_ipc
+        exposes this as the writable ``self.shm.mode`` property — needs
+        CAP_IPC_OWNER, granted via AmbientCapabilities in the systemd
+        unit, or running as root).
 
-        If we can't even attach (root:0600 and we're not root), we attempt
-        to remove the segment via 'ipcrm' subprocess (requires CAP_IPC_OWNER
-        or running as root).
+        M-M16 history: the previous code "recovered" from bad permissions
+        by detaching, ``self.shm.remove()`` (= shmctl IPC_RMID), and
+        recreating the segment.  shmctl IPC_RMID only **marks** a SysV
+        segment for deletion — the segment lives on until every attached
+        process detaches.  Since chronyd was still attached, our newly-
+        created segment had a different shmid; chronyd kept reading the
+        orphaned old one forever and our writes vanished into a segment
+        nothing was listening to.  The same anti-pattern lived in the
+        "can't even attach" path (ipcrm subprocess).  Both paths now
+        either fix permissions in place or raise — failing loudly is
+        the right answer because the operator's only safe recovery is
+        to stop chronyd, ipcrm the segment, and restart both services.
         """
         try:
-            # Try to CREATE segment first (for fresh installs)
-            # This ensures we create it with group-writable permissions
-            # If chronyd hasn't started yet, we create it and chronyd will attach
+            # Try to CREATE segment first (for fresh installs).  This
+            # ensures we create it with group-writable permissions; if
+            # chronyd hasn't started yet, we create it and chronyd will
+            # attach later.
             self.shm = sysv_ipc.SharedMemory(
                 self.key,
                 flags=sysv_ipc.IPC_CREAT | sysv_ipc.IPC_EXCL,
@@ -149,93 +172,74 @@ class ChronySHM:
                 mode=0o666  # World-readable for cross-platform chronyd compatibility
             )
             logger.info("Created new Chrony SHM segment with world-readable permissions (0666)")
+            self._use_sysv = True
+            return
+
         except sysv_ipc.ExistentialError:
-            # Segment already exists — attach and check permissions
+            pass  # Falls through to attach-and-fix path below
+
+        # Segment exists — try to attach and (if needed) fix permissions
+        # in place.
+        try:
+            self.shm = sysv_ipc.SharedMemory(
+                self.key,
+                flags=0,  # Attach to existing
+                size=SHM_SIZE,
+            )
+        except (PermissionError, sysv_ipc.PermissionsError) as e:
+            # We can't even attach.  The previous code's ipcrm-and-
+            # recreate "recovery" silently orphaned chronyd (see method
+            # docstring); refuse rather than do that.
+            raise PermissionError(
+                f"Cannot attach to Chrony SHM (key=0x{self.key:08x}): "
+                f"permission denied (running as uid={os.getuid()}). "
+                f"Operator fix: stop chronyd, "
+                f"`sudo ipcrm -M 0x{self.key:08x}`, restart this service, "
+                f"then start chronyd."
+            ) from e
+
+        current_mode = self.shm.mode
+        current_uid = self.shm.uid
+        my_uid = os.getuid()
+        if current_mode & 0o666 == 0o666:
+            logger.info(
+                f"Attached to existing Chrony SHM segment "
+                f"(mode={oct(current_mode)}, owner_uid={current_uid})"
+            )
+            self._use_sysv = True
+            return
+
+        # Permissions need widening.  Try to do it in place via shmctl
+        # IPC_SET (sysv_ipc exposes this as a writable `mode` property).
+        try:
+            self.shm.mode = 0o666
+            logger.warning(
+                f"Fixed Chrony SHM permissions in place "
+                f"(key=0x{self.key:08x}, mode={oct(current_mode)} → 0o666, "
+                f"owner_uid={current_uid}, my_uid={my_uid})"
+            )
+        except (PermissionError, sysv_ipc.PermissionsError, OSError) as e:
+            # In-place change failed — we lack CAP_IPC_OWNER and we're
+            # not the owner.  Refuse rather than silently orphan chronyd
+            # by remove-and-recreate.
             try:
-                self.shm = sysv_ipc.SharedMemory(
-                    self.key,
-                    flags=0,  # Attach to existing
-                    size=SHM_SIZE
-                )
-                # Check if permissions are correct (need 0666 for cross-user access)
-                current_mode = self.shm.mode
-                current_uid = self.shm.uid
-                my_uid = os.getuid()
-                if current_mode & 0o666 != 0o666:
-                    logger.warning(
-                        f"Chrony SHM (key=0x{self.key:08x}) has restrictive permissions "
-                        f"(mode={oct(current_mode)}, owner_uid={current_uid}, my_uid={my_uid}). "
-                        f"Removing and recreating with correct permissions."
-                    )
-                    self.shm.detach()
-                    self.shm.remove()
-                    self.shm = sysv_ipc.SharedMemory(
-                        self.key,
-                        flags=sysv_ipc.IPC_CREAT | sysv_ipc.IPC_EXCL,
-                        size=SHM_SIZE,
-                        mode=0o666
-                    )
-                    logger.info("Recreated Chrony SHM segment with world-readable permissions (0666)")
-                else:
-                    logger.info(
-                        f"Attached to existing Chrony SHM segment "
-                        f"(mode={oct(current_mode)}, owner_uid={current_uid})"
-                    )
-            except (PermissionError, sysv_ipc.PermissionsError):
-                # Can't even attach — segment exists with root:0600.
-                # Try to remove it via ipcrm subprocess and recreate.
-                logger.warning(
-                    f"Permission denied attaching to Chrony SHM (key=0x{self.key:08x}). "
-                    f"Attempting ipcrm removal..."
-                )
-                if self._try_ipcrm_remove():
-                    self.shm = sysv_ipc.SharedMemory(
-                        self.key,
-                        flags=sysv_ipc.IPC_CREAT | sysv_ipc.IPC_EXCL,
-                        size=SHM_SIZE,
-                        mode=0o666
-                    )
-                    logger.info(
-                        f"Recovered: removed stale SHM via ipcrm and recreated "
-                        f"with correct permissions (0666)"
-                    )
-                else:
-                    raise
+                self.shm.detach()
+            finally:
+                self.shm = None
+            raise PermissionError(
+                f"Chrony SHM (key=0x{self.key:08x}) has restrictive "
+                f"permissions (mode={oct(current_mode)}, "
+                f"owner_uid={current_uid}, my_uid={my_uid}) and we lack "
+                f"CAP_IPC_OWNER to fix them in place.  Refusing to "
+                f"remove + recreate — that would silently orphan "
+                f"chronyd (which is still attached to the old segment). "
+                f"Operator fix: stop chronyd, "
+                f"`sudo ipcrm -M 0x{self.key:08x}`, restart this service, "
+                f"then start chronyd."
+            ) from e
 
         self._use_sysv = True
 
-    def _try_ipcrm_remove(self) -> bool:
-        """Attempt to remove a SHM segment via ipcrm subprocess.
-
-        This handles the case where chrony created the segment as root:0600
-        and our process (running as timestd) can't even attach.  Works when
-        the process has CAP_IPC_OWNER (set via AmbientCapabilities in the
-        systemd unit) or when running as root.
-
-        Returns:
-            True if segment was successfully removed.
-        """
-        import subprocess
-        key_hex = f"0x{self.key:08x}"
-        try:
-            result = subprocess.run(
-                ["ipcrm", "-M", key_hex],
-                capture_output=True, text=True, timeout=5
-            )
-            if result.returncode == 0:
-                logger.info(f"Successfully removed SHM segment {key_hex} via ipcrm")
-                return True
-            else:
-                logger.error(
-                    f"ipcrm failed for {key_hex}: {result.stderr.strip()}. "
-                    f"Manual fix: sudo ipcrm -M {key_hex} && "
-                    f"sudo systemctl restart timestd-fusion"
-                )
-                return False
-        except Exception as e:
-            logger.error(f"ipcrm subprocess failed: {e}")
-            return False
-    
     def _connect_file(self):
         """Connect using file-based shared memory (fallback)."""
         # File-based approach for systems without sysv_ipc
@@ -402,8 +406,11 @@ class ChronySHM:
                     f"offset={(system_time - reference_time)*1000:+.3f}ms"
                 )
 
+            # M-M17: a successful update resets the consecutive-failure
+            # counter so a single recovery cleans the slate.
+            self._consecutive_update_failures = 0
             return True
-            
+
         except Exception as e:
             logger.error(f"Failed to update Chrony SHM: {e}")
             import traceback
@@ -428,6 +435,24 @@ class ChronySHM:
                     self.shm_map.flush()
             except Exception as repair_err:
                 logger.error(f"ChronySHM sequence-count repair failed: {repair_err}")
+
+            # M-M17: mark disconnected so the caller's reconnect path
+            # fires on the next cycle.  The previous code only returned
+            # False — `self.connected` stayed True forever, and the
+            # caller's `if not chrony_shm.connected: reconnect()` loop
+            # never triggered.  Result: a transient SHM error
+            # (e.g. mmap got closed, chronyd recreated the segment)
+            # produced silent failures until the daemon restart.
+            self.connected = False
+            self._consecutive_update_failures += 1
+            if self._consecutive_update_failures >= self._UPDATE_FAILURE_ESCALATE_AT:
+                logger.critical(
+                    f"ChronySHM: {self._consecutive_update_failures} "
+                    f"consecutive update failures on unit {self.unit} "
+                    f"(key=0x{self.key:08x}).  chronyd is receiving no "
+                    f"refclock samples — system clock discipline depends "
+                    f"on resolving this."
+                )
             return False
     
     def disconnect(self):
