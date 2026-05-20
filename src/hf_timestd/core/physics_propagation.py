@@ -9,6 +9,16 @@ Physics-Informed Propagation Model  [DEPRECATED]
     All new code should use ``HFPropagationModel``.  This file is retained for
     backward compatibility but will be removed in a future release.
 
+    §4.4 Low note: the "Tier 1: PyLap/PHaRLAP Ray Tracing" branch
+    documented below was never functional in practice -- the pylap
+    bindings this code attempts to call have a different API than what
+    the body assumes, so the Tier-1 path always raises and the model
+    falls through to Tier-2 (IRI + geometric).  This module emits a
+    DeprecationWarning on instantiation; the canonical raytrace path
+    is `core.raytrace_engine` against the modern pylap interface, used
+    by `HFPropagationModel`.  Documented here rather than fixed because
+    the module is on its way out.
+
 ================================================================================
 PURPOSE
 ================================================================================
