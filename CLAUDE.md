@@ -4,7 +4,7 @@
 
 HF Time Standard Analysis (`hf-timestd`) — a Python system that receives HF time standard broadcasts (WWV, WWVH, CHU, BPM) via ka9q-radio RTP streams, produces sub-millisecond UTC timing measurements for Chrony clock discipline, and generates ionospheric science products (dTEC, TEC, propagation mode identification).
 
-**Version:** 6.12.0 | **License:** MIT | **Python:** >=3.10
+**Version:** 7.0.0 (canonical: `pyproject.toml`) | **License:** MIT | **Python:** >=3.10
 
 ## Quick Reference
 

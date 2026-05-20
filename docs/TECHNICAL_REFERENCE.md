@@ -3,7 +3,8 @@
 **Quick reference for developers working on the HF Time Standard (hf-timestd) codebase.**
 
 **Author:** Michael James Hauan (AC0G)  
-**Last Updated:** April 2, 2026
+**Version:** 7.0.0 (canonical: `pyproject.toml`)  
+**Last Updated:** 2026-05-20
 
 ---
 
@@ -1017,8 +1018,8 @@ sudo sysctl -w net.core.rmem_max=26214400
 
 ---
 
-**Version**: 6.11.0  
-**Last Updated**: March 19, 2026  
+**Version**: 7.0.0 (canonical: `pyproject.toml`)  
+**Last Updated**: 2026-05-20  
 **Purpose**: Technical reference for HF Time Standard developers
 
 **v6.7.1 Release (February 12, 2026) - Propagation Model Full Integration:**

@@ -3,8 +3,8 @@
 **Purpose:** Document the ionospheric physics measurements and scientific capabilities of the HF Time Standard system  
 **Scope:** This document covers the *science* — what measurements mean physically and how they are validated. For *design decisions* (why the system is built this way), see `docs/ARCHITECTURE.md`. For *algorithms and data formats*, see `docs/TECHNICAL_REFERENCE.md`.  
 **Audience:** Scientists, researchers, and amateur radio operators interested in ionospheric studies  
-**System Version:** 6.11.0 (Unified Measurement Path + Adaptive Windowing + Multipath-Aware Uncertainty)  
-**Last Updated:** March 19, 2026
+**System Version:** 7.0.0 (canonical: `pyproject.toml`)  
+**Last Updated:** 2026-05-20
 
 ---
 

@@ -1,8 +1,8 @@
 # HF-TimeStd: Metrological Description
 
 **Prepared for:** Time metrology professionals, "time nuts", and general users  
-**System Version:** 6.11.0 (Unified Measurement Path + Adaptive Windowing + Multipath-Aware Uncertainty)  
-**Last Updated:** March 19, 2026  
+**System Version:** 7.0.0 (canonical: `pyproject.toml`)  
+**Last Updated:** 2026-05-20  
 **Author:** Michael James Hauan (AC0G)
 
 ---

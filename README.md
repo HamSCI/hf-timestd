@@ -281,7 +281,8 @@ The system has an eight-service core pipeline plus a set of housekeeping units (
 
 ## Status
 
-**Production (V6.11.0)** - Active development and field testing in progress.
+**Production (7.0.0)** — canonical version source is `pyproject.toml`.
+Active development and field testing in progress.
 
 ## Credits & Support
 
