@@ -4,6 +4,60 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### 2026-05-17 metrology/physics review — full remediation arc complete (2026-05-20)
+
+The 2026-05-17 code review (`docs/CODE_REVIEW_2026-05-17_METROLOGY_PHYSICS.md`)
+identified ~70 findings across the metrology and physics pipelines.  All
+findings are now closed on `main`, including the deferred P-H29 (TID L3
+deliverable).  The earlier per-finding `[Unreleased]` entries below
+remain as-is; this section is the consolidated landing summary.
+
+- **Branch merge** (`2387c3b`) — 20-commit `--no-ff` merge of
+  `metrology-physics-review-remediation` into `main`.  Covers all of
+  S2/S3/S4, all P-H, all P-M, and all M-M findings (M-M1 through
+  M-M35 minus M-M29 which was absorbed by S2).  The original branch
+  is preserved on origin as the per-finding audit trail.
+
+- **Documentation (D-C1, D-H1..D-H8)** — version banners unified on
+  `pyproject.toml` 7.0.0; BPM weight 30%→0% in ARCHITECTURE; new
+  `docs/OVERVIEW.md` entry point; SCIENTIFIC_CAPABILITIES.md
+  superseded by PHYSICS.md; TECHNICAL_REFERENCE HDF5 section rewritten
+  to SWMR; METROLOGY §4.5 gained ✅/⚠️/❌ implementation-status
+  markers; PHYSICS §3.1 split into ✅ carrier-phase dTEC vs ❌
+  group-delay TEC; PHYSICS_CONTRACT and METROLOGY_CONTRACT bumped
+  1.1.0 → 1.2.0 (and PHYSICS_CONTRACT further → 1.3.0 with P-H29);
+  all 8 Known Deviations resolved.
+
+- **Low §3.4 + §4.4** — 25 commits, one per module, addressing ~30
+  small findings: dead code removal, stale docstrings, bare
+  `except`, magic numbers, exact-float comparisons, validation
+  guards, scandir-instead-of-glob freshness checks, etc.  See the
+  session log for the per-module commit table.
+
+- **P-H29 — TID detector wired as L3 deliverable** (`6ab5d5b`).  The
+  statistical engine (P-H30..P-H33 + P-M26, landed in the remediation
+  branch) finally has a backing data product.  New
+  `schemas/l3_tid_v1.json`; registry entry `('L3', 'tid')` →
+  `fusion:tid`; `PhysicsFusionService` constructs a `TIDDetector` at
+  startup and `_run_tid_detection_cycle` runs every fusion minute,
+  feeding L2 residuals and writing any returned event via
+  `tid_writer`; `web-api/services/tid_service.py` rewritten to read
+  the new product via `make_data_product_reader` (was a glob over a
+  per-date directory tree nothing wrote).  10 regression tests in
+  `tests/unit/test_tid_l3_writer.py`.
+
+Full session log:
+[`docs/changes/SESSION_2026-05-20_REMEDIATION_COMPLETE.md`](docs/changes/SESSION_2026-05-20_REMEDIATION_COMPLETE.md).
+
+Suite at end of session: 1993 passed, 1 deselected (standing
+`test_geometric_prediction` time-of-day flake).
+
+Next session: HDF5 → SQLite cutover (Phase 3a parity check → flip,
+then Phase 3b `write_hdf5=false`, then Phase 4 remove HDF5 + h5py).
+Runbook: `docs/HDF5-TO-SQLITE-MIGRATION.md`.
+
+---
+
 ### Correlation-peak SNR consolidated onto one canonical definition (review S4; M-M1, M-M3)
 
 - **The bug.** Three modules computed correlation-peak SNR three incompatible ways. `tick_edge_detector` used `peak/median(envelope)` — under-reports SNR by ~1.4 dB on a Rayleigh envelope (M-M1). `tick_matched_filter._correlate_tick_iq` used `peak/std(envelope)` — over-reports by ~3.7 dB on a Rayleigh envelope (M-M3). `tick_matched_filter._correlate_tick_am` used `peak/std(signed_correlation)` — already canonical for signed Gaussian noise, but its `noise_std == 0` branch returned a 40 dB sentinel that let artefacts pass downstream 8 dB gates (M-M3). The contract's "≥ 10 dB SNR" target was therefore ambiguous and the three sites disagreed by 1–5 dB.

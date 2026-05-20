@@ -1,57 +1,93 @@
-# Metrology/physics remediation — M-M batch
+# Next session — HDF5 → SQLite cutover
 
-Branch `metrology-physics-review-remediation`. P-M1–P-M26 all done. Now
-on **M-M (metrology-Medium)** findings, 11 file-clusters.
+The 2026-05-17 metrology/physics review remediation arc is **complete**
+on `main` (HEAD `6ab5d5b`, 2026-05-20).  All findings — including the
+deferred P-H29 (TID L3 deliverable) — are resolved; all 8
+PHYSICS_CONTRACT Known Deviations are closed.  Suite green: 1993
+passed, 1 deselected (the standing `test_geometric_prediction`
+time-of-day flake).  Full session log:
+[`docs/changes/SESSION_2026-05-20_REMEDIATION_COMPLETE.md`].
 
-## Done this session (M-M)
-- [x] **S4 + M-M1 + M-M3** — canonical correlation-peak SNR: new
-      `core/snr.py` with `peak_snr_db_envelope` (Rayleigh) and
-      `peak_snr_db_signed` (Gaussian); `tick_edge_detector` and
-      `tick_matched_filter._correlate_tick_iq` migrated to the envelope
-      branch; `tick_matched_filter._correlate_tick_am` migrated to the
-      signed branch (replaces the 40 dB sentinel with NaN). The
-      `metrology_engine` correlation-SNR sites will migrate when its
-      M-M cluster lands.
+The next workstream is the HDF5 → SQLite cutover.  Runbook lives in
+[`docs/HDF5-TO-SQLITE-MIGRATION.md`]; ongoing-task state is in the
+project memory `project_hf_timestd_sqlite_cutover`.
 
-## Remaining M-M clusters (one commit each)
-- [ ] **M-M2** `tick_edge_detector` — Doppler polyfit unweighted +
-      cycle-slip-risky unwrap.
-- [ ] **M-M4** `buffer_timing` — GPS_LEAP_SECONDS captured once at import.
-- [ ] **M-M5/M-M6/M-M7/M-M8 + S4-finish** `metrology_engine` — vacuum
-      fallback `×1.15`; minute_number from untrusted system_time;
-      synthetic edge round-trip truncates mid_sec; ±800 ms multipath
-      suppression; migrate correlation SNR to `peak_snr_db_envelope`.
-- [ ] **M-M9/M-M10/M-M11/M-M12/M-M13** `multi_broadcast_fusion` — key
-      formatter; dead `gpsdo_locked` guard; leap-second Kalman hold
-      length; >5 ms D_clock jump not damped; dual convergence definitions.
-- [ ] **M-M14/M-M15** `broadcast_kalman_filter` — Joseph-form covariance
-      update; NaN/Inf guard on entrypoint.
-- [ ] **M-M16/M-M17** `chrony_shm` — `_connect_sysv` recreates a segment
-      chronyd may be attached to; failed `update()` does not clear
-      `.connected`.
-- [ ] **M-M18/M-M19/M-M20** `metrology_service` — per-record
-      `all_arrivals`/`detection_attempts` heap risk; DEBUG-not-WARNING
-      log; `_cleanup_processed_set` horizon uses `time.time()` while
-      minutes are keyed by ring `head_utc`.
-- [ ] **M-M21/M-M22/M-M23** `l2_calibration_service` — vacuum-only
-      geometric-fallback `propagation_delay_ms`; `k=2.0 / dof=10`
-      mis-labelled as 95 %; uncertainty components un-sourced.
-- [ ] **M-M24/M-M25/M-M26/M-M27/M-M28** `arrival_pattern_matrix` —
-      `int()` truncation in sample conversions; `contains_sample` /
-      `deviation_sigma` disagreement; `max_search_sample` clamp;
-      RTP-mode gate on TEC correction; virtual-vs-true hmF2 semantics.
-- [ ] **M-M30/M-M31/M-M32/M-M33/M-M34/M-M35** `propagation_mode_solver` —
-      Tier-2 MUF check; `back_calculate_emission_time` fallback;
-      E-layer ×0.5 fudge; `identify_mode` metric mismatch; dead FSS
-      branch; circular `second_aligned` boost.
+## Pre-flight state (carried over from 2026-05-19 on bee1)
 
-(M-M29 done by S2 — `propagation_mode_solver._hop_geometry` now uses
-spherical `hop_geometry`.)
+- Phase 1 (`SqliteDataProductReader` + `make_data_product_reader` +
+  `[storage] read_sqlite` knob), Phase 2 (all producers via
+  `make_data_product_writer`), and Phase 3a-prep (all consumers
+  backend-agnostic via `make_data_product_reader`) are all committed.
+- On bee1, all 13 data products were dual-writing as of 2026-05-19.
+  The first full 9-channel `parity_check_all.sh` sweep at ~11:43 UTC
+  returned **70 checks → 60 OK / 10 SKIP / 0 PENDING / 0 FAIL**
+  (SKIPs benign: `chu_fsk` on non-FSK channels, idle reanalysis).
+  The parity window has been accumulating clean runs since.
+- The "merge branch → main" step in the runbook is **already done**
+  (commit `2387c3b`, 2026-05-19 evening / 2026-05-20 morning).  The
+  cutover session can skip directly to the parity-check → flip steps.
 
-## Then
-Low (§3.4, §4.4); documentation (§5); P-H29 (TID L3 wire-in, deferred).
+## Cutover steps (in order)
+
+1. **Parity check** — on bee1:
+
+   ```
+   sudo journalctl -u timestd-sqlite-parity --since "2026-05-19 11:30" \
+       | grep -E 'Summary|FAIL|PENDING'
+   ```
+
+   Go criteria: every run since 2026-05-19 11:32 shows `fail=0 err=0
+   pending=0`.  (The first run after l2-calibration's 11:32 restart
+   may show `L2_timing_measurements` PENDING; runs from 12:00 UTC
+   onwards must all be clean.)  A live full sweep is also fine:
+
+   ```
+   bash scripts/parity_check_all.sh
+   ```
+
+   with the canonical channel list (`CHANNELS="CHU_3330 CHU_7850
+   CHU_14670 SHARED_2500 SHARED_5000 SHARED_10000 SHARED_15000
+   WWV_20000 WWV_25000"`).
+
+2. **Phase 3a — the flip.** With parity verified clean:
+
+   - `/etc/hf-timestd/timestd-config.toml`, `[storage]`: add
+     `read_sqlite = true`.
+   - Repo `config/timestd-config.toml`, `[storage]`: set
+     `read_sqlite = true`.
+   - Restart consumers: `timestd-fusion`, `timestd-l2-calibration`,
+     the physics-fusion service, web-api.
+   - Watch chrony TSL2 and the next parity run.  Any FAIL → **do
+     not flip**, investigate the divergence first.
+
+3. **Phase 3b — `write_hdf5 = false`.** Once Phase 3a has been
+   running clean for at least one full parity window (and ideally
+   a full day), set `write_hdf5 = false` so SQLite is the sole
+   writer.  Re-validate the suite and chrony TSL2.
+
+4. **Phase 4 — remove HDF5 + h5py.** Drop the HDF5 code paths,
+   remove the pinned `h5py>=3.8.0,<3.16.0` dependency, retire
+   `HDF5-TO-SQLITE-MIGRATION.md`'s "during cutover" sections.
+   The fusion-service h5py memory leak (documented in
+   `multi_broadcast_fusion.py`'s `_malloc_trim` block) is only
+   fully fixed once fusion also holds a *long-lived* SQLite
+   connection (still per-cycle today); that's a Phase-4 follow-up.
+
+## Reader semantic to remember
+
+`SqliteDataProductReader` returns `None` for `NULL`, whereas the HDF5
+reader fills with `NaN`/`0`/`""` (the `f7ec934` DUT1 bug class).
+Intentional; downstream code already handles the SQLite-style
+nullability where it matters.
 
 ## Workflow
-`uv run --frozen --extra dev pytest tests/` — `--frozen` keeps uv.lock
-pinned. Known time-of-day flakes (deselect / not regressions):
-`test_geometric_prediction`, `test_fusion_gnss_vtec_rtp_gate`.
+
+```
+uv run --frozen --extra dev pytest tests/
+```
+
+`--frozen` keeps `uv.lock` pinned (without it `uv run` re-resolves
+`ka9q-python` and dirties the lock; `git checkout uv.lock` to drop
+any drift).  Standing flake to deselect (not a regression):
+`tests/test_metrology_engine.py::test_geometric_prediction` (F-layer
+height time-of-day behaviour).
