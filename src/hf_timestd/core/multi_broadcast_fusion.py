@@ -83,8 +83,11 @@ WEIGHTED FUSION:
 Where weights w_i are computed from:
     w_i = confidence × grade_weight × mode_weight × snr_factor
 
-GRADE WEIGHTS:    A: 1.0, B: 0.8, C: 0.5, D: 0.2
-MODE WEIGHTS:     1E: 1.0, 1F: 0.9, 2F: 0.7, 3F: 0.5, GW: 1.0
+GRADE WEIGHTS:    A: 1.0, B: 0.9, C: 0.7, D: 0.5     (see ``grade_scale``)
+MODE WEIGHTS:     1E: 1.0, 1F: 0.95, 2F: 0.85, 3F: 0.7, GW: 1.0  (see ``mode_scale``)
+(§3.4 Low: header tables were 2025-vintage and disagreed with the
+current ``grade_scale`` / ``mode_scale`` literals in
+``_calculate_weights`` -- reconciled 2026-05-20.)
 
 ================================================================================
 AUTO-CALIBRATION
