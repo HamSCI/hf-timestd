@@ -20,17 +20,38 @@ DEFAULT_IONO_HEIGHT_KM = 350.0
 # real Pucheng transmitter — so it is now imported, not duplicated.
 
 
+def _validate_latlon(lat: float, lon: float, label: str) -> None:
+    """§4.4 Low: validate lat/lon are finite and within physical range.
+
+    Raises ``ValueError`` on invalid input -- catching swapped lat/lon
+    or unit-confusion bugs at the boundary instead of silently
+    propagating nonsense through the great-circle / obliquity math.
+    """
+    if not (math.isfinite(lat) and math.isfinite(lon)):
+        raise ValueError(f"{label}: non-finite coordinate (lat={lat!r}, lon={lon!r})")
+    if not (-90.0 <= lat <= 90.0):
+        raise ValueError(f"{label}: lat {lat} out of [-90, 90] (deg)")
+    if not (-180.0 <= lon <= 180.0):
+        raise ValueError(f"{label}: lon {lon} out of [-180, 180] (deg)")
+
+
 def calculate_midpoint(lat1: float, lon1: float, lat2: float, lon2: float) -> Tuple[float, float]:
     """
     Calculate great circle midpoint between two points.
-    
+
     Args:
         lat1, lon1: First point (degrees)
         lat2, lon2: Second point (degrees)
-    
+
     Returns:
         (midpoint_lat, midpoint_lon) in degrees
+
+    Raises:
+        ValueError: if either endpoint is out of range or non-finite.
     """
+    _validate_latlon(lat1, lon1, "calculate_midpoint p1")
+    _validate_latlon(lat2, lon2, "calculate_midpoint p2")
+
     # Convert to radians
     lat1_rad = math.radians(lat1)
     lon1_rad = math.radians(lon1)
@@ -125,6 +146,15 @@ def great_circle_distance(lat1: float, lon1: float, lat2: float, lon2: float) ->
     return EARTH_RADIUS_KM * c
 
 
+#: Maximum obliquity factor (§4.4 Low).  Matches the sibling cap in
+#: ``propagation_model._integrate_layer_delay`` (``max(0.01, sin_sq)``
+#: at the denominator → ``M ≤ 10``).  Without this cap, near-horizon
+#: elevations push ``M`` past 30, well past the regime where the
+#: thin-shell approximation is meaningful; the cap keeps the
+#: slant-to-vertical mapping inside the model's validity envelope.
+MAX_OBLIQUITY_FACTOR = 10.0
+
+
 def convert_slant_to_vertical(
     tec_slant: float,
     elevation_angle_deg: float,
@@ -132,35 +162,43 @@ def convert_slant_to_vertical(
 ) -> Tuple[float, float]:
     """
     Convert slant TEC to vertical TEC using obliquity factor.
-    
+
     The obliquity factor M accounts for the longer path length through
     the ionosphere at oblique angles.
-    
+
     Formula:
         M = 1 / cos(arcsin((R_E * cos(θ)) / (R_E + h_m)))
         VTEC = TEC_slant / M
-    
+
+    The returned ``M`` is capped at :data:`MAX_OBLIQUITY_FACTOR`
+    (=10) to match the sibling cap in ``propagation_model`` -- without
+    it, sub-5° elevations push the obliquity past the regime where
+    the thin-shell approximation is meaningful.
+
     Args:
         tec_slant: Measured slant TEC (TECU)
         elevation_angle_deg: Elevation angle at receiver (degrees)
         h_iono: Ionospheric height (km, default 350)
-    
+
     Returns:
         (vtec, obliquity_factor) tuple
     """
     theta_rad = math.radians(elevation_angle_deg)
-    
+
     # Obliquity factor calculation
     sin_term = (EARTH_RADIUS_KM * math.cos(theta_rad)) / (EARTH_RADIUS_KM + h_iono)
-    
+
     # Clamp to valid range to avoid math domain errors
     sin_term = max(-1.0, min(1.0, sin_term))
-    
+
     M = 1.0 / math.cos(math.asin(sin_term))
-    
+    # §4.4 Low: cap M so a near-horizon elevation doesn't produce an
+    # unphysically large slant→vertical denominator.
+    M = min(M, MAX_OBLIQUITY_FACTOR)
+
     # Convert to vertical
     vtec = tec_slant / M
-    
+
     return vtec, M
 
 
