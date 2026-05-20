@@ -7,8 +7,18 @@ Real-time DSP and Timestamping Service.
 Responsibility:
 1. Ingest raw IQ data from the core-recorder's shared-memory ring buffer.
 2. Run MetrologyEngine (Tone Detection, Channel Characterization).
-3. Write L1_Metrology data products (HDF5).
-4. Do NOT perform physics modeling or clock offset calculation.
+3. Write L1 and L2 metrology data products (HDF5 + SQLite).
+4. Compute the per-channel edge-ensemble timing residual
+   (``d_clock_ms`` on L2 tick_timing) -- this IS a clock-offset
+   measurement, but it is **per-channel** and **not** yet fused
+   across stations and **not** wired to chrony.  Fusion (the
+   `timestd-fusion` service) is what takes these per-channel
+   residuals and produces the chrony SHM update.
+
+(§3.4 Low: docstring line 11 used to say "Do NOT perform ... clock
+offset calculation"; that was stale -- this service has computed
+edge-ensemble d_clock_ms since TickEdgeDetector landed.  Reconciled
+2026-05-20.)
 
 Data path
 ---------
@@ -1030,15 +1040,31 @@ class MetrologyService:
         self.stop()
 
     def _write_status(self, minute: int, results: List[L1MetrologyMeasurement]):
-        """Write status.json."""
+        """Write the per-channel status.json summary.
+
+        §3.4 Low: this used to dump every L1 measurement object via
+        ``[r.model_dump(mode='json') for r in results]`` every minute
+        -- a JSON status file should be small, quick to read, and free
+        of high-cadence payload churn.  Now we summarise: count +
+        first/last station + count of detected tones.  Full
+        measurement records live in the HDF5/SQLite data products.
+        """
         try:
+            detected = [r for r in results if getattr(r, 'tone_detected', False)]
+            stations = sorted({
+                str(getattr(r, 'station_id', '?')) for r in results
+            })
             status = {
                 "service": "metrology",
                 "last_update": datetime.now(timezone.utc).isoformat(),
                 "channel": self.channel_name,
                 "last_minute_processed": minute,
                 "minutes_processed": self.minutes_processed,
-                "last_results": [r.model_dump(mode='json') for r in results]
+                "last_results_summary": {
+                    "n_results": len(results),
+                    "n_detected": len(detected),
+                    "stations": stations,
+                },
             }
             _status_tmp = self.status_file.with_suffix('.tmp')
             with open(_status_tmp, 'w') as f:
