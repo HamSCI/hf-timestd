@@ -41,13 +41,14 @@ Writes: L3/dtec HDF5 (dTEC time series, anchored to GNSS VTEC)
 """
 
 import logging
-import math
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
 
 import numpy as np
+
+# §4.4 Low: previously imported `math`, `datetime`, `timezone`, and
+# `Tuple` — none of which were referenced.  Removed.
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +152,16 @@ class CarrierTECEstimator:
             CarrierTECResult with dTEC time series, or None if insufficient data
         """
         if len(epochs) < 3:
+            return None
+
+        # §4.4 Low: guard against non-positive frequency.  The 1/f²
+        # iono-delay rescaling at the end of this method would divide
+        # by zero (or by a meaningless negative).
+        if not (frequency_mhz > 0 and np.isfinite(frequency_mhz)):
+            logger.warning(
+                f"carrier_tec: invalid frequency_mhz={frequency_mhz!r} "
+                f"for {station}/{channel}; skipping"
+            )
             return None
 
         # Sort by time
@@ -327,8 +338,19 @@ class CarrierTECEstimator:
         phases = np.array([r.get('carrier_phase_rad', 0.0) for r in records])
         snrs = np.array([r.get('snr_db', 0.0) for r in records])
 
-        # Reject records with no real phase measurement (carrier_phase_rad == 0.0
-        # indicates the IQ phase extraction path failed — no carrier phasors).
+        # Reject records with no real phase measurement.  The producing
+        # code (tick_edge_detector) initialises `carrier_phase_rad` to
+        # 0.0 and overwrites it only when the IQ phase extraction
+        # succeeds, so == 0.0 is treated as "no measurement".
+        #
+        # Known limitation (§4.4 Low): a *genuine* phase measurement
+        # that lands on exactly 0.0 rad (real-positive complex carrier)
+        # is therefore dropped along with missing/failed measurements.
+        # The probability of any float64 phase being exactly 0.0 is
+        # negligibly small (~1e-15 for a uniform distribution over
+        # (-π, π]); accepting that as the cost of disambiguating
+        # missing-vs-zero without a separate quality flag in the
+        # producing schema.
         nonzero_mask = phases != 0.0
         if np.sum(nonzero_mask) < 3:
             return None
