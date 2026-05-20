@@ -29,6 +29,7 @@ Key classes:
 
 import logging
 import math
+import os
 import time
 import argparse
 import signal
@@ -405,15 +406,30 @@ class PhysicsFusionService:
             Tuple of (is_fresh, newest_age_seconds)
         """
         newest_mtime = 0.0
-        
+
+        # §4.4 Low: use os.scandir per channel directory instead of
+        # glob("*.h5") + list() + Path-object materialisation; same
+        # syscall budget but no per-file Path-object churn, and the
+        # inner loop short-circuits on stat failure.  Mirrors the
+        # M-M20 + §3.4 fix in `l2_calibration_service._check_l1_freshness`.
         for channel in self.channels:
             l2_dir = self.data_root / 'phase2' / channel / 'clock_offset'
-            if l2_dir.exists():
-                h5_files = list(l2_dir.glob("*.h5"))
-                if h5_files:
-                    channel_mtime = max(f.stat().st_mtime for f in h5_files)
-                    newest_mtime = max(newest_mtime, channel_mtime)
-        
+            if not l2_dir.exists():
+                continue
+            try:
+                with os.scandir(l2_dir) as it:
+                    for entry in it:
+                        if not entry.name.endswith('.h5'):
+                            continue
+                        try:
+                            m = entry.stat().st_mtime
+                        except OSError:
+                            continue
+                        if m > newest_mtime:
+                            newest_mtime = m
+            except OSError:
+                continue
+
         if newest_mtime == 0.0:
             return False, float('inf')
         
@@ -433,7 +449,7 @@ class PhysicsFusionService:
         end_iso = datetime.fromtimestamp(minute_timestamp + 59.999, tz=timezone.utc).isoformat().replace('+00:00', 'Z')
         
         # Collect raw measurements grouped by (station, frequency_mhz)
-        raw_by_station_freq: Dict[tuple, List[Dict]] = defaultdict(list)
+        raw_by_station_freq: Dict[Tuple[str, float, str], List[Dict]] = defaultdict(list)
         
         for channel in self.channels:
             try:
@@ -514,7 +530,7 @@ class PhysicsFusionService:
         
         return measurements_by_station
 
-    def process_minute(self, minute_timestamp: int, station_data: Optional[Dict[tuple, List[Dict]]] = None) -> bool:
+    def process_minute(self, minute_timestamp: int, station_data: Optional[Dict[Tuple[str, float, str], List[Dict]]] = None) -> bool:
         """Process a single minute of data.  Returns True if the L3 summary was written."""
         logger.info(f"Processing minute {minute_timestamp} ({datetime.fromtimestamp(minute_timestamp, tz=timezone.utc)})")
         
@@ -715,7 +731,7 @@ class PhysicsFusionService:
     def _build_ipp_measurements(
         self,
         minute_timestamp: int,
-        tec_estimates: Dict[tuple, TECResult],
+        tec_estimates: Dict[Tuple[str, str], TECResult],
     ) -> List[IPPMeasurement]:
         """
         Build IPP measurements from TEC estimates for VTEC mapping.
@@ -1013,7 +1029,7 @@ class PhysicsFusionService:
     def _process_carrier_dtec(
         self,
         minute_timestamp: int,
-        tec_estimates: Dict[tuple, 'TECResult']
+        tec_estimates: Dict[Tuple[str, str], 'TECResult']
     ):
         """
         Compute carrier-phase dTEC for each channel and anchor to GNSS VTEC
