@@ -1083,7 +1083,7 @@ requires-dist = [
     { name = "h5py", specifier = ">=3.8.0,<3.16.0" },
     { name = "iri2020", git = "https://github.com/space-physics/iri2020.git" },
     { name = "jinja2", specifier = ">=3.0.0" },
-    { name = "ka9q-python", specifier = ">=3.7.1" },
+    { name = "ka9q-python", specifier = ">=3.14.0" },
     { name = "lz4", marker = "extra == 'lz4'", specifier = ">=4.0.0" },
     { name = "matplotlib", specifier = ">=3.7.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
@@ -1226,15 +1226,15 @@ wheels = [
 
 [[package]]
 name = "ka9q-python"
-version = "3.9.0"
+version = "3.14.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/8d/b1/e88383ae86e928a15e0a823998f51b2cc641cb112cec00a8b4a53970b327/ka9q_python-3.9.0.tar.gz", hash = "sha256:affcd7b02e2d01371447ebeb83f8516594e1b6f249561c18dd588602ee2b7ce3", size = 395188, upload-time = "2026-04-14T20:59:41.436Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/93/b9/b33321c299e04dcb34c5f79d30e0c54dd60af7a0887f44ac73e67771852d/ka9q_python-3.14.2.tar.gz", hash = "sha256:0a2962bc0bde3091938e43458f5c70f567442669180fa66dc85c637f3b3f84c2", size = 254208, upload-time = "2026-05-14T11:00:13.719Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/50/39/081fb47bd4a4385f1de3c4a844d6918a540e60845e1c30cb76d951c3c461/ka9q_python-3.9.0-py3-none-any.whl", hash = "sha256:c218875de59af3b3c74091822fa49a70276acc08559e573f3ff11ffb79736e5c", size = 91423, upload-time = "2026-04-14T20:59:40.045Z" },
+    { url = "https://files.pythonhosted.org/packages/68/a5/792658df39e9bb895e6904314b925e0bac41e059eb37dfcc570845c9280e/ka9q_python-3.14.2-py3-none-any.whl", hash = "sha256:59920b944b42823a566de60587c03850d690b9399ceb627927c27da031b48491", size = 104911, upload-time = "2026-05-14T11:00:12.319Z" },
 ]
 
 [[package]]
