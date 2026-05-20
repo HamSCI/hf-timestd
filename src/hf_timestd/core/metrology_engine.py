@@ -1394,8 +1394,15 @@ class MetrologyEngine:
         
         measurements = []
         all_attempts = []
+        # §3.4 Low: the previous gate compared against 'metadata_fallback'
+        # — a source value that buffer_timing.resolve_buffer_timing no
+        # longer (and per the current source: comment, ever) produces.  The
+        # check was therefore a no-op (always True when buffer_timing was
+        # not None).  Compare against the actual non-authoritative value,
+        # 'no_timing', so a sentinel BufferTiming correctly skips this
+        # branch.
         use_per_second_correlator = (
-            buffer_timing is not None and buffer_timing.source != 'metadata_fallback'
+            buffer_timing is not None and buffer_timing.source != 'no_timing'
         )
         
         if use_per_second_correlator:

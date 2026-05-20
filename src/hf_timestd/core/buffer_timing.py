@@ -60,16 +60,26 @@ class BufferTiming:
         utc = timing.sample_to_utc(12345)
         idx = timing.utc_to_sample(1770515405.123)
     """
-    # UTC time of sample 0 of this buffer
+    # UTC time of sample 0 of this buffer.  When ``source == 'no_timing'``
+    # this is a *sentinel* 0.0 (Unix epoch) -- consumers MUST check
+    # ``source != 'no_timing'`` before treating it as real UTC.  The
+    # sentinel can't be NaN because downstream code does
+    # ``int(sample0_utc)`` and we'd lose deterministic behaviour.
     sample0_utc: float
 
     # Sample rate (Hz) — exact, GPSDO-locked
     sample_rate: int
 
-    # Which timing source produced sample0_utc
-    source: str  # 'rtp_gps' or 'no_timing'
+    # Which timing source produced sample0_utc.  Possible values:
+    #   'rtp_gps'   -- authoritative timing from the RTP/GPS snapshot.
+    #   'no_timing' -- sentinel; sample0_utc is meaningless (0.0).
+    source: str
 
-    # Quality metrics
+    # Quality metrics — currently placeholders (§3.4 Low).  Today these
+    # are always 0/1 and 0.0/inf because per-buffer timing is sourced
+    # from a single snapshot (top-level gps_time_ns + rtp_timesnap);
+    # they're retained on the dataclass so a future multi-snapshot
+    # estimator can populate them without a schema change.
     n_snapshots_used: int
     jitter_ms: float
 
