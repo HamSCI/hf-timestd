@@ -23,34 +23,77 @@ no `hdf5_reader.py`, no `import h5py` anywhere in `src/`, `tests/`,
 
 Full pytest: **1951 passed, 1 skipped, 1 deselected, 12 warnings.**
 
-## Live operator action still required
+## Operator restart — done 2026-05-21 14:30-14:43 UTC
 
-The running timestd-fusion / l2-calibration / physics processes
-imported the old `hf_timestd.io.hdf5_writer` / `hdf5_reader` modules
-at startup.  Those modules are now deleted in the source tree.  The
-in-memory cache keeps the processes running, but **a restart picks
-up code that no longer has the HDF5 modules**.  Plan:
+* `sudo systemctl restart timestd-l2-calibration` @ 14:30:59 UTC. Seed
+  log: `Startup: L2 gap ≤10 minutes — normal lookback window sufficient`.
+* `sudo systemctl restart timestd-physics` @ 14:31:22 UTC. Backfilled
+  L3_dtec from minute -30 forward.
+* `sudo systemctl restart timestd-fusion` @ 14:32:36 UTC. Initialized
+  SQLite readers for every channel; authority dropped to A1/T4 σ=2ms
+  during bootstrap then recovered to A1/T6 σ=50μs by 14:37:03 UTC.
+* `sudo systemctl restart timestd-web-api` — FIRST attempt at 14:33:02
+  succeeded, but endpoints returned empty because the running web-api
+  was using `/opt/hf-timestd/web-api/` and `/opt/hf-timestd/src/` — both
+  separate stale snapshots, not the editable-install path.
 
+### Web-api dual-snapshot finding (resolved)
+
+`/opt/hf-timestd/web-api/` is a March-deployed copy that drifts from
+the source tree.  11 files in services/ and routers/ still imported
+`from hf_timestd.io.hdf5_reader import DataProductReader` — they were
+already converted in source, just never deployed.  Plus
+`/opt/hf-timestd/src/` was a separate April-3 snapshot of `hf_timestd`
+that `sys.path.insert(...)` lines in web-api forced into the import
+path, shadowing the venv's editable install at /opt/git/sigmond/.
+
+Resolution (preserved here as the recipe for the next drift):
 ```
-# Confirm services healthy before restart
-systemctl is-active timestd-fusion timestd-l2-calibration timestd-physics
-sqlite3 -readonly /var/lib/timestd/phase2/timestd.db \
-  "SELECT max(timestamp_utc) FROM L1_metrology_measurements;"
+# Move the stale /opt/hf-timestd/src snapshot aside so sys.path.insert
+# points at nothing and the editable install takes precedence.
+TS=$(date -u +%Y%m%dT%H%M%SZ)
+sudo mv /opt/hf-timestd/src /opt/hf-timestd/src.bak-pre-phase4-$TS
 
-# Restart, then watch the journal for clean startup
-sudo systemctl restart timestd-fusion timestd-l2-calibration timestd-physics
-sleep 10
-systemctl is-active timestd-fusion timestd-l2-calibration timestd-physics
+# Back up + sync the 11 web-api files that differ from source.  (Listed
+# by `diff -rq /home/mjh/git/hf-timestd/web-api/ /opt/hf-timestd/web-api/
+# | grep differ | grep -v __pycache__`.)
+BAK=/opt/hf-timestd/web-api/.bak-pre-phase4-$TS
+sudo mkdir -p $BAK/routers $BAK/services
+for f in routers/dashboard.py routers/docs.py routers/propagation.py \
+         routers/ionogram.py routers/tec.py \
+         services/event_service.py services/fusion_service.py \
+         services/health_service.py services/physics_service.py \
+         services/propagation_service.py services/stability_service.py \
+         services/test_signal_service.py services/tid_service.py \
+         services/chrony_service.py services/chu_fsk_service.py \
+         services/phase_service.py services/scintillation_service.py \
+         services/tec_service.py config.py; do
+  sudo cp -p /opt/hf-timestd/web-api/$f $BAK/$f
+  sudo install -o timestd -g timestd -m 644 \
+      /home/mjh/git/hf-timestd/web-api/$f /opt/hf-timestd/web-api/$f
+done
 
-# Re-check L3 freshness after a couple cycles
-sleep 90 && sqlite3 -readonly /var/lib/timestd/phase2/timestd.db \
-  "SELECT max(minute_boundary), datetime('now','-2 minutes') FROM L3_fusion_timing;"
-```
-
-Web-api can be restarted alongside or separately:
-```
+sudo systemctl reset-failed timestd-web-api
 sudo systemctl restart timestd-web-api
 ```
+
+### Post-restart verification (snapshot 2026-05-21 ~14:43 UTC)
+
+* `timestd-{fusion,l2-calibration,physics,web-api,vtec}` all active
+* fusion RSS: 205 MB / 11m uptime ✓
+* Authority: A1/T6 σ=50μs ✓
+* L3 freshness:
+  - L3_fusion_timing: 14:43:53 UTC (≤10s old)
+  - L3_gnss_vtec: 14:43:46 UTC (≤10s old)
+  - L3_dtec: 14:41:00 UTC (per-minute cadence, ~3 min old at check)
+  - DIAG_chrony_stats: 14:42:54 UTC
+  - L2_chu_fsk: 14:43:04 UTC
+* Web-api endpoints verified live:
+  - `/api/chrony/history?hours=1` → 7 sources
+  - `/api/phase/summary` → 17 traces
+  - `/api/phase/channels` → 9 channels
+  - `/api/tec/dtec?start=-30m` → 17 series, 931 points
+  - `/api/ionogram/channels` → 5 channels
 
 ## Pre-existing SQLite-writer gap (deferred bug)
 
