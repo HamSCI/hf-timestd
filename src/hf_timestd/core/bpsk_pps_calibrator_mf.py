@@ -85,17 +85,26 @@ __all__ = ['BpskPpsCalibratorMF']
 # _update_costas_lock).
 COSTAS_TAU_PHASE_EMA_S = 10.0   # φ-EMA time constant (s).
 COSTAS_TAU_DPHASE_EMA_S = 0.5   # |Δφ|-EMA time constant (s).
-# 2026-05-21: raised from 0.004 → 0.008.  The original was set based
-# on a single observed excursion that sat at 0.012-0.015; on later
-# bee1 runs the phase_ema drifted into a regime (φ≈+0.88) where the
-# |Δφ| EMA in *steady state* persistently spent time in 0.004-0.006,
-# triggering ~1 false-positive unlock per minute despite no real
-# carrier excursion.  Real excursions still sit ≥0.012, so 0.008
-# keeps the 2-3× separation from the real-event band while admitting
-# the borderline noise.  If a regime change ever pushes steady-state
-# |Δφ| above 0.008, revisit (the threshold is fundamentally a
-# property of the BPSK signal SNR + Costas loop bandwidth).
-COSTAS_DPHASE_MAX_RAD = 0.008   # |Δφ| EMA above this ⇒ loop in motion.
+# 2026-05-21: raised from 0.004 → 0.008 → 0.020 in two passes.
+#
+# The original 0.004 was set against a single observed excursion that
+# sat at 0.012-0.015, giving 3-4× separation from the real-event band.
+# Later bee1 runs found the carrier-recovery loop's steady-state |Δφ|
+# EMA had drifted into 0.005-0.009 — well below any real excursion
+# but enough to repeatedly trip the gate.  An intermediate 0.008
+# step cut the false-positive rate but the regime kept climbing into
+# 0.008-0.009 and the gate flapped again within minutes.
+#
+# Final value 0.020 was chosen to live solidly above the steady-state
+# jitter regardless of regime, relying on the BAND test
+# (``COSTAS_PHASE_BAND_RAD``, |φ - φ_EMA| > 0.5 rad) to catch real
+# excursions.  Per the original characterisation, real excursions
+# swing |φ| > 5 rad — multiple times the band threshold — so the band
+# test alone is sufficient to detect them.  The dphase test then
+# becomes a defense against rapid loop motion that hasn't yet wandered
+# off, which 0.020 still catches.  If real excursions ever start
+# fitting under both gates, revisit.
+COSTAS_DPHASE_MAX_RAD = 0.020   # |Δφ| EMA above this ⇒ loop in motion.
 COSTAS_PHASE_BAND_RAD = 0.5     # |φ − φ_EMA| above this ⇒ φ wandered off.
 COSTAS_RELOCK_S = 0.5           # φ quiescent this long (s) before re-lock.
 
