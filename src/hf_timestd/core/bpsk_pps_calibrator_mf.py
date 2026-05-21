@@ -85,7 +85,17 @@ __all__ = ['BpskPpsCalibratorMF']
 # _update_costas_lock).
 COSTAS_TAU_PHASE_EMA_S = 10.0   # φ-EMA time constant (s).
 COSTAS_TAU_DPHASE_EMA_S = 0.5   # |Δφ|-EMA time constant (s).
-COSTAS_DPHASE_MAX_RAD = 0.004   # |Δφ| EMA above this ⇒ loop in motion.
+# 2026-05-21: raised from 0.004 → 0.008.  The original was set based
+# on a single observed excursion that sat at 0.012-0.015; on later
+# bee1 runs the phase_ema drifted into a regime (φ≈+0.88) where the
+# |Δφ| EMA in *steady state* persistently spent time in 0.004-0.006,
+# triggering ~1 false-positive unlock per minute despite no real
+# carrier excursion.  Real excursions still sit ≥0.012, so 0.008
+# keeps the 2-3× separation from the real-event band while admitting
+# the borderline noise.  If a regime change ever pushes steady-state
+# |Δφ| above 0.008, revisit (the threshold is fundamentally a
+# property of the BPSK signal SNR + Costas loop bandwidth).
+COSTAS_DPHASE_MAX_RAD = 0.008   # |Δφ| EMA above this ⇒ loop in motion.
 COSTAS_PHASE_BAND_RAD = 0.5     # |φ − φ_EMA| above this ⇒ φ wandered off.
 COSTAS_RELOCK_S = 0.5           # φ quiescent this long (s) before re-lock.
 
