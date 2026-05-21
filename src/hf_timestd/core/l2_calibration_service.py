@@ -315,67 +315,92 @@ class L2CalibrationService:
     def _seed_last_processed(self):
         """Initialise last_processed and lookback_minutes from existing L2 output.
 
-        On a normal restart the L2 clock_offset files already contain the most
-        recently calibrated minute.  Reading the last minute_boundary from each
-        file lets the service continue from where it left off instead of
-        re-processing the whole default lookback window, or — worse — silently
-        skipping the gap when the gap is wider than lookback_minutes.
+        On a normal restart the L2_timing_measurements table already contains
+        the most recently calibrated minute per channel.  Reading the latest
+        row for each channel lets the service continue from where it left
+        off instead of re-processing the whole default lookback window, or
+        — worse — silently skipping the gap when the gap is wider than
+        lookback_minutes.
 
-        The lookback_minutes is expanded to cover the largest per-channel gap
-        (plus a 10-minute margin), capped at 24 hours.
+        The lookback_minutes is expanded to cover the largest per-channel
+        gap (plus a 10-minute margin), capped at 24 hours.  The lookup
+        window matches that cap (with a small slack) — a longer gap can't
+        be resumed regardless.
         """
-        import h5py
-
         max_gap_minutes = 0
 
+        now_utc = datetime.now(timezone.utc)
+        lookup_start_iso = (now_utc - timedelta(hours=25)).isoformat().replace('+00:00', 'Z')
+        lookup_end_iso = now_utc.isoformat().replace('+00:00', 'Z')
+
         for channel in self.channels:
-            l2_dir = self.data_root / "phase2" / channel / "clock_offset"
-            if not l2_dir.exists():
+            try:
+                reader = make_data_product_reader(
+                    data_dir=self.data_root / "phase2" / channel / "clock_offset",
+                    product_level='L2',
+                    product_name='timing_measurements',
+                    channel=channel,
+                    storage_config=self._storage_config,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    f"Startup seed: could not open L2 reader for {channel}: {exc} — "
+                    f"cursor stays at 0, so the next cycle reprocesses the full "
+                    f"lookback window"
+                )
                 continue
 
-            # Find the newest L2 file for this channel
-            h5_files = sorted(l2_dir.glob(f"{channel}_timing_measurements_????????.h5"))
-            if not h5_files:
+            try:
+                rows = reader.read_time_range(start=lookup_start_iso, end=lookup_end_iso)
+            except Exception as exc:  # noqa: BLE001
+                # M-H22: do NOT swallow silently. An unseedable channel
+                # reprocesses its whole lookback window — a storm that
+                # used to have no logged cause.
+                logger.warning(
+                    f"Startup seed: could not read L2_timing_measurements for "
+                    f"{channel}: {exc} — cursor stays at 0, so the next cycle "
+                    f"reprocesses the full lookback window"
+                )
+                rows = []
+            finally:
+                close_fn = getattr(reader, 'close', None)
+                if close_fn is not None:
+                    try:
+                        close_fn()
+                    except Exception:  # noqa: BLE001
+                        pass
+
+            if not rows:
                 continue
 
+            # read_time_range returns rows ordered by timestamp; the last
+            # entry is the most-recently-calibrated minute.
+            last_row = rows[-1]
             last_ts = 0.0
-            parse_failures = 0
-            for h5_path in reversed(h5_files):
+            mb_raw = last_row.get('minute_boundary_utc')
+            if mb_raw is None:
+                mb_raw = last_row.get('minute_boundary')
+            if mb_raw is not None:
                 try:
-                    with h5py.File(str(h5_path), 'r', swmr=True) as f:
-                        # L2 files store minute_boundary_utc (epoch int) or timestamp_utc (ISO str)
-                        for key in ('minute_boundary_utc', 'minute_boundary', 'timestamp_utc'):
-                            if key not in f or len(f[key]) == 0:
-                                continue
-                            raw = f[key][-1]
-                            if isinstance(raw, (bytes, str)):
-                                raw_s = raw.decode() if isinstance(raw, bytes) else raw
-                                last_ts = datetime.fromisoformat(
-                                    raw_s.replace('Z', '+00:00')
-                                ).timestamp()
-                            else:
-                                last_ts = float(raw)
-                            break
-                        if last_ts > 0:
-                            break
-                except Exception as exc:  # noqa: BLE001
-                    # M-H22: do NOT swallow silently. A corrupt L2 file left
-                    # last_ts=0, and an unseedable channel then reprocesses its
-                    # whole lookback window — a storm with no logged cause.
-                    parse_failures += 1
-                    logger.warning(
-                        f"Startup seed: could not read L2 file {h5_path.name} "
-                        f"for channel {channel}: {exc} — trying the next-oldest file"
-                    )
-                    continue
+                    last_ts = float(mb_raw)
+                except (TypeError, ValueError):
+                    last_ts = 0.0
+            if last_ts <= 0:
+                ts_iso = last_row.get('timestamp_utc')
+                if ts_iso:
+                    try:
+                        last_ts = datetime.fromisoformat(
+                            str(ts_iso).replace('Z', '+00:00')
+                        ).timestamp()
+                    except (TypeError, ValueError):
+                        last_ts = 0.0
 
             if last_ts <= 0:
-                if parse_failures:
-                    logger.warning(
-                        f"Startup seed: no readable L2 file for channel {channel} "
-                        f"({parse_failures} failed to parse) — cursor stays at 0, so the "
-                        f"next cycle reprocesses the full lookback window"
-                    )
+                logger.warning(
+                    f"Startup seed: latest L2 row for {channel} has no usable "
+                    f"timestamp — cursor stays at 0, so the next cycle "
+                    f"reprocesses the full lookback window"
+                )
                 continue
 
             # Seed the cursor so _process_channel skips already-done work
