@@ -572,19 +572,17 @@ class CoreRecorderV2:
         if self._t6_calibrator is not None:
             self._start_t6_stream()
 
-        # Begin receiving on the shared MultiStream now that every
-        # channel (archive + T6) is queued via add_channel — ka9q-python
-        # requires all add_channel calls to precede start() for one
-        # consistent multicast-group bind.
+        # Begin receiving on the shared MultiStream for the archive
+        # channels.  T6 is intentionally NOT on this MultiStream — it
+        # uses its own dedicated socket so the archive flush can't
+        # stall its packet reads.  See _start_t6_stream docstring.
         if self._use_shared_multistream and self._multi is not None:
             try:
                 self._multi.start()
-                channel_count = len(self.recorders) + (
-                    1 if self._t6_calibrator is not None else 0
-                )
                 logger.info(
                     f"Shared MultiStream started: 1 UDP socket serving "
-                    f"{channel_count} SSRC-demuxed channels"
+                    f"{len(self.recorders)} SSRC-demuxed archive channels "
+                    f"(T6 on its own dedicated stream)"
                 )
             except Exception as e:
                 logger.error(
@@ -949,12 +947,20 @@ class CoreRecorderV2:
             return False
 
     def _start_t6_stream(self):
-        """Provision the BPSK PPS channel (no archive).
+        """Provision the BPSK PPS channel (no archive) on a dedicated
+        RadiodStream, isolated from the archive channels.
 
-        In shared-MultiStream mode the channel registers on
-        ``self._multi`` alongside the archive channels — one socket for
-        the whole service.  In legacy mode it owns its own
-        ``RadiodStream`` (and its own UDP socket) as it always has.
+        T6 ALWAYS owns its own UDP socket and reader thread, even when
+        the archive channels share a MultiStream.  Rationale: archive
+        channels do a synchronous zstd + fsync flush on the receive
+        thread every ``file_duration_sec`` (default 10 min) which takes
+        seconds while ~10 channels' worth of compressed data is written
+        to disk.  When T6 rode the same MultiStream socket, those
+        flushes blocked the receive loop, the kernel UDP buffer
+        overflowed, T6 dropped samples, the Costas loop unlocked, and
+        chrony saw TSL3 ``?`` (reach=0) every 10 minutes.  A dedicated
+        T6 socket and thread reads packets continuously regardless of
+        what the archive thread is doing.
 
         V1 fix layer 1: block on _wait_for_chrony_settled before
         registering the T6 channel, so the anchor captured by
@@ -981,78 +987,7 @@ class CoreRecorderV2:
         low_edge_hz = t6.get('low_edge_hz')
         high_edge_hz = t6.get('high_edge_hz')
 
-        if self._use_shared_multistream:
-            if self._multi is None:
-                logger.error(
-                    "T6 BPSK PPS shared-mode requested but self._multi is None — "
-                    "shared-mode init must run before _start_t6_stream"
-                )
-                return
-            try:
-                # Add the T6 channel to the shared MultiStream.  add_channel
-                # internally calls ensure_channel; the returned ChannelInfo
-                # comes from the same protocol roundtrip the legacy path uses,
-                # so data_destination capture below is identical.
-                channel_info = self._multi.add_channel(
-                    frequency_hz=float(freq_hz),
-                    preset='iq',
-                    sample_rate=sr,
-                    encoding=Encoding.F32,
-                    agc_enable=False,
-                    gain=0.0,
-                    on_samples=self._t6_on_samples,
-                    low_edge=low_edge_hz,
-                    high_edge=high_edge_hz,
-                    # Wider ACK timeout (vs. default 5 s) — when
-                    # several producer clients register channels in
-                    # quick succession, radiod can stall and a 5 s
-                    # window fails T6 registration.  Without T6, the
-                    # PPS calibrator never starts and TSL3 silently
-                    # goes dark.  Observed on bee1 2026-05-08 in a
-                    # multi-client restart cascade.
-                    timeout=30.0,
-                    # Self-destruct timer; CoreRecorderV2 keeps it refreshed.
-                    lifetime=RADIOD_LIFETIME_FRAMES,
-                )
-                self._t6_channel_info = channel_info
-                if channel_info is not None and getattr(channel_info, 'ssrc', 0):
-                    self._lifetime_entries.append((self._multi, channel_info.ssrc))
-                if self.data_destination is None and channel_info is not None:
-                    self.data_destination = getattr(
-                        channel_info, 'multicast_address', None
-                    )
-                    logger.info(
-                        f"ka9q-python assigned data_destination "
-                        f"{self.data_destination} for T6 channel"
-                    )
-                logger.info(
-                    f"T6 BPSK PPS registered on shared MultiStream: "
-                    f"{desc} at {freq_hz/1e6:.6f} MHz"
-                )
-
-                # V1 fix — start the T6 timing-anchor refresh thread.
-                # Mirrors the dedicated-stream branch.  See
-                # docs/TIMING-PIPELINE-WIRING.md §10.3 path 2a option 2.
-                if self._t6_timing_poll_thread is None:
-                    self._t6_timing_poll_stop.clear()
-                    self._t6_timing_poll_thread = threading.Thread(
-                        target=self._t6_timing_poll_loop,
-                        name="T6TimingPoll",
-                        daemon=True,
-                    )
-                    self._t6_timing_poll_thread.start()
-                    logger.info(
-                        f"T6 timing-anchor refresh thread started "
-                        f"(interval={self.T6_TIMING_POLL_SEC}s)"
-                    )
-            except Exception as e:
-                logger.error(
-                    f"Failed to register T6 BPSK PPS on shared MultiStream: {e}",
-                    exc_info=True,
-                )
-            return
-
-        # Legacy: dedicated RadiodStream + per-channel UDP socket.
+        # Dedicated RadiodStream + per-channel UDP socket.
         try:
             channel_info = self.control.ensure_channel(
                 frequency_hz=freq_hz,

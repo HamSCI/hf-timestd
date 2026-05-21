@@ -1,11 +1,14 @@
-"""Tests for _start_t6_stream's shared-MultiStream branch (plan step 3).
+"""Tests for _start_t6_stream — T6 always uses a dedicated RadiodStream.
 
-In shared mode the T6 BPSK PPS channel registers on the same
-MultiStream as the archive channels (one socket for the whole
-service); in legacy mode it owns its own RadiodStream.  The branch
-also captures ``data_destination`` from the first ChannelInfo it
-sees — needed for inventory reporting when the archive channels are
-all silent at startup.
+Rationale: when T6 rode the shared MultiStream alongside the archive
+channels, an archive-channel rollover (zstd compression + fsync of a
+~73 MB chunk every 10 min) blocked the shared receive thread for
+3-5 s.  During that window the kernel UDP buffer overflowed and T6
+dropped samples, the Costas loop unlocked, and chrony saw TSL3 ``?``
+(reach=0) at every UTC :00/:10/:20/:30/:40/:50 boundary.  Fix: T6
+always owns its own UDP socket and reader thread, isolated from
+whatever the archive thread is doing.  The shared MultiStream is
+still used for the archive channels.
 """
 
 from __future__ import annotations
@@ -54,74 +57,65 @@ def _make_t6_core_recorder(*, use_shared: bool, with_multi: bool = True):
     return cr
 
 
-class TestT6SharedMode(unittest.TestCase):
+class TestT6DedicatedStream(unittest.TestCase):
+    """T6 must build a dedicated RadiodStream regardless of the
+    archive-channel ``shared_multistream`` setting.  When archive
+    channels share a socket the rollover-flush would block T6 reads;
+    T6 always gets its own socket so it stays insulated."""
 
-    def test_shared_mode_calls_multi_add_channel_with_t6_callback(self):
-        cr = _make_t6_core_recorder(use_shared=True)
+    def _start_with_mocked_radiodstream(self, cr):
+        """Patch ka9q.RadiodStream and ensure_channel, then call
+        _start_t6_stream.  Returns (MockRS, stream_instance)."""
         channel_info = MagicMock()
         channel_info.multicast_address = '239.241.146.159'
-        cr._multi.add_channel.return_value = channel_info
-
-        cr._start_t6_stream()
-
-        cr._multi.add_channel.assert_called_once()
-        kwargs = cr._multi.add_channel.call_args.kwargs
-        self.assertEqual(kwargs['frequency_hz'], 5_000_000.0)
-        self.assertEqual(kwargs['preset'], 'iq')
-        self.assertEqual(kwargs['sample_rate'], 24_000)
-        self.assertEqual(kwargs['agc_enable'], False)
-        self.assertEqual(kwargs['gain'], 0.0)
-        # Most important: the T6 calibrator's callback drives the PPS lock
-        # detector — it must be wired into the parent MultiStream's per-SSRC
-        # dispatch.  Bound methods compare equal when wrapping the same
-        # function on the same instance.
-        self.assertEqual(kwargs['on_samples'], cr._t6_on_samples)
-
-    def test_shared_mode_does_not_create_radiod_stream(self):
-        cr = _make_t6_core_recorder(use_shared=True)
-        cr._multi.add_channel.return_value = MagicMock()
-        cr._start_t6_stream()
-        # No legacy per-channel RadiodStream gets built in shared mode.
-        self.assertIsNone(cr._t6_stream)
-
-    def test_shared_mode_captures_data_destination(self):
-        cr = _make_t6_core_recorder(use_shared=True)
-        channel_info = MagicMock()
-        channel_info.multicast_address = '239.241.146.159'
-        cr._multi.add_channel.return_value = channel_info
-        cr._start_t6_stream()
-        self.assertEqual(cr.data_destination, '239.241.146.159')
-
-    def test_shared_mode_without_multi_logs_error_and_returns(self):
-        # If shared-mode init never built _multi (config error), don't
-        # crash — log and return.
-        cr = _make_t6_core_recorder(use_shared=True, with_multi=False)
-        # _multi is None — no add_channel call to verify.  Must not raise.
-        cr._start_t6_stream()
-        self.assertIsNone(cr._t6_stream)
-
-    def test_legacy_mode_still_creates_radiod_stream(self):
-        # Verify the legacy code path is preserved verbatim for rollback.
-        cr = _make_t6_core_recorder(use_shared=False)
-        channel_info = MagicMock()
-        channel_info.multicast_address = '239.241.146.159'
+        channel_info.ssrc = 0xC0FFEE
         cr.control.ensure_channel.return_value = channel_info
 
-        # _start_t6_stream uses a function-local `from ka9q import RadiodStream`,
-        # so the patch target is ka9q.RadiodStream itself (re-resolved at
-        # call time), not a name imported into core_recorder_v2.
+        # _start_t6_stream uses a function-local
+        # ``from ka9q import RadiodStream``, so the patch target is
+        # ka9q.RadiodStream itself (re-resolved at call time), not a
+        # name imported into core_recorder_v2.
         with patch('ka9q.RadiodStream', create=True) as MockRS:
             stream_instance = MagicMock()
             MockRS.return_value = stream_instance
             cr._start_t6_stream()
+        return MockRS, stream_instance, channel_info
 
+    def test_shared_mode_skips_multi_add_channel_for_t6(self):
+        cr = _make_t6_core_recorder(use_shared=True)
+        self._start_with_mocked_radiodstream(cr)
+        # T6 must NOT register on the shared MultiStream — archive
+        # rollover would otherwise stall T6 reads every 10 min.
+        cr._multi.add_channel.assert_not_called()
+
+    def test_shared_mode_creates_dedicated_radiod_stream(self):
+        cr = _make_t6_core_recorder(use_shared=True)
+        MockRS, stream_instance, _ = self._start_with_mocked_radiodstream(cr)
         cr.control.ensure_channel.assert_called_once()
         MockRS.assert_called_once()
-        rs_kwargs = MockRS.call_args.kwargs
-        # Ensure the legacy RadiodStream still gets the T6 callback wired.
-        self.assertEqual(rs_kwargs['on_samples'], cr._t6_on_samples)
         stream_instance.start.assert_called_once()
         self.assertIs(cr._t6_stream, stream_instance)
+
+    def test_legacy_mode_creates_dedicated_radiod_stream(self):
+        cr = _make_t6_core_recorder(use_shared=False)
+        MockRS, stream_instance, _ = self._start_with_mocked_radiodstream(cr)
+        cr.control.ensure_channel.assert_called_once()
+        MockRS.assert_called_once()
+        stream_instance.start.assert_called_once()
+        self.assertIs(cr._t6_stream, stream_instance)
+
+    def test_t6_callback_wired_into_radiod_stream(self):
+        cr = _make_t6_core_recorder(use_shared=True)
+        MockRS, _, _ = self._start_with_mocked_radiodstream(cr)
+        rs_kwargs = MockRS.call_args.kwargs
+        # The calibrator's callback drives the PPS lock detector — it
+        # must be wired into the dedicated stream's sample dispatch.
+        self.assertEqual(rs_kwargs['on_samples'], cr._t6_on_samples)
+
+    def test_captures_data_destination_from_channel_info(self):
+        cr = _make_t6_core_recorder(use_shared=True)
+        self._start_with_mocked_radiodstream(cr)
+        self.assertEqual(cr.data_destination, '239.241.146.159')
 
 
 class TestSharedMultiShutdown(unittest.TestCase):
