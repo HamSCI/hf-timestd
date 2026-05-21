@@ -1,13 +1,20 @@
 # Phase 4 plan — remove HDF5 code paths and `h5py` dependency
 
-**Status as of 2026-05-21:** Steps 0, 1, 2a, 2b, 2c, 3 and partial-7 shipped
-to `main`.  SQLite is the sole writer + factory return; every in-tree HDF5
-*reader* call site that goes through the factory is now SQLite-backed.
-Remaining blockers — Steps 2d / 4 / 5 / 6 — are gated on redeploying
-`/opt/hf-timestd/scripts/live_vtec.py` (a March-snapshot copy that
-still imports `DataProductWriter` directly) and the subsequent
-GNSS-VTEC-to-SQLite producer cutover.  See "Live deploy dependency"
-below.
+**Status as of 2026-05-21:** Phase 4 SHIPPED.  All steps below are live
+on `main`.  hf-timestd has no `hdf5_writer.py`, no `hdf5_reader.py`, no
+`import h5py` anywhere in `src/`, `tests/`, `web-api/`, or the surviving
+`scripts/`.  `h5py` removed from `pyproject.toml` (kept only as a
+transitive dep via `digital_rf` for GRAPE/Haystack export).
+
+Live verification on bee1 (post-restart of timestd-vtec):
+`L3_gnss_vtec` populates at ~1 Hz; fusion's HDF5 file mtime frozen at
+the restart moment.
+
+Outstanding operator action: restart `timestd-fusion`,
+`timestd-l2-calibration`, `timestd-physics`, and `timestd-web-api` so
+they import the new SQLite-only code (their loaded-at-startup module
+cache still references the deleted hdf5_* modules).  See
+`tasks/todo.md` for the exact commands.
 
 | Step | Status | Commit |
 |---|---|---|
@@ -18,49 +25,23 @@ below.
 | 2c — timing_validation load_fusion_result | ✅ live 2026-05-21 | `3a018a9` |
 | Schema 1.1.0→1.2.0 — l3_gnss_vtec diagnostic fields | ✅ live 2026-05-21 | `2a537ca` |
 | 3 — factory simplification + 7 (partial) obsolete-test cleanup | ✅ live 2026-05-21 | `7179cdb` |
-| **2d — `_read_gnss_vtec` × 2** | ⏳ blocked on live_vtec.py redeploy |
-| **4 — delete hdf5_writer/hdf5_reader** | ⏳ blocked on Step 2d |
-| **5 — drop `h5py` from pyproject.toml** | ⏳ blocked on Step 4 |
-| 6 — _malloc_trim / HDF5_AVAILABLE cleanup | ⏳ pending |
+| live_vtec.py redeploy + restart timestd-vtec | ✅ 2026-05-21 13:15:39 UTC | (operator deploy) |
+| 2d — `_read_gnss_vtec` × 2 | ✅ live 2026-05-21 | `ae5db86` |
+| 4 + 5 + 6 — delete hdf5_writer/hdf5_reader, drop h5py, consumer + HDF5_AVAILABLE cleanup | ✅ live 2026-05-21 | `0276a0d` |
+| docs/handoff refresh | ✅ live 2026-05-21 | (this commit) |
 
-### Live deploy dependency (2026-05-21 finding)
+### Live deploy dependency (resolved 2026-05-21)
 
-`/opt/hf-timestd/scripts/live_vtec.py` is a March 16 snapshot that does
-`from hf_timestd.io import DataProductWriter` directly — bypassing
-`make_data_product_writer`.  So even with `write_hdf5=false` in
-`[storage]`, the running `timestd-vtec` service writes only to
-`GNSS_gnss_vtec_YYYYMMDD.h5` and never populates the `L3_gnss_vtec`
-SQLite table.
+`/opt/hf-timestd/scripts/live_vtec.py` was a March 16 snapshot that
+imported `DataProductWriter` directly, bypassing the factory — so
+`timestd-vtec` was writing HDF5 only and `L3_gnss_vtec` was empty.
 
-Consequences:
-* The two `_read_gnss_vtec` sites (physics_fusion_service.py:1119 and
-  multi_broadcast_fusion.py:4602) have no SQLite data source — Step 2d
-  cannot land safely without first writing to `L3_gnss_vtec`.
-* `from hf_timestd.io import DataProductWriter` is still imported by
-  the deployed script — deleting `hdf5_writer.py` (Step 4) would
-  break it on the next vtec restart.
-
-Unblock sequence:
-```
-sudo cp -p /opt/hf-timestd/scripts/live_vtec.py \
-  /opt/hf-timestd/scripts/live_vtec.py.bak-pre-phase4-$(date -u +%Y%m%dT%H%M%SZ)
-sudo install -o timestd -g timestd -m 755 \
-  /home/mjh/git/hf-timestd/scripts/live_vtec.py \
-  /opt/hf-timestd/scripts/live_vtec.py
-sudo systemctl restart timestd-vtec
-# Wait ~30s, then:
-sqlite3 -readonly /var/lib/timestd/phase2/timestd.db \
-  "SELECT count(*), min(timestamp_utc), max(timestamp_utc) FROM L3_gnss_vtec;"
-# Expect: rows accumulating at ~1/min after the batch flush (60s window).
-```
-
-After that:
-1. Run Step 2d (convert the two `_read_gnss_vtec` sites).
-2. Run Step 4 (delete hdf5_writer/hdf5_reader, prune `io/__init__.py`
-   re-exports, prune the dead `from hf_timestd.io.hdf5_writer import
-   DataProductWriter` in metrology_service.py).
-3. Run Step 5 (drop `h5py` from pyproject.toml + `uv lock`).
-4. Run Step 6 (cleanup).
+Redeployed from the May 20 source via `sudo install -o timestd -g
+timestd -m 755 ...`; `sudo systemctl restart timestd-vtec` brought
+the new factory-based path live at 2026-05-21 13:15:39 UTC.  The
+HDF5 file mtime is frozen at the restart moment; `L3_gnss_vtec` now
+populates at ~1 Hz.  This unblocked Step 2d, which in turn unblocked
+Steps 4/5/6.  Operator commands are preserved in `tasks/todo.md`.
 
 ### Original plan (kept for reference)
 
