@@ -1112,58 +1112,69 @@ class PhysicsFusionService:
         """
         Read the nearest GNSS overhead VTEC measurement for a given epoch.
 
-        Returns VTEC in TECU, or None if no data is available within ±120s.
-        Reads only the tail of the HDF5 file (last 300 rows ≈ 5 minutes at 1 Hz)
-        to avoid loading the entire daily file (~368 MB) into memory.
+        Returns VTEC in TECU, or None if no data is available within ±120 s.
+        Reads from L3_gnss_vtec via the SQLite reader (Phase 4 cutover):
+        the indexed (channel, timestamp_utc) range query is cheap, so the
+        old TAIL_ROWS / per-cycle file-tail trick is no longer needed.
         """
-        import h5py
-
         target_dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
-        date_str = target_dt.strftime('%Y%m%d')
-
-        h5_path = self.gnss_vtec_dir / f'GNSS_gnss_vtec_{date_str}.h5'
-        if not h5_path.exists():
-            return None
-
-        TAIL_ROWS = 300  # ~5 minutes at 1 Hz — covers ±120s search window
+        start_iso = (target_dt - timedelta(seconds=120)).isoformat().replace('+00:00', 'Z')
+        end_iso = (target_dt + timedelta(seconds=120)).isoformat().replace('+00:00', 'Z')
 
         try:
-            with h5py.File(h5_path, 'r', libver='latest', swmr=True) as f:
-                if 'unix_timestamp' not in f or 'vtec_tecu' not in f:
-                    return None
-                n = f['unix_timestamp'].shape[0]
-                if n == 0:
-                    return None
-                start = max(0, n - TAIL_ROWS)
-                timestamps = f['unix_timestamp'][start:].astype(np.float64)
-                vtecs = f['vtec_tecu'][start:].astype(np.float64)
-                # Optional quality gate
-                if 'quality_flag' in f:
-                    qflags = f['quality_flag'][start:]
-                    good_mask = np.array([
-                        (q == b'GOOD' or q == b'MARGINAL')
-                        if isinstance(q, bytes) else (q in ('GOOD', 'MARGINAL'))
-                        for q in qflags
-                    ])
-                    timestamps = timestamps[good_mask]
-                    vtecs = vtecs[good_mask]
+            reader = make_data_product_reader(
+                data_dir=self.gnss_vtec_dir,
+                product_level='L3',
+                product_name='gnss_vtec',
+                channel='GNSS',
+                storage_config=self._storage_config,
+            )
         except Exception as e:
-            logger.warning(f"Failed to read GNSS VTEC from {h5_path}: {e}")
+            logger.warning(f"Failed to open GNSS VTEC reader: {e}")
             return None
 
-        if len(timestamps) == 0:
+        try:
+            try:
+                rows = reader.read_time_range(
+                    start=start_iso,
+                    end=end_iso,
+                    quality_flags=['GOOD', 'MARGINAL'],
+                )
+            except Exception as e:
+                logger.warning(f"Failed to read L3_gnss_vtec: {e}")
+                return None
+        finally:
+            close_fn = getattr(reader, 'close', None)
+            if close_fn is not None:
+                try:
+                    close_fn()
+                except Exception:
+                    pass
+
+        if not rows:
             return None
 
-        # Find nearest measurement within ±120 seconds
-        idx = np.searchsorted(timestamps, epoch)
+        # Find the row whose unix_timestamp is nearest to the target epoch.
         best_vtec = None
-        best_dt = 121.0  # just above threshold
-        for candidate in [idx - 1, idx]:
-            if 0 <= candidate < len(timestamps):
-                dt_sec = abs(timestamps[candidate] - epoch)
-                if dt_sec < best_dt:
-                    best_dt = dt_sec
-                    best_vtec = float(vtecs[candidate])
+        best_dt = 121.0  # just above the ±120 s threshold
+        for row in rows:
+            ts = row.get('unix_timestamp')
+            if ts is None:
+                continue
+            try:
+                ts = float(ts)
+            except (TypeError, ValueError):
+                continue
+            dt_sec = abs(ts - epoch)
+            if dt_sec < best_dt:
+                vtec = row.get('vtec_tecu')
+                if vtec is None:
+                    continue
+                try:
+                    best_vtec = float(vtec)
+                except (TypeError, ValueError):
+                    continue
+                best_dt = dt_sec
 
         if best_vtec is not None and 0 < best_vtec <= 200:
             return best_vtec

@@ -4583,123 +4583,92 @@ class MultiBroadcastFusion:
     
     def _read_gnss_vtec(self) -> Optional[Tuple[float, float]]:
         """
-        Read the latest GNSS VTEC from HDF5.
-        Returns (vtec_tecu, timestamp) or None.
-        
-        PERFORMANCE: Reads only the last N rows from the HDF5 file instead of
-        loading the entire dataset through the generic reader. The VTEC file
-        grows ~560 MB/day at 1 Hz; a full table scan every 8s fusion cycle
-        causes intermittent timeouts and VTEC data starvation.
+        Read the latest GNSS VTEC from L3_gnss_vtec (Phase-4 SQLite cutover).
+        Returns (vtec_tecu, unix_timestamp) or None.
+
+        The original HDF5 implementation read a fixed tail of N rows from
+        a ~560 MB/day daily file every 8 s fusion cycle to avoid a full
+        scan; with SQLite the indexed (channel, timestamp_utc) range
+        query over the ±5 min window is cheap and uniform, so no tail
+        trick is needed.
         """
-        logger.info(">>> _read_gnss_vtec() called <<<")
-        
-        if not HDF5_AVAILABLE:
-            logger.warning("HDF5 not available for GNSS VTEC reads")
-            return None
-        
+        from datetime import datetime, timedelta, timezone
+
+        MAX_AGE_SECONDS = 300  # 5 minutes
+        current_time = time.time()
+
+        # Pick a vtec dir for API parity with the reader's `data_dir`
+        # argument; the actual data lives in the SQLite DB, so this
+        # path is only used to satisfy the constructor.
+        vtec_dir = self.data_root / 'data' / 'gnss_vtec'
+        if not vtec_dir.exists():
+            vtec_dir = self.data_root / 'gnss_vtec'
+
+        target_dt = datetime.fromtimestamp(current_time, tz=timezone.utc)
+        start_iso = (target_dt - timedelta(seconds=MAX_AGE_SECONDS)).isoformat().replace('+00:00', 'Z')
+        end_iso = (target_dt + timedelta(seconds=5)).isoformat().replace('+00:00', 'Z')
+
         try:
-            from datetime import datetime, timezone
-            import h5py as _h5py
-            
-            # Check both possible locations for GNSS VTEC data
-            # Primary: data_root/data/gnss_vtec (where live_vtec.py writes with relative path)
-            # Fallback: data_root/gnss_vtec (legacy location)
-            vtec_dir = self.data_root / 'data' / 'gnss_vtec'
-            if not vtec_dir.exists():
-                vtec_dir = self.data_root / 'gnss_vtec'
-            
-            if not vtec_dir.exists():
-                logger.warning(f"GNSS VTEC directory not found: {vtec_dir}")
-                return None
-            
-            # Find today's file (most recent)
-            now = datetime.now(timezone.utc)
-            date_str = now.strftime('%Y%m%d')
-            hdf5_path = vtec_dir / f'GNSS_gnss_vtec_{date_str}.h5'
-            
-            if not hdf5_path.exists():
-                logger.debug(f"Today's VTEC file not found: {hdf5_path}")
-                return None
-            
-            # Fast tail read: only read the last 10 rows instead of entire file
-            TAIL_SIZE = 10
-            MAX_AGE_SECONDS = 300  # 5 minutes
-            
-            with _h5py.File(hdf5_path, 'r', libver='latest', swmr=True) as f:
-                if 'unix_timestamp' not in f or 'vtec_tecu' not in f:
-                    logger.warning(f"Missing required datasets in {hdf5_path}")
-                    return None
-                
-                n_total = len(f['unix_timestamp'])
-                if n_total == 0:
-                    logger.debug("VTEC file is empty")
-                    return None
-                
-                # Read only the tail
-                start_idx = max(0, n_total - TAIL_SIZE)
-                timestamps = f['unix_timestamp'][start_idx:]
-                vtec_values = f['vtec_tecu'][start_idx:]
-                
-                # Optional: read quality flags if present
-                quality_flags = None
-                if 'quality_flag' in f:
-                    quality_flags = f['quality_flag'][start_idx:]
-                
-                n_sats = None
-                if 'n_satellites' in f:
-                    n_sats = f['n_satellites'][start_idx:]
-            
-            # Find the most recent GOOD/MARGINAL measurement within age limit
-            current_time = time.time()
-            best_idx = None
-            best_ts = 0
-            
-            for i in range(len(timestamps) - 1, -1, -1):
-                ts = float(timestamps[i])
-                age = current_time - ts
-                
-                if age > MAX_AGE_SECONDS:
-                    break  # Timestamps are ordered, older ones follow
-                
-                # Check quality if available
-                if quality_flags is not None:
-                    flag = quality_flags[i]
-                    if isinstance(flag, bytes):
-                        flag = flag.decode('utf-8')
-                    if flag not in ('GOOD', 'MARGINAL'):
-                        continue
-                
-                if ts > best_ts:
-                    best_idx = i
-                    best_ts = ts
-                    break  # Most recent valid entry found
-            
-            if best_idx is not None:
-                vtec = float(vtec_values[best_idx])
-                sats = int(n_sats[best_idx]) if n_sats is not None else 0
-                qflag = ''
-                if quality_flags is not None:
-                    qflag = quality_flags[best_idx]
-                    if isinstance(qflag, bytes):
-                        qflag = qflag.decode('utf-8')
-                
-                age = current_time - best_ts
-                logger.info(
-                    f"Read VTEC from HDF5: {vtec:.2f} TECU, "
-                    f"{sats} sats, quality={qflag} (age: {age:.1f}s, "
-                    f"tail read {min(TAIL_SIZE, n_total)} of {n_total} rows)"
-                )
-                return vtec, best_ts
-            else:
-                logger.debug(f"No fresh VTEC in last {MAX_AGE_SECONDS}s (file has {n_total} rows)")
-                return None
-        
-        except FileNotFoundError:
-            logger.warning("HDF5 VTEC file not found")
-            return None
+            reader = make_data_product_reader(
+                data_dir=vtec_dir,
+                product_level='L3',
+                product_name='gnss_vtec',
+                channel='GNSS',
+                storage_config=self._storage_config,
+            )
         except Exception as e:
-            logger.error(f"HDF5 VTEC read failed: {e}")
+            logger.error(f"GNSS VTEC reader init failed: {e}")
             return None
+
+        try:
+            try:
+                rows = reader.read_time_range(
+                    start=start_iso,
+                    end=end_iso,
+                    quality_flags=['GOOD', 'MARGINAL'],
+                )
+            except Exception as e:
+                logger.error(f"L3_gnss_vtec read failed: {e}")
+                return None
+        finally:
+            close_fn = getattr(reader, 'close', None)
+            if close_fn is not None:
+                try:
+                    close_fn()
+                except Exception:
+                    pass
+
+        if not rows:
+            logger.debug(f"No fresh VTEC in last {MAX_AGE_SECONDS}s")
+            return None
+
+        # rows are timestamp-ordered; the latest within the window is
+        # the most-recent GOOD/MARGINAL measurement.  Walk backwards and
+        # return the first one that has both unix_timestamp + vtec_tecu
+        # populated and is within MAX_AGE_SECONDS.
+        for row in reversed(rows):
+            ts = row.get('unix_timestamp')
+            vtec = row.get('vtec_tecu')
+            if ts is None or vtec is None:
+                continue
+            try:
+                ts = float(ts)
+                vtec = float(vtec)
+            except (TypeError, ValueError):
+                continue
+            age = current_time - ts
+            if age > MAX_AGE_SECONDS:
+                break
+            sats = row.get('n_satellites') or 0
+            qflag = row.get('quality_flag', '')
+            logger.info(
+                f"Read VTEC from SQLite: {vtec:.2f} TECU, "
+                f"{sats} sats, quality={qflag} (age: {age:.1f}s)"
+            )
+            return vtec, ts
+
+        logger.debug(f"No GOOD/MARGINAL VTEC in last {MAX_AGE_SECONDS}s")
+        return None
 
     def get_current_calibration(self) -> Dict[str, float]:
         """Get current calibration offsets."""
