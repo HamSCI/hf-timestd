@@ -1,8 +1,9 @@
 """
 TEC (Total Electron Content) service for v6.5.0 data access.
 
-Provides access to HF-derived TEC estimates from the TimingConsistencyValidator
-and archived TEC data products via HDF5.
+Provides access to HF-derived TEC estimates from the
+TimingConsistencyValidator and archived TEC data products via the
+L3_tec SQLite table (Phase 4 cutover).
 """
 
 from datetime import datetime, timedelta, timezone
@@ -14,14 +15,13 @@ from config import config
 
 logger = logging.getLogger(__name__)
 
-# Import DataProductReader for HDF5 access
-try:
-    from hf_timestd.io.hdf5_reader import DataProductReader
-    from hf_timestd.io import make_data_product_reader
-    HDF5_READER_AVAILABLE = True
-except ImportError:
-    HDF5_READER_AVAILABLE = False
-    logger.warning("DataProductReader not available, TEC service will have limited functionality")
+from hf_timestd.io import make_data_product_reader, SqliteDataProductReader
+
+# Retained for callers that still annotate the return type as
+# DataProductReader; SqliteDataProductReader exposes the same
+# read_time_range API.
+DataProductReader = SqliteDataProductReader
+DATA_READER_AVAILABLE = True
 
 
 class TECService:
@@ -47,10 +47,7 @@ class TECService:
         self._reader = None
         
     def _get_reader(self) -> Optional['DataProductReader']:
-        """Get or create the DataProductReader for TEC data."""
-        if not HDF5_READER_AVAILABLE:
-            return None
-        
+        """Get or create the data-product reader for L3_tec."""
         if self._reader is None and self.tec_dir.exists():
             try:
                 self._reader = make_data_product_reader(

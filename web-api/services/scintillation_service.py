@@ -20,12 +20,17 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, List, Optional
 import logging
 import math
-import glob
 
 import numpy as np
-import h5py
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'src'))
+
+try:
+    from config import config as _web_config
+except Exception:
+    _web_config = None
+
+from hf_timestd.io import make_data_product_reader
 
 logger = logging.getLogger(__name__)
 
@@ -89,65 +94,55 @@ class ScintillationService:
         start: datetime,
         end: datetime,
     ) -> List[Dict[str, Any]]:
-        """Read S4 amplitude scintillation from test_signal HDF5 files."""
-        records = []
-        start_iso = start.strftime('%Y-%m-%dT%H:%M:%SZ')
-        end_iso = end.strftime('%Y-%m-%dT%H:%M:%SZ')
+        """Read S4 amplitude scintillation from the L2_test_signal SQLite
+        table."""
+        records: List[Dict[str, Any]] = []
+        start_iso = start.isoformat().replace('+00:00', 'Z')
+        end_iso = end.isoformat().replace('+00:00', 'Z')
+        storage_config = getattr(_web_config, 'storage', {}) if _web_config else {}
 
         for channel in TEST_SIGNAL_CHANNELS:
-            ts_dir = self.phase2_dir / channel / 'test_signal'
-            if not ts_dir.exists():
+            try:
+                reader = make_data_product_reader(
+                    data_dir=self.phase2_dir / channel / 'test_signal',
+                    product_level='L2',
+                    product_name='test_signal',
+                    channel=channel,
+                    storage_config=storage_config,
+                )
+            except Exception as e:
+                logger.warning(f"L2_test_signal reader init failed for {channel}: {e}")
                 continue
 
-            # Find HDF5 files covering the date range
-            for dt in self._date_range(start, end):
-                date_str = dt.strftime('%Y%m%d')
-                pattern = str(ts_dir / f'*{date_str}*.h5')
-                for fpath in sorted(glob.glob(pattern)):
+            try:
+                try:
+                    rows = reader.read_time_range(start=start_iso, end=end_iso)
+                except Exception as e:
+                    logger.warning(f"L2_test_signal read failed for {channel}: {e}")
+                    rows = []
+            finally:
+                close_fn = getattr(reader, 'close', None)
+                if close_fn is not None:
                     try:
-                        with h5py.File(fpath, 'r', libver='latest', swmr=True) as f:
-                            if 'timestamp_utc' not in f:
-                                continue
-                            timestamps = [
-                                t.decode() if isinstance(t, bytes) else t
-                                for t in f['timestamp_utc'][:]
-                            ]
-                            stations = [
-                                s.decode() if isinstance(s, bytes) else s
-                                for s in f['station'][:]
-                            ] if 'station' in f else ['WWV'] * len(timestamps)
+                        close_fn()
+                    except Exception:
+                        pass
 
-                            freq_mhz = f['frequency_mhz'][:] if 'frequency_mhz' in f else [None] * len(timestamps)
-
-                            # Read S4 fields
-                            s4_idx = f['scintillation_index'][:] if 'scintillation_index' in f else [None] * len(timestamps)
-                            s4_2k = f['s4_2khz'][:] if 's4_2khz' in f else [None] * len(timestamps)
-                            s4_3k = f['s4_3khz'][:] if 's4_3khz' in f else [None] * len(timestamps)
-                            s4_4k = f['s4_4khz'][:] if 's4_4khz' in f else [None] * len(timestamps)
-                            s4_5k = f['s4_5khz'][:] if 's4_5khz' in f else [None] * len(timestamps)
-                            s4_slope = f['s4_frequency_slope'][:] if 's4_frequency_slope' in f else [None] * len(timestamps)
-                            fading_var = f['fading_variance'][:] if 'fading_variance' in f else [None] * len(timestamps)
-
-                            for i, ts in enumerate(timestamps):
-                                if ts < start_iso or ts > end_iso:
-                                    continue
-                                s4_val = _safe_float(s4_idx[i])
-                                records.append({
-                                    'timestamp': ts,
-                                    'channel': channel,
-                                    'station': stations[i] if i < len(stations) else 'WWV',
-                                    'frequency_mhz': _safe_float(freq_mhz[i]) if i < len(freq_mhz) else None,
-                                    's4': s4_val,
-                                    's4_2khz': _safe_float(s4_2k[i]),
-                                    's4_3khz': _safe_float(s4_3k[i]),
-                                    's4_4khz': _safe_float(s4_4k[i]),
-                                    's4_5khz': _safe_float(s4_5k[i]),
-                                    's4_frequency_slope': _safe_float(s4_slope[i]),
-                                    'fading_variance': _safe_float(fading_var[i]),
-                                    'source': 'test_signal',
-                                })
-                    except Exception as e:
-                        logger.warning(f"Could not read test_signal from {fpath}: {e}")
+            for row in rows:
+                records.append({
+                    'timestamp': row.get('timestamp_utc'),
+                    'channel': channel,
+                    'station': row.get('station') or 'WWV',
+                    'frequency_mhz': _safe_float(row.get('frequency_mhz')),
+                    's4': _safe_float(row.get('scintillation_index')),
+                    's4_2khz': _safe_float(row.get('s4_2khz')),
+                    's4_3khz': _safe_float(row.get('s4_3khz')),
+                    's4_4khz': _safe_float(row.get('s4_4khz')),
+                    's4_5khz': _safe_float(row.get('s4_5khz')),
+                    's4_frequency_slope': _safe_float(row.get('s4_frequency_slope')),
+                    'fading_variance': _safe_float(row.get('fading_variance')),
+                    'source': 'test_signal',
+                })
         return records
 
     # ------------------------------------------------------------------
@@ -161,142 +156,146 @@ class ScintillationService:
         window_seconds: float = 60.0,
     ) -> List[Dict[str, Any]]:
         """
-        Compute σ_φ phase scintillation from tick_phase HDF5 data.
+        Compute σ_φ phase scintillation from L2_tick_phase rows.
 
         Groups per-tick carrier phase by (channel, station, minute), detrends
         with a linear fit to remove Doppler, and reports std(residual) as σ_φ.
         """
-        records = []
+        records: List[Dict[str, Any]] = []
         start_epoch = start.timestamp()
         end_epoch = end.timestamp()
+        start_iso = start.isoformat().replace('+00:00', 'Z')
+        end_iso = end.isoformat().replace('+00:00', 'Z')
+        storage_config = getattr(_web_config, 'storage', {}) if _web_config else {}
 
         for channel in TICK_PHASE_CHANNELS:
-            tp_dir = self.phase2_dir / channel / 'tick_phase'
-            if not tp_dir.exists():
+            try:
+                reader = make_data_product_reader(
+                    data_dir=self.phase2_dir / channel / 'tick_phase',
+                    product_level='L2',
+                    product_name='tick_phase',
+                    channel=channel,
+                    storage_config=storage_config,
+                )
+            except Exception as e:
+                logger.warning(f"L2_tick_phase reader init failed for {channel}: {e}")
                 continue
 
-            for dt in self._date_range(start, end):
-                date_str = dt.strftime('%Y%m%d')
-                pattern = str(tp_dir / f'*{date_str}*.h5')
-                for fpath in sorted(glob.glob(pattern)):
+            try:
+                try:
+                    rows = reader.read_time_range(start=start_iso, end=end_iso)
+                except Exception as e:
+                    logger.warning(f"L2_tick_phase read failed for {channel}: {e}")
+                    rows = []
+            finally:
+                close_fn = getattr(reader, 'close', None)
+                if close_fn is not None:
                     try:
-                        with h5py.File(fpath, 'r', libver='latest', swmr=True) as f:
-                            if 'carrier_phase_rad' not in f or 'window_center_second' not in f:
-                                continue
+                        close_fn()
+                    except Exception:
+                        pass
 
-                            phases = f['carrier_phase_rad'][:]
-                            seconds = f['window_center_second'][:]
-                            snrs = f['snr_db'][:] if 'snr_db' in f else np.zeros(len(phases))
-                            stations = [
-                                s.decode() if isinstance(s, bytes) else s
-                                for s in f['station'][:]
-                            ] if 'station' in f else ['UNKNOWN'] * len(phases)
-                            freq_mhz = f['frequency_mhz'][:] if 'frequency_mhz' in f else [None] * len(phases)
-                            raw_mb = f['minute_boundary_utc'][:] if 'minute_boundary_utc' in f else np.array([])
-                            if len(raw_mb) == 0:
-                                continue
+            # Group rows by (station, minute_boundary_utc) for sigma-phi
+            # estimation.
+            groups: Dict[tuple, List[Dict[str, Any]]] = {}
+            for row in rows:
+                stn = row.get('station')
+                mb = row.get('minute_boundary_utc')
+                if stn is None or mb is None:
+                    continue
+                if mb < start_epoch or mb > end_epoch:
+                    continue
+                groups.setdefault((stn, int(mb)), []).append(row)
 
-                            # minute_boundary_utc may be Unix epoch (int64/float)
-                            # or ISO string — handle both
-                            if np.issubdtype(raw_mb.dtype, np.integer) or np.issubdtype(raw_mb.dtype, np.floating):
-                                mb_epochs = raw_mb.astype(float)
-                            else:
-                                # String timestamps — parse to epoch
-                                mb_epochs = np.zeros(len(raw_mb))
-                                for _i, _v in enumerate(raw_mb):
-                                    _s = _v.decode() if isinstance(_v, bytes) else str(_v)
-                                    try:
-                                        mb_epochs[_i] = datetime.fromisoformat(_s.replace('Z', '+00:00')).timestamp()
-                                    except (ValueError, AttributeError):
-                                        mb_epochs[_i] = 0.0
+            for (stn, mb_epoch), group in groups.items():
+                phases = []
+                seconds = []
+                snrs = []
+                amps = []
+                freq_mhz_val = None
+                for r in group:
+                    cp = r.get('carrier_phase_rad')
+                    sec = r.get('window_center_second')
+                    snr = r.get('snr_db')
+                    if cp is None or sec is None or snr is None:
+                        continue
+                    phases.append(float(cp))
+                    seconds.append(float(sec))
+                    snrs.append(float(snr))
+                    amps.append(r.get('correlation_peak'))
+                    if freq_mhz_val is None:
+                        freq_mhz_val = r.get('frequency_mhz')
+                if len(phases) < 5:
+                    continue
 
-                            # Group by (station, minute_boundary_epoch)
-                            groups: Dict[tuple, List[int]] = {}
-                            for idx in range(len(phases)):
-                                key = (stations[idx], float(mb_epochs[idx]))
-                                if key not in groups:
-                                    groups[key] = []
-                                groups[key].append(idx)
+                phases = np.array(phases)
+                seconds = np.array(seconds)
+                snrs = np.array(snrs)
+                amps_arr = np.array([
+                    np.nan if a is None else float(a) for a in amps
+                ])
 
-                            for (stn, mb_epoch), indices in groups.items():
-                                if mb_epoch <= 0:
-                                    continue
-                                if mb_epoch < start_epoch or mb_epoch > end_epoch:
-                                    continue
+                good = snrs >= 3.0
+                if np.sum(good) < 5:
+                    continue
+                ph = phases[good]
+                sec = seconds[good]
+                snr_good = snrs[good]
+                amp_good = amps_arr[good]
 
-                                idx_arr = np.array(indices)
-                                ph = phases[idx_arr]
-                                sec = seconds[idx_arr]
-                                snr = snrs[idx_arr]
+                order = np.argsort(sec)
+                ph = np.unwrap(ph[order])
+                sec = sec[order]
+                amp_good = amp_good[order]
 
-                                # Filter by SNR >= 3 dB
-                                good = snr >= 3.0
-                                if np.sum(good) < 5:
-                                    continue
-                                ph = ph[good]
-                                sec = sec[good]
-                                snr_good = snr[good]
+                try:
+                    coeffs = np.polyfit(sec - sec[0], ph, 1)
+                    trend = np.polyval(coeffs, sec - sec[0])
+                    detrended = ph - trend
+                    doppler_hz = coeffs[0] / (2 * np.pi)
+                except (np.linalg.LinAlgError, ValueError):
+                    detrended = ph - np.mean(ph)
+                    doppler_hz = 0.0
 
-                                # Sort by time
-                                order = np.argsort(sec)
-                                ph = np.unwrap(ph[order])
-                                sec = sec[order]
+                sigma_phi = float(np.std(detrended))
+                if sigma_phi < 0.2:
+                    severity = 'weak'
+                elif sigma_phi < 0.5:
+                    severity = 'moderate'
+                else:
+                    severity = 'strong'
 
-                                # Detrend: linear fit removes Doppler
-                                try:
-                                    coeffs = np.polyfit(sec - sec[0], ph, 1)
-                                    trend = np.polyval(coeffs, sec - sec[0])
-                                    detrended = ph - trend
-                                    doppler_hz = coeffs[0] / (2 * np.pi)
-                                except (np.linalg.LinAlgError, ValueError):
-                                    detrended = ph - np.mean(ph)
-                                    doppler_hz = 0.0
+                amp_s4 = None
+                amp_clean = amp_good[~np.isnan(amp_good)]
+                if len(amp_clean) >= 5:
+                    intensity = amp_clean ** 2
+                    mean_i = float(np.mean(intensity))
+                    if mean_i > 1e-10:
+                        amp_s4 = float(np.sqrt(np.var(intensity)) / mean_i)
 
-                                sigma_phi = float(np.std(detrended))
+                if amp_s4 is None and len(snr_good) >= 5:
+                    intensity = 10.0 ** (snr_good / 10.0)
+                    mean_i = float(np.mean(intensity))
+                    if mean_i > 1e-10:
+                        amp_s4 = float(np.sqrt(np.var(intensity)) / mean_i)
 
-                                # Classify severity
-                                if sigma_phi < 0.2:
-                                    severity = 'weak'
-                                elif sigma_phi < 0.5:
-                                    severity = 'moderate'
-                                else:
-                                    severity = 'strong'
+                mb_iso = datetime.fromtimestamp(
+                    mb_epoch, tz=timezone.utc
+                ).strftime('%Y-%m-%dT%H:%M:%SZ')
 
-                                # Also compute amplitude S4 from correlation_peak if available
-                                amp_s4 = None
-                                if 'correlation_peak' in f:
-                                    amps = f['correlation_peak'][:][idx_arr][good][order]
-                                    if len(amps) >= 5:
-                                        intensity = amps ** 2
-                                        mean_i = np.mean(intensity)
-                                        if mean_i > 1e-10:
-                                            amp_s4 = float(np.sqrt(np.var(intensity)) / mean_i)
-                                            
-                                # P3-C: Compute S4 opportunistically from SNR if correlation peak isn't available
-                                if amp_s4 is None and len(snr_good) >= 5:
-                                    # Convert SNR (dB) to linear power proxy
-                                    intensity = 10.0 ** (snr_good / 10.0)
-                                    mean_i = np.mean(intensity)
-                                    if mean_i > 1e-10:
-                                        amp_s4 = float(np.sqrt(np.var(intensity)) / mean_i)
-
-                                mb_iso = datetime.fromtimestamp(mb_epoch, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-
-                                records.append({
-                                    'timestamp': mb_iso,
-                                    'channel': channel,
-                                    'station': stn,
-                                    'frequency_mhz': _safe_float(freq_mhz[indices[0]]) if freq_mhz[indices[0]] is not None else None,
-                                    'sigma_phi_rad': _safe_float(sigma_phi),
-                                    'sigma_phi_severity': severity,
-                                    'doppler_hz': _safe_float(doppler_hz),
-                                    'tick_s4': _safe_float(amp_s4),
-                                    'n_ticks': int(np.sum(good)),
-                                    'mean_snr_db': _safe_float(np.mean(snr_good)),
-                                    'source': 'tick_phase',
-                                })
-                    except Exception as e:
-                        logger.warning(f"Could not read tick_phase from {fpath}: {e}")
+                records.append({
+                    'timestamp': mb_iso,
+                    'channel': channel,
+                    'station': stn,
+                    'frequency_mhz': _safe_float(freq_mhz_val),
+                    'sigma_phi_rad': _safe_float(sigma_phi),
+                    'sigma_phi_severity': severity,
+                    'doppler_hz': _safe_float(doppler_hz),
+                    'tick_s4': _safe_float(amp_s4),
+                    'n_ticks': int(np.sum(good)),
+                    'mean_snr_db': _safe_float(np.mean(snr_good)),
+                    'source': 'tick_phase',
+                })
         return records
 
     # ------------------------------------------------------------------

@@ -44,7 +44,6 @@ import numpy as np
 
 from hf_timestd.core.metrology_engine import MetrologyEngine
 from hf_timestd.models import L1MetrologyMeasurement
-from hf_timestd.io.hdf5_writer import DataProductWriter
 from hf_timestd.io import make_data_product_writer
 from hf_timestd.data_product_registry import DataProductRegistry
 from hf_timestd.interfaces.data_models import TimingConfig, TimingAuthority

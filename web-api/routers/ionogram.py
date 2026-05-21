@@ -11,12 +11,13 @@ Schema fields used: timing_error_ms, corr_snr_db, peak_rank, minute_boundary_utc
 """
 
 from fastapi import APIRouter, Query, HTTPException
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 from pathlib import Path
 import logging
 
 from config import config
+from hf_timestd.io import make_data_product_reader
 
 logger = logging.getLogger(__name__)
 
@@ -96,17 +97,8 @@ def _load_all_arrivals(
     min_snr_db: float,
     data_root: Path,
 ):
-    """Load all_arrivals records for one channel in [ts0, ts1]."""
-    import h5py
-    import numpy as np
-
+    """Load L1_all_arrivals records for one channel in [ts0, ts1]."""
     arr_dir = data_root / "phase2" / channel / "all_arrivals"
-    if not arr_dir.exists():
-        return None
-
-    files = sorted(arr_dir.glob(f"{channel}_all_arrivals_*.h5"))
-    if not files:
-        return None
 
     # Per-station transmitter onset correction (fixed calibration constant).
     # CHU: 74ms H3E sideband filter group delay at the transmitter.
@@ -126,87 +118,55 @@ def _load_all_arrivals(
         "sec_in_minute": [],
     }
 
-    for fpath in files:
+    # Read window as ISO; minute_boundary equality filter happens in Python.
+    t0_iso = datetime.fromtimestamp(ts0, tz=timezone.utc).isoformat().replace('+00:00', 'Z')
+    t1_iso = datetime.fromtimestamp(ts1, tz=timezone.utc).isoformat().replace('+00:00', 'Z')
+
+    try:
+        reader = make_data_product_reader(
+            data_dir=arr_dir,
+            product_level='L1',
+            product_name='all_arrivals',
+            channel=channel,
+            storage_config=getattr(config, 'storage', {}) or {},
+        )
+    except Exception as e:
+        logger.warning(f"L1_all_arrivals reader init failed for {channel}: {e}")
+        return None
+
+    try:
         try:
-            with h5py.File(str(fpath), "r", libver='latest', swmr=True) as h:
-                mb  = h["minute_boundary_utc"][:]
-                snr = h["corr_snr_db"][:]
-                rank = h["peak_rank"][:]
-                arr = h["arrival_ms"][:]
-                te  = h["timing_error_ms"][:]
-                sec = h["utc_second"][:]
-
-                # HDF5 datasets may have slightly different lengths if the
-                # file was written mid-minute; truncate core fields to minimum.
-                n = min(len(mb), len(snr), len(rank), len(arr), len(te), len(sec))
-                mb, snr, rank, arr, te, sec = (
-                    mb[:n], snr[:n], rank[:n], arr[:n], te[:n], sec[:n]
-                )
-
-                # New fields (v2.0.0) — graceful fallback for older files
-                # or mixed files where new fields are shorter (pre-deploy
-                # records in the same daily file lack these fields).
-                # New records are APPENDED, so new fields correspond to the
-                # LAST n_new rows of core fields.  Pad the front with defaults.
-                def _pad_field(h5file, name, n_core, default_val, dtype=None):
-                    if name in h5file:
-                        raw = h5file[name][:]
-                        if len(raw) >= n_core:
-                            return raw[:n_core]
-                        # Pad front (old rows) with defaults, append real data
-                        n_pad = n_core - len(raw)
-                        if isinstance(default_val, bytes):
-                            pad = np.array([default_val] * n_pad)
-                        else:
-                            pad = np.full(n_pad, default_val,
-                                          dtype=dtype or type(default_val))
-                        return np.concatenate([pad, raw])
-                    # Field entirely absent — all defaults
-                    if isinstance(default_val, bytes):
-                        return np.array([default_val] * n_core)
-                    return np.full(n_core, default_val,
-                                   dtype=dtype or type(default_val))
-
-                phase = _pad_field(h, "carrier_phase_rad", n, 0.0)
-                method = _pad_field(h, "detection_method", n, b'tone_correlator')
-                sim_col = _pad_field(h, "sec_in_minute", n, 0, dtype=int)
-
-                mask = (mb >= ts0) & (mb <= ts1)
-                if not np.any(mask):
-                    continue
-
-                snr = snr[mask]
-                rank = rank[mask]
-                arr = arr[mask]
-                te = te[mask]
-                sec = sec[mask]
-                mb_f = mb[mask]
-                phase = phase[mask]
-                method = method[mask]
-                sim_col = sim_col[mask]
-
-                # Apply filters
-                fmask = snr >= min_snr_db
-                if rank_filter is not None:
-                    fmask &= (rank == rank_filter)
-
-                rows["minute_boundary"].extend(mb_f[fmask].tolist())
-                rows["arrival_ms"].extend(arr[fmask].tolist())
-                rows["timing_error_ms"].extend(te[fmask].tolist())
-                rows["corr_snr_db"].extend(snr[fmask].tolist())
-                rows["peak_rank"].extend(rank[fmask].tolist())
-                rows["utc_second"].extend(sec[fmask].tolist())
-                rows["carrier_phase_rad"].extend(phase[fmask].tolist())
-                # Decode bytes to str for detection_method
-                m_filtered = method[fmask]
-                rows["detection_method"].extend(
-                    [m.decode('utf-8') if isinstance(m, bytes) else str(m)
-                     for m in m_filtered]
-                )
-                rows["sec_in_minute"].extend(sim_col[fmask].tolist())
+            raw_rows = reader.read_time_range(start=t0_iso, end=t1_iso)
         except Exception as e:
-            logger.warning(f"Error reading {fpath}: {e}")
+            logger.warning(f"L1_all_arrivals read failed for {channel}: {e}")
+            raw_rows = []
+    finally:
+        close_fn = getattr(reader, 'close', None)
+        if close_fn is not None:
+            try:
+                close_fn()
+            except Exception:
+                pass
+
+    for row in raw_rows:
+        mb = row.get('minute_boundary_utc')
+        if mb is None or mb < ts0 or mb > ts1:
             continue
+        snr = row.get('corr_snr_db')
+        if snr is None or snr < min_snr_db:
+            continue
+        rank = row.get('peak_rank')
+        if rank_filter is not None and rank != rank_filter:
+            continue
+        rows["minute_boundary"].append(mb)
+        rows["arrival_ms"].append(row.get('arrival_ms'))
+        rows["timing_error_ms"].append(row.get('timing_error_ms'))
+        rows["corr_snr_db"].append(snr)
+        rows["peak_rank"].append(rank)
+        rows["utc_second"].append(row.get('utc_second'))
+        rows["carrier_phase_rad"].append(row.get('carrier_phase_rad') or 0.0)
+        rows["detection_method"].append(row.get('detection_method') or 'tone_correlator')
+        rows["sec_in_minute"].append(row.get('sec_in_minute') or 0)
 
     if not rows["minute_boundary"]:
         return None

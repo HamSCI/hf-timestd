@@ -14,8 +14,15 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 import logging
-import h5py
-import glob
+import sqlite3
+
+try:
+    from config import config as _web_config
+except Exception:
+    _web_config = None
+
+from hf_timestd.io import make_data_product_reader
+from hf_timestd.io.sqlite_writer import DEFAULT_DB_PATH
 
 logger = logging.getLogger(__name__)
 
@@ -43,120 +50,106 @@ class PhaseService:
         self.data_root = Path(data_root)
         self.phase2_dir = self.data_root / 'phase2'
 
-    def _find_tick_phase_files(
-        self,
-        channel: Optional[str] = None,
-        date: Optional[datetime] = None
-    ) -> List[Path]:
-        """Find tick_phase HDF5 files, optionally filtered by channel and date."""
-        if channel:
-            search_dirs = [self.phase2_dir / channel / 'tick_phase']
-        else:
-            search_dirs = list(self.phase2_dir.glob('*/tick_phase'))
+    def _list_channels(self) -> List[str]:
+        """List channels visible in L2_tick_phase."""
+        db_path = self._db_path()
+        if not db_path.exists():
+            return []
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
+        except sqlite3.Error:
+            return []
+        try:
+            rows = conn.execute(
+                "SELECT DISTINCT channel FROM L2_tick_phase ORDER BY channel"
+            ).fetchall()
+        except sqlite3.Error:
+            rows = []
+        finally:
+            conn.close()
+        return [r[0] for r in rows]
 
-        files = []
-        for d in search_dirs:
-            if not d.exists():
-                continue
-            if date:
-                date_str = date.strftime('%Y%m%d')
-                pattern = str(d / f'*{date_str}*.h5')
-            else:
-                pattern = str(d / '*.h5')
-            files.extend(sorted(glob.glob(pattern)))
-
-        return [Path(f) for f in files]
+    def _db_path(self) -> Path:
+        storage = getattr(_web_config, 'storage', {}) if _web_config else {}
+        return Path(storage.get('sqlite_path', DEFAULT_DB_PATH))
 
     def _read_phase_data(
         self,
-        files: List[Path],
+        channels: List[str],
         start_epoch: float,
         end_epoch: float,
         station: Optional[str] = None,
-        max_rows: int = 50000
+        max_rows: int = 50000,
     ) -> List[Dict[str, Any]]:
-        """Read tick_phase records from HDF5 files within a time range."""
-        records = []
+        """Read L2_tick_phase records for the given channels in the window."""
+        records: List[Dict[str, Any]] = []
+        start_iso = datetime.fromtimestamp(
+            start_epoch, tz=timezone.utc
+        ).isoformat().replace('+00:00', 'Z')
+        end_iso = datetime.fromtimestamp(
+            end_epoch, tz=timezone.utc
+        ).isoformat().replace('+00:00', 'Z')
+        storage_config = getattr(_web_config, 'storage', {}) if _web_config else {}
 
-        for fpath in files:
+        for ch in channels:
             try:
-                with h5py.File(str(fpath), 'r', libver='latest', swmr=True) as f:
-                    if 'minute_boundary_utc' not in f:
-                        continue
-
-                    mb = f['minute_boundary_utc'][:]
-                    n = len(mb)
-                    if n == 0:
-                        continue
-
-                    # Quick range check on minute boundaries
-                    if mb[-1] < start_epoch - 120 or mb[0] > end_epoch + 120:
-                        continue
-
-                    # Read all needed fields
-                    fields = {}
-                    for name in ['minute_boundary_utc', 'window_center_second',
-                                 'phase_rad', 'carrier_phase_rad', 'dc_carrier_phase_rad',
-                                 'snr_db', 'coherence_quality', 'timing_offset_ms',
-                                 'station', 'channel', 'frequency_mhz',
-                                 'window_start_second', 'window_end_second']:
-                        if name in f:
-                            data = f[name][:]
-                            # Decode bytes to str for string fields
-                            if data.dtype.kind in ('S', 'O'):
-                                data = np.array([
-                                    x.decode('utf-8') if isinstance(x, bytes) else str(x)
-                                    for x in data
-                                ])
-                            fields[name] = data
-
-                    if 'minute_boundary_utc' not in fields:
-                        continue
-
-                    mb_arr = fields['minute_boundary_utc']
-                    wc_arr = fields.get('window_center_second', np.zeros(n))
-
-                    # Compute absolute UTC for each record
-                    utc_arr = mb_arr.astype(np.float64) + wc_arr.astype(np.float64)
-
-                    # Filter by time range
-                    mask = (utc_arr >= start_epoch) & (utc_arr <= end_epoch)
-
-                    # Filter by station if specified
-                    if station and 'station' in fields:
-                        station_mask = np.array([s == station for s in fields['station']])
-                        mask = mask & station_mask
-
-                    indices = np.where(mask)[0]
-                    if len(indices) == 0:
-                        continue
-
-                    for idx in indices:
-                        rec = {
-                            'utc_epoch': float(utc_arr[idx]),
-                            'minute_boundary_utc': int(mb_arr[idx]),
-                        }
-                        for name, data in fields.items():
-                            if name == 'minute_boundary_utc':
-                                continue
-                            if idx < len(data):
-                                val = data[idx]
-                                if isinstance(val, (np.floating, float)):
-                                    rec[name] = float(val)
-                                elif isinstance(val, (np.integer, int)):
-                                    rec[name] = int(val)
-                                else:
-                                    rec[name] = str(val)
-                        records.append(rec)
-
-                    if len(records) >= max_rows:
-                        break
-
+                reader = make_data_product_reader(
+                    data_dir=self.phase2_dir / ch / 'tick_phase',
+                    product_level='L2',
+                    product_name='tick_phase',
+                    channel=ch,
+                    storage_config=storage_config,
+                )
             except Exception as e:
-                logger.warning(f"Error reading {fpath}: {e}")
+                logger.warning(f"L2_tick_phase reader init failed for {ch}: {e}")
                 continue
+            try:
+                try:
+                    rows = reader.read_time_range(start=start_iso, end=end_iso)
+                except Exception as e:
+                    logger.warning(f"L2_tick_phase read failed for {ch}: {e}")
+                    rows = []
+            finally:
+                close_fn = getattr(reader, 'close', None)
+                if close_fn is not None:
+                    try:
+                        close_fn()
+                    except Exception:
+                        pass
 
-        # Sort by UTC
+            for row in rows:
+                mb = row.get('minute_boundary_utc')
+                wc = row.get('window_center_second')
+                if mb is None or wc is None:
+                    continue
+                utc_epoch = float(mb) + float(wc)
+                if utc_epoch < start_epoch or utc_epoch > end_epoch:
+                    continue
+                stn = row.get('station')
+                if station and stn != station:
+                    continue
+                rec = {
+                    'utc_epoch': utc_epoch,
+                    'minute_boundary_utc': int(mb),
+                    'channel': ch,
+                }
+                for name in (
+                    'window_center_second', 'phase_rad',
+                    'carrier_phase_rad', 'dc_carrier_phase_rad',
+                    'snr_db', 'coherence_quality', 'timing_offset_ms',
+                    'station', 'frequency_mhz',
+                    'window_start_second', 'window_end_second',
+                ):
+                    val = row.get(name)
+                    if val is None:
+                        continue
+                    rec[name] = val
+                records.append(rec)
+                if len(records) >= max_rows:
+                    break
+            if len(records) >= max_rows:
+                break
+
         records.sort(key=lambda r: r['utc_epoch'])
         return records[:max_rows]
 
@@ -185,16 +178,13 @@ class PhaseService:
         start_epoch = start.timestamp()
         end_epoch = end.timestamp()
 
-        # Find files covering the date range
-        files = set()
-        current = start.date()
-        while current <= end.date():
-            dt = datetime.combine(current, datetime.min.time())
-            files.update(self._find_tick_phase_files(channel=channel, date=dt))
-            current += timedelta(days=1)
+        if channel:
+            channels = [channel]
+        else:
+            channels = self._list_channels()
 
         records = self._read_phase_data(
-            sorted(files), start_epoch, end_epoch, station=station
+            channels, start_epoch, end_epoch, station=station
         )
 
         if not records:
@@ -415,49 +405,59 @@ class PhaseService:
     VALID_STATIONS = {'WWV', 'WWVH', 'CHU', 'BPM'}
 
     def get_available_channels(self) -> Dict[str, Any]:
-        """List all channels that have tick_phase data on disk."""
+        """List all channels that have tick_phase data in SQLite."""
         channels = []
-        stations = set()
-        for d in sorted(self.phase2_dir.glob('*/tick_phase')):
-            if not d.is_dir():
-                continue
-            channel = d.parent.name
-            # Derive station from channel name prefix
-            if channel.startswith('SHARED_'):
-                # SHARED channels carry multiple stations; peek at latest file
-                station = None
-                latest = sorted(d.glob('*.h5'))
-                if latest:
-                    try:
-                        with h5py.File(str(latest[-1]), 'r', libver='latest', swmr=True) as f:
-                            if 'station' in f:
-                                st_arr = f['station'][:]
-                                unique_st = set()
-                                for s in st_arr:
-                                    val = s.decode('utf-8') if isinstance(s, bytes) else str(s)
-                                    if val in self.VALID_STATIONS:
-                                        unique_st.add(val)
-                                stations.update(unique_st)
-                                station = sorted(unique_st)
-                    except Exception as e:
-                        logger.warning(f"Error reading stations from {latest[-1]}: {e}")
-            else:
-                # Named channel like CHU_14670 or WWV_25000
-                parts = channel.split('_')
-                station = parts[0] if parts else channel
-                if station in self.VALID_STATIONS:
-                    stations.add(station)
-                    station = [station]
-                else:
-                    station = []
+        stations: set = set()
 
-            n_files = len(list(d.glob('*.h5')))
-            channels.append({
-                'channel': channel,
-                'stations': station or [],
-                'n_files': n_files,
-                'dc_meaningful': channel in UNAMBIGUOUS_CHANNELS,
-            })
+        db_path = self._db_path()
+        if not db_path.exists():
+            return {'channels': [], 'stations': []}
+
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
+        except sqlite3.Error as e:
+            logger.warning(f"Could not open L2_tick_phase for channel listing: {e}")
+            return {'channels': [], 'stations': []}
+
+        try:
+            rows = conn.execute(
+                "SELECT channel, COUNT(*) AS n FROM L2_tick_phase GROUP BY channel"
+            ).fetchall()
+        except sqlite3.Error as e:
+            logger.warning(f"L2_tick_phase listing failed: {e}")
+            rows = []
+
+        try:
+            for ch, n in rows:
+                if ch.startswith('SHARED_'):
+                    try:
+                        st_rows = conn.execute(
+                            "SELECT DISTINCT station FROM L2_tick_phase WHERE channel = ?",
+                            (ch,),
+                        ).fetchall()
+                    except sqlite3.Error:
+                        st_rows = []
+                    unique_st = sorted(
+                        s for (s,) in st_rows if s in self.VALID_STATIONS
+                    )
+                    stations.update(unique_st)
+                    station = unique_st
+                else:
+                    parts = ch.split('_')
+                    s = parts[0] if parts else ch
+                    if s in self.VALID_STATIONS:
+                        stations.add(s)
+                        station = [s]
+                    else:
+                        station = []
+                channels.append({
+                    'channel': ch,
+                    'stations': station,
+                    'n_rows': int(n),
+                    'dc_meaningful': ch in UNAMBIGUOUS_CHANNELS,
+                })
+        finally:
+            conn.close()
 
         return {
             'channels': sorted(channels, key=lambda c: c['channel']),

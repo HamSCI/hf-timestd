@@ -55,7 +55,8 @@ from hf_timestd.core.iono_tomography import IonoTomography, RayPath
 from hf_timestd.core.vtec_mapper import VTECMapper, IPPMeasurement
 from hf_timestd.core.hop_geometry import hop_geometry
 from hf_timestd.io import (
-    DataProductReader, DataProductWriter,
+    SqliteDataProductReader as DataProductReader,
+    SqliteDataProductWriter as DataProductWriter,
     make_data_product_writer, make_data_product_reader,
 )
 

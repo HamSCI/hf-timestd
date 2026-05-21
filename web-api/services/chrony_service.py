@@ -3,14 +3,15 @@ Chrony statistics service for the web API.
 
 Reads chrony source comparison data from:
 1. Live chronyc queries (current snapshot)
-2. HDF5 files written by the fusion service (historical data)
+2. The DIAG_chrony_stats SQLite table written by the fusion service
+   (historical data, populated since Phase 1).
 """
 
 import sys
 import logging
 import subprocess
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, List, Optional
 
 # Add parent directory to path for hf_timestd imports
@@ -20,6 +21,13 @@ from hf_timestd.core.chrony_stats import (
     collect_chrony_snapshot,
     ChronySnapshot,
 )
+
+try:
+    from config import config as _web_config
+except Exception:
+    _web_config = None
+
+from hf_timestd.io import make_data_product_reader
 
 logger = logging.getLogger(__name__)
 
@@ -104,115 +112,87 @@ class ChronyService:
         }
 
     def get_history(self, hours: int = 24) -> Dict[str, Any]:
-        """Get historical chrony stats from HDF5 files.
-
-        Returns per-source time series of offset and std_dev.
+        """Get historical chrony stats from the DIAG_chrony_stats SQLite
+        table.  Returns per-source time series of offset and std_dev,
+        plus a deduplicated system-tracking offset series.
         """
-        try:
-            import h5py
-            import numpy as np
-        except ImportError:
-            return {'error': 'h5py not available', 'sources': {}}
-
-        # Find today's (and optionally yesterday's) HDF5 files
         now = datetime.now(timezone.utc)
-        dates = [now.strftime('%Y%m%d')]
-        if hours > 12:
-            from datetime import timedelta
-            yesterday = (now - timedelta(days=1)).strftime('%Y%m%d')
-            dates.insert(0, yesterday)
+        start_iso = (now - timedelta(hours=hours)).isoformat().replace('+00:00', 'Z')
+        end_iso = now.isoformat().replace('+00:00', 'Z')
 
-        all_rows = []
-        for date_str in dates:
-            h5_path = self.fusion_dir / f'chrony_stats_{date_str}.h5'
-            if not h5_path.exists():
-                continue
+        storage_config = getattr(_web_config, 'storage', {}) if _web_config else {}
+
+        try:
+            reader = make_data_product_reader(
+                data_dir=self.fusion_dir,
+                product_level='DIAG',
+                product_name='chrony_stats',
+                channel='fusion',
+                storage_config=storage_config,
+            )
+        except Exception as e:
+            logger.warning(f"chrony history reader init failed: {e}")
+            return {'sources': {}, 'system': []}
+
+        try:
             try:
-                with h5py.File(h5_path, 'r', libver='latest', swmr=True) as f:
-                    if 'chrony_sources' not in f:
-                        continue
-                    grp = f['chrony_sources']
-                    if 'unix_time' not in grp:
-                        continue
-
-                    n = len(grp['unix_time'])
-                    if n == 0:
-                        continue
-
-                    # Filter to requested time range
-                    unix_times = grp['unix_time'][:]
-                    cutoff = now.timestamp() - hours * 3600
-                    mask = unix_times >= cutoff
-
-                    rows = {
-                        'unix_time': unix_times[mask],
-                        'source_name': grp['source_name'][:][mask] if 'source_name' in grp else None,
-                        'offset_us': grp['offset_us'][:][mask] if 'offset_us' in grp else None,
-                        'std_dev_us': grp['std_dev_us'][:][mask] if 'std_dev_us' in grp else None,
-                        'source_state': grp['source_state'][:][mask] if 'source_state' in grp else None,
-                        'n_samples': grp['n_samples'][:][mask] if 'n_samples' in grp else None,
-                        'reach': grp['reach'][:][mask] if 'reach' in grp else None,
-                        'sys_offset_s': grp['sys_offset_s'][:][mask] if 'sys_offset_s' in grp else None,
-                    }
-                    all_rows.append(rows)
+                rows = reader.read_time_range(start=start_iso, end=end_iso)
             except Exception as e:
-                logger.warning(f"Failed to read {h5_path}: {e}")
+                logger.warning(f"chrony history read failed: {e}")
+                return {'sources': {}, 'system': []}
+        finally:
+            close_fn = getattr(reader, 'close', None)
+            if close_fn is not None:
+                try:
+                    close_fn()
+                except Exception:
+                    pass
 
-        if not all_rows:
+        if not rows:
             return {'sources': {}, 'system': []}
 
-        # Merge and group by source
-        import numpy as np
-        unix_times = np.concatenate([r['unix_time'] for r in all_rows])
-        source_names = np.concatenate([r['source_name'] for r in all_rows]) if all_rows[0]['source_name'] is not None else None
-        offsets = np.concatenate([r['offset_us'] for r in all_rows]) if all_rows[0]['offset_us'] is not None else None
-        std_devs = np.concatenate([r['std_dev_us'] for r in all_rows]) if all_rows[0]['std_dev_us'] is not None else None
-        states = np.concatenate([r['source_state'] for r in all_rows]) if all_rows[0]['source_state'] is not None else None
-        sys_offsets = np.concatenate([r['sys_offset_s'] for r in all_rows]) if all_rows[0]['sys_offset_s'] is not None else None
+        sources_data: Dict[str, Dict[str, Any]] = {}
+        seen_sys_times: set = set()
+        system_ts: List[Dict[str, Any]] = []
 
-        if source_names is None or offsets is None:
-            return {'sources': {}, 'system': []}
+        for row in rows:
+            src_name = row.get('source_name')
+            unix_time = row.get('unix_time')
+            if not src_name or unix_time is None:
+                continue
+            entry = sources_data.setdefault(src_name, {
+                'timestamps': [],
+                'offset_ms': [],
+                'std_dev_ms': [],
+                'states': [],
+                'n_points': 0,
+            })
+            offset_us = row.get('offset_us')
+            std_dev_us = row.get('std_dev_us')
+            state = row.get('source_state', '')
+            entry['timestamps'].append(unix_time)
+            entry['offset_ms'].append(
+                round(offset_us / 1000.0, 4) if offset_us is not None else None
+            )
+            entry['std_dev_ms'].append(
+                round(std_dev_us / 1000.0, 4) if std_dev_us is not None else None
+            )
+            entry['states'].append(state)
+            entry['n_points'] += 1
 
-        # Decode bytes
-        def _decode(arr):
-            return [x.decode('utf-8') if isinstance(x, bytes) else str(x) for x in arr]
-
-        source_names_str = _decode(source_names)
-        unique_sources = sorted(set(source_names_str))
-
-        sources_data = {}
-        for src_name in unique_sources:
-            mask = np.array([s == src_name for s in source_names_str])
-            ts = unix_times[mask].tolist()
-            offs = (offsets[mask] / 1000.0).tolist()  # us -> ms
-            sds = (std_devs[mask] / 1000.0).tolist() if std_devs is not None else []
-            sts = _decode(states[mask]) if states is not None else []
-
-            sources_data[src_name] = {
-                'timestamps': ts,
-                'offset_ms': [round(x, 4) for x in offs],
-                'std_dev_ms': [round(x, 4) for x in sds],
-                'states': sts,
-                'n_points': len(ts),
-            }
-
-        # System tracking time series
-        system_ts = []
-        if sys_offsets is not None:
-            # Deduplicate — sys_offset is repeated per source row
-            seen_times = set()
-            for i in range(len(unix_times)):
-                t = round(unix_times[i], 1)
-                if t not in seen_times and not np.isnan(sys_offsets[i]):
-                    seen_times.add(t)
+            sys_offset_s = row.get('sys_offset_s')
+            if sys_offset_s is not None:
+                bucket = round(unix_time, 1)
+                if bucket not in seen_sys_times:
+                    seen_sys_times.add(bucket)
                     system_ts.append({
-                        'unix_time': unix_times[i],
-                        'sys_offset_us': round(sys_offsets[i] * 1e6, 2),
+                        'unix_time': unix_time,
+                        'sys_offset_us': round(sys_offset_s * 1e6, 2),
                     })
 
         return {
             'sources': sources_data,
             'system': system_ts,
             'hours': hours,
-            'n_sources': len(unique_sources),
+            'n_sources': len(sources_data),
         }

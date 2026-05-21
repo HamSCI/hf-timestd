@@ -14,7 +14,7 @@ Reads from JSON files written by the FSK decoder at
 import json
 import time
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, List, Optional
 import logging
 
@@ -52,69 +52,86 @@ class CHUFSKService:
             logger.debug(f"Could not read {path}: {e}")
             return None
 
-    def _get_latest_from_hdf5(self) -> Optional[Dict[str, Any]]:
-        """Fall back to HDF5 for the most recent successful decode (last 24h)."""
+    def _get_latest_from_sqlite(self) -> Optional[Dict[str, Any]]:
+        """Fall back to L2_chu_fsk SQLite for the most recent successful
+        decode (last 3 days)."""
         import sys
         sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'src'))
 
-        try:
-            import h5py
-        except ImportError:
-            return None
-
-        phase2_dir = self.data_root / 'phase2'
-        best = None
-        best_ts = ''
-        best_channel = None
-
         import math
 
-        def _float_or_none(ds, i):
-            v = float(ds[i])
-            return None if math.isnan(v) else v
+        try:
+            from hf_timestd.io import make_data_product_reader
+        except Exception as e:
+            logger.debug(f"make_data_product_reader unavailable: {e}")
+            return None
 
-        def _int_or_none(ds, i):
-            v = int(ds[i])
-            return None if v == 0 else v
+        storage_config = getattr(config, 'storage', {}) or {}
+
+        now = datetime.now(timezone.utc)
+        start_iso = (now - timedelta(days=3)).isoformat().replace('+00:00', 'Z')
+        end_iso = now.isoformat().replace('+00:00', 'Z')
+
+        best: Optional[Dict[str, Any]] = None
+        best_ts = ''
+        best_channel: Optional[str] = None
+
+        phase2_dir = self.data_root / 'phase2'
 
         for channel in self.chu_channels:
-            # Scan last 3 days of HDF5 files, newest first
-            for days_back in range(3):
-                day = (datetime.utcnow() - timedelta(days=days_back)).strftime('%Y%m%d')
-                h5_path = phase2_dir / channel / 'broadcast:fsk' / f'{channel}_chu_fsk_{day}.h5'
-                if not h5_path.exists():
-                    continue
+            try:
+                reader = make_data_product_reader(
+                    data_dir=phase2_dir / channel / 'broadcast:fsk',
+                    product_level='L2',
+                    product_name='chu_fsk',
+                    channel=channel,
+                    storage_config=storage_config,
+                )
+            except Exception as e:
+                logger.warning(f"L2_chu_fsk reader init failed for {channel}: {e}")
+                continue
+
+            try:
                 try:
-                    with h5py.File(str(h5_path), 'r', libver='latest', swmr=True) as f:
-                        n = f['timestamp_utc'].shape[0]
-                        if n == 0:
-                            continue
-                        # Scan last 30 rows for a successful decode
-                        start = max(0, n - 30)
-                        valid_arr = f['fsk_valid'][start:]
-                        for i in range(len(valid_arr) - 1, -1, -1):
-                            if valid_arr[i]:
-                                idx = start + i
-                                ts = f['timestamp_utc'][idx]
-                                if isinstance(ts, bytes):
-                                    ts = ts.decode()
-                                if ts > best_ts:
-                                    best_ts = ts
-                                    best_channel = channel
-                                    best = {
-                                        'timestamp_utc': ts,
-                                        'frames_decoded': int(f['frames_decoded'][idx]),
-                                        'decode_confidence': float(f['decode_confidence'][idx]),
-                                        'decoded_day': _int_or_none(f['decoded_day'], idx) if 'decoded_day' in f else None,
-                                        'decoded_hour': _int_or_none(f['decoded_hour'], idx) if 'decoded_hour' in f else None,
-                                        'decoded_minute': int(f['decoded_minute'][idx]) if 'decoded_minute' in f else None,
-                                        'dut1_seconds': _float_or_none(f['dut1_seconds'], idx) if 'dut1_seconds' in f else None,
-                                        'tai_utc': _int_or_none(f['tai_utc'], idx) if 'tai_utc' in f else None,
-                                        'timing_offset_ms': _float_or_none(f['timing_offset_ms'], idx) if 'timing_offset_ms' in f else None,
-                                    }
-                                break
+                    rows = reader.read_time_range(start=start_iso, end=end_iso)
                 except Exception as e:
-                    logger.warning(f"Could not read HDF5 for {channel} day -{days_back}: {e}")
+                    logger.warning(f"L2_chu_fsk read failed for {channel}: {e}")
+                    rows = []
+            finally:
+                close_fn = getattr(reader, 'close', None)
+                if close_fn is not None:
+                    try:
+                        close_fn()
+                    except Exception:
+                        pass
+
+            # Walk rows newest→oldest, pick the most recent fsk_valid=True
+            for row in reversed(rows):
+                if not row.get('fsk_valid'):
+                    continue
+                ts = row.get('timestamp_utc') or ''
+                if ts <= best_ts:
+                    break  # rows are timestamp-ordered, older won't beat current
+                best_ts = ts
+                best_channel = channel
+                dut1 = row.get('dut1_seconds')
+                if dut1 is not None and math.isnan(dut1):
+                    dut1 = None
+                tai = row.get('tai_utc')
+                if tai == 0:
+                    tai = None
+                best = {
+                    'timestamp_utc': ts,
+                    'frames_decoded': row.get('frames_decoded'),
+                    'decode_confidence': row.get('decode_confidence'),
+                    'decoded_day': row.get('decoded_day') or None,
+                    'decoded_hour': row.get('decoded_hour') or None,
+                    'decoded_minute': row.get('decoded_minute'),
+                    'dut1_seconds': dut1,
+                    'tai_utc': tai,
+                    'timing_offset_ms': row.get('timing_offset_ms'),
+                }
+                break
 
         if best is None:
             return None
@@ -177,9 +194,9 @@ class CHUFSKService:
             
             if best is None or not best.get('detected'):
                 # Fall back to HDF5 for most recent successful decode
-                hdf5_result = self._get_latest_from_hdf5()
-                if hdf5_result:
-                    return hdf5_result
+                sqlite_result = self._get_latest_from_sqlite()
+                if sqlite_result:
+                    return sqlite_result
 
                 # No HDF5 history but we have a recent JSON attempt — return it
                 # so the UI shows decode activity (frames, confidence) rather than

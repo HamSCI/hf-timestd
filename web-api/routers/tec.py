@@ -6,11 +6,11 @@ from fastapi import APIRouter, Query, HTTPException
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 import logging
-import glob
 from pathlib import Path
 
 from services.tec_service import TECService
 from config import config
+from hf_timestd.io import make_data_product_reader
 
 logger = logging.getLogger(__name__)
 
@@ -56,84 +56,97 @@ async def get_dtec_timeseries(
     Each series is keyed as '<STATION>_<freq>MHz', e.g. 'WWV_10.0MHz'.
     """
     try:
-        import h5py
-        import numpy as np
-
         now = datetime.utcnow()
         t0 = _parse_relative_time(start, now)
         t1 = _parse_relative_time(end, now)
         ts0 = int(t0.timestamp())
         ts1 = int(t1.timestamp())
 
-        dtec_dir = Path(config.data_root) / 'phase2' / 'science' / 'dtec'
-        if not dtec_dir.exists():
-            return {"status": "no_data", "message": "dTEC directory not found", "series": {}}
+        # Pass an ISO window to the reader so its (channel, timestamp_utc)
+        # index narrows the scan; minute_boundary equality is verified
+        # in Python because timestamp_utc carries sub-second slop.
+        t0_iso = t0.replace(tzinfo=timezone.utc).isoformat().replace('+00:00', 'Z')
+        t1_iso = t1.replace(tzinfo=timezone.utc).isoformat().replace('+00:00', 'Z')
 
-        # Collect files covering the requested range (one file per day)
-        files = sorted(dtec_dir.glob("AGGREGATED_dtec_*.h5"))
-        if not files:
-            return {"status": "no_data", "message": "No dTEC files found", "series": {}}
+        dtec_dir = Path(config.data_root) / 'phase2' / 'science' / 'dtec'
+
+        try:
+            reader = make_data_product_reader(
+                data_dir=dtec_dir,
+                product_level='L3',
+                product_name='dtec',
+                channel='AGGREGATED',
+                storage_config=getattr(config, 'storage', {}) or {},
+            )
+        except Exception as e:
+            logger.warning(f"L3_dtec reader init failed: {e}")
+            return {"status": "no_data", "message": "L3_dtec reader unavailable", "series": {}}
+
+        try:
+            try:
+                rows = reader.read_time_range(start=t0_iso, end=t1_iso)
+            except Exception as e:
+                logger.warning(f"L3_dtec read failed: {e}")
+                rows = []
+        finally:
+            close_fn = getattr(reader, 'close', None)
+            if close_fn is not None:
+                try:
+                    close_fn()
+                except Exception:
+                    pass
+
+        if not rows:
+            return {
+                "status": "no_data",
+                "message": "No dTEC rows in window",
+                "series": {},
+            }
 
         series: dict = {}
         n_total = 0
-
-        for fpath in files:
-            try:
-                with h5py.File(str(fpath), 'r', libver='latest', swmr=True) as h:
-                    mb = h['minute_boundary'][:]
-                    mask = (mb >= ts0) & (mb <= ts1)
-                    if not np.any(mask):
-                        continue
-
-                    stations_arr = h['station'][:][mask].astype(str)
-                    freqs_arr = h['frequency_mhz'][:][mask]
-                    dtec_rate = h['dtec_rate_tecu_per_s'][:][mask]
-                    dtec_mean = h['dtec_mean_tecu'][:][mask]
-                    snr_arr = h['mean_snr_db'][:][mask]
-                    anchored = h['is_anchored'][:][mask]
-                    mb_filt = mb[mask]
-
-                    # Apply filters
-                    snr_mask = snr_arr >= min_snr_db
-                    if station:
-                        snr_mask &= (stations_arr == station.upper())
-                    if freq_mhz is not None:
-                        snr_mask &= (np.abs(freqs_arr - freq_mhz) < 0.01)
-
-                    for s in np.unique(stations_arr[snr_mask]):
-                        for f in np.unique(freqs_arr[snr_mask & (stations_arr == s)]):
-                            key = f"{s}_{f:.1f}MHz"
-                            row_mask = snr_mask & (stations_arr == s) & (np.abs(freqs_arr - f) < 0.01)
-                            idx = np.where(row_mask)[0]
-                            if downsample > 1:
-                                idx = idx[::downsample]
-                            if key not in series:
-                                series[key] = {
-                                    "station": s,
-                                    "frequency_mhz": float(f),
-                                    "timestamps": [],
-                                    "dtec_rate_tecu_per_s": [],
-                                    "dtec_mean_tecu": [],
-                                    "mean_snr_db": [],
-                                    "is_anchored": [],
-                                }
-                            series[key]["timestamps"].extend(mb_filt[idx].tolist())
-                            series[key]["dtec_rate_tecu_per_s"].extend(dtec_rate[idx].tolist())
-                            series[key]["dtec_mean_tecu"].extend(dtec_mean[idx].tolist())
-                            series[key]["mean_snr_db"].extend(snr_arr[idx].tolist())
-                            series[key]["is_anchored"].extend(anchored[idx].tolist())
-                            n_total += len(idx)
-            except Exception as e:
-                logger.warning(f"Error reading dTEC file {fpath}: {e}")
+        station_filter = station.upper() if station else None
+        for row in rows:
+            mb = row.get('minute_boundary')
+            if mb is None or mb < ts0 or mb > ts1:
                 continue
+            snr = row.get('mean_snr_db')
+            if snr is None or snr < min_snr_db:
+                continue
+            s = row.get('station')
+            f = row.get('frequency_mhz')
+            if s is None or f is None:
+                continue
+            if station_filter and s != station_filter:
+                continue
+            if freq_mhz is not None and abs(f - freq_mhz) > 0.01:
+                continue
+            key = f"{s}_{f:.1f}MHz"
+            entry = series.setdefault(key, {
+                "station": s,
+                "frequency_mhz": float(f),
+                "timestamps": [],
+                "dtec_rate_tecu_per_s": [],
+                "dtec_mean_tecu": [],
+                "mean_snr_db": [],
+                "is_anchored": [],
+            })
+            entry["timestamps"].append(mb)
+            entry["dtec_rate_tecu_per_s"].append(row.get('dtec_rate_tecu_per_s'))
+            entry["dtec_mean_tecu"].append(row.get('dtec_mean_tecu'))
+            entry["mean_snr_db"].append(snr)
+            entry["is_anchored"].append(bool(row.get('is_anchored')))
+            n_total += 1
 
-        # Sort each series by timestamp
-        for key in series:
-            order = sorted(range(len(series[key]["timestamps"])),
-                           key=lambda i: series[key]["timestamps"][i])
+        # Sort each series by timestamp; apply downsample on the final list
+        for key, entry in series.items():
+            order = sorted(range(len(entry["timestamps"])),
+                           key=lambda i: entry["timestamps"][i])
+            if downsample > 1:
+                order = order[::downsample]
             for field in ("timestamps", "dtec_rate_tecu_per_s", "dtec_mean_tecu",
                           "mean_snr_db", "is_anchored"):
-                series[key][field] = [series[key][field][i] for i in order]
+                entry[field] = [entry[field][i] for i in order]
 
         return {
             "status": "ok",

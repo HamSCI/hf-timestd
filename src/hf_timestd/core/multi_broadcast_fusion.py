@@ -239,25 +239,9 @@ except ImportError:
 # Initialize logger FIRST (before any code that might use it)
 logger = logging.getLogger(__name__)
 
-# Disable HDF5 file locking BEFORE importing h5py so the setting takes
-# effect at library initialization time.  The writer uses an open-write-close
-# pattern (no persistent handles), but HDF5 library-level locking can still
-# block concurrent reads on some systems.  Setting the env var after import
-# has no effect on HDF5 ≥ 1.14.
-os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
-
-# Data-product I/O for reading L1A and L2 products. The reader backend
-# (HDF5 / SQLite) is selected per-call by make_data_product_reader from
-# the [storage] config — see docs/HDF5-TO-SQLITE-MIGRATION.md.
-try:
-    from hf_timestd.io import make_data_product_reader
-    HDF5_AVAILABLE = True
-except ImportError:
-    HDF5_AVAILABLE = False
-    logger.warning("h5py/xarray not available, HDF5 reads will fail")
-
-if not HDF5_AVAILABLE:
-    logger.warning("HDF5 storage DISABLED")
+# Data-product I/O for reading L1A and L2 products from the SQLite
+# tables that hf-timestd uses post-Phase-4.
+from hf_timestd.io import make_data_product_reader
 
 # Physics Propagation for GNSS Integration (migrated to HFPropagationModel)
 try:
@@ -783,11 +767,9 @@ class MultiBroadcastFusion:
         # ====================================================================
         # Data Product Writer for fusion_timing
         # ====================================================================
-        # Route through make_data_product_writer so the [storage] config
-        # picks the backend (HDF5, SQLite, or DualWriter for both).
-        # Phase 2 of the HDF5→SQLite cutover converted every other producer
-        # to this factory; this site was missed and continued unconditionally
-        # writing HDF5 — see docs/HDF5-TO-SQLITE-MIGRATION.md.
+        # Route through make_data_product_writer.  Post-Phase-4 the
+        # factory always returns SqliteDataProductWriter; pre-cutover
+        # it dispatched between HDF5 / SQLite / DualWriter.
         try:
             from hf_timestd.io import make_data_product_writer
 
@@ -1429,10 +1411,6 @@ class MultiBroadcastFusion:
         
         Returns observations from the last N minutes, grouped by channel and minute.
         """
-        if not HDF5_AVAILABLE:
-            logger.warning("HDF5 not available for tone observations")
-            return {}
-        
         try:
             return self._read_latest_tone_observations_by_channel_hdf5(lookback_minutes)
         except Exception as e:
@@ -1454,11 +1432,6 @@ class MultiBroadcastFusion:
         """
         from datetime import datetime, timezone, timedelta
         from .wwv_constants import BPM_UT1_MINUTES
-        
-        # If HDF5 not available, return empty dict
-        if not HDF5_AVAILABLE:
-            logger.debug("HDF5 not available for tone detections")
-            return {}
         
         now = time.time()
         cutoff = now - (lookback_minutes * 60)
@@ -1582,9 +1555,6 @@ class MultiBroadcastFusion:
         """
         from datetime import datetime, timezone, timedelta
         
-        if not HDF5_AVAILABLE:
-            return {}
-        
         now = time.time()
         cutoff = now - (lookback_minutes * 60)
         
@@ -1660,9 +1630,6 @@ class MultiBroadcastFusion:
         Returns FSK timing keyed by minute boundary.
         """
         from datetime import datetime, timezone
-        
-        if not HDF5_AVAILABLE:
-            return {}
         
         now = time.time()
         cutoff = now - (lookback_minutes * 60)
@@ -1869,9 +1836,6 @@ class MultiBroadcastFusion:
         from datetime import datetime, timezone
 
         l1_data = {}
-        if not HDF5_AVAILABLE:
-            return {}
-
         now = time.time()
         cutoff = now - (lookback_minutes * 60)
         start_dt = datetime.fromtimestamp(cutoff, timezone.utc)
@@ -1933,9 +1897,6 @@ class MultiBroadcastFusion:
         from datetime import datetime, timezone
 
         l2_data = {}
-        if not HDF5_AVAILABLE:
-            return {}
-
         now = time.time()
         cutoff = now - (lookback_minutes * 60)
         start_dt = datetime.fromtimestamp(cutoff, timezone.utc)

@@ -19,7 +19,7 @@ import argparse
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
-from hf_timestd.io.hdf5_reader import DataProductReader
+from hf_timestd.io import SqliteDataProductReader as DataProductReader
 from hf_timestd.core.wwv_constants import (
     WWV_FREQUENCIES, WWVH_FREQUENCIES, CHU_FREQUENCIES,
     SHARED_FREQUENCIES, STATION_SPECIFIC_FREQ

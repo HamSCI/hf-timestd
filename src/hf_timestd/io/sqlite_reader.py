@@ -47,7 +47,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from hf_timestd.schemas import get_schema
-from hf_timestd.io.hdf5_reader import DataProductReader
 from hf_timestd.io.sqlite_writer import DEFAULT_DB_PATH, _table_name
 
 logger = logging.getLogger(__name__)
