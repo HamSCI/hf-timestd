@@ -79,8 +79,12 @@ class TestCostasLockDetector(unittest.TestCase):
         cal = _detector_calibrator()
         _drive_detector(cal, 0.0, cal._costas_relock_batches)
         self.assertTrue(cal.costas_locked)
-        # A sustained per-batch phase slew — the motion test trips.
-        _drive_detector(cal, 0.15, 5)
+        # A sustained per-batch phase slew large enough for the |Δφ| EMA
+        # to converge well above the threshold given the 0.5 s time
+        # constant.  30 batches × 0.10 rad/batch puts dphase_ema ≈ 0.07
+        # (> 0.030) and total phase swing 3.0 rad (> 1.0 band) — both
+        # gates trip.
+        _drive_detector(cal, 0.10, 30)
         self.assertFalse(cal.costas_locked)
 
     def test_band_test_holds_unlocked_through_a_plateau(self):

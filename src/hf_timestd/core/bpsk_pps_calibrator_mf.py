@@ -95,17 +95,22 @@ COSTAS_TAU_DPHASE_EMA_S = 0.5   # |Δφ|-EMA time constant (s).
 # step cut the false-positive rate but the regime kept climbing into
 # 0.008-0.009 and the gate flapped again within minutes.
 #
-# Final value 0.020 was chosen to live solidly above the steady-state
-# jitter regardless of regime, relying on the BAND test
-# (``COSTAS_PHASE_BAND_RAD``, |φ - φ_EMA| > 0.5 rad) to catch real
-# excursions.  Per the original characterisation, real excursions
-# swing |φ| > 5 rad — multiple times the band threshold — so the band
-# test alone is sufficient to detect them.  The dphase test then
-# becomes a defense against rapid loop motion that hasn't yet wandered
-# off, which 0.020 still catches.  If real excursions ever start
-# fitting under both gates, revisit.
-COSTAS_DPHASE_MAX_RAD = 0.020   # |Δφ| EMA above this ⇒ loop in motion.
-COSTAS_PHASE_BAND_RAD = 0.5     # |φ − φ_EMA| above this ⇒ φ wandered off.
+# 2026-05-21 (third pass) raised to 0.030.  Even 0.020 was tripping
+# in the new regime — peak dphase_ema=0.02023 observed within minutes
+# of deploy.  0.030 leaves ~50% headroom over worst observed
+# steady-state jitter while still catching real excursions (the
+# canonical 0.012-0.015 band falls comfortably below; truly
+# pathological events run well past).
+COSTAS_DPHASE_MAX_RAD = 0.030   # |Δφ| EMA above this ⇒ loop in motion.
+# 2026-05-21 raised from 0.5 → 1.0.  The phase_ema settled at +0.88
+# rad on bee1 (vs +0.13 the original tuning saw); steady-state |φ|
+# oscillates around the EMA with peaks reaching 0.5 rad away — barely
+# over the original band threshold.  Real excursions per the
+# characterisation swing |φ| > 5 rad — five times the new threshold,
+# so we still catch them comfortably.  Note: chain_delay during the
+# borderline band-test trips stayed stable to ±100 ns, confirming
+# the BPSK measurement is fine and the gate was over-protective.
+COSTAS_PHASE_BAND_RAD = 1.0     # |φ − φ_EMA| above this ⇒ φ wandered off.
 COSTAS_RELOCK_S = 0.5           # φ quiescent this long (s) before re-lock.
 
 
