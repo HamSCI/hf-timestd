@@ -1226,15 +1226,15 @@ wheels = [
 
 [[package]]
 name = "ka9q-python"
-version = "3.15.0"
+version = "3.15.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/59/a0/61b9327fc335787a34063cf20f1873d8e4fe04bea8a50adb9ea9e85694f0/ka9q_python-3.15.0.tar.gz", hash = "sha256:16313d7ab37478c5a20c5841bdd2581ac1d214181c74d4b3efd9dc6590264e1b", size = 258401, upload-time = "2026-05-21T01:25:00.071Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d4/63/898c890ce857b6c8dc4ac914388f98d623997812d62d22b036a098c47da8/ka9q_python-3.15.1.tar.gz", hash = "sha256:def905d26456b66032eefbb78a92d09872e4e1e9ebca4b5acc16faff1426f45a", size = 260617, upload-time = "2026-05-21T11:42:49.659Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/2a/c9/93e44c765f80563ed08b53cfc0756c8275b768fc730eb218455cb373e4bf/ka9q_python-3.15.0-py3-none-any.whl", hash = "sha256:6b443724d003d0a1292484a536001f2a86a13ff2d8eb218ca044fc3a202b3bf3", size = 106597, upload-time = "2026-05-21T01:24:58.799Z" },
+    { url = "https://files.pythonhosted.org/packages/68/1f/3d3126063e9d266f87c98bc040caf40db55668e6b574536b97b5bfce43dc/ka9q_python-3.15.1-py3-none-any.whl", hash = "sha256:8610c15bccbc7e2f15b102d22d135bf90f5449c4053152400210914fefb8fd51", size = 106927, upload-time = "2026-05-21T11:42:48.263Z" },
 ]
 
 [[package]]
