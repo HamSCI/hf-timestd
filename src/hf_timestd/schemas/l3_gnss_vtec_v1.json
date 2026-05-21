@@ -1,5 +1,5 @@
 {
-    "schema_version": "1.1.0",
+    "schema_version": "1.2.0",
     "data_product": "L3A_gnss_vtec",
     "description": "Real-time GNSS Vertical Total Electron Content from ZED-F9P receiver",
     "cadence_seconds": 1,
@@ -77,6 +77,56 @@
             "type": "boolean",
             "required": true,
             "description": "Whether Differential Code Bias corrections were applied"
+        },
+        {
+            "name": "gnss_week",
+            "type": "integer",
+            "required": false,
+            "description": "GNSS week number from RXM-RAWX (defensible cross-stream alignment vs system clock)"
+        },
+        {
+            "name": "gnss_rcvTow_s",
+            "type": "float",
+            "required": false,
+            "allow_nan": true,
+            "description": "GNSS receiver time-of-week (sub-second) at the observation epoch",
+            "units": "seconds"
+        },
+        {
+            "name": "gnss_leapS",
+            "type": "integer",
+            "required": false,
+            "description": "Current GPS leap seconds from RXM-RAWX"
+        },
+        {
+            "name": "gnss_recStat",
+            "type": "integer",
+            "required": false,
+            "description": "RXM-RAWX receiver status bitfield (bit 0 = leapSec valid, bit 1 = clkReset)"
+        },
+        {
+            "name": "unix_minus_gnss_s",
+            "type": "float",
+            "required": false,
+            "allow_nan": true,
+            "description": "Instantaneous system_clock - GNSS_clock offset for this sample",
+            "units": "seconds"
+        },
+        {
+            "name": "unix_minus_gnss_mean_s",
+            "type": "float",
+            "required": false,
+            "allow_nan": true,
+            "description": "Running mean of unix_minus_gnss_s",
+            "units": "seconds"
+        },
+        {
+            "name": "unix_minus_gnss_std_s",
+            "type": "float",
+            "required": false,
+            "allow_nan": true,
+            "description": "Running std deviation of unix_minus_gnss_s",
+            "units": "seconds"
         }
     ],
     "quality_flags": {
