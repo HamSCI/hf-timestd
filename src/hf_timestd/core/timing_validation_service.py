@@ -21,7 +21,7 @@ Fusion should converge to within its stated uncertainty.
 import json
 import logging
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
 from collections import deque
@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 # GPS epoch constants
 GPS_EPOCH_UNIX = 315964800  # Seconds from Unix epoch to GPS epoch
 from .leap_second import get_current_gps_leap_seconds
+from hf_timestd.io import make_data_product_reader
 GPS_LEAP_SECONDS = get_current_gps_leap_seconds()
 BILLION = 1_000_000_000
 
@@ -120,20 +121,22 @@ class TimingValidationService:
         timing_authority: str = "rtp",
         gps_accuracy_ms: float = 0.001,  # L4 default
         history_size: int = 1440,  # 24 hours at 1/minute
+        storage_config: Optional[Dict[str, Any]] = None,
     ):
         self.raw_buffer_path = Path(raw_buffer_path)
         self.hot_buffer_path = Path(hot_buffer_path)
         self.fusion_output_path = Path(fusion_output_path)
         self.timing_authority = timing_authority
         self.gps_accuracy_ms = gps_accuracy_ms
-        
+        self._storage_config = storage_config or {}
+
         # Validation history (circular buffer)
         self._history: deque[ValidationPoint] = deque(maxlen=history_size)
-        
+
         # Cache of parsed sidecars
         self._sidecar_cache: Dict[str, List[TimingSnapshot]] = {}
-        
-        # Cache of fusion data (loaded from HDF5)
+
+        # Cache of fusion rows by minute_boundary
         self._fusion_cache: Dict[int, Dict[str, Any]] = {}
     
     def parse_timing_snapshots(self, json_path: Path) -> List[TimingSnapshot]:
@@ -314,67 +317,59 @@ class TimingValidationService:
         return 0.0
     
     def load_fusion_result(self, minute_boundary: int) -> Optional[Dict[str, Any]]:
-        """Load fusion result for a minute from HDF5 file."""
+        """Load the fusion row for a given minute_boundary from L3_fusion_timing."""
         # Check cache first
         if minute_boundary in self._fusion_cache:
             return self._fusion_cache[minute_boundary]
-        
-        # Fusion output structure: {fusion_path}/fusion_fusion_timing_{date}.h5
-        date_str = datetime.utcfromtimestamp(minute_boundary).strftime('%Y%m%d')
-        fusion_file = self.fusion_output_path / f"fusion_fusion_timing_{date_str}.h5"
-        
-        if not fusion_file.exists():
-            return None
-        
+
+        # Read a ±2 min window so the row whose timestamp_utc is at the
+        # minute_boundary epoch (which sits ON the lower bound) is
+        # included, even with sub-second timestamp slop.  Filtering by
+        # exact minute_boundary happens in Python below.
+        target_dt = datetime.fromtimestamp(minute_boundary, tz=timezone.utc)
+        start_iso = (target_dt - timedelta(minutes=2)).isoformat().replace('+00:00', 'Z')
+        end_iso = (target_dt + timedelta(minutes=2)).isoformat().replace('+00:00', 'Z')
+
         try:
-            import h5py
-            import numpy as np
-            
-            with h5py.File(fusion_file, 'r', libver='latest', swmr=True) as f:
-                # HDF5 structure: each column is a separate dataset
-                if 'minute_boundary' not in f:
-                    return None
-                
-                # Get minute_boundary array
-                minute_boundaries = f['minute_boundary'][:]
-                
-                # Find matching index
-                matches = (minute_boundaries == minute_boundary)
-                if not matches.any():
-                    return None
-                
-                idx = int(np.where(matches)[0][0])  # First match
-                
-                # Build result dict from key columns only (faster)
-                key_columns = [
-                    'minute_boundary', 'timestamp_utc', 'd_clock_fused_ms', 
-                    'uncertainty_ms', 'n_broadcasts', 'quality_grade',
-                    'n_stations', 'kalman_state'
-                ]
-                
-                result = {}
-                for key in key_columns:
-                    if key in f:
-                        try:
-                            val = f[key][idx]
-                            # Convert numpy types to Python types
-                            if hasattr(val, 'item'):
-                                val = val.item()
-                            # Decode bytes to string
-                            if isinstance(val, bytes):
-                                val = val.decode('utf-8', errors='replace')
-                            result[key] = val
-                        except Exception as e:
-                            logger.debug(f"Ignored exception: {e}")
-                            pass  # Skip problematic columns
-                
-                # Cache for reuse
-                self._fusion_cache[minute_boundary] = result
-                return result
-                
+            reader = make_data_product_reader(
+                data_dir=self.fusion_output_path,
+                product_level='L3',
+                product_name='fusion_timing',
+                channel='fusion',
+                storage_config=self._storage_config,
+            )
         except Exception as e:
-            logger.debug(f"Failed to load fusion result from {fusion_file}: {e}")
+            logger.debug(f"Failed to open fusion reader: {e}")
             return None
+
+        try:
+            try:
+                rows = reader.read_time_range(start=start_iso, end=end_iso)
+            except Exception as e:
+                logger.debug(f"Failed to read fusion row for minute {minute_boundary}: {e}")
+                return None
+        finally:
+            close_fn = getattr(reader, 'close', None)
+            if close_fn is not None:
+                try:
+                    close_fn()
+                except Exception:
+                    pass
+
+        key_columns = (
+            'minute_boundary', 'timestamp_utc', 'd_clock_fused_ms',
+            'uncertainty_ms', 'n_broadcasts', 'quality_grade',
+            'n_stations', 'kalman_state',
+        )
+
+        for row in rows:
+            if row.get('minute_boundary') != minute_boundary:
+                continue
+            result = {k: row.get(k) for k in key_columns if row.get(k) is not None}
+            self._fusion_cache[minute_boundary] = result
+            return result
+
+        return None
     
     def _sidecars_have_gps_lock(self, minute_boundary: int) -> bool:
         """Check if any sidecar for this minute has a non-zero gps_time_ns field."""
