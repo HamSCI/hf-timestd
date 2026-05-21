@@ -95,22 +95,22 @@ COSTAS_TAU_DPHASE_EMA_S = 0.5   # |Δφ|-EMA time constant (s).
 # step cut the false-positive rate but the regime kept climbing into
 # 0.008-0.009 and the gate flapped again within minutes.
 #
-# 2026-05-21 (third pass) raised to 0.030.  Even 0.020 was tripping
-# in the new regime — peak dphase_ema=0.02023 observed within minutes
-# of deploy.  0.030 leaves ~50% headroom over worst observed
-# steady-state jitter while still catching real excursions (the
-# canonical 0.012-0.015 band falls comfortably below; truly
-# pathological events run well past).
-COSTAS_DPHASE_MAX_RAD = 0.030   # |Δφ| EMA above this ⇒ loop in motion.
-# 2026-05-21 raised from 0.5 → 1.0.  The phase_ema settled at +0.88
-# rad on bee1 (vs +0.13 the original tuning saw); steady-state |φ|
-# oscillates around the EMA with peaks reaching 0.5 rad away — barely
-# over the original band threshold.  Real excursions per the
-# characterisation swing |φ| > 5 rad — five times the new threshold,
-# so we still catch them comfortably.  Note: chain_delay during the
-# borderline band-test trips stayed stable to ±100 ns, confirming
-# the BPSK measurement is fine and the gate was over-protective.
-COSTAS_PHASE_BAND_RAD = 1.0     # |φ − φ_EMA| above this ⇒ φ wandered off.
+# 2026-05-21 (fourth pass) raised to 0.050.  Even 0.030 was tripping —
+# observed peaks reached 0.0309 within minutes of deploy.  The
+# dphase test is now essentially a *redundant* detector since real
+# excursions are reliably caught by the BAND test (they swing |φ| > 5
+# rad, far above any sane band threshold).  0.050 means the dphase
+# test only fires on truly aggressive loop motion (faster than any
+# observed steady-state regime) while otherwise staying out of the way.
+COSTAS_DPHASE_MAX_RAD = 0.050   # |Δφ| EMA above this ⇒ loop in motion.
+# 2026-05-21 (second pass) raised 1.0 → 2.0.  Steady-state |φ - φ_EMA|
+# observed at 1.02 — just over the previous threshold.  Real excursions
+# per the original characterisation swing |φ| > 5 rad — 2.5× above the
+# new threshold, so we still catch them reliably.  Chain_delay during
+# every borderline band trip has stayed stable to ±100 ns, confirming
+# that what the gate is rejecting is NOT a measurement-quality event.
+# This is the primary detector for real excursions; tune it conservatively.
+COSTAS_PHASE_BAND_RAD = 2.0     # |φ − φ_EMA| above this ⇒ φ wandered off.
 COSTAS_RELOCK_S = 0.5           # φ quiescent this long (s) before re-lock.
 
 
