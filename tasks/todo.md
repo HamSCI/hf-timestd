@@ -1,93 +1,116 @@
-# Next session — HDF5 → SQLite cutover
+# Next session — finish HDF5 → SQLite Phase 4
 
-The 2026-05-17 metrology/physics review remediation arc is **complete**
-on `main` (HEAD `6ab5d5b`, 2026-05-20).  All findings — including the
-deferred P-H29 (TID L3 deliverable) — are resolved; all 8
-PHYSICS_CONTRACT Known Deviations are closed.  Suite green: 1993
-passed, 1 deselected (the standing `test_geometric_prediction`
-time-of-day flake).  Full session log:
-[`docs/changes/SESSION_2026-05-20_REMEDIATION_COMPLETE.md`].
+Phase 3a + Phase 3b + Phase 4 Step 0 + Phase 4 Step 1 all shipped on
+2026-05-20.  SQLite is the sole writer on `main`; HDF5 reader/writer
+modules and the `h5py` dependency remain in the tree as a rollback
+path that Phase 4 Steps 2–7 will retire.
 
-The next workstream is the HDF5 → SQLite cutover.  Runbook lives in
-[`docs/HDF5-TO-SQLITE-MIGRATION.md`]; ongoing-task state is in the
-project memory `project_hf_timestd_sqlite_cutover`.
+Full plan: [`docs/PHASE_4_PLAN.md`].
+Migration design seed: [`docs/HDF5-TO-SQLITE-MIGRATION.md`].
+Last session log: [`docs/changes/SESSION_2026-05-20_PHASE_3B_FLIP.md`]
+and [`docs/changes/SESSION_2026-05-20_REMEDIATION_COMPLETE.md`].
 
-## Pre-flight state (carried over from 2026-05-19 on bee1)
+## Pre-flight state on bee1 (snapshot 2026-05-21 ~12:00 UTC)
 
-- Phase 1 (`SqliteDataProductReader` + `make_data_product_reader` +
-  `[storage] read_sqlite` knob), Phase 2 (all producers via
-  `make_data_product_writer`), and Phase 3a-prep (all consumers
-  backend-agnostic via `make_data_product_reader`) are all committed.
-- On bee1, all 13 data products were dual-writing as of 2026-05-19.
-  The first full 9-channel `parity_check_all.sh` sweep at ~11:43 UTC
-  returned **70 checks → 60 OK / 10 SKIP / 0 PENDING / 0 FAIL**
-  (SKIPs benign: `chu_fsk` on non-FSK channels, idle reanalysis).
-  The parity window has been accumulating clean runs since.
-- The "merge branch → main" step in the runbook is **already done**
-  (commit `2387c3b`, 2026-05-19 evening / 2026-05-20 morning).  The
-  cutover session can skip directly to the parity-check → flip steps.
+| Check | Status |
+|---|---|
+| 24 `timestd-*` units in `active` state | ✅ |
+| timestd-fusion uptime since Phase 3b | 15h+ (continuous since 2026-05-20 20:40:35 UTC) |
+| timestd-fusion RSS | 222 MB — flat, the h5py leak is gone now that fusion no longer touches HDF5 |
+| Authority | A1/T6 active, σ_ns = 50 000, no disagreement_flags |
+| `timestd-sqlite-parity.service` | ❌ failing — **expected**, see operational debt below |
+| 24 h soak target | not strictly met (need ~5 h more after this snapshot) but the leak driver is gone — user previously authorised proceeding before the strict 24 h on Phase 3b for the same reason |
 
-## Cutover steps (in order)
+## Operational debt to clear before / during Phase 4
 
-1. **Parity check** — on bee1:
+* **`timestd-sqlite-parity.timer` should be disabled.** It runs
+  `scripts/parity_check_all.sh` which compares HDF5 vs SQLite.  With
+  Phase 3b live there's no HDF5 side, so every run exits non-zero.
+  The service has been failing since 2026-05-21 06:00:29 UTC.  Stop
+  the timer + service:
+  ```
+  sudo systemctl disable --now timestd-sqlite-parity.timer
+  sudo systemctl reset-failed timestd-sqlite-parity.service
+  ```
+  Phase 4 Step 7 retires `parity_check_all.sh` itself.
 
-   ```
-   sudo journalctl -u timestd-sqlite-parity --since "2026-05-19 11:30" \
-       | grep -E 'Summary|FAIL|PENDING'
-   ```
+* **The two pipeline watchdogs must stay stopped until Phase 4 Step
+  0's SQLite freshness check ships to bee1.**  Step 0 has shipped to
+  `main` (commit `fd48016`) but the deployed
+  `/opt/hf-timestd/scripts/pipeline-watchdog.sh` on bee1 still uses
+  the `*.h5` mtime check, so re-enabling the timer would mass-restart
+  every metrology@* + fusion every ~5 min until the deploy lands.
+  Either deploy first (recommended) then `sudo systemctl enable --now
+  timestd-pipeline-watchdog.timer timestd-tsl3-watchdog.timer`, or
+  defer until after Step 2.
 
-   Go criteria: every run since 2026-05-19 11:32 shows `fail=0 err=0
-   pending=0`.  (The first run after l2-calibration's 11:32 restart
-   may show `L2_timing_measurements` PENDING; runs from 12:00 UTC
-   onwards must all be clean.)  A live full sweep is also fine:
+## Phase 4 sub-step status
 
-   ```
-   bash scripts/parity_check_all.sh
-   ```
+| Step | Status | Commit / Notes |
+|---|---|---|
+| 0 — pipeline-watchdog SQLite freshness check | ✅ shipped | `fd48016` (needs bee1 deploy before re-enabling watchdog timers) |
+| 1 — `chrony_stats` schema → SQLite via `make_data_product_writer` | ✅ shipped | `9eaaa65` |
+| **2 — Convert 5 raw-h5py *reader* sites** | ⏳ **start here** | l2_calibration_service.py:327-345, physics_fusion_service.py:1119-1131, 1525-1534, 1561-1577, timing_validation_service.py:330-333 |
+| 3 — Simplify `make_data_product_writer`/`_reader` factory | ⏳ | keep factory shape, body becomes one-line SQLite return |
+| 4 — Delete `src/hf_timestd/io/hdf5_writer.py` + `hdf5_reader.py` | ⏳ | requires Step 2 + 3 first (no `from hf_timestd.io.hdf5_*` imports left) |
+| 5 — Drop `h5py>=3.8.0,<3.16.0` from `pyproject.toml` + `uv lock` | ⏳ | last "no-going-back" step; do after Step 4 has soaked a few hours |
+| 6 — Comment cleanup (`_malloc_trim`, `HDF5_AVAILABLE`, dead SWMR/file-locking notes) | ⏳ | mechanical |
+| 7 — Test rewrites / deletions (≥9 HDF5-specific test files) | ⏳ | `test_l2_seed_logging.py`, `test_physics_fusion_seed_minutes.py`, `test_dual_writer.py`, `test_hdf5_io.py` + 5 others — grep before starting |
+| 8 — Fusion long-lived SQLite connection (post-Phase-4 polish) | ⏳ optional | RSS already stable at 222 MB; this is belt-and-braces |
 
-   with the canonical channel list (`CHANNELS="CHU_3330 CHU_7850
-   CHU_14670 SHARED_2500 SHARED_5000 SHARED_10000 SHARED_15000
-   WWV_20000 WWV_25000"`).
+## Step-2 starting point (concrete)
 
-2. **Phase 3a — the flip.** With parity verified clean:
+For each reader site, replace the raw `h5py.File(...)` block with
+`make_data_product_reader(...).read_*()` against the same product
+that's now writing to SQLite.  One commit per site, each verified
+with `uv run --frozen --extra dev pytest tests/` before the next.
 
-   - `/etc/hf-timestd/timestd-config.toml`, `[storage]`: add
-     `read_sqlite = true`.
-   - Repo `config/timestd-config.toml`, `[storage]`: set
-     `read_sqlite = true`.
-   - Restart consumers: `timestd-fusion`, `timestd-l2-calibration`,
-     the physics-fusion service, web-api.
-   - Watch chrony TSL2 and the next parity run.  Any FAIL → **do
-     not flip**, investigate the divergence first.
+| File | Line | Purpose | SQLite product to read |
+|---|---|---|---|
+| `src/hf_timestd/core/l2_calibration_service.py` | 327–345 | startup seed — last L1 row per channel | `L1_metrology_measurements` |
+| `src/hf_timestd/core/physics_fusion_service.py` | 1119–1131 | startup seed — propagation history | `L2_propagation_history` |
+| `src/hf_timestd/core/physics_fusion_service.py` | 1525–1534 | startup seed — L3 propagation | `L3_propagation` |
+| `src/hf_timestd/core/physics_fusion_service.py` | 1561–1577 | restart-resume — L3 dtec checkpoint | `L3_dtec` |
+| `src/hf_timestd/core/timing_validation_service.py` | 330–333 | validation read — fusion timing | `L3_fusion_timing` |
 
-3. **Phase 3b — `write_hdf5 = false`.** Once Phase 3a has been
-   running clean for at least one full parity window (and ideally
-   a full day), set `write_hdf5 = false` so SQLite is the sole
-   writer.  Re-validate the suite and chrony TSL2.
-
-4. **Phase 4 — remove HDF5 + h5py.** Drop the HDF5 code paths,
-   remove the pinned `h5py>=3.8.0,<3.16.0` dependency, retire
-   `HDF5-TO-SQLITE-MIGRATION.md`'s "during cutover" sections.
-   The fusion-service h5py memory leak (documented in
-   `multi_broadcast_fusion.py`'s `_malloc_trim` block) is only
-   fully fixed once fusion also holds a *long-lived* SQLite
-   connection (still per-cycle today); that's a Phase-4 follow-up.
+After all five: `grep -rn 'from hf_timestd.io.hdf5_writer\|from
+hf_timestd.io.hdf5_reader\|hdf5_writer\|hdf5_reader' src/ tests/`
+should be empty (cue for Step 3 / Step 4).
 
 ## Reader semantic to remember
 
 `SqliteDataProductReader` returns `None` for `NULL`, whereas the HDF5
-reader fills with `NaN`/`0`/`""` (the `f7ec934` DUT1 bug class).
+reader filled with `NaN`/`0`/`""` (the `f7ec934` DUT1 bug class).
 Intentional; downstream code already handles the SQLite-style
-nullability where it matters.
+nullability where it matters.  Worth a re-check at each Step 2 site,
+since startup-seed code is exactly where the HDF5-side coercion may
+have been masking a `None`-blind consumer.
 
 ## Workflow
 
 ```
-uv run --frozen --extra dev pytest tests/
+uv run --frozen --extra dev pytest tests/ \
+    --deselect tests/test_metrology_engine.py::test_geometric_prediction
 ```
 
 `--frozen` keeps `uv.lock` pinned (without it `uv run` re-resolves
 `ka9q-python` and dirties the lock; `git checkout uv.lock` to drop
-any drift).  Standing flake to deselect (not a regression):
-`tests/test_metrology_engine.py::test_geometric_prediction` (F-layer
-height time-of-day behaviour).
+any drift).  The deselected test is the standing time-of-day F-layer
+flake (`project_hf_timestd_flaky_geometric_prediction`), not a
+regression.
+
+## Out-of-scope items mentioned in the previous handoff — defer
+
+These appeared in `project_hf_timestd_authority_work.md` /
+`project_hf_timestd_fusion_audit.md` as parallel work, but are not
+Phase-4 blockers:
+
+* sigmond `smd install lan-fusion-client` + `smd lan-fusion-watch`
+  (consumer side of the LAN Fusion service).
+* `hf-timestd` `multi-instance` branch (8d7f5af, Rob's 2026-04-02
+  work) — 264 commits stale, needs a rebase-or-drop decision.
+* Bootstrap CORRELATING single-station stall (CHU vs WWV ~60 ms bias)
+  — separate task #8 per Phase 4 plan, "not Phase-4 blocking but
+  useful signal."
+* sigmond untracked `docs/SCINTILLATION-MONITORING.md` — design draft
+  from 2026-05-17, not gated on cutover.
