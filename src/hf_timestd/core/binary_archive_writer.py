@@ -1187,7 +1187,7 @@ class BinaryArchiveWriter:
             'stale_drops': self.stale_drops,
             'timing_drops': self.timing_drops,
             'current_buffer_pos': self.current_buffer.write_pos if self.current_buffer else 0,
-            'pending_flush': self._pending_flush_buffer is not None,
+            'flush_queue_depth': self._flush_queue.qsize(),
         }
 
 
