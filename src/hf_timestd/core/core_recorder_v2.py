@@ -1036,7 +1036,20 @@ class CoreRecorderV2:
                 channel=channel_info,
                 on_samples=self._t6_on_samples,
                 samples_per_packet=200,
-                resequence_buffer_size=128,
+                # 256 packets ≈ 3.2 s at T6's 80 pkt/sec, half-fill at
+                # 1.6 s.  The resequencer declares a packet lost when the
+                # buffer reaches half-full without the next-expected
+                # sequence arriving (resequencer.py _handle_lost_packet).
+                # The default 128 gave 0.8 s tolerance — long enough for
+                # normal jitter but tight under transient CPU contention
+                # (observed on bee1 2026-05-21: a single archive-rollover
+                # burst momentarily starved the T6 reader thread, the
+                # resequencer over-eagerly declared a packet "lost",
+                # filled 480 ms with zeros, and the BPSK Costas loop
+                # unlocked downstream from the resulting phantom-edge
+                # storm).  Doubling the buffer doubles the wait window
+                # without affecting steady-state latency.
+                resequence_buffer_size=256,
             )
             self._t6_stream.start()
             logger.info(f"T6 BPSK PPS stream started: {desc} at {freq_hz/1e6:.6f} MHz")
