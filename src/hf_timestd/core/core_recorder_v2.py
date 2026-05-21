@@ -33,6 +33,7 @@ import json
 import threading
 import subprocess
 import socket
+import numpy as np
 from collections import deque
 from pathlib import Path
 from typing import Dict, Optional, List
@@ -297,6 +298,24 @@ class CoreRecorderV2:
         # SHM push.  Stored in ns to match `rtp_to_utc_offset_ns`
         # convention.
         self._t6_last_local_minus_source_ns = None
+        # Rolling window of recent chain_delay_ns values (one per
+        # accepted PPS edge, ~1 Hz).  std-dev across the window is the
+        # observed BPSK matched-filter jitter — the dominant physical
+        # uncertainty contribution to TSL3.  Published in the status
+        # JSON as l6_pps.chain_delay_ns_std_ns; BpskPpsProbe converts
+        # it to authority.t6_sigma_ms (floored at sigma_floor_ms so we
+        # don't under-claim during calm windows).  60 samples ≈ 1 min
+        # of recent history — long enough to average out per-PPS noise,
+        # short enough that a real degradation shows up within 1 min.
+        self._t6_chain_delay_history = deque(maxlen=60)
+        # Kept alongside for diagnostics: std of the residual we push
+        # to chrony.  In normal operation this is near-zero (the
+        # integer-second-residual stays inside one ns quantum when
+        # chrony has the local clock well-disciplined and the anchor
+        # is the frozen ChannelInfo); it is NOT the right authority
+        # σ signal but stays visible in the probe.detail block for
+        # debugging.
+        self._t6_local_minus_source_history = deque(maxlen=60)
         # V1 fix per docs/TIMING-PIPELINE-WIRING.md §10.3 path 2a (option 2):
         # the RTP→wall_time math for TSL3 SHM uses a *fresh* GPS/RTP
         # anchor — refreshed by _t6_timing_poll_loop — instead of the
@@ -2088,6 +2107,21 @@ class CoreRecorderV2:
                             self._t6_last_local_minus_source_ns = int(round(
                                 (wall_time_sec - ref_time) * 1e9
                             ))
+                            # Append to rolling histories for σ computation.
+                            # chain_delay_ns is the BPSK matched-filter
+                            # edge-position estimate — its std across the
+                            # window IS the observed BPSK jitter that
+                            # BpskPpsProbe forwards as authority t6_sigma_ms.
+                            # local_minus_source_ns is logged alongside for
+                            # diagnostics (it captures post-anchor-frozen
+                            # computation stability, near-zero in normal
+                            # operation; NOT a useful σ signal).
+                            self._t6_chain_delay_history.append(
+                                float(effective_chain_delay)
+                            )
+                            self._t6_local_minus_source_history.append(
+                                self._t6_last_local_minus_source_ns
+                            )
                             # V1 fix layer 2 — Signal B (sustained Δ breach).
                             self._t6_check_delta_breach(
                                 self._t6_last_local_minus_source_ns
@@ -2225,6 +2259,38 @@ class CoreRecorderV2:
                     # The value the BpskPpsProbe forwards as offset_ms.  None
                     # until the first SHM push has happened.
                     'local_minus_source_ns': self._t6_last_local_minus_source_ns,
+                    # Observed BPSK matched-filter jitter over the last
+                    # ~60 PPS edges (≈1 min at 1 Hz): std of chain_delay_ns.
+                    # This IS the physical uncertainty of the BPSK PPS
+                    # measurement; BpskPpsProbe uses it as authority
+                    # t6_sigma_ms (floored at sigma_floor_ms so calm
+                    # windows don't under-claim).  None until ≥2 samples.
+                    'chain_delay_ns_std_ns': (
+                        float(np.std(
+                            list(self._t6_chain_delay_history),
+                            ddof=1,
+                        ))
+                        if len(self._t6_chain_delay_history) >= 2
+                        else None
+                    ),
+                    'chain_delay_ns_window': len(
+                        self._t6_chain_delay_history
+                    ),
+                    # Diagnostic — std of the residual we push to chrony.
+                    # Near-zero in normal operation (anchor is frozen,
+                    # chrony has the clock disciplined); kept for
+                    # debugging and NOT used as the published σ.
+                    'local_minus_source_ns_std_ns': (
+                        float(np.std(
+                            list(self._t6_local_minus_source_history),
+                            ddof=1,
+                        ))
+                        if len(self._t6_local_minus_source_history) >= 2
+                        else None
+                    ),
+                    'local_minus_source_ns_window': len(
+                        self._t6_local_minus_source_history
+                    ),
                     # V1 fix layer 2 — drift monitor flags.  See
                     # docs/TIMING-PIPELINE-WIRING.md §10.3 and
                     # _t6_check_anchor_consistency / _t6_check_delta_breach.

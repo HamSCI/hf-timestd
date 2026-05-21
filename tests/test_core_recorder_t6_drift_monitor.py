@@ -319,5 +319,108 @@ class TestProbeForwarding(unittest.TestCase):
             path.unlink()
 
 
+class TestProbeSigmaFromJitter(unittest.TestCase):
+    """BpskPpsProbe.sigma_ms is derived from the producer's rolling
+    std-dev of chain_delay_ns (the BPSK matched-filter edge-position
+    estimate, published as l6_pps.chain_delay_ns_std_ns), clamped from
+    below by sigma_floor_ms.  Pre-jitter producers (no std field)
+    fall back to the floor — same numeric behavior as the old
+    hardcoded sigma."""
+
+    def _make_status(self, std_ns, *, window=60, ts=None):
+        from datetime import datetime, timezone
+        now = ts or datetime(2026, 5, 21, 17, 30, 0, tzinfo=timezone.utc)
+        block = {
+            'enabled': True,
+            'locked': True,
+            'pps_ok': 100,
+            'pps_noise': 0,
+            'pps_consecutive': 50,
+            'chain_delay_ns': 1234,
+            'local_minus_source_ns': 500,
+        }
+        if std_ns is not None:
+            block['chain_delay_ns_std_ns'] = std_ns
+            block['chain_delay_ns_window'] = window
+        return {
+            'timestamp': now.isoformat().replace('+00:00', 'Z'),
+            'l6_pps': block,
+        }, now
+
+    def _write(self, status):
+        import json
+        import tempfile
+        with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as f:
+            json.dump(status, f)
+            return Path(f.name)
+
+    def test_observed_std_above_floor_used_directly(self):
+        from hf_timestd.core.bpsk_pps_probe import BpskPpsProbe
+        status, now = self._make_status(std_ns=5000.0)  # 5 µs std
+        path = self._write(status)
+        try:
+            probe = BpskPpsProbe(
+                status_path=path, now_fn=lambda: now,
+                sigma_floor_ms=0.001,
+            )
+            result = probe.poll()
+            self.assertTrue(result.available)
+            self.assertAlmostEqual(result.sigma_ms, 0.005, places=6)
+            self.assertEqual(
+                result.detail['chain_delay_ns_std_ns'], 5000.0
+            )
+        finally:
+            path.unlink()
+
+    def test_observed_std_below_floor_clamped(self):
+        from hf_timestd.core.bpsk_pps_probe import BpskPpsProbe
+        # 100 ns std — well below the 1 µs floor
+        status, now = self._make_status(std_ns=100.0)
+        path = self._write(status)
+        try:
+            probe = BpskPpsProbe(
+                status_path=path, now_fn=lambda: now,
+                sigma_floor_ms=0.001,
+            )
+            result = probe.poll()
+            self.assertAlmostEqual(result.sigma_ms, 0.001, places=6)
+            # Detail still reports the raw observed value (transparency).
+            self.assertEqual(
+                result.detail['chain_delay_ns_std_ns'], 100.0
+            )
+        finally:
+            path.unlink()
+
+    def test_missing_std_falls_back_to_floor(self):
+        from hf_timestd.core.bpsk_pps_probe import BpskPpsProbe
+        # Pre-jitter producer — no chain_delay_ns_std_ns field.
+        status, now = self._make_status(std_ns=None)
+        path = self._write(status)
+        try:
+            probe = BpskPpsProbe(
+                status_path=path, now_fn=lambda: now,
+                sigma_floor_ms=0.001,
+            )
+            result = probe.poll()
+            self.assertAlmostEqual(result.sigma_ms, 0.001, places=6)
+            self.assertIsNone(result.detail['chain_delay_ns_std_ns'])
+        finally:
+            path.unlink()
+
+    def test_unparseable_std_falls_back_to_floor(self):
+        from hf_timestd.core.bpsk_pps_probe import BpskPpsProbe
+        status, now = self._make_status(std_ns='not-a-number')
+        path = self._write(status)
+        try:
+            probe = BpskPpsProbe(
+                status_path=path, now_fn=lambda: now,
+                sigma_floor_ms=0.001,
+            )
+            result = probe.poll()
+            self.assertAlmostEqual(result.sigma_ms, 0.001, places=6)
+        finally:
+            path.unlink()
+
+
 if __name__ == '__main__':
     unittest.main()

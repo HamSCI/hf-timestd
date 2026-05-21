@@ -29,10 +29,15 @@ ChronyTrackingProbe.  When the system is well-disciplined Δ is
 sub-µs; when the anchor is stale (V1) Δ inflates to whatever
 accumulated error the anchor inherited.
 
-The published sigma_ms (default 0.050 ms / 50 µs) captures the
-calibration uncertainty (quantization + matched-filter jitter); it
-matches the reserved {T6,T5} cross-check threshold and is consistent
-with the half-quantization-step bias at 16 kHz sample rate.
+sigma_ms is computed from observed jitter: the producer maintains a
+60-sample rolling std-dev of ``chain_delay_ns`` (the BPSK matched
+filter's per-PPS edge-position estimate) and publishes it as
+``l6_pps.chain_delay_ns_std_ns``.  This IS the physical uncertainty
+of the BPSK PPS measurement.  The probe converts to ms, clamps below
+by ``sigma_floor_ms`` (calibration uncertainty floor we can't directly
+measure — antenna cable temperature, BPSK detector bias, half-
+quantization-step), and falls back to ``sigma_floor_ms`` on producers
+that don't emit the std field yet.
 """
 from __future__ import annotations
 
@@ -40,7 +45,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Optional
 
 from hf_timestd.core.authority_manager import ProbeResult
 
@@ -55,13 +60,26 @@ class BpskPpsProbe:
         status_path: Path = Path("/var/lib/timestd/status/core-recorder-status.json"),
         freshness_sec: float = 60.0,
         min_consecutive: int = 30,
-        sigma_ms: float = 0.050,
+        sigma_floor_ms: float = 0.001,
         now_fn: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ):
+        """
+        Args:
+            sigma_floor_ms: Minimum sigma we'll publish.  Observed
+                std-dev can go arbitrarily small in calm windows, but
+                we always have systematic calibration uncertainty
+                (antenna cable thermal drift, BPSK detector bias, half-
+                quantization-step) that the observed jitter doesn't
+                see.  1 µs (0.001 ms) is conservative for the
+                LB-1421 + TS1 + RX-888 chain at 16 kHz sample rate
+                (half-quantization is 31 µs but our matched-filter
+                resolves well below that floor in clean conditions).
+                If observed std exceeds this, we publish observed.
+        """
         self.status_path = Path(status_path)
         self.freshness_sec = float(freshness_sec)
         self.min_consecutive = int(min_consecutive)
-        self.sigma_ms = float(sigma_ms)
+        self.sigma_floor_ms = float(sigma_floor_ms)
         self.now_fn = now_fn
 
     def poll(self) -> ProbeResult:
@@ -145,12 +163,48 @@ class BpskPpsProbe:
                 reason=f"local_minus_source_ns unparseable: {residual_ns_raw!r}",
             )
 
+        # Sigma from observed jitter — producer publishes a rolling
+        # std-dev of chain_delay_ns (≈60 samples / 1 min at 1 Hz);
+        # we clamp from below by the floor.  Pre-jitter producers omit
+        # the field — fall back to the floor (matches prior hardcoded
+        # behavior so authority cross-checks stay stable on mixed
+        # versions).
+        std_ns_raw = l6.get("chain_delay_ns_std_ns")
+        std_window_raw = l6.get("chain_delay_ns_window")
+        std_ns: Optional[float]
+        std_window: Optional[int]
+        try:
+            std_ns = float(std_ns_raw) if std_ns_raw is not None else None
+        except (TypeError, ValueError):
+            std_ns = None
+        try:
+            std_window = int(std_window_raw) if std_window_raw is not None else None
+        except (TypeError, ValueError):
+            std_window = None
+        if std_ns is None:
+            sigma_ms = self.sigma_floor_ms
+        else:
+            sigma_ms = max(std_ns / 1_000_000.0, self.sigma_floor_ms)
+
+        # Diagnostic: local_minus_source_ns std (post-anchor computation
+        # stability, NOT the physical σ).  Forwarded as-is for the
+        # debugging view; not used for the published sigma_ms.
+        lms_std_raw = l6.get("local_minus_source_ns_std_ns")
+        try:
+            lms_std_ns = float(lms_std_raw) if lms_std_raw is not None else None
+        except (TypeError, ValueError):
+            lms_std_ns = None
+
         detail = {
             "pps_ok": int(l6.get("pps_ok", 0)),
             "pps_noise": int(l6.get("pps_noise", 0)),
             "pps_consecutive": consec,
             "chain_delay_ns": l6.get("chain_delay_ns"),
+            "chain_delay_ns_std_ns": std_ns,
+            "chain_delay_ns_window": std_window,
             "local_minus_source_ns": residual_ns,
+            "local_minus_source_ns_std_ns": lms_std_ns,
+            "sigma_floor_ms": self.sigma_floor_ms,
             "age_sec": round(age_sec, 3),
         }
         # V1 fix layer 2 — forward drift-monitor flags into the
@@ -168,7 +222,7 @@ class BpskPpsProbe:
             self.t_level,
             available=True,
             offset_ms=residual_ns / 1_000_000.0,
-            sigma_ms=self.sigma_ms,
+            sigma_ms=sigma_ms,
             detail=detail,
         )
 

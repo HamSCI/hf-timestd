@@ -233,13 +233,19 @@ def build_authority_runner_from_config(
     ]
 
     if t6_cfg.get("enabled"):
+        # Backward-compat: older configs key the sigma floor as ``sigma_ms``
+        # (the historical hardcoded sigma value).  Accept both — preferring
+        # the new name when both are set.
+        sigma_floor_ms = float(t6_cfg.get(
+            "sigma_floor_ms", t6_cfg.get("sigma_ms", 0.001),
+        ))
         probes.append(BpskPpsProbe(
             status_path=Path(t6_cfg.get(
                 "status_path", "/var/lib/timestd/status/core-recorder-status.json",
             )),
             freshness_sec=float(t6_cfg.get("freshness_sec", 60.0)),
             min_consecutive=int(t6_cfg.get("min_consecutive", 30)),
-            sigma_ms=float(t6_cfg.get("sigma_ms", 0.050)),
+            sigma_floor_ms=sigma_floor_ms,
         ))
 
     if "refid" in t5_cfg or t5_cfg.get("enabled"):
