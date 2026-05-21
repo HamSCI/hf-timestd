@@ -124,21 +124,64 @@ def test_no_scratch_or_tmp_files_after_clean_flush(tmp_path: Path):
 
 
 def test_abandon_after_max_retries_unlinks_scratch(tmp_path: Path):
-    """After MAX_FLUSH_RETRIES the buffer is dropped — scratch must go too."""
+    """After MAX_FLUSH_RETRIES the buffer is dropped — scratch must go too.
+
+    The retry loop now lives in the async worker (_flush_one_buffer),
+    but the abandon semantics on the in-flight buffer are identical.
+    """
     w = _writer(tmp_path)
     buf, _ = _drive_one_chunk(w)
     scratch = buf.scratch_path
 
-    # Force every _flush_minute attempt to fail.
-    with patch.object(BinaryArchiveWriter, '_flush_minute', return_value=False):
-        for _ in range(w.MAX_FLUSH_RETRIES):
-            done = w._try_flush(buf)
-        # Last call returned True (abandon path).
-        assert done is True
+    # Force every _flush_minute attempt to fail; speed up the backoff
+    # so the test doesn't sleep for seconds.
+    with patch.object(BinaryArchiveWriter, '_flush_minute', return_value=False), \
+         patch('hf_timestd.core.binary_archive_writer.time.sleep'):
+        ok = w._flush_one_buffer(buf)
+
+    assert ok is False, "exhausted retries must report failure"
     assert buf.flush_attempts == w.MAX_FLUSH_RETRIES
     assert not scratch.exists(), \
         "scratch file must be unlinked on MAX_FLUSH_RETRIES abandon"
     assert buf.scratch_path is None
+
+
+def test_try_flush_enqueues_to_worker(tmp_path: Path):
+    """_try_flush hands the buffer to the worker (async); always True."""
+    w = _writer(tmp_path)
+    buf, _ = _drive_one_chunk(w)
+    scratch = buf.scratch_path
+
+    ok = w._try_flush(buf)
+    assert ok is True
+    # Worker thread processes the buffer; wait for it to drain.
+    w._flush_queue.join()
+    assert not scratch.exists(), \
+        "worker should have flushed and unlinked scratch"
+
+
+def test_try_flush_queue_full_abandons_loudly(tmp_path: Path):
+    """When the worker is wedged + queue full, _try_flush drops the
+    buffer with a loud error rather than blocking the receive thread."""
+    w = _writer(tmp_path)
+    # Stop the worker so the queue can fill.
+    w._flush_stop.set()
+    w._flush_thread.join(timeout=2.0)
+
+    bufs = []
+    for _ in range(w._flush_queue.maxsize):
+        buf, _ = _drive_one_chunk(w, rtp_start=len(bufs) * w.samples_per_chunk)
+        bufs.append(buf)
+        assert w._try_flush(buf) is True
+
+    # Queue is full — next enqueue must abandon the new buffer.
+    overflow_buf, _ = _drive_one_chunk(w, rtp_start=999 * w.samples_per_chunk)
+    overflow_scratch = overflow_buf.scratch_path
+    assert overflow_scratch.exists()
+    ok = w._try_flush(overflow_buf)
+    assert ok is True, "_try_flush always returns True (ownership transferred or abandoned)"
+    assert not overflow_scratch.exists(), \
+        "abandoned buffer's scratch must be unlinked"
 
 
 # ---- crash-recovery: startup picks up stale scratch files --------------------

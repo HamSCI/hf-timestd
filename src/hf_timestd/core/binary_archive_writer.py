@@ -23,6 +23,7 @@ import json
 import logging
 import numpy as np
 import os
+import queue
 import shutil
 import threading
 import time
@@ -169,8 +170,27 @@ class BinaryArchiveWriter:
         
         # Current minute buffer
         self.current_buffer: Optional[MinuteBuffer] = None
-        self._pending_flush_buffer: Optional[MinuteBuffer] = None  # Retained on flush failure
         self._lock = threading.Lock()
+
+        # Async flush worker.  _flush_minute does zstd compression +
+        # fsync of a ~73 MB chunk; running it inline on the receive
+        # thread blocked packet reads for 3-5 s at every 10-min
+        # boundary, overflowed the kernel UDP buffer, and dropped
+        # 0.4-1% of samples per channel per day across all 9
+        # archive channels.  The receive thread now enqueues
+        # completed buffers and returns immediately; this daemon
+        # thread drains the queue off the hot path.  Bounded queue
+        # gives the receive thread bounded latency on enqueue (no
+        # blocking) — if the worker can't keep up we log + drop
+        # rather than backpressure the network reader.
+        self._flush_queue: queue.Queue = queue.Queue(maxsize=4)
+        self._flush_stop = threading.Event()
+        self._flush_thread = threading.Thread(
+            target=self._flush_worker_loop,
+            name=f"flush-{config.channel_name}",
+            daemon=True,
+        )
+        self._flush_thread.start()
         
         # Statistics
         self.minutes_written = 0
@@ -595,44 +615,84 @@ class BinaryArchiveWriter:
             return 0
     
     def _try_flush(self, buffer: MinuteBuffer) -> bool:
-        """Attempt to flush a minute buffer, retaining it on failure for retry.
+        """Hand the buffer off to the async flush worker.
 
-        Returns True if the buffer was successfully written (or abandoned after
-        MAX_FLUSH_RETRIES), meaning the caller should clear current_buffer.
-        Returns False if the flush failed but the buffer should be kept for a
-        later retry — the caller must NOT discard it.
+        Returns True unconditionally — ownership transfers to the worker
+        (or to scratch-cleanup on queue overflow), so the caller must
+        clear ``current_buffer`` either way.
+
+        The worker handles compression + fsync + retries off the
+        receive thread.  The bounded queue ensures the receive thread
+        never blocks on enqueue: if the worker has fallen behind
+        (queue full), we cleanly abandon the oldest buffer with a
+        loud error rather than back-pressuring packet reads.
         """
-        if self._flush_minute(buffer):
-            return True  # Written successfully
-
-        buffer.flush_attempts += 1
-        if buffer.flush_attempts >= self.MAX_FLUSH_RETRIES:
+        try:
+            # ``put_nowait`` so we never block the receive thread on
+            # the queue.  Worker is sized for the steady-state load;
+            # if it ever falls behind by ``maxsize`` chunks we have a
+            # bigger problem than this one buffer.
+            self._flush_queue.put_nowait(buffer)
+            return True
+        except queue.Full:
             logger.error(
-                f"{self.config.channel_name}: ABANDONING minute "
-                f"{buffer.minute_boundary} after {buffer.flush_attempts} "
-                f"flush failures — {buffer.write_pos} samples LOST"
+                f"{self.config.channel_name}: flush queue full "
+                f"(maxsize={self._flush_queue.maxsize}) — ABANDONING "
+                f"minute {buffer.minute_boundary} "
+                f"({buffer.write_pos} samples LOST)"
             )
-            # Release the memmap so we don't strand the scratch file
-            # in archive_dir for an operator to clean up by hand.
             self._release_scratch(buffer)
-            return True  # Give up — let caller discard
+            return True
 
-        logger.warning(
-            f"{self.config.channel_name}: flush failed for minute "
-            f"{buffer.minute_boundary} (attempt {buffer.flush_attempts}/"
-            f"{self.MAX_FLUSH_RETRIES}) — will retry"
-        )
-        return False  # Keep buffer alive
+    def _flush_worker_loop(self) -> None:
+        """Daemon worker: pull buffers from the queue and flush them.
 
-    def _retry_pending_flush(self) -> None:
-        """Retry flushing a buffer that failed on a previous minute crossing.
-
-        Called (with lock held) at the start of _write_samples_inner and flush().
+        One worker thread per archive channel — the channels write
+        independent files so there's no inter-channel ordering need;
+        the parallelism gives us 9× concurrent compression+fsync
+        instead of the old serial-on-the-receive-thread behavior.
         """
-        if self._pending_flush_buffer is None:
-            return
-        if self._try_flush(self._pending_flush_buffer):
-            self._pending_flush_buffer = None
+        while not self._flush_stop.is_set():
+            try:
+                buffer = self._flush_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            if buffer is None:
+                # Sentinel from close() — drain done.
+                self._flush_queue.task_done()
+                return
+            try:
+                self._flush_one_buffer(buffer)
+            finally:
+                self._flush_queue.task_done()
+
+    def _flush_one_buffer(self, buffer: MinuteBuffer) -> bool:
+        """Synchronously flush a single buffer with retry.  Returns
+        True on success, False if all retries were exhausted (in which
+        case scratch has been unlinked and samples are lost).
+
+        Extracted from the worker loop for direct test access — the
+        retry logic is the unit of behavior worth verifying.
+        """
+        for attempt in range(self.MAX_FLUSH_RETRIES):
+            if self._flush_minute(buffer):
+                return True
+            buffer.flush_attempts = attempt + 1
+            logger.warning(
+                f"{self.config.channel_name}: flush failed for minute "
+                f"{buffer.minute_boundary} (attempt {buffer.flush_attempts}/"
+                f"{self.MAX_FLUSH_RETRIES}) — will retry"
+            )
+            # Exponential backoff capped at 5 s.  attempt=0 → 0.1 s,
+            # attempt=1 → 0.2 s, … attempt=5 → 3.2 s, attempt=6+ → 5 s.
+            time.sleep(min(0.1 * (2 ** attempt), 5.0))
+        logger.error(
+            f"{self.config.channel_name}: ABANDONING minute "
+            f"{buffer.minute_boundary} after {self.MAX_FLUSH_RETRIES} "
+            f"flush failures — {buffer.write_pos} samples LOST"
+        )
+        self._release_scratch(buffer)
+        return False
 
     def _cleanup_partial_write(self, *paths: Path) -> None:
         """Clean up partial files after a failed write."""
@@ -994,9 +1054,6 @@ class BinaryArchiveWriter:
         gap_samples: int = 0
     ) -> int:
         """Write samples to the buffer (called with lock held, offset calibrated)."""
-        # Retry any stale buffer from a previous failed flush before proceeding
-        self._retry_pending_flush()
-
         # Ensure complex64
         if samples.dtype != np.complex64:
             samples = samples.astype(np.complex64)
@@ -1036,17 +1093,10 @@ class BinaryArchiveWriter:
         
         # Check if we've crossed into a new minute
         if sample_minute > self.current_buffer.minute_boundary:
-            # Flush current minute — on failure, retry logic keeps buffer
-            if self._try_flush(self.current_buffer):
-                self.current_buffer = self._start_new_minute(sample_unix_time, rtp_timestamp)
-            else:
-                # Flush failed but buffer retained for retry.  We cannot
-                # accumulate new-minute samples into the old buffer, so
-                # stash it aside and start a fresh buffer.  The stale
-                # buffer will be retried on the next minute crossing via
-                # _retry_pending_flush().
-                self._pending_flush_buffer = self.current_buffer
-                self.current_buffer = self._start_new_minute(sample_unix_time, rtp_timestamp)
+            # Hand off to async worker; _try_flush always returns True
+            # (either enqueued or abandoned on queue overflow).
+            self._try_flush(self.current_buffer)
+            self.current_buffer = self._start_new_minute(sample_unix_time, rtp_timestamp)
         
         # Write to buffer at correct position based on RTP timestamp
         # In RTP mode, samples are positioned by their RTP offset from minute boundary
@@ -1088,24 +1138,39 @@ class BinaryArchiveWriter:
         
         # Check if minute is complete
         if buffer.is_complete:
-            if self._try_flush(buffer):
-                self.current_buffer = None
-            # else: buffer retained in place; will retry on next write_samples call
-        
+            self._try_flush(buffer)
+            self.current_buffer = None
+
         return samples_to_write
-    
+
     def flush(self):
-        """Flush any pending data to disk."""
+        """Enqueue any pending buffer + wait for the worker to drain.
+
+        Use this when you need durability — e.g. on shutdown or before
+        a downstream consumer must see the latest chunk.  In the steady
+        state the worker drains asynchronously and you don't need to
+        call this.
+        """
         with self._lock:
-            # Retry any stale buffer first
-            self._retry_pending_flush()
             if self.current_buffer and self.current_buffer.write_pos > 0:
-                if self._try_flush(self.current_buffer):
-                    self.current_buffer = None
-    
+                self._try_flush(self.current_buffer)
+                self.current_buffer = None
+        # Block until the worker has processed everything enqueued so far.
+        # join() returns when every put() has been task_done()-d, which is
+        # how we know zstd+fsync has finished on the last buffer.
+        self._flush_queue.join()
+
     def close(self):
         """Close the writer, flushing any pending data."""
         self.flush()
+        # Stop the worker — send sentinel, then signal stop so the
+        # worker exits even if the queue is empty.
+        self._flush_stop.set()
+        try:
+            self._flush_queue.put_nowait(None)
+        except queue.Full:
+            pass  # sentinel optional; the stop event covers it
+        self._flush_thread.join(timeout=10.0)
         logger.info(
             f"BinaryArchiveWriter closed: {self.minutes_written} minutes, "
             f"{self.samples_written} samples, {self.write_errors} errors"

@@ -1111,13 +1111,21 @@ class CoreRecorderV2:
     # failure mode that the watchdog only recovers from, not
     # diagnoses.
     T6_SHM_LOG_INTERVAL_SEC = 60.0
-    # Cadence for the T6 timing-anchor refresh thread.  5 s tracks
-    # radiod's ~2 Hz status emit closely enough that anchor drift stays
-    # below one sample at 24 kHz, while keeping CPU/network overhead
-    # negligible.  The listen window must be > radiod's status emit
-    # period to reliably see the T6 channel each cycle.
-    T6_TIMING_POLL_SEC = 5.0
-    T6_TIMING_POLL_LISTEN_SEC = 2.0
+    # Cadence for the T6 timing-anchor refresh thread.  Used to be
+    # 5 s / 2 s but the SHM-push code reverted to `rtp_to_wallclock`
+    # with the frozen ChannelInfo (the comment at the push site
+    # documents this; option-2 fresh-anchor produced jittery Δ in
+    # 2026-05-11 testing).  The poll thread's *only* remaining
+    # consumers are Signal A (anchor consistency check, threshold
+    # measured in deciseconds — gradual drift) and Layer 3 recapture
+    # trigger (debounced by hysteresis).  Neither needs sub-30 s
+    # reaction time.  30 s sleep + 0.5 s listen cuts discover_channels
+    # invocations by ~12× and the listen window by 4× vs the old
+    # cadence, eliminating most of the per-T6-poll multicast overhead
+    # while keeping discontinuity detection well within
+    # T6_DRIFT_SUSTAINED_SEC (60 s).
+    T6_TIMING_POLL_SEC = 30.0
+    T6_TIMING_POLL_LISTEN_SEC = 0.5
 
     # V1 fix layer 2 — drift monitor thresholds.  See
     # docs/TIMING-PIPELINE-WIRING.md §10.3 step 2.
