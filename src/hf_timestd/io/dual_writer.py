@@ -1,23 +1,14 @@
-"""DualWriter — forwards writes to both HDF5 and SQLite backends.
+"""DualWriter (legacy) and ``make_data_product_writer`` factory.
 
-Phase 1 of the HDF5 → SQLite migration. Producers don't need to know
-which backend(s) are configured — they construct a writer via
-``make_data_product_writer(...)`` and call the same API regardless.
+Phases 1–3 of the HDF5 → SQLite migration used three backend
+configurations (HDF5-only, SQLite-only, both-dual-write).  Phase 3b
+(2026-05-20) flipped to SQLite-only writes on bee1 and Phase 4 then
+collapsed the factory to always return ``SqliteDataProductWriter``.
 
-Three configurations are supported (driven by ``[storage]`` config):
-
-- ``write_hdf5 = true,  write_sqlite = false``  → returns ``DataProductWriter`` (today's behaviour)
-- ``write_hdf5 = false, write_sqlite = true``   → returns ``SqliteDataProductWriter`` (Phase 3+)
-- ``write_hdf5 = true,  write_sqlite = true``   → returns ``DualWriter`` wrapping both (Phase 1+2 canary)
-
-DualWriter validates ONCE (against the schema), then dispatches the
-already-validated row to both backends. This guarantees the two stores
-agree on whether a row is acceptable — they never see different inputs.
-
-If either backend raises during the actual insert, the exception
-propagates. The other backend may have succeeded — that's the same
-"partial write" semantics either backend would have alone if it
-encountered a transient I/O error mid-batch.
+``DualWriter`` is retained in this module solely so any out-of-tree
+test fixture that imported the class continues to import; it is no
+longer reachable from the factory.  Phase 5 removes it together with
+the HDF5 backend modules.
 """
 
 from __future__ import annotations
@@ -167,67 +158,26 @@ def make_data_product_writer(
     station_metadata: Optional[Dict[str, Any]] = None,
     storage_config: Optional[Dict[str, Any]] = None,
 ):
-    """Construct a data product writer based on ``[storage]`` config.
+    """Construct an SQLite data product writer.
 
-    Returns one of: ``DataProductWriter``, ``SqliteDataProductWriter``,
-    or ``DualWriter`` wrapping both. Callers don't need to know which
-    — the returned object exposes the full writer API in all three
-    cases.
-
-    Args:
-        output_dir / product_level / product_name / channel / version /
-            processing_version / station_metadata: same as
-            ``DataProductWriter.__init__``.
-        storage_config: a dict typically loaded from the
-            ``[storage]`` section of timestd-config.toml. Recognized
-            keys:
-              - ``write_hdf5`` (bool, default True)
-              - ``write_sqlite`` (bool, default False)
-              - ``sqlite_path`` (str, default
-                ``/var/lib/timestd/phase2/timestd.db``)
-            ``None`` is treated as defaults — i.e. HDF5-only,
-            preserving today's behaviour.
+    Post-Phase-4 the factory always returns ``SqliteDataProductWriter``.
+    ``storage_config`` is kept in the signature so existing call sites
+    don't need to change; only ``sqlite_path`` is honoured (the
+    ``write_hdf5`` / ``write_sqlite`` knobs are no-ops — SQLite is the
+    sole backend).
     """
     cfg = storage_config or {}
-    write_hdf5 = bool(cfg.get("write_hdf5", True))
-    write_sqlite = bool(cfg.get("write_sqlite", False))
     sqlite_path = cfg.get("sqlite_path")  # SqliteDataProductWriter has its own default
 
-    if not write_hdf5 and not write_sqlite:
-        # Defensive: refuse a config that disables both backends. The
-        # service can't make progress without somewhere to write.
-        raise ValueError(
-            "at least one of [storage] write_hdf5 / write_sqlite must be true"
-        )
-
-    h5_writer = None
-    sql_writer = None
-    if write_hdf5:
-        h5_writer = DataProductWriter(
-            output_dir=output_dir,
-            product_level=product_level,
-            product_name=product_name,
-            channel=channel,
-            version=version,
-            processing_version=processing_version,
-            station_metadata=station_metadata,
-        )
-    if write_sqlite:
-        sqlite_kwargs = dict(
-            output_dir=output_dir,
-            product_level=product_level,
-            product_name=product_name,
-            channel=channel,
-            version=version,
-            processing_version=processing_version,
-            station_metadata=station_metadata,
-        )
-        if sqlite_path is not None:
-            sqlite_kwargs["db_path"] = Path(sqlite_path)
-        sql_writer = SqliteDataProductWriter(**sqlite_kwargs)
-
-    if h5_writer is not None and sql_writer is not None:
-        return DualWriter(h5_writer, sql_writer)
-    if h5_writer is not None:
-        return h5_writer
-    return sql_writer
+    kwargs: Dict[str, Any] = dict(
+        output_dir=output_dir,
+        product_level=product_level,
+        product_name=product_name,
+        channel=channel,
+        version=version,
+        processing_version=processing_version,
+        station_metadata=station_metadata,
+    )
+    if sqlite_path is not None:
+        kwargs["db_path"] = Path(sqlite_path)
+    return SqliteDataProductWriter(**kwargs)

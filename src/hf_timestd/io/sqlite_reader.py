@@ -329,48 +329,17 @@ def make_data_product_reader(
     use_registry: bool = True,
     storage_config: Optional[Dict[str, Any]] = None,
 ):
-    """Construct a data product reader based on ``[storage]`` config.
+    """Construct an SQLite data product reader.
 
-    Returns a ``DataProductReader`` (HDF5) by default, or a
-    ``SqliteDataProductReader`` when ``[storage] read_sqlite = true``.
-    Both expose the same ``read_time_range`` API, so the caller does not
-    need to know which backend it received.
-
-    This is the read-side mirror of ``make_data_product_writer``.
-    Keeping the read knob independent of the write knob
-    (``read_sqlite`` vs ``write_sqlite``) is what lets the migration
-    verify SQLite *writes* for days before any reader trusts them — see
-    ``docs/HDF5-TO-SQLITE-MIGRATION.md``, Phase 2.
-
-    Args:
-        data_dir / product_level / product_name / channel / version /
-            use_registry: same as ``DataProductReader.__init__``.
-        storage_config: a dict typically loaded from the ``[storage]``
-            section of timestd-config.toml. Recognized keys:
-              - ``read_sqlite`` (bool, default False)
-              - ``sqlite_path`` (str, default
-                ``/var/lib/timestd/phase2/timestd.db``)
-            ``None`` is treated as defaults — i.e. HDF5 reads,
-            preserving today's behaviour.
+    Post-Phase-4 the factory always returns ``SqliteDataProductReader``.
+    ``storage_config`` is kept in the signature so existing call sites
+    don't need to change; only ``sqlite_path`` is honoured (the
+    ``read_sqlite`` knob is a no-op — SQLite is the sole backend).
     """
     cfg = storage_config or {}
-    read_sqlite = bool(cfg.get("read_sqlite", False))
+    sqlite_path = cfg.get("sqlite_path")  # SqliteDataProductReader has its own default
 
-    if read_sqlite:
-        sqlite_path = cfg.get("sqlite_path")  # SqliteDataProductReader has its own default
-        kwargs: Dict[str, Any] = dict(
-            data_dir=data_dir,
-            product_level=product_level,
-            product_name=product_name,
-            channel=channel,
-            version=version,
-            use_registry=use_registry,
-        )
-        if sqlite_path is not None:
-            kwargs["db_path"] = Path(sqlite_path)
-        return SqliteDataProductReader(**kwargs)
-
-    return DataProductReader(
+    kwargs: Dict[str, Any] = dict(
         data_dir=data_dir,
         product_level=product_level,
         product_name=product_name,
@@ -378,3 +347,6 @@ def make_data_product_reader(
         version=version,
         use_registry=use_registry,
     )
+    if sqlite_path is not None:
+        kwargs["db_path"] = Path(sqlite_path)
+    return SqliteDataProductReader(**kwargs)

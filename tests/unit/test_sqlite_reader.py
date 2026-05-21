@@ -1,14 +1,8 @@
 """Unit tests for SqliteDataProductReader and make_data_product_reader.
 
-Phase 2 of the HDF5 → SQLite migration. See
-``docs/HDF5-TO-SQLITE-MIGRATION.md`` and
-``src/hf_timestd/io/sqlite_reader.py``.
-
-Mirrors the structure of ``test_sqlite_writer.py`` so the read/write
-pair can be kept in lockstep. Rows are produced with the real
-``SqliteDataProductWriter`` (and, for the cross-backend parity test,
-the real ``DualWriter``) so the reader is always exercised against
-genuine writer output.
+Phase 4 of the HDF5 → SQLite migration: SQLite is the sole backend.
+Rows are produced with the real ``SqliteDataProductWriter`` so the
+reader is always exercised against genuine writer output.
 """
 
 from __future__ import annotations
@@ -20,14 +14,12 @@ from pathlib import Path
 
 import pytest
 
-from hf_timestd.io.hdf5_reader import DataProductReader
 from hf_timestd.io.sqlite_writer import SqliteDataProductWriter
 from hf_timestd.io.sqlite_reader import (
     SqliteDataProductReader,
     make_data_product_reader,
     _parse_iso,
 )
-from hf_timestd.io import make_data_product_writer
 
 
 # ---------------------------------------------------------------------
@@ -409,100 +401,28 @@ class TestFactory:
             channel=CHANNEL,
         )
 
-    def test_defaults_to_hdf5(self, temp_dir):
-        """No config, empty config, and explicit read_sqlite=false all
-        yield the HDF5 reader — today's behaviour is preserved."""
-        for cfg in (None, {}, {"read_sqlite": False}):
-            reader = make_data_product_reader(
-                **self._kwargs(temp_dir), storage_config=cfg
-            )
-            assert isinstance(reader, DataProductReader)
-            assert not isinstance(reader, SqliteDataProductReader)
+    def test_factory_returns_sqlite_unconditionally(self, temp_dir, temp_db):
+        """Post-Phase-4: the factory always returns SqliteDataProductReader,
+        regardless of what's in storage_config."""
+        for cfg in (None, {}, {"read_sqlite": False}, {"read_sqlite": True}):
+            kwargs = self._kwargs(temp_dir)
+            if cfg is not None:
+                cfg = {**cfg, "sqlite_path": str(temp_db)}
+            reader = make_data_product_reader(**kwargs, storage_config=cfg)
+            try:
+                assert isinstance(reader, SqliteDataProductReader)
+            finally:
+                reader.close()
 
-    def test_read_sqlite_selects_sqlite_backend(self, temp_dir, temp_db):
+    def test_sqlite_path_override_honoured(self, temp_dir, temp_db):
         reader = make_data_product_reader(
             **self._kwargs(temp_dir),
-            storage_config={"read_sqlite": True, "sqlite_path": str(temp_db)},
+            storage_config={"sqlite_path": str(temp_db)},
         )
         try:
-            assert isinstance(reader, SqliteDataProductReader)
             assert reader.db_path == temp_db
         finally:
             reader.close()
-
-
-# ---------------------------------------------------------------------
-# Cross-backend parity — DualWriter output read by both readers
-# ---------------------------------------------------------------------
-
-
-class TestCrossBackendParity:
-    def test_dualwriter_rows_read_identically(self, temp_dir, temp_db):
-        """Write the same rows to HDF5 and SQLite via DualWriter, then
-        confirm the HDF5 and SQLite readers return the same required-
-        field values row-for-row. This is the unit-test analogue of the
-        live verify_sqlite_parity.py check."""
-        rows = [
-            _row(
-                f"2026-05-15T17:0{i}:00Z",
-                clock_offset_ms=-2.0 + i * 0.5,
-                confidence=0.7 + i * 0.02,
-                minute_boundary_utc=1778857200 + i * 60,
-            )
-            for i in range(5)
-        ]
-        storage = {
-            "write_hdf5": True,
-            "write_sqlite": True,
-            "sqlite_path": str(temp_db),
-        }
-        writer = make_data_product_writer(
-            output_dir=temp_dir,
-            product_level=LEVEL,
-            product_name=PRODUCT,
-            channel=CHANNEL,
-            storage_config=storage,
-        )
-        try:
-            writer.write_measurements_batch(rows)
-        finally:
-            writer.close()
-
-        hdf5_reader = make_data_product_reader(
-            data_dir=temp_dir, product_level=LEVEL, product_name=PRODUCT,
-            channel=CHANNEL, storage_config={"read_sqlite": False},
-        )
-        sqlite_reader = make_data_product_reader(
-            data_dir=temp_dir, product_level=LEVEL, product_name=PRODUCT,
-            channel=CHANNEL,
-            storage_config={"read_sqlite": True, "sqlite_path": str(temp_db)},
-        )
-        try:
-            h5_rows = hdf5_reader.read_time_range(WIN_START, WIN_END)
-            sql_rows = sqlite_reader.read_time_range(WIN_START, WIN_END)
-        finally:
-            if hasattr(hdf5_reader, "close"):
-                pass  # HDF5 reader has no persistent handle
-            sqlite_reader.close()
-
-        assert len(h5_rows) == len(sql_rows) == 5
-
-        h5_by_ts = {r["timestamp_utc"]: r for r in h5_rows}
-        sql_by_ts = {r["timestamp_utc"]: r for r in sql_rows}
-        assert set(h5_by_ts) == set(sql_by_ts)
-
-        for ts, h5_row in h5_by_ts.items():
-            sql_row = sql_by_ts[ts]
-            for field in REQUIRED_FIELDS:
-                h5_v, sql_v = h5_row.get(field), sql_row.get(field)
-                if isinstance(h5_v, float) or isinstance(sql_v, float):
-                    assert float(h5_v) == pytest.approx(float(sql_v)), (
-                        f"{field} @ {ts}: h5={h5_v!r} sql={sql_v!r}"
-                    )
-                else:
-                    assert h5_v == sql_v, (
-                        f"{field} @ {ts}: h5={h5_v!r} sql={sql_v!r}"
-                    )
 
 
 # ---------------------------------------------------------------------
