@@ -1,90 +1,127 @@
-# Next session — finish HDF5 → SQLite Phase 4
+# Phase 4 — gated on `live_vtec.py` redeploy
 
-Phase 3a + Phase 3b + Phase 4 Step 0 + Phase 4 Step 1 all shipped on
-2026-05-20.  SQLite is the sole writer on `main`; HDF5 reader/writer
-modules and the `h5py` dependency remain in the tree as a rollback
-path that Phase 4 Steps 2–7 will retire.
+Steps 0, 1, 2a, 2b, 2c, 3 and partial-7 shipped to `main` 2026-05-21.
+Schema `l3_gnss_vtec_v1.json` bumped 1.1.0 → 1.2.0 to declare 7
+GNSS-diagnostic fields the producer writes.
 
-Full plan: [`docs/PHASE_4_PLAN.md`].
-Migration design seed: [`docs/HDF5-TO-SQLITE-MIGRATION.md`].
-Last session log: [`docs/changes/SESSION_2026-05-20_PHASE_3B_FLIP.md`]
-and [`docs/changes/SESSION_2026-05-20_REMEDIATION_COMPLETE.md`].
-
-## Pre-flight state on bee1 (snapshot 2026-05-21 ~12:00 UTC)
-
-| Check | Status |
-|---|---|
-| 24 `timestd-*` units in `active` state | ✅ |
-| timestd-fusion uptime since Phase 3b | 15h+ (continuous since 2026-05-20 20:40:35 UTC) |
-| timestd-fusion RSS | 222 MB — flat, the h5py leak is gone now that fusion no longer touches HDF5 |
-| Authority | A1/T6 active, σ_ns = 50 000, no disagreement_flags |
-| `timestd-sqlite-parity.service` | ❌ failing — **expected**, see operational debt below |
-| 24 h soak target | not strictly met (need ~5 h more after this snapshot) but the leak driver is gone — user previously authorised proceeding before the strict 24 h on Phase 3b for the same reason |
-
-## Operational debt to clear before / during Phase 4
-
-* **`timestd-sqlite-parity.timer` should be disabled.** It runs
-  `scripts/parity_check_all.sh` which compares HDF5 vs SQLite.  With
-  Phase 3b live there's no HDF5 side, so every run exits non-zero.
-  The service has been failing since 2026-05-21 06:00:29 UTC.  Stop
-  the timer + service:
-  ```
-  sudo systemctl disable --now timestd-sqlite-parity.timer
-  sudo systemctl reset-failed timestd-sqlite-parity.service
-  ```
-  Phase 4 Step 7 retires `parity_check_all.sh` itself.
-
-* **The two pipeline watchdogs must stay stopped until Phase 4 Step
-  0's SQLite freshness check ships to bee1.**  Step 0 has shipped to
-  `main` (commit `fd48016`) but the deployed
-  `/opt/hf-timestd/scripts/pipeline-watchdog.sh` on bee1 still uses
-  the `*.h5` mtime check, so re-enabling the timer would mass-restart
-  every metrology@* + fusion every ~5 min until the deploy lands.
-  Either deploy first (recommended) then `sudo systemctl enable --now
-  timestd-pipeline-watchdog.timer timestd-tsl3-watchdog.timer`, or
-  defer until after Step 2.
-
-## Phase 4 sub-step status
-
-| Step | Status | Commit / Notes |
+| Step | Status | Commit |
 |---|---|---|
-| 0 — pipeline-watchdog SQLite freshness check | ✅ shipped | `fd48016` (needs bee1 deploy before re-enabling watchdog timers) |
-| 1 — `chrony_stats` schema → SQLite via `make_data_product_writer` | ✅ shipped | `9eaaa65` |
-| **2 — Convert 5 raw-h5py *reader* sites** | ⏳ **start here** | l2_calibration_service.py:327-345, physics_fusion_service.py:1119-1131, 1525-1534, 1561-1577, timing_validation_service.py:330-333 |
-| 3 — Simplify `make_data_product_writer`/`_reader` factory | ⏳ | keep factory shape, body becomes one-line SQLite return |
-| 4 — Delete `src/hf_timestd/io/hdf5_writer.py` + `hdf5_reader.py` | ⏳ | requires Step 2 + 3 first (no `from hf_timestd.io.hdf5_*` imports left) |
-| 5 — Drop `h5py>=3.8.0,<3.16.0` from `pyproject.toml` + `uv lock` | ⏳ | last "no-going-back" step; do after Step 4 has soaked a few hours |
-| 6 — Comment cleanup (`_malloc_trim`, `HDF5_AVAILABLE`, dead SWMR/file-locking notes) | ⏳ | mechanical |
-| 7 — Test rewrites / deletions (≥9 HDF5-specific test files) | ⏳ | `test_l2_seed_logging.py`, `test_physics_fusion_seed_minutes.py`, `test_dual_writer.py`, `test_hdf5_io.py` + 5 others — grep before starting |
-| 8 — Fusion long-lived SQLite connection (post-Phase-4 polish) | ⏳ optional | RSS already stable at 222 MB; this is belt-and-braces |
+| 0 — pipeline-watchdog SQLite freshness | ✅ | `fd48016` |
+| 1 — chrony_stats SQLite | ✅ | `9eaaa65` |
+| 2a — l2_calibration startup seed | ✅ | `134ad53` |
+| 2b — physics_fusion L3_dtec seed + lookback | ✅ | `6c92ae3` |
+| 2c — timing_validation load_fusion_result | ✅ | `3a018a9` |
+| Schema 1.1.0→1.2.0 — l3_gnss_vtec diagnostic fields | ✅ | `2a537ca` |
+| 3 — factory simplify + 7-partial test cleanup | ✅ | `7179cdb` |
+| **2d — `_read_gnss_vtec` × 2** | ⏳ deploy-gated |
+| **4 — delete hdf5_writer/hdf5_reader** | ⏳ deploy-gated |
+| **5 — drop `h5py`** | ⏳ deploy-gated |
+| 6 — _malloc_trim / HDF5_AVAILABLE cleanup | ⏳ pending |
 
-## Step-2 starting point (concrete)
+Full pytest at HEAD: **1951 passed, 1 skipped, 1 deselected**.
 
-For each reader site, replace the raw `h5py.File(...)` block with
-`make_data_product_reader(...).read_*()` against the same product
-that's now writing to SQLite.  One commit per site, each verified
-with `uv run --frozen --extra dev pytest tests/` before the next.
+## Pre-flight (snapshot 2026-05-21 ~13:00 UTC)
 
-| File | Line | Purpose | SQLite product to read |
-|---|---|---|---|
-| `src/hf_timestd/core/l2_calibration_service.py` | 327–345 | startup seed — last L1 row per channel | `L1_metrology_measurements` |
-| `src/hf_timestd/core/physics_fusion_service.py` | 1119–1131 | startup seed — propagation history | `L2_propagation_history` |
-| `src/hf_timestd/core/physics_fusion_service.py` | 1525–1534 | startup seed — L3 propagation | `L3_propagation` |
-| `src/hf_timestd/core/physics_fusion_service.py` | 1561–1577 | restart-resume — L3 dtec checkpoint | `L3_dtec` |
-| `src/hf_timestd/core/timing_validation_service.py` | 330–333 | validation read — fusion timing | `L3_fusion_timing` |
+* timestd-fusion: 238 MB RSS, ~15h30m uptime since Phase 3b. ✅
+* Authority A1/T6, σ=50μs, no disagreement_flags. ✅
+* timestd-sqlite-parity.timer + service: inactive ✅ (already disabled per
+  earlier handoff; do NOT re-enable — parity has no HDF5 side post-3b).
+* pipeline-watchdog timers: active with Step-0 SQLite freshness deployed. ✅
 
-After all five: `grep -rn 'from hf_timestd.io.hdf5_writer\|from
-hf_timestd.io.hdf5_reader\|hdf5_writer\|hdf5_reader' src/ tests/`
-should be empty (cue for Step 3 / Step 4).
+## The blocker — `/opt/hf-timestd/scripts/live_vtec.py`
 
-## Reader semantic to remember
+The deployed script is a March 16 snapshot:
+```
+< from hf_timestd.io import DataProductWriter
+> from hf_timestd.io import make_data_product_writer
+```
+It bypasses the factory and writes HDF5 directly (the inode at
+`/opt/hf-timestd/scripts/live_vtec.py` is a separate copy from the
+in-tree source).  So:
 
-`SqliteDataProductReader` returns `None` for `NULL`, whereas the HDF5
-reader filled with `NaN`/`0`/`""` (the `f7ec934` DUT1 bug class).
-Intentional; downstream code already handles the SQLite-style
-nullability where it matters.  Worth a re-check at each Step 2 site,
-since startup-seed code is exactly where the HDF5-side coercion may
-have been masking a `None`-blind consumer.
+1. `L3_gnss_vtec` table is empty — Step 2d (two `_read_gnss_vtec`
+   sites in src/) can't read SQLite that nobody writes.
+2. Deleting `hdf5_writer.py` / `hdf5_reader.py` (Step 4) breaks the
+   deployed script's `from hf_timestd.io import DataProductWriter`
+   on next restart.
+
+## Resume sequence
+
+1. **Redeploy** (operator with sudo):
+   ```
+   sudo cp -p /opt/hf-timestd/scripts/live_vtec.py \
+     /opt/hf-timestd/scripts/live_vtec.py.bak-pre-phase4-$(date -u +%Y%m%dT%H%M%SZ)
+   sudo install -o timestd -g timestd -m 755 \
+     /home/mjh/git/hf-timestd/scripts/live_vtec.py \
+     /opt/hf-timestd/scripts/live_vtec.py
+   sudo systemctl restart timestd-vtec
+   ```
+2. **Verify** L3_gnss_vtec is populating:
+   ```
+   sleep 90 && sqlite3 -readonly /var/lib/timestd/phase2/timestd.db \
+     "SELECT count(*), min(timestamp_utc), max(timestamp_utc) FROM L3_gnss_vtec;"
+   ```
+   Expect rows from now ± 60s (live_vtec batches HDF5/SQLite writes every
+   60s) growing at ~1 Hz.
+
+3. **Step 2d** — convert the two `_read_gnss_vtec` readers:
+   * `src/hf_timestd/core/physics_fusion_service.py:1119` —
+     `_read_gnss_vtec` per-cycle hot path. Replace raw h5py.File scan
+     with `make_data_product_reader('L3','gnss_vtec','GNSS').read_time_range`
+     over a ±120 s window around the target epoch. Honour the existing
+     quality_flag GOOD/MARGINAL gate.
+   * `src/hf_timestd/core/multi_broadcast_fusion.py:4602` — same
+     pattern.
+   * One commit each.  Verify `grep -rn 'import h5py\|hdf5_writer\|
+     hdf5_reader' src/` returns only `io/hdf5_*.py`, `io/__init__.py`,
+     `dual_writer.py`, `sqlite_reader.py:from .hdf5_reader`, and
+     `metrology_service.py:47` (the dead import) before Step 4.
+
+4. **Step 4** — delete + prune:
+   * `git rm src/hf_timestd/io/hdf5_writer.py src/hf_timestd/io/hdf5_reader.py`
+   * Edit `src/hf_timestd/io/__init__.py` to drop the
+     `DataProductWriter` + `DataProductReader` re-exports.
+   * Edit `src/hf_timestd/io/dual_writer.py` to drop
+     `from .hdf5_writer import DataProductWriter` + the `DualWriter`
+     class.
+   * Edit `src/hf_timestd/io/sqlite_reader.py` to drop
+     `from hf_timestd.io.hdf5_reader import DataProductReader`.
+   * Edit `src/hf_timestd/core/metrology_service.py:47` — drop
+     the unused direct `DataProductWriter` import.
+   * Run `uv run --frozen --extra dev pytest tests/ --deselect
+     tests/test_metrology_engine.py::test_geometric_prediction` — must be
+     green.
+
+5. **Step 5** — drop `h5py`:
+   * Edit `pyproject.toml`: remove `"h5py>=3.8.0,<3.16.0",`.
+   * `uv lock --upgrade-package h5py` (or just `uv lock`) — verify the
+     resolved lock no longer mentions `h5py`.
+   * `uv sync --extra dev` and re-run pytest.
+
+6. **Step 6** — cleanup mechanical:
+   * `multi_broadcast_fusion.py:202-220` — `_malloc_trim` is now a
+     pure glibc-arena workaround unrelated to h5py.  Either keep with
+     updated comment or delete if RSS proves stable.
+   * `multi_broadcast_fusion.py:242-260` — delete `HDF5_AVAILABLE`
+     branch (the reader factory cannot fail with `ImportError` now;
+     SQLite is bundled in stdlib).  Drop the `if not HDF5_AVAILABLE`
+     guards at lines 1432, 1459, 1585, 1664, 1872, 1936.
+   * `live_vtec.py` — rename `hdf5_writer` → `vtec_writer`,
+     `hdf5_write_buffer` → `vtec_write_buffer`, etc.  Update log
+     strings.  This is the only producer where the naming is now
+     misleading; everything else already routed through neutrally-named
+     factory calls.
+
+## Pre-existing gap surfaced this session
+
+`SqliteDataProductWriter` rejects `float('nan')` on a `required + allow_nan`
+float field because Python's `sqlite3` coerces NaN→NULL at the binding
+layer, hitting the column's NOT NULL constraint.  `test_writer_accepts_
+nan_velocity_direction` is skipped with a long-form reason citing this.
+Not a Phase-4 regression — masked previously by the HDF5 fallback writer.
+Fix later: either drop NOT NULL when `allow_nan: true`, or document that
+producers must emit `None` (not NaN) and update affected schemas to
+`required: false`.
 
 ## Workflow
 
@@ -92,25 +129,3 @@ have been masking a `None`-blind consumer.
 uv run --frozen --extra dev pytest tests/ \
     --deselect tests/test_metrology_engine.py::test_geometric_prediction
 ```
-
-`--frozen` keeps `uv.lock` pinned (without it `uv run` re-resolves
-`ka9q-python` and dirties the lock; `git checkout uv.lock` to drop
-any drift).  The deselected test is the standing time-of-day F-layer
-flake (`project_hf_timestd_flaky_geometric_prediction`), not a
-regression.
-
-## Out-of-scope items mentioned in the previous handoff — defer
-
-These appeared in `project_hf_timestd_authority_work.md` /
-`project_hf_timestd_fusion_audit.md` as parallel work, but are not
-Phase-4 blockers:
-
-* sigmond `smd install lan-fusion-client` + `smd lan-fusion-watch`
-  (consumer side of the LAN Fusion service).
-* `hf-timestd` `multi-instance` branch (8d7f5af, Rob's 2026-04-02
-  work) — 264 commits stale, needs a rebase-or-drop decision.
-* Bootstrap CORRELATING single-station stall (CHU vs WWV ~60 ms bias)
-  — separate task #8 per Phase 4 plan, "not Phase-4 blocking but
-  useful signal."
-* sigmond untracked `docs/SCINTILLATION-MONITORING.md` — design draft
-  from 2026-05-17, not gated on cutover.
