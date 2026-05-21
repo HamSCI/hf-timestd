@@ -37,7 +37,7 @@ import threading
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Set, Tuple
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 
@@ -1516,34 +1516,53 @@ class PhysicsFusionService:
         is empty; the startup lookback window then reprocesses minutes
         whose L3 records already exist, producing duplicate TEC/dTEC/L3
         records (the contract forbids duplicate records).  Reading the
-        ``minute_boundary`` dataset of the recent L3 dtec files back into
+        ``minute_boundary`` column from the recent L3_dtec rows back into
         the set makes the loop's ``target_minute in self._processed_minutes``
         guard effective across a restart.  The set is pruned to a 12 h
-        window elsewhere, so scanning the few most-recent day files is
-        sufficient.
+        window elsewhere, so scanning the last three days is sufficient
+        — matching the previous three-most-recent-day-file scan.
         """
-        import h5py
-        dtec_dir = self.data_root / 'phase2' / 'science' / 'dtec'
-        if not dtec_dir.exists():
+        try:
+            reader = make_data_product_reader(
+                data_dir=self.data_root / 'phase2' / 'science' / 'dtec',
+                product_level='L3',
+                product_name='dtec',
+                channel='AGGREGATED',
+                storage_config=self._storage_config,
+            )
+        except Exception as e:
+            logger.debug(f"L3 seed reader init failed: {e}")
             return
-        seeded = 0
-        for l3_path in sorted(
-            dtec_dir.glob('AGGREGATED_dtec_????????.h5'), reverse=True,
-        )[:3]:
+
+        try:
+            now_utc = datetime.now(timezone.utc)
+            start_iso = (now_utc - timedelta(days=3)).isoformat().replace('+00:00', 'Z')
+            end_iso = now_utc.isoformat().replace('+00:00', 'Z')
             try:
-                with h5py.File(str(l3_path), 'r', swmr=True) as f:
-                    if 'minute_boundary' not in f or len(f['minute_boundary']) == 0:
-                        continue
-                    for raw in f['minute_boundary'][:]:
-                        # Normalise to a minute-aligned epoch second so the
-                        # value matches the loop's target_minute exactly.
-                        m = int(raw)
-                        m -= m % 60
-                        if m not in self._processed_minutes:
-                            self._processed_minutes.add(m)
-                            seeded += 1
+                rows = reader.read_time_range(start=start_iso, end=end_iso)
             except Exception as e:
-                logger.debug(f"L3 seed scan failed for {l3_path}: {e}")
+                logger.debug(f"L3 seed read failed: {e}")
+                rows = []
+        finally:
+            close_fn = getattr(reader, 'close', None)
+            if close_fn is not None:
+                try:
+                    close_fn()
+                except Exception:
+                    pass
+
+        seeded = 0
+        for row in rows:
+            mb = row.get('minute_boundary')
+            if mb is None:
+                continue
+            # Normalise to a minute-aligned epoch second so the value
+            # matches the loop's target_minute exactly.
+            m = int(mb)
+            m -= m % 60
+            if m not in self._processed_minutes:
+                self._processed_minutes.add(m)
+                seeded += 1
         if seeded:
             logger.info(
                 f"Seeded {seeded} already-processed minute(s) from L3 "
@@ -1553,65 +1572,111 @@ class PhysicsFusionService:
     def _startup_lookback_minutes(self) -> int:
         """Return how many minutes back to scan on startup.
 
-        Reads the last written timestamp from the L3 dtec output file for
-        today (and yesterday as a fallback) to find where processing stopped.
-        Falls back to L2 file mtime if no L3 output exists yet.
-        Capped at 24 hours.
-        """
-        import h5py
+        Reads the last written timestamp from the L3 dtec table to find
+        where processing stopped.  Falls back to the newest L2 timing
+        measurement timestamp if no L3 output exists yet.  Capped at
+        30 minutes (real-time priority over backfill).
 
+        UTC-midnight-crossing semantics from the previous file-scan
+        version are preserved: we find the most-recent dtec timestamp
+        and treat it as "current" only if ≤5 min old; older means
+        backfill from there.  With a single SQLite table that's just a
+        ``MAX(minute_boundary)`` plus an age check.
+        """
         last_written_ts = 0.0
 
-        # Scan L3 dtec files newest-first to find the oldest stale file.
-        # We want the OLDEST last-timestamp that is more than 5 minutes behind
-        # now — that is where backfill must start.  Scanning newest-first and
-        # stopping at the first file whose last timestamp is recent (≤5 min old)
-        # handles the UTC-midnight-crossing case correctly: if physics crashed
-        # partway through March 7 UTC and a March 8 UTC file already exists
-        # (because metrology kept running), we must resume from March 7's last
-        # written minute, not March 8's.
-        dtec_dir = self.data_root / 'phase2' / 'science' / 'dtec'
-        if dtec_dir.exists():
-            for l3_path in sorted(dtec_dir.glob('AGGREGATED_dtec_????????.h5'), reverse=True):
+        try:
+            reader = make_data_product_reader(
+                data_dir=self.data_root / 'phase2' / 'science' / 'dtec',
+                product_level='L3',
+                product_name='dtec',
+                channel='AGGREGATED',
+                storage_config=self._storage_config,
+            )
+        except Exception:
+            reader = None
+
+        if reader is not None:
+            try:
+                now_utc = datetime.now(timezone.utc)
+                # 24h window is well past the 30-min cap below.
+                start_iso = (now_utc - timedelta(hours=24)).isoformat().replace('+00:00', 'Z')
+                end_iso = now_utc.isoformat().replace('+00:00', 'Z')
                 try:
-                    with h5py.File(str(l3_path), 'r', swmr=True) as f:
-                        # minute_boundary is epoch float; timestamp_utc is ISO string
-                        for key in ('minute_boundary', 'timestamp_utc'):
-                            if key not in f or len(f[key]) == 0:
-                                continue
-                            raw = f[key][-1]
-                            if isinstance(raw, (bytes, str)):
-                                raw_s = raw.decode() if isinstance(raw, bytes) else raw
-                                ts = datetime.fromisoformat(
-                                    raw_s.replace('Z', '+00:00')
-                                ).timestamp()
-                            else:
-                                ts = float(raw)
-                            # If this file is current (≤5 min old), skip it and
-                            # keep looking at older files for a gap.
-                            if time.time() - ts <= 5 * 60:
-                                ts = 0.0
-                            if ts > last_written_ts:
-                                last_written_ts = ts
-                            break
+                    rows = reader.read_time_range(start=start_iso, end=end_iso)
                 except Exception:
-                    pass
-            # If every file was current, last_written_ts stays 0 → returns 5 below
+                    rows = []
+            finally:
+                close_fn = getattr(reader, 'close', None)
+                if close_fn is not None:
+                    try:
+                        close_fn()
+                    except Exception:
+                        pass
+
+            if rows:
+                last_row = rows[-1]
+                mb = last_row.get('minute_boundary')
+                if mb is not None:
+                    try:
+                        ts = float(mb)
+                    except (TypeError, ValueError):
+                        ts = 0.0
+                else:
+                    ts_iso = last_row.get('timestamp_utc')
+                    try:
+                        ts = datetime.fromisoformat(
+                            str(ts_iso).replace('Z', '+00:00')
+                        ).timestamp() if ts_iso else 0.0
+                    except (TypeError, ValueError):
+                        ts = 0.0
+                # If the latest row is current (≤5 min old), no backfill
+                # gap exists; otherwise resume from there.
+                if ts > 0.0 and time.time() - ts > 5 * 60:
+                    last_written_ts = ts
 
         if last_written_ts == 0.0:
-            # No L3 output yet — fall back to L2 file mtime
-            newest_mtime = 0.0
+            # No (or only fresh) L3 output — fall back to the newest L2
+            # timing-measurement timestamp across channels.
+            now_utc = datetime.now(timezone.utc)
+            start_iso = (now_utc - timedelta(hours=24)).isoformat().replace('+00:00', 'Z')
+            end_iso = now_utc.isoformat().replace('+00:00', 'Z')
             for channel in self.channels:
-                l2_dir = self.data_root / 'phase2' / channel / 'clock_offset'
-                if l2_dir.exists():
-                    for h5_file in l2_dir.glob("*.h5"):
+                try:
+                    l2_reader = make_data_product_reader(
+                        data_dir=self.data_root / 'phase2' / channel / 'clock_offset',
+                        product_level='L2',
+                        product_name='timing_measurements',
+                        channel=channel,
+                        storage_config=self._storage_config,
+                    )
+                except Exception:
+                    continue
+                try:
+                    try:
+                        l2_rows = l2_reader.read_time_range(start=start_iso, end=end_iso)
+                    except Exception:
+                        l2_rows = []
+                finally:
+                    close_fn = getattr(l2_reader, 'close', None)
+                    if close_fn is not None:
                         try:
-                            mtime = h5_file.stat().st_mtime
-                            if mtime > newest_mtime:
-                                newest_mtime = mtime
-                        except OSError:
+                            close_fn()
+                        except Exception:
                             pass
-            last_written_ts = newest_mtime
+                if not l2_rows:
+                    continue
+                mb = l2_rows[-1].get('minute_boundary_utc')
+                if mb is None:
+                    mb = l2_rows[-1].get('minute_boundary')
+                if mb is None:
+                    continue
+                try:
+                    ts = float(mb)
+                except (TypeError, ValueError):
+                    continue
+                if ts > last_written_ts:
+                    last_written_ts = ts
 
         if last_written_ts == 0.0:
             return 5
