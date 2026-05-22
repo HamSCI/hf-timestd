@@ -271,6 +271,16 @@ class CoreRecorderV2:
         # config.toml files keep working — rename the section in a
         # deploy-coordinated commit.
         self._t6_calibrator = None
+        # Differential-detector sidecar (offline A/B analysis).  Opt-in
+        # via t6_config['enable_diff_sidecar'] = True.  Runs alongside
+        # the main calibrator on every batch of T6 samples; dumps
+        # per-PPS edge timestamps to a CSV at
+        # t6_config['diff_sidecar_path'] (default
+        # /var/lib/timestd/debug/bpsk_diff_edges.csv) for later
+        # comparison against the MF detector's chain_delay history.
+        # Does NOT push to chrony or modify any T6 state.
+        self._t6_diff_calibrator = None
+        self._t6_diff_warned = False
         self._t6_stream = None  # RadiodStream for BPSK channel
         # T6 channel's ChannelInfo — saved during _start_t6_stream so that
         # rtp_to_wallclock can compute wall-time of detected edges for the
@@ -446,6 +456,41 @@ class CoreRecorderV2:
                     )
                     logger.info(f"T6 BPSK PPS calibrator (legacy) initialized: "
                                 f"freq={freq_hz/1e6:.6f} MHz, sr={sr}")
+
+                # Differential-detector sidecar — opt-in via
+                # t6_config['enable_diff_sidecar'] = True.  Runs in
+                # parallel with the main calibrator on every batch;
+                # dumps per-PPS edge timestamps to a CSV for offline
+                # analysis.  DOES NOT push to chrony or touch any
+                # other T6 state.  See bpsk_pps_calibrator_diff.py.
+                if self._t6_config.get('enable_diff_sidecar', False):
+                    try:
+                        from hf_timestd.core.bpsk_pps_calibrator_diff import (
+                            BpskPpsCalibratorDiff,
+                        )
+                        diff_csv = self._t6_config.get(
+                            'diff_sidecar_path',
+                            '/var/lib/timestd/debug/bpsk_diff_edges.csv',
+                        )
+                        diff_thresh = self._t6_config.get(
+                            'diff_sidecar_threshold_factor', 100.0,
+                        )
+                        self._t6_diff_calibrator = BpskPpsCalibratorDiff(
+                            sample_rate=sr,
+                            output_path=diff_csv,
+                            threshold_factor=diff_thresh,
+                        )
+                        logger.info(
+                            f"T6 diff-detector sidecar initialised: "
+                            f"output={diff_csv}, threshold_factor={diff_thresh}"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"T6 diff-detector sidecar init failed "
+                            f"(non-fatal, main calibrator continues): {e}"
+                        )
+                        self._t6_diff_calibrator = None
+
                 # Init TSL3 SHM feed (unit 2). Failure is non-fatal —
                 # calibration still drives chain_delay_correction_ns.
                 try:
@@ -1894,6 +1939,25 @@ class CoreRecorderV2:
         result = self._t6_calibrator.process_samples(
             samples, quality.last_rtp_timestamp
         )
+
+        # Differential-detector sidecar (offline A/B analysis).
+        # Failures here MUST NOT affect main calibrator state;
+        # swallow exceptions and log once per service lifetime.
+        # Use getattr so test fixtures that bypass __init__ stay safe.
+        diff_cal = getattr(self, '_t6_diff_calibrator', None)
+        if diff_cal is not None:
+            try:
+                diff_cal.process_samples(
+                    samples, quality.last_rtp_timestamp
+                )
+            except Exception as e:
+                if not getattr(self, '_t6_diff_warned', False):
+                    logger.warning(
+                        f"T6 diff-detector sidecar failed (will be "
+                        f"silent for remaining batches): {e}",
+                        exc_info=True,
+                    )
+                    self._t6_diff_warned = True
 
         # Stuck-recovery: cascade gate in the MF calibrator can keep
         # pps_consecutive pinned at 0 indefinitely if the underlying
