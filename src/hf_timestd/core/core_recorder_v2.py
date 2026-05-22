@@ -412,6 +412,21 @@ class CoreRecorderV2:
         # delay is a property of the hardware, not a per-edge measurement).
         self._t6_diff_disambiguation_ns = 0
         self._t6_diff_disambiguated = False
+        # Cross-restart disambiguation persistence.  Each restart used
+        # to re-run the T4 chrony comparison from scratch, which picked
+        # a different disambiguation every time (chrony slews
+        # continuously).  Loading a fresh persisted *effective*
+        # chain_delay lets us re-derive disambiguation from an invariant
+        # — the physical RF path — instead of from chrony's transient
+        # state.  See bpsk_chain_delay_store.py for the rationale and
+        # docs/HF-PPS-CHRONY-TUNING.md §5 for the original symptom.
+        from .bpsk_chain_delay_store import ChainDelayStore
+        self._t6_mf_chain_delay_store = ChainDelayStore("MF")
+        self._t6_diff_chain_delay_store = ChainDelayStore("diff")
+        # Counters for save-cadence debouncing (write once per
+        # PERSIST_EVERY_N_EDGES accepted edges, not on every cycle).
+        self._t6_mf_saves_pending = 0
+        self._t6_diff_saves_pending = 0
         self._t6_config = config.get('timing', {}).get('l6_pps', {})
         if self._t6_config.get('enabled', False):
             freq_hz = self._t6_config.get('frequency_hz')
@@ -1225,6 +1240,11 @@ class CoreRecorderV2:
     # observed (~13 s) so transient cascades don't trigger needless
     # resets.
     T6_STUCK_TIMEOUT_SEC = 60.0
+    # Cadence for writing the persisted effective chain_delay to disk.
+    # At 1 PPS, 60 edges = one save per minute — bounded even if the
+    # rate later climbs.  See bpsk_chain_delay_store.py for the
+    # cross-restart story.
+    T6_PERSIST_EVERY_N_EDGES = 60
     # Cadence of the T6-SHM diagnostic log line.  Every 60 s emits one
     # INFO line with pushes-per-window + the gate-decision inputs
     # (`last_edge_rtp` vs `_t6_last_pushed_rtp`, `result.locked`,
@@ -1399,6 +1419,72 @@ class CoreRecorderV2:
             pass
 
         return None
+
+    def _t6_disambiguate_via_external_reference(self, result) -> None:
+        """Fallback disambiguation path used when no fresh persisted
+        chain_delay is available.  Walks the timing-tier hierarchy
+        (T5 > T4 > T3) and sets ``self._t6_disambiguation_ns`` to the
+        integer-sample shift that brings the calibrator's implied
+        wall-time into agreement with the highest-rank available tier.
+
+        Pre-fresh-persistence-store this was the only path; today it
+        runs only on cold deploys, after staleness expiry, or when the
+        sample-rate has been changed.  See
+        :class:`bpsk_chain_delay_store.ChainDelayStore` for the
+        preferred persisted-value path.
+        """
+        try:
+            last_edge_rtp = getattr(self._t6_calibrator, '_last_edge_rtp', None)
+            if last_edge_rtp is None or self._t6_channel_info is None:
+                return
+            ref = self._get_disambiguation_reference()
+            if ref is None:
+                logger.info(
+                    "T6 chain_delay initial accept: no usable non-T6 "
+                    "timing authority for disambiguation; accepting "
+                    "calibrator value as-is"
+                )
+                return
+            ref_offset_ms, ref_sigma_ms, ref_tier = ref
+            # Compute raw wall-time of the detected edge WITHOUT ka9q
+            # applying chain_delay (kept None on ChannelInfo so the
+            # subtraction inside rtp_to_wallclock is a no-op).
+            self._t6_channel_info.chain_delay_correction_ns = None
+            from ka9q.rtp_recorder import rtp_to_wallclock
+            raw_wall_time_sec = rtp_to_wallclock(last_edge_rtp, self._t6_channel_info)
+            if raw_wall_time_sec is None:
+                return
+            wall_time_sec = raw_wall_time_sec - (result.chain_delay_ns / 1e9)
+            ref_time = round(wall_time_sec)
+            offset_sec = wall_time_sec - ref_time
+            # The reference tier's offset_ms is its estimate of
+            # (system_clock - true_UTC).  Our wall_time_offset is also
+            # that same quantity (modulo BPSK calibration error).
+            # Disagreement reveals the wrap.
+            disagreement_sec = offset_sec - (ref_offset_ms / 1000.0)
+            sr_local = self._t6_calibrator.sample_rate
+            shift_samples = round(disagreement_sec * sr_local)
+            self._t6_disambiguation_ns = int(round(
+                shift_samples * 1e9 / sr_local
+            ))
+            if shift_samples != 0:
+                logger.info(
+                    f"T6 chain_delay disambiguated against {ref_tier} "
+                    f"(offset={ref_offset_ms:+.3f} ms, "
+                    f"sigma={ref_sigma_ms:.3f} ms): raw="
+                    f"{result.chain_delay_ns} ns implied wall-time "
+                    f"offset {offset_sec*1000:+.3f} ms; disagreement "
+                    f"{disagreement_sec*1000:+.1f} ms; shifting "
+                    f"{shift_samples} samples ({self._t6_disambiguation_ns} ns)"
+                )
+            else:
+                logger.info(
+                    f"T6 chain_delay disambiguated against {ref_tier}: "
+                    f"already aligned within one sample "
+                    f"(disagreement {disagreement_sec*1000:+.3f} ms)"
+                )
+        except Exception as e:
+            logger.warning(f"T6 disambiguation failed: {e}")
 
     def _wait_for_chrony_settled(self) -> bool:
         """Block until chrony's Last offset has been below
@@ -1917,6 +2003,16 @@ class CoreRecorderV2:
 
     def _t6_on_samples(self, samples, quality):
         """Sample callback for the BPSK PPS stream — feeds the calibrator."""
+        # Defensive lazy-init for unit tests that bypass __init__ via
+        # ``CoreRecorderV2.__new__(CoreRecorderV2)``.  In production
+        # __init__ has already set these; in tests they are absent and
+        # we want the persistence layer to be a no-op rather than to
+        # crash the calibrator path.
+        if not hasattr(self, '_t6_mf_chain_delay_store'):
+            self._t6_mf_chain_delay_store = None
+            self._t6_diff_chain_delay_store = None
+            self._t6_mf_saves_pending = 0
+            self._t6_diff_saves_pending = 0
         # One-shot smoke log on the first batch so the journal records
         # whether quality.last_rtp_timestamp is flowing in shared mode.
         # Same hook helps confirm legacy-mode startup health.
@@ -2043,6 +2139,14 @@ class CoreRecorderV2:
             self._t6_wrap_rejections = 0
             self._t6_recent_raw.clear()
             self._t6_last_locked_wall = wall_now
+            # Persisted effective chain_delay reflected the old
+            # operating point that just got rejected; clear it so the
+            # next initial-accept re-disambiguates from scratch.
+            if self._t6_mf_chain_delay_store is not None:
+                try:
+                    self._t6_mf_chain_delay_store.path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
         if result is not None and result.locked:
             # Wrap-rejection: refuse jumps > 10 ms from the last accepted
@@ -2057,82 +2161,69 @@ class CoreRecorderV2:
             WRAP_THRESHOLD_NS = 10_000_000
             if self._t6_last_chain_delay_ns is None:
                 # First stable lock — disambiguate WHICH whole sample is the
-                # real PPS edge by comparing against the system clock (now
-                # disciplined by chrony / LAN GPS to <1us). The calibrator
-                # picks one consistent edge position from possibly multiple
-                # candidates (real PPS plus noise edges). The system clock
-                # tells us which is the "right" sample, but the BPSK provides
-                # sub-sample precision once disambiguated.
+                # real PPS edge.
                 #
-                # Compute the integer-sample shift that would move corrected
-                # wall_time into agreement with the highest-rank-available
-                # non-T6 timing-authority tier (T5 > T4 > T3).  Per the
-                # timing model, the system clock is downstream of the
-                # authority hierarchy, not a peer source — using it for
-                # disambiguation would be circular.  We use the explicit
-                # tier that publishes an offset_ms.  Sigma sanity check:
-                # reject any reference whose sigma is larger than the
-                # half-second-wrap value we're trying to disambiguate
-                # against (250 ms).  Lock the shift in as
-                # _t6_disambiguation_ns; subsequent calibrator reports
-                # are adjusted by the same constant so all measurements
-                # share the same disambiguated reference frame.
-                try:
-                    last_edge_rtp = getattr(self._t6_calibrator, '_last_edge_rtp', None)
-                    if last_edge_rtp is not None and self._t6_channel_info is not None:
-                        ref = self._get_disambiguation_reference()
-                        if ref is None:
-                            logger.info(
-                                f"T6 chain_delay initial accept: no usable "
-                                f"non-T6 timing authority for disambiguation; "
-                                f"accepting calibrator value as-is"
-                            )
-                        else:
-                            ref_offset_ms, ref_sigma_ms, ref_tier = ref
-                            # Compute raw wall-time of the detected edge
-                            # WITHOUT ka9q applying chain_delay (kept None
-                            # on ChannelInfo so the subtraction inside
-                            # rtp_to_wallclock is a no-op).
-                            self._t6_channel_info.chain_delay_correction_ns = None
-                            from ka9q.rtp_recorder import rtp_to_wallclock
-                            raw_wall_time_sec = rtp_to_wallclock(last_edge_rtp, self._t6_channel_info)
-                            if raw_wall_time_sec is not None:
-                                wall_time_sec = raw_wall_time_sec - (result.chain_delay_ns / 1e9)
-                                ref_time = round(wall_time_sec)
-                                offset_sec = wall_time_sec - ref_time
-                                # The reference tier's offset_ms is its
-                                # estimate of (system_clock - true_UTC).
-                                # Our wall_time_offset is also that same
-                                # quantity (modulo BPSK calibration error).
-                                # Disagreement reveals the wrap.
-                                disagreement_sec = offset_sec - (ref_offset_ms / 1000.0)
-                                sr_local = self._t6_calibrator.sample_rate
-                                shift_samples = round(disagreement_sec * sr_local)
-                                self._t6_disambiguation_ns = int(round(
-                                    shift_samples * 1e9 / sr_local
-                                ))
-                                if shift_samples != 0:
-                                    logger.info(
-                                        f"T6 chain_delay disambiguated against {ref_tier} "
-                                        f"(offset={ref_offset_ms:+.3f} ms, "
-                                        f"sigma={ref_sigma_ms:.3f} ms): raw="
-                                        f"{result.chain_delay_ns} ns implied wall-time "
-                                        f"offset {offset_sec*1000:+.3f} ms; disagreement "
-                                        f"{disagreement_sec*1000:+.1f} ms; shifting "
-                                        f"{shift_samples} samples ({self._t6_disambiguation_ns} ns)"
-                                    )
-                                else:
-                                    logger.info(
-                                        f"T6 chain_delay disambiguated against {ref_tier}: "
-                                        f"already aligned within one sample "
-                                        f"(disagreement {disagreement_sec*1000:+.3f} ms)"
-                                    )
-                except Exception as e:
-                    logger.warning(f"T6 disambiguation failed: {e}")
-                # Apply disambiguation to the chain_delay we lock in
+                # Preferred path: load the last-known-good *effective*
+                # chain_delay from disk and compute the integer-sample
+                # shift that aligns the new raw value with it.  The
+                # physical RF path is invariant across restarts, so the
+                # effective chain_delay is too — using the persisted
+                # value avoids re-walking chrony's transient state and
+                # eliminates the per-restart drift (635 µs spread across
+                # three restarts observed on bee1 2026-05-21).  See
+                # bpsk_chain_delay_store.py.
+                #
+                # Fallback path (no fresh persisted value): compute the
+                # integer-sample shift that would move corrected
+                # wall_time into agreement with the highest-rank-
+                # available non-T6 timing-authority tier (T5 > T4 > T3).
+                # Per the timing model the system clock is downstream
+                # of the authority hierarchy, not a peer source — using
+                # it for disambiguation would be circular.  Sigma
+                # sanity check: reject any reference whose sigma is
+                # larger than the half-second-wrap value we're trying
+                # to disambiguate against (250 ms).
+                sr_local = self._t6_calibrator.sample_rate
+                persisted = (
+                    self._t6_mf_chain_delay_store.load()
+                    if self._t6_mf_chain_delay_store is not None
+                    else None
+                )
+                if persisted is not None and persisted.sample_rate == sr_local:
+                    from .bpsk_chain_delay_store import compute_disambiguation_ns
+                    self._t6_disambiguation_ns = compute_disambiguation_ns(
+                        raw_chain_delay_ns=result.chain_delay_ns,
+                        persisted_effective_chain_delay_ns=persisted.effective_chain_delay_ns,
+                        sample_rate=sr_local,
+                    )
+                    age_s = time.time() - persisted.saved_at_unix
+                    logger.info(
+                        f"T6 chain_delay disambiguated against persisted "
+                        f"effective={persisted.effective_chain_delay_ns} ns "
+                        f"({age_s:.0f}s old): raw={result.chain_delay_ns} ns, "
+                        f"shifting {self._t6_disambiguation_ns} ns "
+                        f"(skipping T4 chrony walk — invariant RF path)"
+                    )
+                else:
+                    if persisted is not None:
+                        logger.warning(
+                            f"T6 chain_delay persisted sample_rate "
+                            f"{persisted.sample_rate} != current {sr_local}; "
+                            f"falling back to T4 disambiguation"
+                        )
+                    self._t6_disambiguate_via_external_reference(result)
+                # Apply disambiguation (set above either way) and lock in.
                 effective = result.chain_delay_ns + self._t6_disambiguation_ns
                 self._t6_last_chain_delay_ns = effective
                 effective_chain_delay = effective
+                # Persist the just-locked effective value so the next
+                # restart skips disambiguation entirely.
+                if self._t6_mf_chain_delay_store is not None:
+                    self._t6_mf_chain_delay_store.save(
+                        sample_rate=sr_local,
+                        effective_chain_delay_ns=effective,
+                    )
+                    self._t6_mf_saves_pending = 0
                 logger.info(
                     f"T6 chain_delay initial accept: {result.chain_delay_ns} ns "
                     f"(effective with disambiguation: {effective} ns)"
@@ -2172,6 +2263,16 @@ class CoreRecorderV2:
                     self._t6_disambiguation_ns = 0
                     self._t6_wrap_rejections = 0
                     self._t6_recent_raw.clear()
+                    # Persisted effective chain_delay reflected the old
+                    # operating point that the step-recovery just admitted
+                    # was stale.  Clear it so the next initial-accept
+                    # re-disambiguates from scratch instead of re-applying
+                    # the previous (now-wrong) shift.
+                    if self._t6_mf_chain_delay_store is not None:
+                        try:
+                            self._t6_mf_chain_delay_store.path.unlink(missing_ok=True)
+                        except OSError:
+                            pass
                 else:
                     if self._t6_wrap_rejections == 1 or self._t6_wrap_rejections % 60 == 0:
                         logger.warning(
@@ -2200,6 +2301,18 @@ class CoreRecorderV2:
                 self._t6_wrap_rejections = 0
                 self._t6_recent_raw.clear()
                 effective_chain_delay = self._t6_last_chain_delay_ns
+                # Refresh persisted effective chain_delay every
+                # T6_PERSIST_EVERY_N_EDGES accepted cycles.  Disk I/O
+                # cadence ~ once/minute at 1 PPS — bounded even if the
+                # rate later climbs.
+                if self._t6_mf_chain_delay_store is not None:
+                    self._t6_mf_saves_pending += 1
+                    if self._t6_mf_saves_pending >= self.T6_PERSIST_EVERY_N_EDGES:
+                        self._t6_mf_chain_delay_store.save(
+                            sample_rate=self._t6_calibrator.sample_rate,
+                            effective_chain_delay_ns=self._t6_last_chain_delay_ns,
+                        )
+                        self._t6_mf_saves_pending = 0
 
             # Record BPSK metadata in archive sidecars.  Per the
             # architectural separation (chain_delay is metrology, not
@@ -2328,58 +2441,125 @@ class CoreRecorderV2:
                                 * 1e9 / sr_local
                             ))
 
-                            # Step 2: one-shot T4 disambiguation on
-                            # the FIRST accepted diff edge.  Mirrors
-                            # the legacy MF's initial-accept logic:
-                            # compute the wall-time-offset implied by
-                            # the raw chain_delay, compare to T4's
-                            # offset, and lock in an integer-sample
-                            # shift that aligns the two.  All future
-                            # edges use the same shift — chain delay
-                            # is a property of the RF hardware, not a
-                            # per-edge measurement.
+                            # Step 2: one-shot disambiguation on the
+                            # FIRST accepted diff edge.  Mirrors the
+                            # legacy MF's initial-accept logic.
+                            #
+                            # Preferred path: load the last-known-good
+                            # *effective* chain_delay from disk and
+                            # compute the integer-sample shift that
+                            # aligns the new raw value with it.  The
+                            # physical RF path is invariant across
+                            # restarts; this avoids the per-restart
+                            # drift that chrony-state-based
+                            # disambiguation suffers from.
+                            #
+                            # Fallback path: walk the timing-tier
+                            # hierarchy (T4 LAN GPS, then T3 fusion).
                             if not self._t6_diff_disambiguated:
-                                ref = self._get_disambiguation_reference()
-                                if ref is None:
-                                    logger.info(
-                                        "HFPS chain_delay initial accept: no "
-                                        "usable non-T6 timing authority for "
-                                        "disambiguation; accepting raw value"
+                                persisted = (
+                                    self._t6_diff_chain_delay_store.load()
+                                    if self._t6_diff_chain_delay_store is not None
+                                    else None
+                                )
+                                if (persisted is not None
+                                        and persisted.sample_rate == sr_local):
+                                    from .bpsk_chain_delay_store import (
+                                        compute_disambiguation_ns,
                                     )
-                                    self._t6_diff_disambiguation_ns = 0
+                                    self._t6_diff_disambiguation_ns = (
+                                        compute_disambiguation_ns(
+                                            raw_chain_delay_ns=chain_delay_ns_raw,
+                                            persisted_effective_chain_delay_ns=(
+                                                persisted.effective_chain_delay_ns
+                                            ),
+                                            sample_rate=sr_local,
+                                        )
+                                    )
                                     self._t6_diff_disambiguated = True
+                                    age_s = time.time() - persisted.saved_at_unix
+                                    logger.info(
+                                        f"HFPS chain_delay disambiguated against "
+                                        f"persisted effective="
+                                        f"{persisted.effective_chain_delay_ns} ns "
+                                        f"({age_s:.0f}s old): raw="
+                                        f"{chain_delay_ns_raw} ns, shifting "
+                                        f"{self._t6_diff_disambiguation_ns} ns "
+                                        f"(skipping T4 chrony walk)"
+                                    )
+                                    # Eager refresh — the new
+                                    # disambiguation should survive a
+                                    # crash within the first minute.
+                                    if self._t6_diff_chain_delay_store is not None:
+                                        self._t6_diff_chain_delay_store.save(
+                                            sample_rate=sr_local,
+                                            effective_chain_delay_ns=(
+                                                chain_delay_ns_raw
+                                                + self._t6_diff_disambiguation_ns
+                                            ),
+                                        )
+                                        self._t6_diff_saves_pending = 0
                                 else:
-                                    ref_offset_ms, ref_sigma_ms, ref_tier = ref
-                                    wall_time_sec_initial = (
-                                        raw_wall_time_sec
-                                        - chain_delay_ns_raw / 1e9
-                                    )
-                                    ref_time_initial = round(wall_time_sec_initial)
-                                    offset_sec_initial = (
-                                        wall_time_sec_initial - ref_time_initial
-                                    )
-                                    disagreement_sec = (
-                                        offset_sec_initial
-                                        - ref_offset_ms / 1000.0
-                                    )
-                                    shift_samples = round(
-                                        disagreement_sec * sr_local
-                                    )
-                                    self._t6_diff_disambiguation_ns = int(round(
-                                        shift_samples * 1e9 / sr_local
-                                    ))
-                                    self._t6_diff_disambiguated = True
-                                    logger.info(
-                                        f"HFPS chain_delay disambiguated "
-                                        f"against {ref_tier} "
-                                        f"(offset={ref_offset_ms:+.3f} ms, "
-                                        f"sigma={ref_sigma_ms:.3f} ms): "
-                                        f"raw_chain_delay={chain_delay_ns_raw} "
-                                        f"ns; disagreement "
-                                        f"{disagreement_sec*1000:+.3f} ms; "
-                                        f"shift {shift_samples} samples "
-                                        f"({self._t6_diff_disambiguation_ns} ns)"
-                                    )
+                                    if persisted is not None:
+                                        logger.warning(
+                                            f"HFPS persisted sample_rate "
+                                            f"{persisted.sample_rate} != current "
+                                            f"{sr_local}; falling back to T4"
+                                        )
+                                    ref = self._get_disambiguation_reference()
+                                    if ref is None:
+                                        logger.info(
+                                            "HFPS chain_delay initial accept: no "
+                                            "usable non-T6 timing authority for "
+                                            "disambiguation; accepting raw value"
+                                        )
+                                        self._t6_diff_disambiguation_ns = 0
+                                        self._t6_diff_disambiguated = True
+                                    else:
+                                        ref_offset_ms, ref_sigma_ms, ref_tier = ref
+                                        wall_time_sec_initial = (
+                                            raw_wall_time_sec
+                                            - chain_delay_ns_raw / 1e9
+                                        )
+                                        ref_time_initial = round(wall_time_sec_initial)
+                                        offset_sec_initial = (
+                                            wall_time_sec_initial - ref_time_initial
+                                        )
+                                        disagreement_sec = (
+                                            offset_sec_initial
+                                            - ref_offset_ms / 1000.0
+                                        )
+                                        shift_samples = round(
+                                            disagreement_sec * sr_local
+                                        )
+                                        self._t6_diff_disambiguation_ns = int(round(
+                                            shift_samples * 1e9 / sr_local
+                                        ))
+                                        self._t6_diff_disambiguated = True
+                                        logger.info(
+                                            f"HFPS chain_delay disambiguated "
+                                            f"against {ref_tier} "
+                                            f"(offset={ref_offset_ms:+.3f} ms, "
+                                            f"sigma={ref_sigma_ms:.3f} ms): "
+                                            f"raw_chain_delay={chain_delay_ns_raw} "
+                                            f"ns; disagreement "
+                                            f"{disagreement_sec*1000:+.3f} ms; "
+                                            f"shift {shift_samples} samples "
+                                            f"({self._t6_diff_disambiguation_ns} ns)"
+                                        )
+                                        # Eager refresh so the next
+                                        # restart inherits the T4-derived
+                                        # shift instead of re-walking
+                                        # chrony from a different state.
+                                        if self._t6_diff_chain_delay_store is not None:
+                                            self._t6_diff_chain_delay_store.save(
+                                                sample_rate=sr_local,
+                                                effective_chain_delay_ns=(
+                                                    chain_delay_ns_raw
+                                                    + self._t6_diff_disambiguation_ns
+                                                ),
+                                            )
+                                            self._t6_diff_saves_pending = 0
 
                             # Step 3: apply the locked disambiguation
                             # to the per-edge chain_delay and compute
@@ -2403,6 +2583,19 @@ class CoreRecorderV2:
                             )
                             self._t6_diff_last_pushed_rtp = diff_last_edge_rtp
                             self._t6_diff_shm_push_count += 1
+                            # Refresh persisted effective chain_delay
+                            # every T6_PERSIST_EVERY_N_EDGES accepted
+                            # cycles so the next restart skips
+                            # disambiguation.  Disk I/O cadence ~ once
+                            # per minute at 1 PPS.
+                            if self._t6_diff_chain_delay_store is not None:
+                                self._t6_diff_saves_pending += 1
+                                if self._t6_diff_saves_pending >= self.T6_PERSIST_EVERY_N_EDGES:
+                                    self._t6_diff_chain_delay_store.save(
+                                        sample_rate=sr_local,
+                                        effective_chain_delay_ns=effective_chain_delay_ns,
+                                    )
+                                    self._t6_diff_saves_pending = 0
                 except Exception as e:
                     if not getattr(self, '_t6_diff_shm_warned', False):
                         logger.warning(
