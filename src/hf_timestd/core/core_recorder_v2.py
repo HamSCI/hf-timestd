@@ -401,6 +401,17 @@ class CoreRecorderV2:
         # offset added to every calibrator chain_delay report so all
         # measurements share a common disambiguated reference frame.
         self._t6_disambiguation_ns = 0
+        # Same idea, but for the diff detector (Method 5) chain_delay.
+        # The diff detector reports chain_delay_samples = edge_rtp mod
+        # SR, i.e. only the sub-second position of the observed
+        # polarity flip.  To turn that into a wall-clock offset chrony
+        # can use, we need to know WHICH integer-sample position
+        # within the second is the true PPS edge — same disambiguation
+        # the legacy MF does against T4 (LAN GPS).  Locked once on the
+        # first accepted diff edge; constant from then on (the RF chain
+        # delay is a property of the hardware, not a per-edge measurement).
+        self._t6_diff_disambiguation_ns = 0
+        self._t6_diff_disambiguated = False
         self._t6_config = config.get('timing', {}).get('l6_pps', {})
         if self._t6_config.get('enabled', False):
             freq_hz = self._t6_config.get('frequency_hz')
@@ -2304,27 +2315,90 @@ class CoreRecorderV2:
                     if diff_edge_advanced:
                         self._t6_channel_info.chain_delay_correction_ns = None
                         from ka9q.rtp_recorder import rtp_to_wallclock
-                        # The diff detector's edge RTP already
-                        # CORRESPONDS TO the polarity-flip sample
-                        # position — no chain_delay subtraction is
-                        # needed (compare with the TSL3 path above,
-                        # which subtracts effective_chain_delay
-                        # because the MF reports an edge at the
-                        # CENTER of its boxcar response and needs to
-                        # be shifted back).  Here, |s[n] - s[n-1]|
-                        # peaks exactly at the polarity flip, so
-                        # last_edge_rtp IS the edge sample.
-                        diff_wall_time_sec = rtp_to_wallclock(
+                        # Step 1: rtp_to_wallclock gives the local
+                        # wall time of the sample where we OBSERVED
+                        # the polarity flip.
+                        raw_wall_time_sec = rtp_to_wallclock(
                             diff_last_edge_rtp, self._t6_channel_info
                         )
-                        if diff_wall_time_sec is not None:
-                            diff_ref_time = round(diff_wall_time_sec)
+                        if raw_wall_time_sec is not None:
+                            sr_local = diff_cal.sample_rate
+                            chain_delay_ns_raw = int(round(
+                                diff_cal.chain_delay_samples
+                                * 1e9 / sr_local
+                            ))
+
+                            # Step 2: one-shot T4 disambiguation on
+                            # the FIRST accepted diff edge.  Mirrors
+                            # the legacy MF's initial-accept logic:
+                            # compute the wall-time-offset implied by
+                            # the raw chain_delay, compare to T4's
+                            # offset, and lock in an integer-sample
+                            # shift that aligns the two.  All future
+                            # edges use the same shift — chain delay
+                            # is a property of the RF hardware, not a
+                            # per-edge measurement.
+                            if not self._t6_diff_disambiguated:
+                                ref = self._get_disambiguation_reference()
+                                if ref is None:
+                                    logger.info(
+                                        "HFPS chain_delay initial accept: no "
+                                        "usable non-T6 timing authority for "
+                                        "disambiguation; accepting raw value"
+                                    )
+                                    self._t6_diff_disambiguation_ns = 0
+                                    self._t6_diff_disambiguated = True
+                                else:
+                                    ref_offset_ms, ref_sigma_ms, ref_tier = ref
+                                    wall_time_sec_initial = (
+                                        raw_wall_time_sec
+                                        - chain_delay_ns_raw / 1e9
+                                    )
+                                    ref_time_initial = round(wall_time_sec_initial)
+                                    offset_sec_initial = (
+                                        wall_time_sec_initial - ref_time_initial
+                                    )
+                                    disagreement_sec = (
+                                        offset_sec_initial
+                                        - ref_offset_ms / 1000.0
+                                    )
+                                    shift_samples = round(
+                                        disagreement_sec * sr_local
+                                    )
+                                    self._t6_diff_disambiguation_ns = int(round(
+                                        shift_samples * 1e9 / sr_local
+                                    ))
+                                    self._t6_diff_disambiguated = True
+                                    logger.info(
+                                        f"HFPS chain_delay disambiguated "
+                                        f"against {ref_tier} "
+                                        f"(offset={ref_offset_ms:+.3f} ms, "
+                                        f"sigma={ref_sigma_ms:.3f} ms): "
+                                        f"raw_chain_delay={chain_delay_ns_raw} "
+                                        f"ns; disagreement "
+                                        f"{disagreement_sec*1000:+.3f} ms; "
+                                        f"shift {shift_samples} samples "
+                                        f"({self._t6_diff_disambiguation_ns} ns)"
+                                    )
+
+                            # Step 3: apply the locked disambiguation
+                            # to the per-edge chain_delay and compute
+                            # the system_time for chrony.
+                            effective_chain_delay_ns = (
+                                chain_delay_ns_raw
+                                + self._t6_diff_disambiguation_ns
+                            )
+                            wall_time_sec = (
+                                raw_wall_time_sec
+                                - effective_chain_delay_ns / 1e9
+                            )
+                            ref_time = round(wall_time_sec)
                             diff_shm.update(
-                                reference_time=float(diff_ref_time),
-                                system_time=diff_wall_time_sec,
+                                reference_time=float(ref_time),
+                                system_time=wall_time_sec,
                                 # precision -20 ≈ 1 µs — claim closer to
-                                # the actual ~22 ns observed σ; lets
-                                # chrony weight HFPS appropriately.
+                                # the observed ~22 ns σ; lets chrony
+                                # weight HFPS appropriately.
                                 precision=-20,
                             )
                             self._t6_diff_last_pushed_rtp = diff_last_edge_rtp
