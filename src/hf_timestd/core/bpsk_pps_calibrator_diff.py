@@ -103,7 +103,18 @@ DIFF_INTER_EDGE_TOL_S = 0.001
 # the previous edge.  This gate does.
 DIFF_POSITION_HISTORY_LEN = 30          # rolling window of recent positions
 DIFF_POSITION_HISTORY_BOOTSTRAP = 10    # accept everything until this many edges
-DIFF_POSITION_TOL_SAMPLES = 5.0         # reject when |cd - median| > this
+# Tolerance: ~1 ms (= 96 samples at 96 kHz).  Real PPS edges are stable
+# to fractions of a sample within a session — 1 ms is *several orders
+# of magnitude* above the genuine jitter — but it's still well below
+# the multi-100-ms sidelobe distance from the half-second template,
+# which is what we actually want to reject.  Tighter values bit a
+# degenerate fixed point in early testing: when a single transient
+# put one edge over the tolerance and got rejected, the median froze
+# and subsequent real edges (within fractions of a sample of where
+# the median had been) tripped the gate too, since cumulative
+# Costas-perturbation can shift the median by samples over minutes
+# while the running median can't follow without accepted samples.
+DIFF_POSITION_TOL_SAMPLES = 100.0
 
 
 class BpskPpsCalibratorDiff:
