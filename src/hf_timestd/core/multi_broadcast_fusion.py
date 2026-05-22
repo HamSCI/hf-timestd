@@ -5524,6 +5524,7 @@ if __name__ == '__main__':
     # Read receiver coordinates from config if provided
     receiver_lat = None
     receiver_lon = None
+    config = None  # ensure defined even if --config isn't passed (used below)
     if args.config and args.config.exists():
         try:
             import toml
