@@ -4657,9 +4657,10 @@ class MultiBroadcastFusion:
 
 
 def run_fusion_service(
-    data_root: Path, 
-    interval_sec: float = 60.0, 
+    data_root: Path,
+    interval_sec: float = 60.0,
     enable_chrony: bool = True,
+    enable_chrony_l1: bool = False,
     lookback_minutes: int = 30,
     receiver_lat: Optional[float] = None,
     receiver_lon: Optional[float] = None,
@@ -4725,16 +4726,31 @@ def run_fusion_service(
             from hf_timestd.core.chrony_shm import ChronySHM
             _chrony_shm_available = True
 
-            # Initialize L1 feed (SHM unit 0)
-            chrony_shm_l1 = ChronySHM(unit=0)
-            if chrony_shm_l1.connect():
-                logger.info("Chrony SHM L1 feed enabled (unit=0, refid=TSL1)")
+            # Initialize L1 feed (SHM unit 0) only when enable_chrony_l1
+            # is True.  Default OFF as of 2026-05-22: the L1 and L2
+            # fusion paths produce byte-identical d_clock_fused_ms in
+            # the current single-station-mode operating point, so
+            # writing both is redundant.  Pare to L2 only (-> chrony
+            # refid HFFS in the new naming scheme); L1 stays available
+            # for revival if the paths diverge again.
+            if enable_chrony_l1:
+                chrony_shm_l1 = ChronySHM(unit=0)
+                if chrony_shm_l1.connect():
+                    logger.info(
+                        "Chrony SHM L1 feed enabled (unit=0, refid=TSL1)"
+                    )
+                else:
+                    logger.warning(
+                        "Failed to connect to Chrony SHM unit 0 - L1 feed "
+                        "disabled (will retry periodically)"
+                    )
+                    chrony_shm_l1.connected = False  # Keep object for reconnect
             else:
-                logger.warning(
-                    "Failed to connect to Chrony SHM unit 0 - L1 feed disabled "
-                    "(will retry periodically)"
+                chrony_shm_l1 = None
+                logger.info(
+                    "Chrony SHM L1 feed (unit=0) disabled by config "
+                    "(L2/HFFS is the single consolidated fusion feed)"
                 )
-                chrony_shm_l1.connected = False  # Keep object for reconnect
 
             # Initialize L2 feed (SHM unit 1)
             chrony_shm_l2 = ChronySHM(unit=1)
@@ -5533,10 +5549,14 @@ if __name__ == '__main__':
             pass
     
     enable_chrony = args.enable_chrony and not args.disable_chrony
+    enable_chrony_l1 = bool(
+        config.get('fusion', {}).get('enable_chrony_l1', False)
+    ) if config else False
     run_fusion_service(
-        args.data_root, 
-        args.interval, 
+        args.data_root,
+        args.interval,
         enable_chrony=enable_chrony,
+        enable_chrony_l1=enable_chrony_l1,
         lookback_minutes=args.lookback,
         receiver_lat=receiver_lat,
         receiver_lon=receiver_lon,

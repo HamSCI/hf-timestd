@@ -55,21 +55,42 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
-# Threshold for "this is a polarity flip" vs background: |d[n]| must
-# exceed THRESHOLD_FACTOR × running median of |d|.  With the 90 dB
-# theoretical margin, anything above ~10× the median is decisively a
-# flip.  Conservative 100× keeps us comfortably above any expected
-# carrier-induced jitter while well below the actual flip magnitude.
+# Threshold-A: |d[n]| must exceed THRESHOLD_FACTOR × running median.
+# Background between flips is dominated by sub-Hz carrier rotation
+# (~A·6e-5 per sample at SR=96 kHz); 100× the median rejects normal
+# carrier-induced jitter while well below the 2A spike of a real
+# polarity flip.
 DIFF_THRESHOLD_FACTOR = 100.0
+
+# Threshold-B: |d[n]| must also exceed RUNNING_MAX_FRAC × the running
+# max of accepted peaks.  Defends against the failure mode observed
+# in early sidecar data: when the running median dips briefly during
+# a quiet stretch, threshold-A drops with it and weak sidelobe peaks
+# (with d_magnitude ~100× smaller than a real flip) slip through.
+# A real polarity flip is always within a factor of ~2 of the
+# running max, so 0.5 is comfortably tight.
+DIFF_RUNNING_MAX_FRAC = 0.5
 
 # Running-median IIR alpha — slow enough that one big spike (the
 # flip we want to detect) doesn't pollute the median estimate.
 DIFF_MEDIAN_IIR_ALPHA = 0.01
 
-# Minimum gap between accepted edges, as a fraction of one second.
-# PPS edges are exactly 1 s apart; anything closer is a sidelobe or
-# spurious peak.
-DIFF_MIN_EDGE_GAP_FRAC = 0.99
+# Running-max IIR — same structure as the legacy MF's _peak_running:
+# clamped floor (0.99×) so a quiet batch can't drop the threshold,
+# plus a slow drift (5% blend) toward observed peaks.  Bootstrapped
+# from the first accepted peak.
+DIFF_RUNNING_MAX_FLOOR = 0.99
+DIFF_RUNNING_MAX_BLEND = 0.05
+
+# Inter-edge time consistency: PPS edges are 1.000 s apart to within
+# the GPSDO's stability.  Reject any peak whose RTP gap from the
+# previous accepted edge falls outside [1 - tol, 1 + tol] seconds.
+# 0.001 s tolerance = ±1 ms = ±96 samples at 96 kHz; comfortably
+# wider than the worst observed step adoption (±60 samples) so a
+# genuine chain-delay step is still accepted, but tight enough to
+# reject the scattered outliers seen in early sidecar data which
+# landed at random positions hundreds of ms off.
+DIFF_INTER_EDGE_TOL_S = 0.001
 
 
 class BpskPpsCalibratorDiff:
@@ -103,11 +124,16 @@ class BpskPpsCalibratorDiff:
         self._last_sample: Optional[np.complex64] = None
         self._last_edge_rtp: Optional[int] = None
         self._median_d: Optional[float] = None
+        # Running max — bootstrapped from the first accepted peak,
+        # then IIR'd toward observed accepted-peak magnitudes.  Used
+        # for the absolute-floor threshold (DIFF_RUNNING_MAX_FRAC).
+        self._running_max: Optional[float] = None
 
         # Counters
         self.pps_ok: int = 0
         self.peaks_rejected_gap: int = 0
         self.peaks_rejected_threshold: int = 0
+        self.peaks_rejected_running_max: int = 0
         # The last chain_delay we resolved, in [0, SR) sample units.
         # Modular like the legacy calibrator's chain_delay_samples.
         self.chain_delay_samples: Optional[float] = None
@@ -183,7 +209,20 @@ class BpskPpsCalibratorDiff:
                 + DIFF_MEDIAN_IIR_ALPHA * batch_median
             )
 
-        threshold = self.threshold_factor * self._median_d
+        # Two-leg threshold:
+        #   threshold-A: K · running_median(|d|)  — rejects carrier-induced jitter
+        #   threshold-B: 0.5 · running_max         — rejects sidelobe peaks
+        # The effective gate is max(A, B): a real polarity flip
+        # satisfies both comfortably; weak sidelobes (~100× smaller
+        # than a real flip) fail B even when median dips low enough
+        # for A to pass.  B is None until the first accepted peak
+        # establishes a running_max; until then only A gates.
+        threshold_a = self.threshold_factor * self._median_d
+        if self._running_max is not None:
+            threshold_b = DIFF_RUNNING_MAX_FRAC * self._running_max
+            threshold = max(threshold_a, threshold_b)
+        else:
+            threshold = threshold_a
 
         # Local-max test on the interior of d (need neighbours on
         # both sides for the parabolic interp).  Asymmetric `>=` on
@@ -204,6 +243,9 @@ class BpskPpsCalibratorDiff:
             return
 
         now = time.time()
+        # Inter-edge tolerance in integer samples (set once per batch).
+        sr = self.sample_rate
+        inter_tol_samples = int(DIFF_INTER_EDGE_TOL_S * sr)
         for pi in peak_idx:
             # Parabolic interpolation around the peak.
             # f(x) ≈ a·x² + b·x + c, vertex at -b/(2a).
@@ -218,15 +260,36 @@ class BpskPpsCalibratorDiff:
             edge_rtp_int = int(rtp_at_d[pi])
             edge_rtp_frac = float(frac)
 
-            # Inter-edge-gap reject: PPS edges are exactly 1 s apart.
-            # Anything closer is a sidelobe / spurious peak from noise.
+            # Inter-edge-time consistency: PPS edges are 1.000 s
+            # apart to within the GPSDO's stability.  Accept the
+            # peak only if its RTP gap from the previous accepted
+            # edge falls inside [1 s − tol, 1 s + tol], OR if this
+            # is the first edge.  Rejects sidelobes / spurious
+            # peaks at random offsets (the dominant outlier mode
+            # observed in early sidecar data).
             if self._last_edge_rtp is not None:
                 gap = (edge_rtp_int - self._last_edge_rtp) & 0xFFFFFFFF
                 if gap > 0x7FFFFFFF:
                     gap -= 0x100000000
-                if abs(gap) < int(DIFF_MIN_EDGE_GAP_FRAC * self.sample_rate):
+                if abs(gap - sr) > inter_tol_samples:
+                    # Out-of-window peak — discard.  This branch also
+                    # rejects close-in sidelobes (< 0.99 s).
                     self.peaks_rejected_gap += 1
                     continue
+
+            # Accepted peak — update running_max for threshold-B.
+            d_pi = float(d[pi])
+            if self._running_max is None:
+                self._running_max = d_pi
+            else:
+                # IIR toward observed peak, clamped from below so a
+                # weak peak can't pull the threshold down (matches
+                # the legacy MF's _peak_running update semantics).
+                self._running_max = max(
+                    DIFF_RUNNING_MAX_FLOOR * self._running_max,
+                    (1.0 - DIFF_RUNNING_MAX_BLEND) * self._running_max
+                    + DIFF_RUNNING_MAX_BLEND * d_pi,
+                )
 
             edge_rtp_full = edge_rtp_int + edge_rtp_frac
             chain_delay_samples = edge_rtp_full % self.sample_rate
@@ -237,7 +300,7 @@ class BpskPpsCalibratorDiff:
             if self._csv_fp is not None:
                 self._csv_fp.write(
                     f"{now:.6f},{edge_rtp_int},{edge_rtp_frac:.6f},"
-                    f"{d[pi]:.6f},{self._median_d:.6g},"
+                    f"{d_pi:.6f},{self._median_d:.6g},"
                     f"{chain_delay_samples:.6f}\n"
                 )
 

@@ -292,6 +292,16 @@ class CoreRecorderV2:
         # 16 kHz) rather than the HF-fusion floor (~150 us).
         self._t6_shm = None
         self._t6_last_pushed_rtp = None
+
+        # SHM unit 3 (HFPS): the diff-detector (Method 5) edge feed.
+        # Built only when t6_config['enable_diff_sidecar'] is True
+        # AND the operational SHM push is enabled.  Runs in parallel
+        # with TSL3 — chrony selects between them via its own
+        # selection algorithm (HFPS gets `prefer` in chrony.conf
+        # once validated).
+        self._t6_diff_shm = None
+        self._t6_diff_last_pushed_rtp = None
+        self._t6_diff_shm_push_count = 0
         # Diagnostic counters for the T6 SHM push gate.  Pair with the
         # periodic log line below — on the next "TSL3 dark while
         # acquired=1" incident, the journal shows whether pushes are
@@ -506,6 +516,37 @@ class CoreRecorderV2:
                 except Exception as e:
                     logger.warning(f"T6 TSL3 SHM init failed: {e}")
                     self._t6_shm = None
+
+                # Init HFPS SHM feed (unit 3) — operational chrony
+                # feed from the diff detector (Method 5).  Built only
+                # when the sidecar is enabled AND SHM push is wired.
+                # Runs in parallel with TSL3 (unit 2); chrony selects
+                # between them by its usual algorithm.
+                if (self._t6_diff_calibrator is not None
+                        and self._t6_config.get('diff_to_shm_unit', None)
+                        is not None):
+                    try:
+                        from hf_timestd.core.chrony_shm import ChronySHM
+                        diff_unit = int(
+                            self._t6_config.get('diff_to_shm_unit')
+                        )
+                        self._t6_diff_shm = ChronySHM(unit=diff_unit)
+                        if self._t6_diff_shm.connect():
+                            logger.info(
+                                f"T6 diff-detector SHM feed enabled "
+                                f"(unit={diff_unit}, expected refid HFPS)"
+                            )
+                        else:
+                            logger.warning(
+                                f"T6 diff-detector SHM unit={diff_unit} "
+                                f"connect failed; HFPS disabled"
+                            )
+                            self._t6_diff_shm = None
+                    except Exception as e:
+                        logger.warning(
+                            f"T6 diff-detector SHM init failed: {e}"
+                        )
+                        self._t6_diff_shm = None
         self.ntp_status_lock = threading.Lock()
 
         # Timing Calibrator for SSRC registration
@@ -2237,6 +2278,65 @@ class CoreRecorderV2:
                     if not getattr(self, '_t6_shm_warned', False):
                         logger.warning(f"T6 TSL3 SHM push failed: {e}")
                         self._t6_shm_warned = True
+
+            # HFPS SHM feed (unit 3): push wall-time of the diff
+            # detector's (Method 5) latest accepted edge.  Runs in
+            # parallel with TSL3 above so chrony has both refclocks
+            # to choose between via its selection algorithm.  Uses
+            # the SAME channel_info (and therefore the same RTP →
+            # wall-time mapping) as TSL3; the difference is only in
+            # which detector produced `last_edge_rtp`.
+            diff_cal = getattr(self, '_t6_diff_calibrator', None)
+            diff_shm = getattr(self, '_t6_diff_shm', None)
+            if (diff_cal is not None and diff_shm is not None
+                    and self._t6_channel_info is not None):
+                try:
+                    diff_last_edge_rtp_full = getattr(
+                        diff_cal, 'chain_delay_samples', None
+                    )  # used for status; not the rtp itself
+                    diff_last_edge_rtp = getattr(
+                        diff_cal, '_last_edge_rtp', None
+                    )
+                    diff_edge_advanced = (
+                        diff_last_edge_rtp is not None
+                        and diff_last_edge_rtp != self._t6_diff_last_pushed_rtp
+                    )
+                    if diff_edge_advanced:
+                        self._t6_channel_info.chain_delay_correction_ns = None
+                        from ka9q.rtp_recorder import rtp_to_wallclock
+                        # The diff detector's edge RTP already
+                        # CORRESPONDS TO the polarity-flip sample
+                        # position — no chain_delay subtraction is
+                        # needed (compare with the TSL3 path above,
+                        # which subtracts effective_chain_delay
+                        # because the MF reports an edge at the
+                        # CENTER of its boxcar response and needs to
+                        # be shifted back).  Here, |s[n] - s[n-1]|
+                        # peaks exactly at the polarity flip, so
+                        # last_edge_rtp IS the edge sample.
+                        diff_wall_time_sec = rtp_to_wallclock(
+                            diff_last_edge_rtp, self._t6_channel_info
+                        )
+                        if diff_wall_time_sec is not None:
+                            diff_ref_time = round(diff_wall_time_sec)
+                            diff_shm.update(
+                                reference_time=float(diff_ref_time),
+                                system_time=diff_wall_time_sec,
+                                # precision -20 ≈ 1 µs — claim closer to
+                                # the actual ~22 ns observed σ; lets
+                                # chrony weight HFPS appropriately.
+                                precision=-20,
+                            )
+                            self._t6_diff_last_pushed_rtp = diff_last_edge_rtp
+                            self._t6_diff_shm_push_count += 1
+                except Exception as e:
+                    if not getattr(self, '_t6_diff_shm_warned', False):
+                        logger.warning(
+                            f"T6 HFPS SHM push failed (will be silent "
+                            f"for remaining batches): {e}",
+                            exc_info=True,
+                        )
+                        self._t6_diff_shm_warned = True
 
                 # Diagnostic: T6 SHM has a known failure mode where chrony
                 # reach decays to 0 while the matched filter keeps
