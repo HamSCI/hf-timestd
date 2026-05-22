@@ -92,6 +92,19 @@ DIFF_RUNNING_MAX_BLEND = 0.05
 # landed at random positions hundreds of ms off.
 DIFF_INTER_EDGE_TOL_S = 0.001
 
+# Position-stability check: after enough edges have accumulated a
+# baseline (DIFF_POSITION_HISTORY_BOOTSTRAP), reject any candidate
+# whose chain_delay_samples differs from the running median by more
+# than DIFF_POSITION_TOL_SAMPLES.  This defends against the failure
+# mode observed in the early sidecar data: 3-8% of accepted edges
+# landed at sidelobe positions (e.g., 47768 instead of the
+# consensus 47916.17 — 148 samples = 1.54 ms off).  The inter-edge
+# time gate doesn't catch these because they're still ~1 s after
+# the previous edge.  This gate does.
+DIFF_POSITION_HISTORY_LEN = 30          # rolling window of recent positions
+DIFF_POSITION_HISTORY_BOOTSTRAP = 10    # accept everything until this many edges
+DIFF_POSITION_TOL_SAMPLES = 5.0         # reject when |cd - median| > this
+
 
 class BpskPpsCalibratorDiff:
     """Per-sample magnitude-derivative PPS edge detector.
@@ -129,11 +142,18 @@ class BpskPpsCalibratorDiff:
         # for the absolute-floor threshold (DIFF_RUNNING_MAX_FRAC).
         self._running_max: Optional[float] = None
 
+        # Rolling history of accepted chain_delay_samples for the
+        # position-stability check.  Stored as a list with a manual
+        # cap (DIFF_POSITION_HISTORY_LEN) so we can compute a
+        # running median without numpy.
+        self._position_history: list[float] = []
+
         # Counters
         self.pps_ok: int = 0
         self.peaks_rejected_gap: int = 0
         self.peaks_rejected_threshold: int = 0
         self.peaks_rejected_running_max: int = 0
+        self.peaks_rejected_position: int = 0
         # The last chain_delay we resolved, in [0, SR) sample units.
         # Modular like the legacy calibrator's chain_delay_samples.
         self.chain_delay_samples: Optional[float] = None
@@ -293,6 +313,43 @@ class BpskPpsCalibratorDiff:
 
             edge_rtp_full = edge_rtp_int + edge_rtp_frac
             chain_delay_samples = edge_rtp_full % self.sample_rate
+
+            # Position-stability check.  After enough edges have
+            # accumulated a baseline, reject any candidate whose
+            # chain_delay_samples is more than DIFF_POSITION_TOL_SAMPLES
+            # off the running median.  PPS edges are emitted by a
+            # GPS-disciplined oscillator — the true edge position is
+            # stable to nanoseconds, so anything that drifts by a sample
+            # in one second is a sidelobe, not the real signal.  This
+            # check rejects the 3-8% outlier rate observed in early
+            # sidecar data; it kicks in after the bootstrap window.
+            #
+            # Wraparound handling: chain_delay_samples is in [0, SR);
+            # if the consensus is near 0 or near SR, raw subtraction
+            # would give a misleading "huge gap" for a value on the
+            # other side of the wrap.  Fold to [-SR/2, SR/2).
+            if len(self._position_history) >= DIFF_POSITION_HISTORY_BOOTSTRAP:
+                hist = sorted(self._position_history)
+                n = len(hist)
+                if n % 2 == 1:
+                    history_median = hist[n // 2]
+                else:
+                    history_median = 0.5 * (hist[n // 2 - 1] + hist[n // 2])
+                dev = chain_delay_samples - history_median
+                # Wraparound fold
+                if dev > self.sample_rate / 2:
+                    dev -= self.sample_rate
+                elif dev < -self.sample_rate / 2:
+                    dev += self.sample_rate
+                if abs(dev) > DIFF_POSITION_TOL_SAMPLES:
+                    self.peaks_rejected_position += 1
+                    continue
+
+            # Accepted — update position history (cap at LEN).
+            self._position_history.append(chain_delay_samples)
+            if len(self._position_history) > DIFF_POSITION_HISTORY_LEN:
+                self._position_history.pop(0)
+
             self.chain_delay_samples = float(chain_delay_samples)
             self._last_edge_rtp = edge_rtp_int
             self.pps_ok += 1

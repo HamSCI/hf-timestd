@@ -177,6 +177,100 @@ class TestNoCSVMode:
         assert cal.chain_delay_samples is not None
 
 
+class TestPositionStabilityCheck:
+    """After the bootstrap window, an edge whose chain_delay_samples is
+    far from the recent consensus must be rejected.  This defends
+    against sidelobe outliers that pass the magnitude + inter-edge-time
+    gates but land at the wrong sub-sample position."""
+
+    def test_outlier_position_rejected_after_bootstrap(self):
+        """Edges that pass the gap gate (~1 s after the previous edge)
+        but at a sub-sample position more than DIFF_POSITION_TOL_SAMPLES
+        from the running median must be rejected.  Sidelobes in real
+        data look like this: timing is roughly right, position is way
+        off."""
+        from hf_timestd.core.bpsk_pps_calibrator_diff import (
+            DIFF_POSITION_HISTORY_BOOTSTRAP,
+            DIFF_POSITION_TOL_SAMPLES,
+        )
+        cal = BpskPpsCalibratorDiff(sample_rate=SR)
+
+        # Manually pre-populate the position history with enough
+        # entries to satisfy the bootstrap window — simulates the
+        # state after a calm period of consistent edges.
+        baseline_cd = 47916.17
+        cal._position_history = [
+            baseline_cd + 0.001 * i  # tiny per-edge jitter
+            for i in range(DIFF_POSITION_HISTORY_BOOTSTRAP + 5)
+        ]
+        cal.chain_delay_samples = baseline_cd
+        cal._last_edge_rtp = 1_000_000
+
+        # Feed one batch with a polarity flip about 1 sec after
+        # the simulated previous edge, but at a position 1000
+        # samples off from baseline (well beyond the 5-sample tol).
+        outlier_offset = baseline_cd + 1000.0  # = 48916.17
+        signal = _make_bpsk_signal(
+            duration_s=1.5,
+            edge_offset_samples=outlier_offset,
+            transition_width_samples=2.0,
+        )
+        # First edge in this synth signal lands at outlier_offset
+        # relative to RTP value 0; we want it ~SR samples after
+        # _last_edge_rtp = 1_000_000.  Start RTP at 1_000_000 + SR -
+        # outlier_offset so first edge lands at RTP 1_000_000 + SR.
+        rtp_start = int(1_000_000 + SR - outlier_offset)
+        before_rejected = cal.peaks_rejected_position
+        _run_diff(cal, signal, rtp_start=rtp_start)
+
+        # chain_delay_samples must NOT have updated — outlier rejected.
+        assert abs(cal.chain_delay_samples - baseline_cd) < 1.0, \
+            f"outlier leaked through: {cal.chain_delay_samples} vs " \
+            f"baseline {baseline_cd}"
+        assert cal.peaks_rejected_position > before_rejected, \
+            "position-rejection counter did not increment"
+
+    def test_bootstrap_accepts_initial_edges(self):
+        """During the bootstrap window (first
+        DIFF_POSITION_HISTORY_BOOTSTRAP edges), no position-stability
+        check applies — needed so the running median has something
+        to converge on."""
+        from hf_timestd.core.bpsk_pps_calibrator_diff import (
+            DIFF_POSITION_HISTORY_BOOTSTRAP,
+        )
+        cal = BpskPpsCalibratorDiff(sample_rate=SR)
+        signal = _make_bpsk_signal(
+            duration_s=float(DIFF_POSITION_HISTORY_BOOTSTRAP + 2),
+            edge_offset_samples=5.0,
+            transition_width_samples=2.0,
+        )
+        _run_diff(cal, signal)
+        # All bootstrap edges should be accepted — no rejections.
+        assert cal.peaks_rejected_position == 0
+        assert cal.pps_ok >= DIFF_POSITION_HISTORY_BOOTSTRAP
+
+    def test_wraparound_near_second_boundary(self):
+        """If the consensus is near 0 (or near SR), the position
+        check must fold the wraparound — an edge at SR-1 vs an edge
+        at 0 are physically the same position, not SR samples apart."""
+        cal = BpskPpsCalibratorDiff(sample_rate=SR)
+        # Edge at offset 0 — chain_delay_samples will be near 0 or
+        # near SR depending on which side of the integer boundary
+        # the parabolic interp lands on.  Either way, the position
+        # check should fold across the wraparound.
+        signal = _make_bpsk_signal(
+            duration_s=15.0, edge_offset_samples=0.0,
+            transition_width_samples=2.0,
+        )
+        _run_diff(cal, signal)
+        # We don't assert specific values; just that running it
+        # doesn't produce phantom position-rejection events from
+        # wraparound mis-handling.
+        assert cal.pps_ok >= 10, \
+            f"wraparound test: too few edges ({cal.pps_ok}) — " \
+            f"position check may be over-rejecting"
+
+
 class TestModuleConstants:
     def test_threshold_factor_default(self):
         # Documented as 100 in the module — flagging if someone
