@@ -162,17 +162,21 @@ class BpskPpsCalibratorMF:
     ):
         """
         Args:
-            use_magnitude_correlation: If True, replace the Costas-loop
-                + Re(s_rot) detection path with rotation-invariant
-                magnitude correlation: y[n] = boxcar(s)[n] on the COMPLEX
-                signal, then peak-pick on |y|.  The Costas loop is still
-                run for observability (phase / dphase_ema in the journal)
-                but its lock state no longer gates edge acceptance.  The
-                BPSK polarity flip produces a peak of magnitude 2·N·|A|
-                regardless of carrier phase, so the per-restart
-                chain_delay disambiguation drift caused by Costas
-                re-acquiring at slightly different operating points goes
-                away.  See docs/HF-PPS-CHRONY-TUNING.md §5.2.
+            use_magnitude_correlation: If True, peak-pick on |MF(s_rot)|
+                (complex matched filter, take magnitude) instead of
+                MF(Re(s_rot)) (legacy).  Costas is still used to remove
+                residual carrier *frequency* — without that derotation
+                a sub-Hz offset accumulates >N·ω·Δt phase rotation over
+                the N=SR/2 boxcar window and the sums cancel toward
+                zero; a 2026-05-22 deploy that tried to drop Costas
+                entirely walked chain_delay to a 185 ms sidelobe within
+                seconds.  What we DO drop is the costas_locked GATE —
+                |MF(s_rot)| is rotation-invariant to any small residual
+                phase error θ (|e^(jθ)|=1), so we no longer need to
+                refuse edges during brief Costas excursions.  This
+                eliminates the per-restart chain_delay disambiguation
+                drift inherent to the Re(s_rot) path's amplitude
+                dependence on θ.  See docs/HF-PPS-CHRONY-TUNING.md §5.2.
         """
         if sample_rate < 8000:
             raise ValueError(
@@ -394,12 +398,26 @@ class BpskPpsCalibratorMF:
         self._rtp_buf = np.concatenate([self._rtp_buf, rtp_batch])
 
         if self._use_magnitude_correlation:
-            # MAGNITUDE-CORRELATION PATH (rotation-invariant).
-            # Boxcar MF on the COMPLEX signal: a polarity flip at the
-            # PPS edge produces y_complex = sum(post) - sum(pre)
-            # = N·(-A·e^jφ) - N·(A·e^jφ) = -2N·A·e^jφ, so |y_complex|
-            # = 2N·|A| regardless of φ.  No Costas dependency.
-            self._z_buf = np.concatenate([self._z_buf, s])
+            # MAGNITUDE-CORRELATION PATH.  Keep the Costas rotation
+            # (needed to remove residual carrier *frequency* so the
+            # half-second boxcar integrates coherently — without it,
+            # any sub-Hz offset accumulates >N·ω·Δt phase rotation
+            # over N=SR/2 samples, the sums cancel toward zero, and a
+            # carrier-induced sidelobe wins peak-pick at the wrong
+            # position — observed live 2026-05-22 01:48 UTC: chain_delay
+            # walked to a sidelobe 185 ms off true).  Drop only the
+            # final ``Re()`` projection and the costas_locked gate:
+            # |MF(s_rot)| is rotation-invariant to any small residual
+            # phase error θ — |e^(jθ)| = 1 — so it stays robust through
+            # Costas excursions without gating edges.  This is the
+            # narrow fix to the Re-path's failure modes (per-restart
+            # chain_delay disambiguation drift, threshold treadmill)
+            # while keeping Costas's actual essential job (frequency
+            # tracking).
+            s_rot = s * np.exp(-1j * self._phase)
+            self._z_buf = np.concatenate(
+                [self._z_buf, s_rot.astype(np.complex64)]
+            )
             if len(self._z_buf) < 2 * self._N + 1:
                 return self._maybe_result()
             N = self._N
@@ -409,8 +427,8 @@ class BpskPpsCalibratorMF:
             idx = np.arange(N, len(self._z_buf) - N)
             y_complex = ((csum[idx + N + 1] - csum[idx + 1])
                          - (csum[idx] - csum[idx - N]))
-            # Take magnitude: preserves all signal energy, rotation-
-            # invariant, downstream code already operates on |y|.
+            # Take magnitude: preserves all signal energy regardless of
+            # residual phase, downstream code already operates on |y|.
             y = np.abs(y_complex).astype(np.float64)
             rtp_at_y = self._rtp_buf[idx]
         else:

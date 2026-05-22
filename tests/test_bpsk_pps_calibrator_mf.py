@@ -25,6 +25,7 @@ def _make_bpsk_signal(
     amplitude: float = 1.0,
     noise_std: float = 0.0,
     carrier_phase: float = 0.0,
+    carrier_freq_hz: float = 0.0,
     transition_width_samples: float = 2.0,
     seed: int = 42,
 ) -> np.ndarray:
@@ -63,7 +64,13 @@ def _make_bpsk_signal(
     else:
         signal_real = amplitude * polarity
         noise_imag = np.zeros(n)
-    s = (signal_real + 1j * noise_imag) * np.exp(1j * carrier_phase)
+    # Static phase rotation, optional residual carrier frequency.  The
+    # carrier_freq_hz parameter models the post-radiod-downmix offset
+    # that a real BPSK signal carries (Costas's job is to track and
+    # remove it before the boxcar MF integrates).
+    omega = 2.0 * np.pi * carrier_freq_hz
+    phase = carrier_phase + omega * t / sample_rate
+    s = (signal_real + 1j * noise_imag) * np.exp(1j * phase)
     return s.astype(np.complex64)
 
 
@@ -328,3 +335,43 @@ class TestMagnitudeCorrelation:
         no surprise switch-over for existing deployments."""
         cal = BpskPpsCalibratorMF(sample_rate=SR)
         assert cal._use_magnitude_correlation is False
+
+    @pytest.mark.parametrize("carrier_hz", [0.0, 0.2, 0.5])
+    def test_locks_with_residual_carrier_frequency(self, carrier_hz):
+        """Real BPSK signal has residual carrier offset after radiod's
+        downmix — sub-Hz from GPSDO + RX-888 LO mismatch in normal
+        operation.  Costas tracks and removes it (1 Hz loop BW); the
+        magnitude path must still produce correct chain_delay through
+        that tracking.
+
+        A 2026-05-22 deploy that ran |MF(s)| WITHOUT Costas derotation
+        walked to a 185 ms sidelobe in seconds — the boxcar over
+        N=SR/2 samples cancels rotating signal — proving Costas's
+        carrier-frequency removal is essential even though its
+        lock-state gate is not.
+
+        Limit: carrier offsets above ~1 Hz exceed the Costas loop
+        bandwidth and BOTH detection paths degrade (legacy Re cancels
+        in cos·polarity averaging the same way magnitude does).  For
+        the GPSDO-fed TS1 install on bee1 the residual is well below
+        0.5 Hz, so we test 0-0.5 Hz here; higher offsets are a
+        Costas-loop tuning concern, separate from detection-path
+        choice."""
+        injected = 7.5
+        cal = BpskPpsCalibratorMF(
+            sample_rate=SR, consecutive_required=5,
+            edge_tolerance_samples=20,
+            use_magnitude_correlation=True,
+        )
+        signal = _make_bpsk_signal(
+            duration_s=15.0, edge_offset_samples=injected,
+            carrier_freq_hz=carrier_hz,
+        )
+        result = _feed_in_batches(cal, signal)
+        assert result is not None, \
+            f"failed to lock at carrier_freq_hz={carrier_hz}"
+        err = _modular_distance(result.chain_delay_samples, injected, SR)
+        # 2 samples (~21 µs at 96 kHz) of slack for Costas tracking error.
+        assert err < 2.0, \
+            f"carrier_hz={carrier_hz} recovered={result.chain_delay_samples} "\
+            f"injected={injected} err={err}"
