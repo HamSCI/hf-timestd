@@ -250,6 +250,20 @@ enabled = false
 #                                 # (matched-filter only). Default 1.0; the GPSDO
 #                                 # topology means residual carrier offset is
 #                                 # sub-Hz, so a slow loop is plenty.
+# use_magnitude_correlation = false
+#                                 # When true, the matched filter runs on the
+#                                 # COMPLEX IQ signal and peak-picks on |y|.
+#                                 # The Costas loop is still computed (for
+#                                 # observability) but no longer gates edge
+#                                 # acceptance — the magnitude peak is
+#                                 # rotation-invariant by construction.
+#                                 # Eliminates the carrier-recovery instability
+#                                 # and per-restart chain_delay disambiguation
+#                                 # drift documented in
+#                                 # docs/HF-PPS-CHRONY-TUNING.md §5.2.  Default
+#                                 # false to keep deployed Costas behaviour
+#                                 # until explicit opt-in; recommended TRUE
+#                                 # for any GPSDO-fed TS1 installation.
 #
 # Channel filter overrides (require ka9q-python ≥ 3.11):
 # low_edge_hz = -25000            # Channel filter low edge (Hz, relative to center).

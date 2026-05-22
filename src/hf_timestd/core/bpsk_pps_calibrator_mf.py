@@ -158,7 +158,22 @@ class BpskPpsCalibratorMF:
         debug_dump_seconds: float = 60.0,
         debug_dump_subthreshold_factor: float = 0.2,
         phase_log_period_batches: int = 0,
+        use_magnitude_correlation: bool = False,
     ):
+        """
+        Args:
+            use_magnitude_correlation: If True, replace the Costas-loop
+                + Re(s_rot) detection path with rotation-invariant
+                magnitude correlation: y[n] = boxcar(s)[n] on the COMPLEX
+                signal, then peak-pick on |y|.  The Costas loop is still
+                run for observability (phase / dphase_ema in the journal)
+                but its lock state no longer gates edge acceptance.  The
+                BPSK polarity flip produces a peak of magnitude 2·N·|A|
+                regardless of carrier phase, so the per-restart
+                chain_delay disambiguation drift caused by Costas
+                re-acquiring at slightly different operating points goes
+                away.  See docs/HF-PPS-CHRONY-TUNING.md §5.2.
+        """
         if sample_rate < 8000:
             raise ValueError(
                 f"sample_rate must be ≥ 8000 Hz "
@@ -192,7 +207,16 @@ class BpskPpsCalibratorMF:
         self._costas_locked: bool = False
         self._costas_relock_counter: int = 0
 
+        self._use_magnitude_correlation = bool(use_magnitude_correlation)
+
+        # Real-path I buffer (Costas-rotated real signal).  Used when
+        # use_magnitude_correlation == False.
         self._I_buf = np.zeros(0, dtype=np.float32)
+        # Complex-path z buffer (raw IQ).  Used when
+        # use_magnitude_correlation == True; lets the MF integrate the
+        # COMPLEX signal so the polarity-flip energy is preserved
+        # regardless of where Costas thinks the phase is.
+        self._z_buf = np.zeros(0, dtype=np.complex64)
         self._rtp_buf = np.zeros(0, dtype=np.int64)
 
         self._last_edge_rtp: Optional[int] = None
@@ -302,6 +326,7 @@ class BpskPpsCalibratorMF:
         self._costas_locked = False
         self._costas_relock_counter = 0
         self._I_buf = np.zeros(0, dtype=np.float32)
+        self._z_buf = np.zeros(0, dtype=np.complex64)
         self._rtp_buf = np.zeros(0, dtype=np.int64)
         self._last_edge_rtp = None
         self._last_y_tail = np.zeros(0, dtype=np.float64)
@@ -364,27 +389,50 @@ class BpskPpsCalibratorMF:
         # warm by the time edge acceptance starts gating on it.
         self._update_costas_lock(phase_increment)
 
-        s_rot = s * np.exp(-1j * self._phase)
-        I_batch = s_rot.real.astype(np.float32)
         rtp_batch = (np.arange(batch_size, dtype=np.int64)
                      + np.int64(rtp_timestamp)) & 0xFFFFFFFF
-
-        self._I_buf = np.concatenate([self._I_buf, I_batch])
         self._rtp_buf = np.concatenate([self._rtp_buf, rtp_batch])
 
-        if len(self._I_buf) < 2 * self._N + 1:
-            return self._maybe_result()
+        if self._use_magnitude_correlation:
+            # MAGNITUDE-CORRELATION PATH (rotation-invariant).
+            # Boxcar MF on the COMPLEX signal: a polarity flip at the
+            # PPS edge produces y_complex = sum(post) - sum(pre)
+            # = N·(-A·e^jφ) - N·(A·e^jφ) = -2N·A·e^jφ, so |y_complex|
+            # = 2N·|A| regardless of φ.  No Costas dependency.
+            self._z_buf = np.concatenate([self._z_buf, s])
+            if len(self._z_buf) < 2 * self._N + 1:
+                return self._maybe_result()
+            N = self._N
+            csum = np.concatenate(
+                ([0.0 + 0.0j], np.cumsum(self._z_buf, dtype=np.complex128))
+            )
+            idx = np.arange(N, len(self._z_buf) - N)
+            y_complex = ((csum[idx + N + 1] - csum[idx + 1])
+                         - (csum[idx] - csum[idx - N]))
+            # Take magnitude: preserves all signal energy, rotation-
+            # invariant, downstream code already operates on |y|.
+            y = np.abs(y_complex).astype(np.float64)
+            rtp_at_y = self._rtp_buf[idx]
+        else:
+            # REAL-PATH (legacy) — Costas rotates s into the frame
+            # where the signal is real, then MF on Re(s_rot).
+            s_rot = s * np.exp(-1j * self._phase)
+            I_batch = s_rot.real.astype(np.float32)
+            self._I_buf = np.concatenate([self._I_buf, I_batch])
 
-        # MF: y[i] = sum(buf[i+1:i+N+1]) - sum(buf[i-N:i]).
-        # Computed via cumsum for O(L) per batch.
-        N = self._N
-        csum = np.concatenate(
-            ([0.0], np.cumsum(self._I_buf, dtype=np.float64))
-        )
-        idx = np.arange(N, len(self._I_buf) - N)
-        y = ((csum[idx + N + 1] - csum[idx + 1])
-             - (csum[idx] - csum[idx - N]))
-        rtp_at_y = self._rtp_buf[idx]
+            if len(self._I_buf) < 2 * self._N + 1:
+                return self._maybe_result()
+
+            # MF: y[i] = sum(buf[i+1:i+N+1]) - sum(buf[i-N:i]).
+            # Computed via cumsum for O(L) per batch.
+            N = self._N
+            csum = np.concatenate(
+                ([0.0], np.cumsum(self._I_buf, dtype=np.float64))
+            )
+            idx = np.arange(N, len(self._I_buf) - N)
+            y = ((csum[idx + N + 1] - csum[idx + 1])
+                 - (csum[idx] - csum[idx - N]))
+            rtp_at_y = self._rtp_buf[idx]
 
         # Splice carryover from previous batch so peaks straddling the
         # boundary aren't lost (three-point peak detection needs 1
@@ -427,7 +475,10 @@ class BpskPpsCalibratorMF:
             self._last_rtp_tail = rtp_at_y[-2:].copy()
 
         # Slide buffer: keep last 2*N samples for next batch.
-        self._I_buf = self._I_buf[-2 * N:]
+        if self._use_magnitude_correlation:
+            self._z_buf = self._z_buf[-2 * N:]
+        else:
+            self._I_buf = self._I_buf[-2 * N:]
         self._rtp_buf = self._rtp_buf[-2 * N:]
 
         # Periodic phase log (Phase 1 of Costas-drift investigation).
@@ -576,7 +627,13 @@ class BpskPpsCalibratorMF:
         # hold — until the loop re-locks.  The gate is inert during
         # acquisition (_acquired False) so the bootstrap can still walk
         # the reference toward a consistent offset.
-        if self._acquired and not self._costas_locked:
+        #
+        # MAGNITUDE-CORRELATION MODE BYPASSES THIS GATE: |y_complex| is
+        # rotation-invariant, so a Costas excursion does not produce
+        # phantom peaks in the first place.  Edges are accepted purely
+        # on their MF magnitude + position-grid consistency.
+        if (not self._use_magnitude_correlation
+                and self._acquired and not self._costas_locked):
             # Still record the phantoms for the debug capture (Layer B
             # analysis) — but mutate no lock state.  Uses the frozen
             # _peak_running / threshold from before the excursion.

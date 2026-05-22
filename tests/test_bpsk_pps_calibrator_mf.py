@@ -228,3 +228,103 @@ class TestConstructorValidation:
     def test_accepts_minimum_sample_rate(self):
         cal = BpskPpsCalibratorMF(sample_rate=8000)
         assert cal.sample_rate == 8000
+
+
+# ---------------------------------------------------------------------------
+# Magnitude-correlation detection path (rotation-invariant; skips Costas).
+# ---------------------------------------------------------------------------
+
+
+class TestMagnitudeCorrelation:
+    """The magnitude-correlation path computes the MF on the COMPLEX
+    signal and peak-picks on |y|.  It should:
+      * lock as fast as the legacy path on a clean signal,
+      * recover chain_delay to the same sub-sample precision,
+      * remain locked regardless of carrier phase (the whole point),
+      * still respect the chain_delay step-detection / phantom-gating
+        logic that does not depend on Costas.
+    """
+
+    def test_lock_at_zero_offset_magnitude_mode(self):
+        cal = BpskPpsCalibratorMF(
+            sample_rate=SR, consecutive_required=5,
+            edge_tolerance_samples=20,
+            use_magnitude_correlation=True,
+        )
+        signal = _make_bpsk_signal(duration_s=10.0, edge_offset_samples=0.0)
+        result = _feed_in_batches(cal, signal)
+        assert result is not None, "magnitude-mode failed to lock noise-free"
+        assert result.locked
+        err = _modular_distance(result.chain_delay_samples, 0.0, SR)
+        assert err < 0.5, \
+            f"chain_delay={result.chain_delay_samples}, expected ~0"
+
+    def test_chain_delay_matches_injected_offset(self):
+        injected = 12.3
+        cal = BpskPpsCalibratorMF(
+            sample_rate=SR, consecutive_required=5,
+            edge_tolerance_samples=20,
+            use_magnitude_correlation=True,
+        )
+        signal = _make_bpsk_signal(
+            duration_s=10.0, edge_offset_samples=injected,
+        )
+        result = _feed_in_batches(cal, signal)
+        assert result is not None
+        err = _modular_distance(result.chain_delay_samples, injected, SR)
+        assert err < 0.1, \
+            f"recovered={result.chain_delay_samples}, injected={injected}, err={err}"
+
+    @pytest.mark.parametrize("phi", [0.0, np.pi / 4, np.pi / 2, np.pi, 1.234])
+    def test_invariant_under_carrier_phase(self, phi):
+        """Magnitude correlation is designed to be carrier-phase
+        invariant — this is the WHOLE POINT vs the legacy path that
+        needed a Costas loop to rotate phase out before peak-picking."""
+        cal = BpskPpsCalibratorMF(
+            sample_rate=SR, consecutive_required=5,
+            edge_tolerance_samples=20,
+            use_magnitude_correlation=True,
+        )
+        signal = _make_bpsk_signal(
+            duration_s=10.0, edge_offset_samples=2.0, carrier_phase=phi,
+        )
+        result = _feed_in_batches(cal, signal)
+        assert result is not None, f"failed to lock at carrier phase {phi}"
+        assert _modular_distance(result.chain_delay_samples, 2.0, SR) < 0.2
+
+    def test_lock_at_20db_snr_magnitude_mode(self):
+        injected = 5.7
+        cal = BpskPpsCalibratorMF(
+            sample_rate=SR, consecutive_required=5,
+            edge_tolerance_samples=50,
+            use_magnitude_correlation=True,
+        )
+        signal = _make_bpsk_signal(
+            duration_s=15.0, edge_offset_samples=injected,
+            amplitude=1.0, noise_std=0.1,
+        )
+        result = _feed_in_batches(cal, signal)
+        assert result is not None, "magnitude-mode failed to lock at 20 dB SNR"
+        err = _modular_distance(result.chain_delay_samples, injected, SR)
+        assert err < 2.0, f"recovered={result.chain_delay_samples}, err={err}"
+
+    def test_reset_clears_complex_buffer(self):
+        cal = BpskPpsCalibratorMF(
+            sample_rate=SR, consecutive_required=5,
+            edge_tolerance_samples=20,
+            use_magnitude_correlation=True,
+        )
+        signal = _make_bpsk_signal(duration_s=10.0, edge_offset_samples=0.0)
+        _feed_in_batches(cal, signal)
+        assert cal.locked
+        assert len(cal._z_buf) > 0  # complex buffer was populated
+        cal.reset()
+        assert not cal.locked
+        assert len(cal._z_buf) == 0
+        assert len(cal._I_buf) == 0
+
+    def test_legacy_mode_default(self):
+        """Default behavior (no flag) must remain the Costas+Re path —
+        no surprise switch-over for existing deployments."""
+        cal = BpskPpsCalibratorMF(sample_rate=SR)
+        assert cal._use_magnitude_correlation is False

@@ -421,6 +421,18 @@ class CoreRecorderV2:
                         phase_log_period_batches=self._t6_config.get(
                             'phase_log_period_batches', 0
                         ),
+                        # Magnitude-correlation detection (opt-in).
+                        # When True the matched filter runs on the
+                        # COMPLEX signal and peak-picks on |y| — no
+                        # Costas dependency.  Eliminates the
+                        # carrier-recovery instability and the
+                        # per-restart chain_delay disambiguation drift
+                        # that the Re(s_rot) path inherits from
+                        # Costas's choice of operating point.  See
+                        # docs/HF-PPS-CHRONY-TUNING.md §5.2.
+                        use_magnitude_correlation=self._t6_config.get(
+                            'use_magnitude_correlation', False
+                        ),
                     )
                     logger.info(f"T6 BPSK PPS calibrator (matched-filter) initialized: "
                                 f"freq={freq_hz/1e6:.6f} MHz, sr={sr}")
