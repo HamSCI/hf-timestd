@@ -51,9 +51,18 @@ file_duration_sec = 600
 save_digital_rf = false
 
 # Tiered Storage: Use /dev/shm (RAM) for hot buffer, disk for cold storage
+#
+# Two independent RAM budgets ADD UP — keep their sum well under the
+# systemd MemoryMax (defaults to 6 G in our unit file).  Cgroup memory
+# accounting also double-counts tmpfs-backed scratch, so the effective
+# ceiling is (tiered_ram_percent + ring_ram_percent) × available_RAM
+# + ~1 G tmpfs double-count + ~0.5 G Python heap.  10 % + 10 % is a
+# safe default on hosts with 14 G+ available; raise both together if
+# you also raise MemoryMax.
 tiered_storage = true
 hot_buffer_root = "/dev/shm/timestd"
-tiered_ram_percent = 20
+tiered_ram_percent = 10
+ring_ram_percent = 10
 
 # Channel defaults (applied to all channel groups unless overridden per-group)
 [recorder.channel_defaults]

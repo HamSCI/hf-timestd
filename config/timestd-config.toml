@@ -44,10 +44,17 @@ save_digital_rf = false
 
 # Tiered Storage: Use /dev/shm (RAM) for hot buffer, disk for cold storage
 # Eliminates disk round-trip for real-time pipeline
-# Auto-configures based on available RAM (default: 20% of RAM for hot buffer)
+#
+# Two independent RAM budgets ADD UP — keep their sum well under the
+# systemd MemoryMax (currently 6 G).  Cgroup memory accounting also
+# double-counts tmpfs-backed scratch files, so the effective ceiling is
+# (tiered_ram_percent + ring_ram_percent) × available_RAM + ~1 G for
+# cgroup tmpfs double-count + ~0.5 G for Python heap.  With 14 G
+# available, 10 % + 10 % stays comfortably below 6 G (2026-05-22).
 tiered_storage = true
 hot_buffer_root = "/dev/shm/timestd"
-ram_percent = 20  # Percentage of available RAM to use for hot buffer
+tiered_ram_percent = 10  # Tiered hot-buffer scratch budget
+ring_ram_percent = 10    # Phase-1 metrology ring buffer budget (default 20 is too generous at MemoryMax=6G)
 
 # Archive Drive: Move evicted data to a secondary drive instead of deleting
 # When the primary disk hits 80%, oldest days are moved to archive_root.
