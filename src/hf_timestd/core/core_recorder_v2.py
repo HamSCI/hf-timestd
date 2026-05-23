@@ -2955,40 +2955,40 @@ class CoreRecorderV2:
                             # Step 3: compute system_time for chrony.
                             #
                             # NMEA-anchored path (Option 3 architectural
-                            # fix, 2026-05-23 PM session): if a T5
-                            # disambig captured the (M_disambig,
-                            # edge_rtp_disambig) pair, derive M_edge by
+                            # fix, 2026-05-23 PM session, revised):
+                            # if a T5 disambig captured (M_disambig,
+                            # edge_rtp_disambig), derive ref_time by
                             # edge-counting on GPSDO-accurate RTP deltas
-                            # and compute the host clock at edge sample
-                            # FRESH (clock_gettime now − RTP-elapsed)
-                            # rather than via the stale ka9q anchor.
-                            # Eliminates the anchor-drift artifact (see
-                            # project_hf_pps_t5_direct_2026-05-23).
+                            # (NMEA truth, no host clock).  Keep using
+                            # rtp_to_wallclock for system_time — it gives
+                            # host clock at edge acquisition via the
+                            # 30s-refreshed anchor (B_anchor bounded by
+                            # refresh interval × slew rate ≈ few ms),
+                            # MUCH safer than clock_gettime at processing
+                            # time (which adds unknown packet/processing
+                            # latency, observed ~40 ms on bee1).
+                            #
+                            # The frozen-disambig `effective_chain_delay`
+                            # is replaced by `chain_delay_calib_s` — a
+                            # per-deployment config knob holding only the
+                            # PHYSICAL chain delay (no host clock bias).
+                            # Initial deploy uses 0; tune after observing
+                            # chrony's per-source bias for HFPS vs NTP.
+                            #
+                            # Math:
+                            #   offset = raw_wall_time − chain_delay_calib − M_edge
+                            #          = (true_chain_delay − chain_delay_calib) + B_anchor
+                            # With chain_delay_calib tuned: offset ≈ B_anchor ≈ B_now.
                             #
                             # Fallback: if M_disambig is None (T5 failed
                             # at startup; only T4/persisted path
-                            # available), use the legacy anchor-based
-                            # math.  Keeps a working SHM feed even when
-                            # NMEA is unavailable.
+                            # available), use the legacy anchor + frozen-
+                            # disambig math so SHM keeps working.
                             effective_chain_delay_ns = (
                                 chain_delay_ns_raw
                                 + self._t6_diff_disambiguation_ns
                             )
                             if self._t6_diff_M_disambig is not None:
-                                rtp_now = int(quality.last_rtp_timestamp)
-                                rtp_delta_to_edge = (
-                                    (rtp_now - diff_last_edge_rtp)
-                                    & 0xFFFFFFFF
-                                )
-                                if rtp_delta_to_edge > 0x7FFFFFFF:
-                                    rtp_delta_to_edge -= 0x100000000
-                                gps_elapsed_since_edge = (
-                                    rtp_delta_to_edge / sr_local
-                                )
-                                T_sys_now = time.time()
-                                T_sys_at_edge_acq = (
-                                    T_sys_now - gps_elapsed_since_edge
-                                )
                                 edge_rtp_delta_from_disambig = (
                                     (diff_last_edge_rtp
                                      - self._t6_diff_edge_rtp_disambig)
@@ -3004,7 +3004,7 @@ class CoreRecorderV2:
                                 )
                                 ref_time = float(M_edge)
                                 wall_time_sec = (
-                                    T_sys_at_edge_acq
+                                    raw_wall_time_sec
                                     - self._t6_chain_delay_calib_s
                                 )
                             else:
