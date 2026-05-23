@@ -412,6 +412,19 @@ class CoreRecorderV2:
         # delay is a property of the hardware, not a per-edge measurement).
         self._t6_diff_disambiguation_ns = 0
         self._t6_diff_disambiguated = False
+        # NMEA-anchored SHM math (Option 3, 2026-05-23 PM session):
+        # at T5 disambig we pair (NMEA integer GPS second, BPSK edge RTP).
+        # Per-edge SHM push then derives M_edge by edge-counting from this
+        # pair using GPSDO-accurate RTP deltas, and computes the host clock
+        # at the edge sample FRESH via clock_gettime() minus RTP-elapsed
+        # — never consults the stale ka9q anchor.  Bypasses the
+        # anchor-drift artifact (see project_hf_pps_t5_direct_2026-05-23).
+        self._t6_diff_M_disambig = None
+        self._t6_diff_edge_rtp_disambig = None
+        # Physical chain_delay calibration — initialized to 0 here;
+        # re-read from self._t6_config after that attribute is assigned
+        # just below.
+        self._t6_chain_delay_calib_s = 0.0
         # Cross-restart disambiguation persistence.  Each restart used
         # to re-run the T4 chrony comparison from scratch, which picked
         # a different disambiguation every time (chrony slews
@@ -439,6 +452,11 @@ class CoreRecorderV2:
         # to T4 chronyc tracking as before.
         self._lb1421_probe = None
         self._t6_config = config.get('timing', {}).get('l6_pps', {})
+        # Apply chain_delay calibration knob now that _t6_config is set
+        # (referenced by HFPS NMEA-anchored SHM push).
+        self._t6_chain_delay_calib_s = float(
+            self._t6_config.get('chain_delay_calib_s', 0.0)
+        )
         if self._t6_config.get('enabled', False):
             freq_hz = self._t6_config.get('frequency_hz')
             if freq_hz is None:
@@ -1658,7 +1676,8 @@ class CoreRecorderV2:
             return False
 
     def _t6_diff_disambiguate_via_t5_lb1421(
-        self, chain_delay_ns_raw: int, raw_wall_time_sec: float
+        self, chain_delay_ns_raw: int, raw_wall_time_sec: float,
+        edge_rtp: Optional[int] = None,
     ) -> bool:
         """T5 (LB-1421 NMEA) disambiguation for the HFPS / diff path.
 
@@ -1697,6 +1716,14 @@ class CoreRecorderV2:
         self._t6_diff_disambiguation_ns = (
             effective_chain_delay_ns - chain_delay_ns_raw
         )
+        # Capture the (NMEA GPS second, BPSK edge RTP) pair for the
+        # NMEA-anchored SHM push path.  Subsequent edges count
+        # GPS seconds from this pair using GPSDO-accurate RTP deltas,
+        # bypassing the ka9q anchor (which has the host-clock-bias-at-
+        # refresh-moment baked in and produces the long-run drift).
+        if edge_rtp is not None:
+            self._t6_diff_M_disambig = int(reading.pps_utc_sec)
+            self._t6_diff_edge_rtp_disambig = int(edge_rtp) & 0xFFFFFFFF
         logger.info(
             f"HFPS chain_delay disambiguated against T5 (LB-1421 NMEA): "
             f"raw={chain_delay_ns_raw} ns, "
@@ -1704,7 +1731,9 @@ class CoreRecorderV2:
             f"NMEA_PPS_UTC={reading.pps_utc_sec}, "
             f"delta={delta_sec*1000:+.3f} ms, "
             f"effective_chain_delay={effective_chain_delay_ns} ns "
-            f"(no integer-sample-shift step — direct GPS reference)"
+            f"(no integer-sample-shift step — direct GPS reference); "
+            f"NMEA-anchored pair: M={self._t6_diff_M_disambig}, "
+            f"edge_rtp={self._t6_diff_edge_rtp_disambig}"
         )
         return True
 
@@ -2849,7 +2878,8 @@ class CoreRecorderV2:
                                     # Falls through to T4 if T5 isn't wired
                                     # or its reading is unavailable.
                                     if self._t6_diff_disambiguate_via_t5_lb1421(
-                                            chain_delay_ns_raw, raw_wall_time_sec
+                                            chain_delay_ns_raw, raw_wall_time_sec,
+                                            edge_rtp=diff_last_edge_rtp,
                                     ):
                                         self._t6_diff_disambiguated = True
                                         # Eager refresh — disambiguation should
@@ -2922,20 +2952,69 @@ class CoreRecorderV2:
                                                 )
                                                 self._t6_diff_saves_pending = 0
 
-                            # Step 3: apply the locked disambiguation
-                            # to the per-edge chain_delay and compute
-                            # the system_time for chrony.
+                            # Step 3: compute system_time for chrony.
+                            #
+                            # NMEA-anchored path (Option 3 architectural
+                            # fix, 2026-05-23 PM session): if a T5
+                            # disambig captured the (M_disambig,
+                            # edge_rtp_disambig) pair, derive M_edge by
+                            # edge-counting on GPSDO-accurate RTP deltas
+                            # and compute the host clock at edge sample
+                            # FRESH (clock_gettime now − RTP-elapsed)
+                            # rather than via the stale ka9q anchor.
+                            # Eliminates the anchor-drift artifact (see
+                            # project_hf_pps_t5_direct_2026-05-23).
+                            #
+                            # Fallback: if M_disambig is None (T5 failed
+                            # at startup; only T4/persisted path
+                            # available), use the legacy anchor-based
+                            # math.  Keeps a working SHM feed even when
+                            # NMEA is unavailable.
                             effective_chain_delay_ns = (
                                 chain_delay_ns_raw
                                 + self._t6_diff_disambiguation_ns
                             )
-                            wall_time_sec = (
-                                raw_wall_time_sec
-                                - effective_chain_delay_ns / 1e9
-                            )
-                            ref_time = round(wall_time_sec)
+                            if self._t6_diff_M_disambig is not None:
+                                rtp_now = int(quality.last_rtp_timestamp)
+                                rtp_delta_to_edge = (
+                                    (rtp_now - diff_last_edge_rtp)
+                                    & 0xFFFFFFFF
+                                )
+                                if rtp_delta_to_edge > 0x7FFFFFFF:
+                                    rtp_delta_to_edge -= 0x100000000
+                                gps_elapsed_since_edge = (
+                                    rtp_delta_to_edge / sr_local
+                                )
+                                T_sys_now = time.time()
+                                T_sys_at_edge_acq = (
+                                    T_sys_now - gps_elapsed_since_edge
+                                )
+                                edge_rtp_delta_from_disambig = (
+                                    (diff_last_edge_rtp
+                                     - self._t6_diff_edge_rtp_disambig)
+                                    & 0xFFFFFFFF
+                                )
+                                if edge_rtp_delta_from_disambig > 0x7FFFFFFF:
+                                    edge_rtp_delta_from_disambig -= 0x100000000
+                                edge_count = int(round(
+                                    edge_rtp_delta_from_disambig / sr_local
+                                ))
+                                M_edge = (
+                                    self._t6_diff_M_disambig + edge_count
+                                )
+                                ref_time = float(M_edge)
+                                wall_time_sec = (
+                                    T_sys_at_edge_acq
+                                    - self._t6_chain_delay_calib_s
+                                )
+                            else:
+                                wall_time_sec = (
+                                    raw_wall_time_sec
+                                    - effective_chain_delay_ns / 1e9
+                                )
+                                ref_time = float(round(wall_time_sec))
                             diff_shm.update(
-                                reference_time=float(ref_time),
+                                reference_time=ref_time,
                                 system_time=wall_time_sec,
                                 # precision -20 ≈ 1 µs — claim closer to
                                 # the observed ~22 ns σ; lets chrony
