@@ -1,0 +1,35 @@
+# Stable symlink for the LBE-1421 GPSDO USB-CDC NMEA endpoint.
+#
+# The LB-1421 enumerates as three /dev/ttyACM* devices (NMEA out,
+# command/status, and one reserved); the device-info endpoint is
+# `if00`, the same one we read NMEA from on bee1.  Without this rule
+# the ACM number changes across reboots and across USB hot-plug
+# events.
+#
+# After installing, the device appears at /dev/lb1421-nmea regardless
+# of ACM enumeration order, which is what
+# `[timing] lb1421_nmea_device` in timestd-config.toml points at.
+#
+# Installation:
+#   sudo cp deploy/udev-lb1421-nmea.rules /etc/udev/rules.d/90-lb1421-nmea.rules
+#   sudo udevadm control --reload
+#   sudo udevadm trigger --subsystem-match=tty
+#
+# Verify:
+#   ls -la /dev/lb1421-nmea
+#   stty -F /dev/lb1421-nmea raw 115200 -echo
+#   timeout 3 cat /dev/lb1421-nmea | head
+#
+# Vendor / product IDs from `lsusb`:
+#   Bus 001 Device NNN: ID 1dd2:2444 Leo Bodnar Electronics Ltd
+#                       LBE-1421 GPSDO Locked Clock Source
+
+# Note on attribute matching: udev's ATTRS{} keys must all match on a
+# *single* ancestor device, but idVendor/idProduct live on the parent
+# USB device and bInterfaceNumber lives on the interface — they aren't
+# on the same ancestor.  Since the LB-1421 enumerates only one tty
+# endpoint (if00, the NMEA stream — by-id confirms this on bee1),
+# matching idVendor+idProduct alone suffices.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1dd2", ATTRS{idProduct}=="2444", \
+    SYMLINK+="lb1421-nmea", \
+    MODE="0660", GROUP="gpsdo"

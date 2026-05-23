@@ -427,6 +427,17 @@ class CoreRecorderV2:
         # PERSIST_EVERY_N_EDGES accepted edges, not on every cycle).
         self._t6_mf_saves_pending = 0
         self._t6_diff_saves_pending = 0
+        # T5 disambiguation reference (LB-1421 GPSDO NMEA over USB-CDC).
+        # When wired, gives an integer-GPS-second reference for the
+        # BPSK PPS disambiguation that bypasses chrony's discipline
+        # noise entirely — closes the architectural detour where the
+        # GPSDO drives TS-1 to produce the PPS we measure, but we
+        # then asked chrony (disciplined by a LAN GPS NTP server) for
+        # the integer second.  Instantiate via lb1421_t5_probe.py and
+        # pass into this object via attach_lb1421_probe; absent
+        # injection, T5 is unavailable and the disambig falls through
+        # to T4 chronyc tracking as before.
+        self._lb1421_probe = None
         self._t6_config = config.get('timing', {}).get('l6_pps', {})
         if self._t6_config.get('enabled', False):
             freq_hz = self._t6_config.get('frequency_hz')
@@ -1498,6 +1509,96 @@ class CoreRecorderV2:
 
         return None
 
+    def attach_lb1421_probe(self, probe) -> None:
+        """Inject an Lb1421T5Probe for use by T5 disambiguation.
+
+        Called once at startup by the entrypoint, after the probe has
+        been instantiated and started.  Stored as a member; consulted
+        by the BPSK PPS disambiguation path *before* the T4/T3 hierarchy.
+        Pass None (or never call) to disable T5 — the disambig will
+        fall through to the existing chronyc-tracking path.
+        """
+        self._lb1421_probe = probe
+
+    def _t6_disambiguate_via_t5_lb1421(self, result) -> bool:
+        """Disambiguate against T5 (LB-1421 GPSDO NMEA over USB-CDC).
+
+        Returns True on success, False if T5 is unavailable, the
+        latest reading is stale or has no fix, or the host-clock
+        anchor is so divergent from NMEA that PPS-edge pairing would
+        be unsafe (>±0.5 s).  On success sets
+        ``self._t6_disambiguation_ns`` such that
+        ``raw + disambig = (raw_wall_time_at_edge − NMEA_UTC) * 1e9``,
+        i.e., the physical RF chain_delay derived without consulting
+        the host system clock as a timing source.
+
+        Unlike the integer-sample-shift path, this is a *direct
+        measurement*: NMEA tells us the GPS second of the most-recent
+        PPS edge, the MF tells us the RTP-position of that edge, and
+        their wall-time difference IS the chain_delay.  No
+        ``round(disagreement * sr)`` step, hence no inherited
+        reference noise.
+        """
+        if self._lb1421_probe is None:
+            return False
+        reading = self._lb1421_probe.get_latest()
+        if reading is None:
+            logger.debug(
+                "T6 T5 disambig: no fresh LB-1421 NMEA reading "
+                "(stale, no fix, or device closed)"
+            )
+            return False
+        try:
+            last_edge_rtp = getattr(self._t6_calibrator, '_last_edge_rtp', None)
+            if last_edge_rtp is None or self._t6_channel_info is None:
+                return False
+            self._t6_channel_info.chain_delay_correction_ns = None
+            from ka9q.rtp_recorder import rtp_to_wallclock
+            raw_wall_time_sec = rtp_to_wallclock(
+                last_edge_rtp, self._t6_channel_info
+            )
+            if raw_wall_time_sec is None:
+                return False
+            # Pairing sanity: the host-clock anchor used by ka9q's
+            # rtp_to_wallclock must place the matched-filter edge
+            # within ±0.5 s of NMEA's claimed PPS UTC.  Beyond that the
+            # ambiguity is no longer "off by an integer second" but
+            # "off by an unknown N seconds" — fall back.
+            delta_sec = raw_wall_time_sec - reading.pps_utc_sec
+            if abs(delta_sec) > 0.5:
+                logger.warning(
+                    f"T6 T5 disambig: host-clock anchor "
+                    f"({raw_wall_time_sec:.3f}) and NMEA PPS UTC "
+                    f"({reading.pps_utc_sec}) differ by "
+                    f"{delta_sec:+.3f} s — too wide for unambiguous "
+                    f"pairing.  Falling back to T4."
+                )
+                return False
+            # Physical chain_delay = (raw_wall_time − true_PPS_UTC).
+            effective_chain_delay_ns = int(round(
+                (raw_wall_time_sec - reading.pps_utc_sec) * 1e9
+            ))
+            # Back-derive disambig shift: effective = raw + disambig.
+            self._t6_disambiguation_ns = (
+                effective_chain_delay_ns - result.chain_delay_ns
+            )
+            logger.info(
+                f"T6 chain_delay disambiguated against T5 (LB-1421 NMEA): "
+                f"raw={result.chain_delay_ns} ns, "
+                f"raw_wall_time={raw_wall_time_sec:.6f}, "
+                f"NMEA_PPS_UTC={reading.pps_utc_sec}, "
+                f"delta={delta_sec*1000:+.3f} ms, "
+                f"effective_chain_delay={effective_chain_delay_ns} ns "
+                f"(no integer-sample-shift step — direct GPS reference)"
+            )
+            return True
+        except Exception as e:
+            logger.warning(
+                f"T6 T5 disambig: unexpected error ({e}); "
+                f"falling back to T4"
+            )
+            return False
+
     def _t6_disambiguate_via_external_reference(self, result) -> None:
         """Fallback disambiguation path used when no fresh persisted
         chain_delay is available.  Walks the timing-tier hierarchy
@@ -2287,9 +2388,13 @@ class CoreRecorderV2:
                         logger.warning(
                             f"T6 chain_delay persisted sample_rate "
                             f"{persisted.sample_rate} != current {sr_local}; "
-                            f"falling back to T4 disambiguation"
+                            f"falling back to disambiguation hierarchy"
                         )
-                    self._t6_disambiguate_via_external_reference(result)
+                    # T5 (LB-1421 NMEA over USB) — direct GPS reference,
+                    # no chrony detour.  Falls through to T4 if T5 isn't
+                    # wired or the reading is unavailable.
+                    if not self._t6_disambiguate_via_t5_lb1421(result):
+                        self._t6_disambiguate_via_external_reference(result)
                 # Apply disambiguation (set above either way) and lock in.
                 effective = result.chain_delay_ns + self._t6_disambiguation_ns
                 self._t6_last_chain_delay_ns = effective
@@ -3232,6 +3337,24 @@ def main():
     
     # Run recorder
     recorder = CoreRecorderV2(recorder_config)
+    # Attach the T5 disambiguation reference (LB-1421 GPSDO NMEA over
+    # USB-CDC), if configured.  Gated by
+    #   [timing]
+    #   lb1421_nmea_device = "/dev/lb1421-nmea"
+    # Pass an empty string or omit the key to disable T5; the disambig
+    # will fall back to T4 chronyc tracking as before.
+    timing_section = config.get('timing', {})
+    lb1421_device = str(timing_section.get('lb1421_nmea_device', '')).strip()
+    if lb1421_device:
+        from .lb1421_t5_probe import Lb1421T5Probe
+        lb1421_probe = Lb1421T5Probe(device=Path(lb1421_device))
+        lb1421_probe.start()
+        recorder.attach_lb1421_probe(lb1421_probe)
+        logger.info(
+            f"T5 LB-1421 NMEA probe attached "
+            f"(device={lb1421_device}); BPSK PPS disambig will prefer "
+            f"GPS direct over chronyc tracking."
+        )
     recorder.run()
 
 

@@ -1080,6 +1080,20 @@ Per-service overrides in [services] take precedence over the profile.
 
         # Start daemon mode
         recorder = CoreRecorderV2(recorder_config)
+        # Attach the T5 disambiguation reference (LB-1421 GPSDO NMEA
+        # over USB-CDC), if configured.  Gated by
+        #   [timing]
+        #   lb1421_nmea_device = "/dev/lb1421-nmea"
+        # Pass an empty string or omit the key to disable T5; the
+        # disambig will fall back to T4 chronyc tracking as before.
+        timing_section = config.get('timing', {})
+        lb1421_device = timing_section.get('lb1421_nmea_device', '').strip()
+        if lb1421_device:
+            from pathlib import Path
+            from .core.lb1421_t5_probe import Lb1421T5Probe
+            lb1421_probe = Lb1421T5Probe(device=Path(lb1421_device))
+            lb1421_probe.start()
+            recorder.attach_lb1421_probe(lb1421_probe)
         recorder.run()
     elif args.command == 'discover':
         import toml
