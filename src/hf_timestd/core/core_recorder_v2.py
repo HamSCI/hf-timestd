@@ -1261,6 +1261,15 @@ class CoreRecorderV2:
     T6_STEP_RECOVERY_WINDOW = 60
     T6_STEP_RECOVERY_TIGHT_NS = 1_000_000
 
+    # T5-sanity threshold for step-recovery: when T5 (LB-1421 NMEA) is
+    # available and step-recovery is about to admit a 60-rejection
+    # cluster as a "genuine new operating point," reject the candidate
+    # if T5 says the physical chain_delay hasn't really moved.  5 ms is
+    # well above legitimate slow physical drift (temperature, etc.) and
+    # well below the half-second-wrap sidelobe distance (500 ms) that
+    # caused the 2026-05-23 phantom-step incident.
+    T6_STEP_RECOVERY_T5_SANITY_NS = 5_000_000
+
     # Stuck-recovery timeout for the calibrator.  The MF cascade-
     # tolerance gate (in BpskPpsCalibratorMF) intentionally prevents
     # ``_last_edge_rtp`` from moving on far-out noise edges so a
@@ -1520,6 +1529,53 @@ class CoreRecorderV2:
         """
         self._lb1421_probe = probe
 
+    def _t5_implied_effective_chain_delay(self) -> Optional[float]:
+        """Return T5-derived effective chain_delay (ns) for the current
+        matched-filter edge, or None if T5 is unavailable.
+
+        Used by step-recovery's sanity check: when a 60-rejection
+        cluster looks like a new physical operating point, this helper
+        computes what the chain_delay *would* be if we disambiguated
+        the new lock against GPS truth right now.  If that value
+        differs from the existing locked chain_delay by more than a
+        few ms, the "step" is almost certainly phantom (packet-loss
+        zero-fill, MF sidelobe at ±0.5 s) and step-recovery should
+        refuse to clear the lock.
+
+        Does NOT modify any state.  Returns None on any of:
+          - T5 probe not attached
+          - No fresh / valid NMEA reading
+          - Calibrator has no recent edge
+          - rtp_to_wallclock returns None
+          - Host-clock anchor and NMEA disagree by more than ±0.5 s
+            (pairing too ambiguous to trust)
+        """
+        # Defensive: some unit tests bypass __init__ via __new__, so
+        # _lb1421_probe may not be defined.  Treat absence as "not wired".
+        probe = getattr(self, '_lb1421_probe', None)
+        if probe is None:
+            return None
+        reading = probe.get_latest()
+        if reading is None:
+            return None
+        last_edge_rtp = getattr(self._t6_calibrator, '_last_edge_rtp', None)
+        if last_edge_rtp is None or self._t6_channel_info is None:
+            return None
+        try:
+            self._t6_channel_info.chain_delay_correction_ns = None
+            from ka9q.rtp_recorder import rtp_to_wallclock
+            raw_wall_time_sec = rtp_to_wallclock(
+                last_edge_rtp, self._t6_channel_info
+            )
+            if raw_wall_time_sec is None:
+                return None
+            delta_sec = raw_wall_time_sec - reading.pps_utc_sec
+            if abs(delta_sec) > 0.5:
+                return None
+            return (raw_wall_time_sec - reading.pps_utc_sec) * 1e9
+        except Exception:
+            return None
+
     def _t6_disambiguate_via_t5_lb1421(self, result) -> bool:
         """Disambiguate against T5 (LB-1421 GPSDO NMEA over USB-CDC).
 
@@ -1539,9 +1595,11 @@ class CoreRecorderV2:
         ``round(disagreement * sr)`` step, hence no inherited
         reference noise.
         """
-        if self._lb1421_probe is None:
+        # Defensive lazy-init: some unit tests bypass __init__ via __new__.
+        probe = getattr(self, '_lb1421_probe', None)
+        if probe is None:
             return False
-        reading = self._lb1421_probe.get_latest()
+        reading = probe.get_latest()
         if reading is None:
             logger.debug(
                 "T6 T5 disambig: no fresh LB-1421 NMEA reading "
@@ -2432,30 +2490,75 @@ class CoreRecorderV2:
                     median_raw = sorted(self._t6_recent_raw)[
                         self.T6_STEP_RECOVERY_WINDOW // 2
                     ]
-                    logger.warning(
-                        f"T6 chain_delay step accepted after "
-                        f"{self.T6_STEP_RECOVERY_WINDOW} consistent rejections "
-                        f"(spread={spread_ns} ns < "
-                        f"{self.T6_STEP_RECOVERY_TIGHT_NS} ns, "
-                        f"median raw={median_raw} ns, "
-                        f"old locked={self._t6_last_chain_delay_ns} ns). "
-                        f"Resetting lock for re-disambiguation on next cycle."
-                    )
-                    effective_chain_delay = self._t6_last_chain_delay_ns
-                    self._t6_last_chain_delay_ns = None
-                    self._t6_disambiguation_ns = 0
-                    self._t6_wrap_rejections = 0
-                    self._t6_recent_raw.clear()
-                    # Persisted effective chain_delay reflected the old
-                    # operating point that the step-recovery just admitted
-                    # was stale.  Clear it so the next initial-accept
-                    # re-disambiguates from scratch instead of re-applying
-                    # the previous (now-wrong) shift.
-                    if self._t6_mf_chain_delay_store is not None:
-                        try:
-                            self._t6_mf_chain_delay_store.path.unlink(missing_ok=True)
-                        except OSError:
-                            pass
+                    # T5 sanity check (NEW 2026-05-23): step-recovery's
+                    # tight-cluster rule is fooled by packet-loss
+                    # zero-fill regions that produce phantom edges
+                    # ~0.5 s away from the real polarity flip (the MF's
+                    # boxcar template has a sidelobe at ±0.5 s).  On
+                    # 2026-05-23 10:10 UTC this caused HPPS to walk
+                    # 216 ms after a "Lost packet recovery: gap=11520
+                    # samples" event.  With T5 wired we can verify the
+                    # new operating point against GPS truth before
+                    # accepting it.
+                    t5_implied = self._t5_implied_effective_chain_delay()
+                    if (t5_implied is not None
+                            and self._t6_last_chain_delay_ns is not None
+                            and abs(t5_implied - self._t6_last_chain_delay_ns)
+                                > self.T6_STEP_RECOVERY_T5_SANITY_NS):
+                        # T5 says the physical chain_delay has NOT
+                        # actually changed; the cluster is a phantom.
+                        # Reject the step-recovery and keep the lock.
+                        logger.warning(
+                            f"T6 step-recovery REJECTED by T5 sanity: "
+                            f"candidate would set effective ~ "
+                            f"{t5_implied:.0f} ns, old locked = "
+                            f"{self._t6_last_chain_delay_ns} ns, "
+                            f"disagreement = "
+                            f"{t5_implied - self._t6_last_chain_delay_ns:+.0f} ns "
+                            f"(threshold ±{self.T6_STEP_RECOVERY_T5_SANITY_NS} ns). "
+                            f"Phantom edge from packet-loss zero-fill or "
+                            f"matched-filter sidelobe.  Holding old lock; "
+                            f"clearing recent_raw to give the calibrator "
+                            f"a fresh window to relock on the true edge."
+                        )
+                        self._t6_recent_raw.clear()
+                        self._t6_wrap_rejections = 0
+                        effective_chain_delay = self._t6_last_chain_delay_ns
+                    else:
+                        if t5_implied is None:
+                            sanity_msg = "T5 unavailable"
+                        else:
+                            sanity_msg = (
+                                f"T5 confirms: candidate effective "
+                                f"~ {t5_implied:.0f} ns vs old "
+                                f"{self._t6_last_chain_delay_ns} ns "
+                                f"(within ±{self.T6_STEP_RECOVERY_T5_SANITY_NS} ns)"
+                            )
+                        logger.warning(
+                            f"T6 chain_delay step accepted after "
+                            f"{self.T6_STEP_RECOVERY_WINDOW} consistent rejections "
+                            f"(spread={spread_ns} ns < "
+                            f"{self.T6_STEP_RECOVERY_TIGHT_NS} ns, "
+                            f"median raw={median_raw} ns, "
+                            f"old locked={self._t6_last_chain_delay_ns} ns; "
+                            f"{sanity_msg}). "
+                            f"Resetting lock for re-disambiguation on next cycle."
+                        )
+                        effective_chain_delay = self._t6_last_chain_delay_ns
+                        self._t6_last_chain_delay_ns = None
+                        self._t6_disambiguation_ns = 0
+                        self._t6_wrap_rejections = 0
+                        self._t6_recent_raw.clear()
+                        # Persisted effective chain_delay reflected the old
+                        # operating point that the step-recovery just admitted
+                        # was stale.  Clear it so the next initial-accept
+                        # re-disambiguates from scratch instead of re-applying
+                        # the previous (now-wrong) shift.
+                        if self._t6_mf_chain_delay_store is not None:
+                            try:
+                                self._t6_mf_chain_delay_store.path.unlink(missing_ok=True)
+                            except OSError:
+                                pass
                 else:
                     if self._t6_wrap_rejections == 1 or self._t6_wrap_rejections % 60 == 0:
                         logger.warning(

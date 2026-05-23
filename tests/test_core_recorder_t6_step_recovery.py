@@ -138,6 +138,106 @@ class TestT6StepRecovery(unittest.TestCase):
         self.assertEqual(cr._t6_wrap_rejections, 0)
 
 
+class TestT6StepRecoveryT5Sanity(unittest.TestCase):
+    """The 2026-05-23 phantom-step incident: a `Lost packet recovery` gap
+    of 11520 samples produced a tight 60-edge cluster ~216 ms away from
+    the working lock — the matched filter's boxcar sidelobe at ±0.5 s.
+    Without the T5 sanity check step-recovery accepted it as a real
+    operating-point change, re-disambiguated against T4, and walked HPPS
+    out to +216 ms / chrony-falseticker.
+
+    With the T5 probe wired we cross-check the candidate against GPS
+    truth (LB-1421 NMEA): if the candidate's implied effective
+    chain_delay disagrees with the existing lock by more than
+    ``T6_STEP_RECOVERY_T5_SANITY_NS`` (5 ms), the step is rejected and
+    the lock is held.
+    """
+
+    def _make_recorder_with_t5(
+        self,
+        *,
+        locked_ns: int,
+        t5_implied_ns: float,
+    ):
+        """Build a step-recovery test recorder with the T5 helper stubbed
+        to return ``t5_implied_ns``.  No real probe involved."""
+        cr = _make_recorder_at_locked_state(locked_ns=locked_ns)
+        cr._t5_implied_effective_chain_delay = MagicMock(
+            return_value=t5_implied_ns
+        )
+        return cr
+
+    def test_t5_lets_same_delay_step_proceed_after_rtp_realignment(self):
+        # The "stream restart re-lock" case: after a radiod restart the
+        # matched filter re-locks at a *different RTP-grid position*
+        # but the *physical chain_delay is unchanged* (it's an RF-path
+        # constant).  T5's implied effective for the new raw is the
+        # same as the old lock to within sub-ms.  In this case the
+        # step-recovery should PROCEED — the calibrator's raw moved
+        # but the underlying truth didn't, so the disambig needs to
+        # re-run to bind the new raw to the same effective.
+        locked = 32_000_000
+        # T5 confirms 50 µs off — well within the 5 ms sanity threshold.
+        cr = self._make_recorder_with_t5(
+            locked_ns=locked, t5_implied_ns=32_050_000.0
+        )
+        for i in range(CoreRecorderV2.T6_STEP_RECOVERY_WINDOW):
+            jitter_ns = (i % 5) * 50
+            cr._t6_calibrator.process_samples.return_value = _calibrator_result(
+                418_000_000 + jitter_ns
+            )
+            samples, quality = _samples_quality()
+            cr._t6_on_samples(samples, quality)
+
+        # Step-recovery PROCEEDED: lock cleared so initial-accept
+        # re-disambiguates against T5 on the next cycle.
+        self.assertIsNone(cr._t6_last_chain_delay_ns)
+        self.assertEqual(cr._t6_disambiguation_ns, 0)
+        self.assertEqual(len(cr._t6_recent_raw), 0)
+
+    def test_t5_phantom_detection_holds_lock_through_packet_loss(self):
+        # The 2026-05-23 bee1 incident exactly: 60-edge cluster ~216 ms
+        # away from old lock, T5 (had it been available) would have
+        # computed implied ~248 ms (the phantom edge's wall-clock
+        # position relative to NMEA's true PPS).  Difference from old
+        # locked = 216 ms >> 5 ms → REJECT.  HPPS stays at +1 ns
+        # instead of walking to +216 ms.
+        locked = 32_000_000
+        # Mirror the bee1 incident's effective_chain_delay = 249.367 ms:
+        cr = self._make_recorder_with_t5(
+            locked_ns=locked, t5_implied_ns=249_367_024.0
+        )
+        for i in range(CoreRecorderV2.T6_STEP_RECOVERY_WINDOW):
+            jitter_ns = (i % 5) * 50
+            cr._t6_calibrator.process_samples.return_value = _calibrator_result(
+                574_919_107 + jitter_ns  # also the bee1 incident raw
+            )
+            samples, quality = _samples_quality()
+            cr._t6_on_samples(samples, quality)
+
+        # Lock retained — phantom step refused.
+        self.assertEqual(cr._t6_last_chain_delay_ns, locked)
+        self.assertEqual(len(cr._t6_recent_raw), 0)
+
+    def test_t5_unavailable_falls_through_to_old_behaviour(self):
+        # If T5 isn't wired (helper returns None), step-recovery must
+        # behave as before — the 2026-05-23 fix is opt-in via T5,
+        # never a regression.
+        locked = 32_000_000
+        cr = _make_recorder_at_locked_state(locked_ns=locked)
+        cr._t5_implied_effective_chain_delay = MagicMock(return_value=None)
+
+        for i in range(CoreRecorderV2.T6_STEP_RECOVERY_WINDOW):
+            jitter_ns = (i % 5) * 50
+            cr._t6_calibrator.process_samples.return_value = _calibrator_result(
+                418_000_000 + jitter_ns
+            )
+            samples, quality = _samples_quality()
+            cr._t6_on_samples(samples, quality)
+
+        self.assertIsNone(cr._t6_last_chain_delay_ns)
+
+
 class TestT6StuckRecovery(unittest.TestCase):
 
     def test_unlocked_for_longer_than_timeout_resets_calibrator(self):
