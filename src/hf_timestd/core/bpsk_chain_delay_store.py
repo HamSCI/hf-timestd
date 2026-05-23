@@ -8,11 +8,16 @@ disambiguation step resolves which integer-sample multiple of the wrap
 is correct, by comparing the implied wall-time of the detected edge
 against an external timing authority.
 
-**Per the RTP-reference invariant (METROLOGY.md §4.5), that reference
-MUST be a peer authority (T5 on-host GPS+PPS) or a fusion-derived
-offset (T3) — never the host wall clock proxy (T4 chronyc tracking).**
-See ``_get_disambiguation_reference`` in ``core_recorder_v2.py`` for
-the hierarchy that enforces this; T4 is a bootstrap-only fallback.
+**The §4.5 RTP-reference invariant is preserved by THIS module, not
+by the choice of disambiguation reference.**  The reference at first
+lock comes from whichever non-T6 tier passes the sample-period-
+aligned sigma gate in ``_get_disambiguation_reference`` — in practice
+T4 chronyc tracking (T3 fusion's ms-scale σ is too wide for the
+integer-sample shift to be reliable).  Once that one-shot pick is
+made, this file records the resulting *effective chain_delay* — a
+physical RF-path constant — and every subsequent cycle re-derives
+its own disambig from that value with no host-wall-clock dependence.
+The invariant lives in the persisted value, not in the bootstrap.
 
 The problem: chrony's *Last offset* shifts continuously as it
 disciplines the local clock.  Every restart re-runs this comparison

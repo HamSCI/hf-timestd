@@ -1199,10 +1199,28 @@ class CoreRecorderV2:
             self._t6_stream = None
 
     # Maximum sigma of a non-T6 reference we'll trust for disambiguation.
-    # Half-second wrap value is ~322 ms; we need our reference to be tighter
-    # than that to be useful for disambiguating which side of the wrap is
-    # correct.  250 ms gives margin without being unrealistically tight.
-    T6_DISAMBIGUATION_MAX_SIGMA_MS = 250.0
+    #
+    # Disambiguation resolves an integer-sample shift via
+    # ``shift_samples = round(disagreement_sec * sample_rate)``.  At 96 kHz
+    # the sample period is 10.4 µs; a reliable integer-sample pick demands
+    # reference central-value uncertainty well under one sample period.
+    # Empirically (bee1 2026-05-23) a T3 fusion reference with σ ≈ 4 ms
+    # and a transient central-value bias of a few hundred µs picked a wrap
+    # off by 24 samples (≈ +252 µs), then re-locked −381 µs after a
+    # restart that captured a different fusion bias — both wide enough to
+    # make chrony flag TSL3 as a falseticker.  T4 chronyc tracking against
+    # a healthy LAN GPS routinely sits at ~1 µs RMS, which IS tight enough
+    # for sub-sample disambiguation.
+    #
+    # 5 µs ≈ half a sample period at 96 kHz — the threshold below which a
+    # reference will reliably yield the correct integer wrap.  In practice
+    # this means T3 fusion is never used for disambiguation; the
+    # bootstrap path is always T4 (or T5 once wired), satisfying the
+    # §4.5 invariant via the *persistence* mechanism: T4 is consulted
+    # ONCE per restart-window to establish the RF-path-invariant
+    # ``effective_chain_delay``, and from there every cycle re-derives
+    # disambiguation from the persisted value with no T4 dependence.
+    T6_DISAMBIGUATION_MAX_SIGMA_MS = 0.005
 
     # Step-recovery thresholds for the wrap-rejector.  The wrap-rejector
     # locks in the first stable chain_delay after disambiguation; if the
@@ -1370,28 +1388,40 @@ class CoreRecorderV2:
 
           - **T5** (highest): on-host GPS+PPS chrony refclock — direct
             peer authority, no wall-clock dependence.  Not yet wired.
-          - **T3** (preferred fallback): HF Fusion offset via
-            ``/run/hf-timestd/fusion_status.json``.  Fusion is
-            always-on (per the operator-described architecture) and
-            computes ``(rtp_time − true_UTC)`` directly from HF time
-            stations — never via the host system clock.  This is the
-            clean reference under the invariant.
-          - **T4** (last-resort fallback): LAN GPS+PPS via
-            ``chronyc tracking``.  This reads ``system_clock − true_UTC``
-            and therefore couples the disambiguation to the host wall
-            clock — a soft violation of the invariant, tolerated only
-            when T5 and T3 are unavailable (e.g., cold start before
-            fusion has converged).  Sub-sample wrap-pick is correct
-            even with loose chrony, so this remains acceptable as a
-            bootstrap; it must not be the steady-state path.
+          - **T3**: HF Fusion offset via
+            ``/run/hf-timestd/fusion_status.json``.  Listed first as
+            the invariant-cleanest source, but **in practice rejected
+            by the sigma gate** — HF fusion's steady-state uncertainty
+            (sub-ms at best) is far wider than the sample period
+            (~10 µs at 96 kHz), so the integer-sample disambiguation
+            it produces is unreliable.  Bee1 2026-05-23: a T3 fusion
+            disambig with σ=4.3 ms picked a wrap off by 24 samples
+            (+252 µs), then re-locked −381 µs after restart — both
+            wide enough that chrony marked TSL3 a falseticker.
+          - **T4** (practical bootstrap): LAN GPS+PPS via
+            ``chronyc tracking``.  Reads ``system_clock − true_UTC``;
+            superficially appears to couple disambig to the host wall
+            clock, but the invariant is preserved through the
+            *persistence* mechanism: T4 is consulted ONCE per
+            restart-window to pick the integer wrap, the result is
+            written to ``/var/lib/timestd/bpsk_*_chain_delay.json``,
+            and every subsequent cycle re-derives disambiguation from
+            that RF-path-invariant value with no further T4 reads.
+            Per-sample data labeling continues to use T3 fusion as
+            the authority offset; T4 only resolves the integer-wrap
+            ambiguity at the moment of physical lock.
         """
         # T5: on-host GPS+PPS — not yet wired (requires direct refclock
         # probe in core-recorder).  Add a check here once the probe lands.
 
-        # T3 PREFERRED — fusion is the clean per-invariant reference.
-        # fusion_status.json carries the Kalman-fused offset between RTP
-        # and true UTC, computed end-to-end from HF time stations
-        # without ever consulting the host system clock.
+        # T3 — fusion is the invariant-cleanest reference, but the
+        # sample-period-aligned sigma gate (5 µs at 96 kHz) will reject
+        # it in practice: HF fusion's steady-state uncertainty sits in
+        # the millisecond range, three orders of magnitude wider than
+        # what an integer-sample disambiguation can tolerate.  Listed
+        # first so that if T5 lands (sub-µs reference) or a future
+        # fusion design tightens its σ, this path activates without a
+        # code change.
         try:
             fusion_path = Path('/run/hf-timestd/fusion_status.json')
             data = json.loads(fusion_path.read_text())
@@ -1406,11 +1436,15 @@ class CoreRecorderV2:
         except (FileNotFoundError, OSError, json.JSONDecodeError, KeyError, ValueError):
             pass
 
-        # T4 BOOTSTRAP FALLBACK — soft violation of the invariant.  Only
-        # reached if fusion is unavailable or has not yet converged
-        # below T6_DISAMBIGUATION_MAX_SIGMA_MS.  Reads chrony's tracking
-        # offset against the LAN GPS source.  `Last offset` is
-        # (true_time − local_time); we negate for (system_clock − UTC).
+        # T4 BOOTSTRAP — practical disambiguation source today.  The
+        # §4.5 invariant is preserved by the persistence mechanism:
+        # T4's reading is consulted ONCE here, written to
+        # bpsk_*_chain_delay.json as the RF-path-invariant
+        # effective_chain_delay, and every subsequent cycle re-derives
+        # disambiguation from that value with no further wall-clock
+        # read.  Reads chrony's tracking offset against the LAN GPS
+        # source.  `Last offset` is (true_time − local_time); we
+        # negate for (system_clock − UTC).
         try:
             import subprocess
             result = subprocess.run(
@@ -1429,12 +1463,13 @@ class CoreRecorderV2:
                     offset_ms = -last_offset_sec * 1000.0
                     sigma_ms = rms_offset_sec * 1000.0
                     if sigma_ms <= self.T6_DISAMBIGUATION_MAX_SIGMA_MS:
-                        logger.warning(
-                            "T6 disambiguation falling back to T4 chronyc "
-                            "tracking — fusion-derived T3 unavailable.  "
-                            "Once fusion converges, restart core-recorder "
-                            "to re-disambiguate against the invariant-"
-                            "compliant reference.  See METROLOGY.md §4.5."
+                        logger.info(
+                            f"T6 disambiguation using T4 chronyc tracking "
+                            f"(sigma={sigma_ms:.3f} ms).  Result persists "
+                            f"to bpsk_*_chain_delay.json so subsequent "
+                            f"cycles re-derive from the RF-path-invariant "
+                            f"value without re-reading chrony.  See "
+                            f"METROLOGY.md §4.5."
                         )
                         return offset_ms, sigma_ms, 'T4'
         except (FileNotFoundError, OSError,
