@@ -2320,6 +2320,18 @@ class CoreRecorderV2:
 
     def _t6_on_samples(self, samples, quality):
         """Sample callback for the BPSK PPS stream — feeds the calibrator."""
+        # Per-batch FRESH host clock snapshot — paired with this batch's
+        # first-sample RTP.  Used by the HFPS NMEA-anchored SHM push as
+        # the time-source replacement for `rtp_to_wallclock` (which uses
+        # ka9q's 30s-stale anchor).  Refreshed at batch cadence (~50 Hz
+        # at 1920-sample batches), so the host-clock-bias-at-anchor-
+        # capture stale window is bounded to ~20 ms × slew rate (~ns).
+        # The constant `batch_handler_entry − first_sample_acquisition`
+        # latency (packet network + radiod pipeline + Python scheduling,
+        # typically ~25 ms at 1920-sample batches) gets absorbed by
+        # `chain_delay_calib_s`.
+        _batch_handler_entry_host_time = time.time()
+        _batch_handler_entry_rtp = int(quality.last_rtp_timestamp)
         # Defensive lazy-init for unit tests that bypass __init__ via
         # ``CoreRecorderV2.__new__(CoreRecorderV2)``.  In production
         # __init__ has already set these; in tests they are absent and
@@ -3030,8 +3042,20 @@ class CoreRecorderV2:
                                     self._t6_diff_M_disambig + edge_count
                                 )
                                 ref_time = float(M_edge)
+                                # Per-batch fresh anchor (see _t6_on_samples
+                                # top): host clock at handler entry paired
+                                # with this batch's first-sample RTP.  No
+                                # ka9q anchor staleness.
+                                rtp_delta_from_batch_entry = (
+                                    (diff_last_edge_rtp
+                                     - _batch_handler_entry_rtp)
+                                    & 0xFFFFFFFF
+                                )
+                                if rtp_delta_from_batch_entry > 0x7FFFFFFF:
+                                    rtp_delta_from_batch_entry -= 0x100000000
                                 wall_time_sec = (
-                                    raw_wall_time_sec
+                                    _batch_handler_entry_host_time
+                                    + rtp_delta_from_batch_entry / sr_local
                                     - self._t6_chain_delay_calib_s
                                 )
                             else:
