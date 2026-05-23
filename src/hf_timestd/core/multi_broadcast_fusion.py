@@ -4660,7 +4660,6 @@ def run_fusion_service(
     data_root: Path,
     interval_sec: float = 60.0,
     enable_chrony: bool = True,
-    enable_chrony_l1: bool = False,
     lookback_minutes: int = 30,
     receiver_lat: Optional[float] = None,
     receiver_lon: Optional[float] = None,
@@ -4716,9 +4715,15 @@ def run_fusion_service(
         storage_config=_storage_config
     )
     
-    # Initialize dual Chrony SHM outputs if enabled
-    chrony_shm_l1 = None  # SHM 0: timestd.L1 (raw L1 metrology fusion)
-    chrony_shm_l2 = None  # SHM 1: timestd.L2 (calibrated L2 timing fusion)
+    # Initialize Chrony SHM output if enabled.  Single feed at SHM unit 1
+    # (refid FUSE) — the legacy L1 raw-metrology feed at unit 0 was
+    # dropped 2026-05-23 along with the TSL1/TSL2/TSL3 → FUSE/HPPS
+    # rename; the L1 and L2 fusion paths had produced byte-identical
+    # d_clock_fused_ms in single-station-mode for weeks before that,
+    # making the second feed redundant.  result_l1 is still computed
+    # for the L1-vs-L2 diagnostic comparison logged later in this
+    # function, but never published to chrony.
+    chrony_shm_l2 = None  # SHM 1: refid FUSE
     _chrony_shm_available = False  # True if sysv_ipc is importable
 
     if enable_chrony:
@@ -4726,48 +4731,18 @@ def run_fusion_service(
             from hf_timestd.core.chrony_shm import ChronySHM
             _chrony_shm_available = True
 
-            # Initialize L1 feed (SHM unit 0) only when enable_chrony_l1
-            # is True.  Default OFF as of 2026-05-22: the L1 and L2
-            # fusion paths produce byte-identical d_clock_fused_ms in
-            # the current single-station-mode operating point, so
-            # writing both is redundant.  Pare to L2 only (-> chrony
-            # refid HFFS in the new naming scheme); L1 stays available
-            # for revival if the paths diverge again.
-            if enable_chrony_l1:
-                chrony_shm_l1 = ChronySHM(unit=0)
-                if chrony_shm_l1.connect():
-                    logger.info(
-                        "Chrony SHM L1 feed enabled (unit=0, refid=TSL1) "
-                        "[legacy, normally disabled — see config "
-                        "enable_chrony_l1]"
-                    )
-                else:
-                    logger.warning(
-                        "Failed to connect to Chrony SHM unit 0 - L1 feed "
-                        "disabled (will retry periodically)"
-                    )
-                    chrony_shm_l1.connected = False  # Keep object for reconnect
-            else:
-                chrony_shm_l1 = None
-                logger.info(
-                    "Chrony SHM L1 feed (unit=0) disabled by config "
-                    "(L2/HFFS is the single consolidated fusion feed)"
-                )
-
-            # Initialize L2 feed (SHM unit 1)
             chrony_shm_l2 = ChronySHM(unit=1)
             if chrony_shm_l2.connect():
                 logger.info("Chrony SHM FUSE feed enabled (unit=1, refid=FUSE)")
             else:
                 logger.warning(
-                    "Failed to connect to Chrony SHM unit 1 - L2 feed disabled "
-                    "(will retry periodically)"
+                    "Failed to connect to Chrony SHM unit 1 - FUSE feed "
+                    "disabled (will retry periodically)"
                 )
                 chrony_shm_l2.connected = False  # Keep object for reconnect
 
         except Exception as e:
             logger.warning(f"Chrony SHM not available: {e}")
-            chrony_shm_l1 = None
             chrony_shm_l2 = None
     
     # Initialize chrony stats collector (runs alongside fusion, logs source comparison)
@@ -4787,7 +4762,6 @@ def run_fusion_service(
     logger.info("Starting Multi-Broadcast Fusion Service")
     logger.info(f"  Interval: {interval_sec} seconds")
     logger.info(f"  Output: {fusion.fusion_dir / 'fusion_fusion_timing_YYYYMMDD.h5'}")
-    logger.info(f"  Chrony SHM L1 (legacy): {'enabled' if chrony_shm_l1 and chrony_shm_l1.connected else 'disabled (will retry)' if chrony_shm_l1 else 'disabled'}")
     logger.info(f"  Chrony SHM FUSE: {'enabled' if chrony_shm_l2 and chrony_shm_l2.connected else 'disabled (will retry)' if chrony_shm_l2 else 'disabled'}")
     # Initialize calibration file writer (wsprdaemon integration)
     calib_writer = None
@@ -5008,20 +4982,13 @@ def run_fusion_service(
             # fusion's connect().
             if enable_chrony and _chrony_shm_available:
                 _need_reconnect = (
-                    (chrony_shm_l1 and not chrony_shm_l1.connected) or
-                    (chrony_shm_l2 and not chrony_shm_l2.connected)
+                    chrony_shm_l2 and not chrony_shm_l2.connected
                 )
                 if _need_reconnect and (loop_start_time - _shm_last_reconnect_attempt) >= _shm_reconnect_interval:
                     with (loop_metrics.phase("shm_reconnect") if loop_metrics else nullcontext()):
                         _shm_last_reconnect_attempt = loop_start_time
-                        if chrony_shm_l1 and not chrony_shm_l1.connected:
-                            logger.info("Attempting Chrony SHM L1 reconnect...")
-                            if chrony_shm_l1.connect():
-                                logger.info("Chrony SHM L1 reconnected (unit=0, refid=TSL1) [legacy]")
-                                if loop_metrics:
-                                    loop_metrics.mark_event("shm_reconnect_l1")
                         if chrony_shm_l2 and not chrony_shm_l2.connected:
-                            logger.info("Attempting Chrony SHM L2 reconnect...")
+                            logger.info("Attempting Chrony SHM FUSE reconnect...")
                             if chrony_shm_l2.connect():
                                 logger.info("Chrony SHM FUSE reconnected (unit=1, refid=FUSE)")
                                 if loop_metrics:
@@ -5172,11 +5139,10 @@ def run_fusion_service(
                 if result.consistency_flag != 'OK':
                     logger.warning(f"  ⚠️ Consistency: {result.consistency_flag}")
                 
-                # Write directly to Chrony SHM (fusion runs at chrony poll rate)
-                # DUAL FEED ARCHITECTURE: Write both L1 (raw) and L2 (calibrated) feeds
-                # L1 feed: Uses raw L1 metrology fusion (fallback, fast)
-                # L2 feed: Uses calibrated L2 timing fusion (primary, accurate)
-                if (chrony_shm_l1 and chrony_shm_l1.connected) or (chrony_shm_l2 and chrony_shm_l2.connected):
+                # Write directly to Chrony SHM (fusion runs at chrony poll rate).
+                # Single FUSE feed using calibrated L2 timing fusion.
+                # (L1 dual-feed dropped 2026-05-23 — see TSL→FUSE/HPPS rename.)
+                if chrony_shm_l2 and chrony_shm_l2.connected:
                     # Check quality criteria
                     # CRITICAL FIX (2026-01-10): Bootstrap-aware quality gating
                     # During bootstrap (calibration not converged), accept grade D
@@ -5295,27 +5261,14 @@ def run_fusion_service(
 
                         _shm_write_t0 = time.monotonic()
                         try:
-                            # Update L1 feed (SHM 0) - raw L1 metrology fusion only
-                            if chrony_shm_l1 and chrony_shm_l1.connected and result_l1:
-                                reference_time_l1 = system_time - (result_l1.d_clock_fused_ms / 1000.0)
-                                uncertainty_sec_l1 = max(0.1, result_l1.uncertainty_ms) / 1000.0
-                                # Precision = log2(seconds), more negative = better
-                                # Clamp to [-20, -4] range (1us to 62ms)
-                                raw_precision_l1 = int(np.log2(uncertainty_sec_l1))
-                                precision_l1 = max(-20, min(-4, raw_precision_l1))
-                                
-                                update_success_l1 = chrony_shm_l1.update(reference_time_l1, system_time, precision_l1)
-                                if update_success_l1:
-                                    chrony_fed_this_cycle = True
-                                    logger.debug(
-                                        f"Chrony SHM L1 (unit=0) updated: D_clock={result_l1.d_clock_fused_ms:+.3f}ms, "
-                                        f"uncertainty={result_l1.uncertainty_ms:.1f}ms, precision={precision_l1} "
-                                        f"[{result_l1.n_stations}sta, {result_l1.quality_grade}]"
-                                    )
-                                else:
-                                    logger.warning("Chrony SHM L1 write failed")
-                            
-                            # Update L2 feed (SHM 1) - calibrated L2 timing fusion
+                            # Update FUSE feed (SHM 1) - calibrated L2 timing fusion.
+                            # The L1 (raw-metrology) feed at SHM 0 was dropped
+                            # 2026-05-23 with the TSL→FUSE/HPPS rename; the L1
+                            # and L2 fusion paths produced byte-identical
+                            # d_clock_fused_ms in single-station mode for weeks,
+                            # making the second feed redundant.  result_l1 is
+                            # still computed for the L1-vs-L2 diagnostic
+                            # comparison logged earlier in the cycle.
                             if chrony_shm_l2 and chrony_shm_l2.connected and result_l2:
                                 reference_time_l2 = system_time - (result_l2.d_clock_fused_ms / 1000.0)
                                 uncertainty_sec_l2 = max(0.1, result_l2.uncertainty_ms) / 1000.0
@@ -5552,14 +5505,19 @@ if __name__ == '__main__':
             pass
     
     enable_chrony = args.enable_chrony and not args.disable_chrony
-    enable_chrony_l1 = bool(
-        config.get('fusion', {}).get('enable_chrony_l1', False)
-    ) if config else False
+    # `[fusion] enable_chrony_l1` config key is silently ignored if
+    # present (2026-05-23: L1 chrony feed path deleted).  Warn so an
+    # operator notices a stale config block.
+    if config and config.get('fusion', {}).get('enable_chrony_l1') is not None:
+        logger.warning(
+            "[fusion] enable_chrony_l1 is set but the L1 chrony feed "
+            "was removed 2026-05-23; the key is ignored.  Remove it "
+            "from timestd-config.toml."
+        )
     run_fusion_service(
         args.data_root,
         args.interval,
         enable_chrony=enable_chrony,
-        enable_chrony_l1=enable_chrony_l1,
         lookback_minutes=args.lookback,
         receiver_lat=receiver_lat,
         receiver_lon=receiver_lon,
