@@ -1,0 +1,20 @@
+# /etc/systemd/system/timestd-hpps-watchdog.timer
+[Unit]
+Description=HF-Timestd HPPS Watchdog Timer
+Documentation=https://github.com/mijahauan/hf-timestd
+
+[Timer]
+# First check 2 minutes after boot — past the HPPS settle window so
+# we don't false-alarm during startup.
+OnBootSec=2min
+# Then every minute.  LastRx threshold in the script is 600 s, so
+# polling at 60 s gives us at most ~11 minutes of HPPS darkness
+# before a restart fires.
+OnUnitActiveSec=1min
+
+# Catch missed runs if the system was off briefly.
+Persistent=true
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

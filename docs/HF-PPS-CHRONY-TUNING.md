@@ -297,11 +297,13 @@ chatter.
 
 ### 4.5 Watchdog
 
-`timestd-tsl3-watchdog.timer` runs every 60 s. If `LastRx > 120 s`
-for TSL3 in `chronyc tracking`, it restarts `timestd-core-recorder`.
-There's a 300 s cooldown after each restart to prevent flapping.
+`timestd-hpps-watchdog.timer` runs every 60 s. If `LastRx > 600 s`
+for HPPS in `chronyc tracking`, it restarts `timestd-core-recorder`.
+There's a 1800 s cooldown after each restart to prevent flapping.
+(2026-05-23: renamed from `timestd-tsl3-watchdog` with the chrony
+refid rename TSL3→HPPS.)
 
-This is a hammer, not a scalpel. It does keep TSL3 alive across
+This is a hammer, not a scalpel. It does keep HPPS alive across
 weird failure modes, but it can also generate its own `?` events
 (every restart kills the calibrator's accumulated lock state). When
 diagnosing, *check the watchdog log first* — much of what looks

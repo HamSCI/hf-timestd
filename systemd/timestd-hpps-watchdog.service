@@ -1,6 +1,6 @@
-# /etc/systemd/system/timestd-tsl3-watchdog.service
+# /etc/systemd/system/timestd-hpps-watchdog.service
 [Unit]
-Description=HF-Timestd TSL3 (T6 BPSK SHM) Watchdog
+Description=HF-Timestd HPPS (T6 BPSK SHM) Watchdog
 Documentation=https://github.com/mijahauan/hf-timestd
 After=chrony.service
 Wants=chrony.service
@@ -21,15 +21,18 @@ Group=root
 # than the glitches they were trying to recover from.
 #
 # Current values:
-#   TSL3_LASTRX_THRESHOLD_S=600  (10 min — only react to genuine outages)
-#   TSL3_RESTART_COOLDOWN_S=1800 (30 min — prevent thrash even when fired)
+#   HPPS_LASTRX_THRESHOLD_S=600  (10 min — only react to genuine outages)
+#   HPPS_RESTART_COOLDOWN_S=1800 (30 min — prevent thrash even when fired)
 #
-# Revert to the prior 120/300 once chain_delay is persisted across
-# restarts (see docs/HF-PPS-CHRONY-TUNING.md §5).
-Environment=TSL3_LASTRX_THRESHOLD_S=600
-Environment=TSL3_RESTART_COOLDOWN_S=1800
-ExecStart=/opt/hf-timestd/scripts/tsl3-watchdog.sh
+# Today (2026-05-23) the chain_delay IS persisted across restarts AND
+# disambig uses T5 (LB-1421 USB NMEA, GPS-truth-direct), so the
+# original 120/300 rationale for tighter thresholds is moot.  Once a
+# stable week of operation confirms the T5+persistence pipeline is
+# resilient, this can revert to 120/300.
+Environment=HPPS_LASTRX_THRESHOLD_S=600
+Environment=HPPS_RESTART_COOLDOWN_S=1800
+ExecStart=/opt/hf-timestd/scripts/hpps-watchdog.sh
 
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=tsl3-watchdog
+SyslogIdentifier=hpps-watchdog

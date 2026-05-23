@@ -78,7 +78,7 @@ newest `.h5` mtime exceeds the threshold. Phase 3b intentionally
 froze those `.h5` files, so the watchdog mass-restarted 9
 metrology@* + fusion every ~5 min on 2026-05-20 until both watchdog
 timers were manually stopped. **Both `timestd-pipeline-watchdog.timer`
-and `timestd-tsl3-watchdog.timer` are currently stopped on bee1 and
+and `timestd-hpps-watchdog.timer` are currently stopped on bee1 and
 will re-arm on reboot** — fixing this script is the blocker for
 re-enabling them.
 
@@ -92,7 +92,7 @@ physics/TEC. Test by stopping a producer manually and confirming the
 watchdog restarts it.
 
 After deploying the script, `systemctl start
-timestd-pipeline-watchdog.timer timestd-tsl3-watchdog.timer` to
+timestd-pipeline-watchdog.timer timestd-hpps-watchdog.timer` to
 re-arm.
 
 This should arguably land BEFORE the rest of Phase 4 — it's the

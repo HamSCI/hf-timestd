@@ -1,18 +1,18 @@
 #!/bin/bash
-# /opt/hf-timestd/scripts/tsl3-watchdog.sh
+# /opt/hf-timestd/scripts/hpps-watchdog.sh
 #
-# Restart timestd-core-recorder if TSL3 (T6 BPSK SHM refclock) goes
+# Restart timestd-core-recorder if HPPS (T6 BPSK SHM refclock) goes
 # dark.  Targets the specific failure mode where the matched-filter
 # / calibrator keeps reporting `acquired=1, pps_consec>0` in the log,
 # but the SHM push gate stops firing — chrony silently sees reach=0
 # while everything LOOKS fine in the journal.
 #
 # Observed first on bee1 2026-05-12 ~07:01 UTC after ~5 hours of
-# runtime; a `systemctl restart timestd-core-recorder` brought TSL3
+# runtime; a `systemctl restart timestd-core-recorder` brought HPPS
 # back within seconds.  This script automates that.
 #
 # Detection: LastRx > LASTRX_THRESHOLD_S means chrony hasn't sampled
-# TSL3 within the threshold — that's the symptom that confirmed the
+# HPPS within the threshold — that's the symptom that confirmed the
 # failure during the incident.  reach=0 alone is noisier (it can
 # happen transiently on chrony restart); LastRx is monotone since
 # the last good sample.
@@ -21,18 +21,25 @@
 # the last restart so we don't thrash if there's a deeper problem
 # (e.g., radiod completely missing).  Default cooldown is 5 minutes.
 #
+# Environment variables (also accepts legacy TSL3_* names for
+# in-flight rename compatibility — drop the legacy names after one
+# stable week of operation):
+#   HPPS_LASTRX_THRESHOLD_S   - dark-source restart threshold (default 120)
+#   HPPS_RESTART_COOLDOWN_S   - minimum gap between auto-restarts (default 300)
+#   HPPS_STATE_DIR            - cooldown state file directory
+#
 # Exit codes:
-#   0 - TSL3 healthy, OR restart attempted, OR cooldown active
+#   0 - HPPS healthy, OR restart attempted, OR cooldown active
 #   1 - chronyc query failed (transient — let systemd retry next tick)
 #   2 - state file write failed (operator should investigate)
 
 set -euo pipefail
 
-LASTRX_THRESHOLD_S="${TSL3_LASTRX_THRESHOLD_S:-120}"
-COOLDOWN_S="${TSL3_RESTART_COOLDOWN_S:-300}"
-STATE_DIR="${TSL3_STATE_DIR:-/var/lib/hf-timestd}"
-STATE_FILE="$STATE_DIR/tsl3-watchdog-last-restart"
-LOG_TAG="tsl3-watchdog"
+LASTRX_THRESHOLD_S="${HPPS_LASTRX_THRESHOLD_S:-${TSL3_LASTRX_THRESHOLD_S:-120}}"
+COOLDOWN_S="${HPPS_RESTART_COOLDOWN_S:-${TSL3_RESTART_COOLDOWN_S:-300}}"
+STATE_DIR="${HPPS_STATE_DIR:-${TSL3_STATE_DIR:-/var/lib/hf-timestd}}"
+STATE_FILE="$STATE_DIR/hpps-watchdog-last-restart"
+LOG_TAG="hpps-watchdog"
 TARGET_UNIT="timestd-core-recorder.service"
 
 log() { logger -t "$LOG_TAG" -- "$@"; echo "[$LOG_TAG] $*"; }
@@ -97,7 +104,7 @@ main() {
         return 0
     fi
 
-    log "TSL3 LastRx=${lastrx}s exceeds threshold ${LASTRX_THRESHOLD_S}s"
+    log "HPPS LastRx=${lastrx}s exceeds threshold ${LASTRX_THRESHOLD_S}s"
 
     if cooldown_active; then
         log "restart cooldown active (last restart < ${COOLDOWN_S}s ago); skipping"
