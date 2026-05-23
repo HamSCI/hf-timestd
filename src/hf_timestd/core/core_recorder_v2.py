@@ -1179,6 +1179,14 @@ class CoreRecorderV2:
             self._t6_channel_info = channel_info
             if channel_info is not None and getattr(channel_info, 'ssrc', 0):
                 self._lifetime_entries.append((self.control, channel_info.ssrc))
+            # Wire continuous STATUS listener (ka9q-python ≥3.16.0).
+            # Refreshes channel_info.gps_time / .rtp_timesnap in place on
+            # every radiod STATUS broadcast (sub-second), bounding T6
+            # SHM-push wallclock drift to a few µs vs the legacy ~30 s
+            # anchor-staleness window that drove HPPS/HFPS to drift at
+            # the host slew rate (~3.8 µs/s on bee1).  Layer 3 recapture
+            # remains in place as a safety net for radiod restarts.
+            self._register_t6_with_status_listener(channel_info)
             if self.data_destination is None and channel_info is not None:
                 self.data_destination = getattr(channel_info, 'multicast_address', None)
                 logger.info(
@@ -2140,6 +2148,50 @@ class CoreRecorderV2:
             self._t6_drift_first_breach_wall = None
             self._t6_drift_flag_sustained = False
 
+    def _register_t6_with_status_listener(self, channel_info) -> None:
+        """Wire the T6 channel into ka9q-python's continuous STATUS
+        listener so its ``gps_time`` / ``rtp_timesnap`` anchor is
+        refreshed in place on every radiod STATUS broadcast.
+
+        Called from ``_start_t6_stream`` (initial wiring) and from
+        ``_t6_attempt_recapture`` after the wholesale ChannelInfo swap
+        (re-registers the new object so the listener mutates the
+        currently-used reference).
+
+        Silent no-op when ka9q-python is older than 3.16 (the listener
+        feature is absent) or when ``self.control`` lacks the helper.
+        The Layer-3 recapture path is still the source of truth for
+        radiod-restart discontinuity recovery; this helper just
+        eliminates the slow-drift component between recaptures.
+        """
+        if channel_info is None or not getattr(channel_info, 'ssrc', 0):
+            return
+        control = getattr(self, 'control', None)
+        if control is None:
+            # Bare/mocked recorder (e.g. unit tests that exercise the
+            # Layer-3 swap math without a real RadiodControl).
+            return
+        start_fn = getattr(control, 'start_status_listener', None)
+        if start_fn is None:
+            # Old ka9q-python (<3.16) — nothing to wire.
+            return
+        try:
+            listener = start_fn()
+            listener.register_channel(channel_info)
+            logger.info(
+                f"T6 channel SSRC {channel_info.ssrc:08x} wired to "
+                f"continuous STATUS listener — anchor refresh per "
+                f"radiod STATUS broadcast (sub-second cadence)"
+            )
+        except Exception as e:
+            # Listener failures must not break recorder startup —
+            # without it the recorder falls back to the legacy 30 s
+            # Layer-3 recapture cadence (slow but functional).
+            logger.warning(
+                f"Failed to wire T6 channel into STATUS listener "
+                f"(falling back to Layer-3 cadence): {e}"
+            )
+
     def _t6_recapture_cooldown_remaining_sec(self) -> Optional[float]:
         """Time (seconds) remaining before a sustained-breach re-capture
         is allowed.  Returns 0 when no cooldown is active; None when no
@@ -2290,6 +2342,10 @@ class CoreRecorderV2:
         new_ci.rtp_timesnap = int(fresh_rtp_snap)
         # Reference swap — atomic across the GIL.
         self._t6_channel_info = new_ci
+        # Re-register the new ChannelInfo with the continuous STATUS
+        # listener so subsequent in-place anchor mutations land on the
+        # current object, not the now-orphaned pre-recapture copy.
+        self._register_t6_with_status_listener(new_ci)
 
         with self._t6_timing_lock:
             self._t6_latest_gps_time_ns = int(fresh_gps_ns)
