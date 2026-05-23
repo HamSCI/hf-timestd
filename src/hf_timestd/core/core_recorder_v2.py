@@ -2844,6 +2844,30 @@ class CoreRecorderV2:
                                     )
                                     self._t6_diff_disambiguated = True
                                     age_s = time.time() - persisted.saved_at_unix
+                                    # Also capture an NMEA-anchored pair
+                                    # for the new SHM push math.  In the
+                                    # persistence-restored path we don't
+                                    # have a fresh T5 reading necessarily;
+                                    # derive M_disambig from the locally-
+                                    # computed wall_time (raw_wall_time −
+                                    # effective_chain_delay rounded to
+                                    # integer GPS second).  This is the
+                                    # SAME math the SHM push has always
+                                    # used for ref_time, so the estimate
+                                    # is reliable as long as anchor
+                                    # staleness < 0.5 s (always true in
+                                    # normal operation).
+                                    eff_ns = (
+                                        chain_delay_ns_raw
+                                        + self._t6_diff_disambiguation_ns
+                                    )
+                                    M_est = int(round(
+                                        raw_wall_time_sec - eff_ns / 1e9
+                                    ))
+                                    self._t6_diff_M_disambig = M_est
+                                    self._t6_diff_edge_rtp_disambig = (
+                                        int(diff_last_edge_rtp) & 0xFFFFFFFF
+                                    )
                                     logger.info(
                                         f"HFPS chain_delay disambiguated against "
                                         f"persisted effective="
@@ -2851,7 +2875,10 @@ class CoreRecorderV2:
                                         f"({age_s:.0f}s old): raw="
                                         f"{chain_delay_ns_raw} ns, shifting "
                                         f"{self._t6_diff_disambiguation_ns} ns "
-                                        f"(skipping T4 chrony walk)"
+                                        f"(skipping T4 chrony walk); "
+                                        f"NMEA-anchored pair: "
+                                        f"M={self._t6_diff_M_disambig}, "
+                                        f"edge_rtp={self._t6_diff_edge_rtp_disambig}"
                                     )
                                     # Eager refresh — the new
                                     # disambiguation should survive a
