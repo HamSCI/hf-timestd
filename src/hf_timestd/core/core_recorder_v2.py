@@ -1212,7 +1212,7 @@ class CoreRecorderV2:
     # a healthy LAN GPS routinely sits at ~1 µs RMS, which IS tight enough
     # for sub-sample disambiguation.
     #
-    # 5 µs ≈ half a sample period at 96 kHz — the threshold below which a
+    # 10 µs ≈ one sample period at 96 kHz — the threshold below which a
     # reference will reliably yield the correct integer wrap.  In practice
     # this means T3 fusion is never used for disambiguation; the
     # bootstrap path is always T4 (or T5 once wired), satisfying the
@@ -1220,7 +1220,19 @@ class CoreRecorderV2:
     # ONCE per restart-window to establish the RF-path-invariant
     # ``effective_chain_delay``, and from there every cycle re-derives
     # disambiguation from the persisted value with no T4 dependence.
-    T6_DISAMBIGUATION_MAX_SIGMA_MS = 0.005
+    #
+    # Set to 0.010 ms rather than the theoretical 0.005 ms (half-sample)
+    # because chrony's RMS_offset metric (the published σ) reflects
+    # multi-poll history rather than instantaneous noise — at sub-µs
+    # actual jitter, chrony often reports RMS in the 4-8 µs range.  Half-
+    # sample-period gating rejected T4 ~half the time on bee1 2026-05-23
+    # and dropped to the catastrophic "accept as-is" fallback (no shift
+    # applied → wall_time offset could be anywhere in [-500 ms, +500 ms]).
+    # One-sample-period gating gives ±0.5 sample = ±5 µs central-value
+    # precision when the disambig runs, which translates to ~5-10 µs
+    # residual on TSL3/HPPS — still 20-50× better than the prior T3-fusion
+    # regime, with reliable engagement.
+    T6_DISAMBIGUATION_MAX_SIGMA_MS = 0.010
 
     # Step-recovery thresholds for the wrap-rejector.  The wrap-rejector
     # locks in the first stable chain_delay after disambiguation; if the
@@ -1472,6 +1484,14 @@ class CoreRecorderV2:
                             f"METROLOGY.md §4.5."
                         )
                         return offset_ms, sigma_ms, 'T4'
+                    else:
+                        logger.warning(
+                            f"T6 disambiguation: T4 chronyc tracking "
+                            f"sigma={sigma_ms:.3f} ms exceeds gate "
+                            f"{self.T6_DISAMBIGUATION_MAX_SIGMA_MS:.3f} ms — "
+                            f"cannot use as reference.  Calibrator will "
+                            f"accept raw value as-is (likely a wrap error)."
+                        )
         except (FileNotFoundError, OSError,
                 subprocess.SubprocessError, ValueError, IndexError) as e:
             logger.debug(f"T4 chrony tracking unavailable: {e}")
