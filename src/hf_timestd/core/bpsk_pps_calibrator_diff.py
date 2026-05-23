@@ -116,6 +116,24 @@ DIFF_POSITION_HISTORY_BOOTSTRAP = 10    # accept everything until this many edge
 # while the running median can't follow without accepted samples.
 DIFF_POSITION_TOL_SAMPLES = 100.0
 
+# Self-recovery: state-machine wedge protection.  All three gates
+# (gap, threshold-B running_max, position-stability) reference state
+# that is only updated on accept.  After a major RF disturbance that
+# shifts the true edge position by more than the gates' tolerance,
+# the gates start rejecting every newly-detected peak; the state
+# they reference never updates; the rejections persist indefinitely.
+# Observed live 2026-05-23 12:23 UTC: diff calibrator silent for
+# 200+ s after the MF concurrently went phantom-stormy, while the
+# MF self-recovered via Costas re-lock + step-adoption within ~3
+# min.  Self-recovery here is the diff-side equivalent of the MF's
+# step-recovery path: count consecutive *rejects* (peak detected
+# but no gate cleared); reset _last_edge_rtp / _position_history /
+# _running_max once the count crosses the threshold; the next
+# peak hits clean state and re-acquires.  Threshold of 30 means
+# wedging is broken within ~30 s at 1 PPS — well inside the
+# HPPS systemd watchdog's 600 s LastRx threshold.
+DIFF_REJECT_RECOVERY_THRESHOLD = 30
+
 
 class BpskPpsCalibratorDiff:
     """Per-sample magnitude-derivative PPS edge detector.
@@ -165,6 +183,12 @@ class BpskPpsCalibratorDiff:
         self.peaks_rejected_threshold: int = 0
         self.peaks_rejected_running_max: int = 0
         self.peaks_rejected_position: int = 0
+        # Consecutive-reject counter for the self-recovery path.
+        # Resets to 0 on every successful accept.  When it crosses
+        # DIFF_REJECT_RECOVERY_THRESHOLD the gate state is reset so
+        # the next peak can re-acquire from clean state.
+        self._consecutive_rejects: int = 0
+        self.recovery_resets: int = 0
         # The last chain_delay we resolved, in [0, SR) sample units.
         # Modular like the legacy calibrator's chain_delay_samples.
         self.chain_delay_samples: Optional[float] = None
@@ -306,6 +330,7 @@ class BpskPpsCalibratorDiff:
                     # Out-of-window peak — discard.  This branch also
                     # rejects close-in sidelobes (< 0.99 s).
                     self.peaks_rejected_gap += 1
+                    self._record_reject_and_maybe_recover("gap")
                     continue
 
             # Accepted peak — update running_max for threshold-B.
@@ -354,6 +379,7 @@ class BpskPpsCalibratorDiff:
                     dev += self.sample_rate
                 if abs(dev) > DIFF_POSITION_TOL_SAMPLES:
                     self.peaks_rejected_position += 1
+                    self._record_reject_and_maybe_recover("position")
                     continue
 
             # Accepted — update position history (cap at LEN).
@@ -364,6 +390,7 @@ class BpskPpsCalibratorDiff:
             self.chain_delay_samples = float(chain_delay_samples)
             self._last_edge_rtp = edge_rtp_int
             self.pps_ok += 1
+            self._consecutive_rejects = 0
 
             if self._csv_fp is not None:
                 self._csv_fp.write(
@@ -371,6 +398,42 @@ class BpskPpsCalibratorDiff:
                     f"{d_pi:.6f},{self._median_d:.6g},"
                     f"{chain_delay_samples:.6f}\n"
                 )
+
+    def _record_reject_and_maybe_recover(self, gate: str) -> None:
+        """Track consecutive rejections; reset gating state if wedged.
+
+        Both the inter-edge-time gate and the position-stability gate
+        reference state (``_last_edge_rtp`` and ``_position_history``
+        respectively) that is only updated on accept.  After a major
+        RF disturbance shifts the true edge position by more than the
+        gates' tolerance, the gates start rejecting every newly-
+        detected peak; the state they reference never updates; the
+        rejections persist indefinitely.
+
+        Equivalent to the MF calibrator's step-recovery path: count
+        consecutive rejects, and once the count crosses the
+        threshold, reset the gating state so the next peak hits clean
+        state and re-acquires.  Threshold of 30 means wedging clears
+        within ~30 s at 1 PPS — well inside the systemd watchdog's
+        600 s LastRx threshold.
+        """
+        self._consecutive_rejects += 1
+        if self._consecutive_rejects >= DIFF_REJECT_RECOVERY_THRESHOLD:
+            logger.warning(
+                f"Diff calibrator self-recovery: "
+                f"{self._consecutive_rejects} consecutive rejects "
+                f"(latest gate={gate}, "
+                f"totals: gap={self.peaks_rejected_gap}, "
+                f"position={self.peaks_rejected_position}, "
+                f"running_max={self.peaks_rejected_running_max}); "
+                f"resetting _last_edge_rtp, _position_history, "
+                f"_running_max so next peak re-acquires from clean state"
+            )
+            self._last_edge_rtp = None
+            self._position_history.clear()
+            self._running_max = None
+            self._consecutive_rejects = 0
+            self.recovery_resets += 1
 
     def close(self) -> None:
         """Close the CSV file handle if open."""

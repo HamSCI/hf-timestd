@@ -1,0 +1,30 @@
+# /etc/systemd/system/timestd-hfps-watchdog.service
+[Unit]
+Description=HF-Timestd HFPS (T6 diff-detector SHM) Watchdog
+Documentation=https://github.com/mijahauan/hf-timestd
+After=chrony.service
+Wants=chrony.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+
+# Apples-to-apples sibling of timestd-hpps-watchdog.service — same
+# rationale, same thresholds, watches the HFPS refclock instead of
+# HPPS.  Catches the case where the diff-detector's SHM push thread
+# stalls or the calibrator wedges in a way the internal
+# DIFF_REJECT_RECOVERY_THRESHOLD path doesn't catch.
+#
+# Note: a restart by EITHER watchdog resets BOTH detectors (they live
+# in the same process).  Cooldown state files are separate
+# (hfps-watchdog-last-restart vs hpps-watchdog-last-restart) so each
+# watchdog can fire when its own source is dark, but the 1800s
+# cooldown still prevents thrash within either side.
+Environment=HFPS_LASTRX_THRESHOLD_S=600
+Environment=HFPS_RESTART_COOLDOWN_S=1800
+ExecStart=/opt/hf-timestd/scripts/hfps-watchdog.sh
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hfps-watchdog

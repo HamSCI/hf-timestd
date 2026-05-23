@@ -271,6 +271,149 @@ class TestPositionStabilityCheck:
             f"position check may be over-rejecting"
 
 
+class TestSelfRecovery:
+    """When the RF signal shifts enough to violate the position-stability
+    or inter-edge-time gate persistently, the gate state never updates
+    (it's only updated on accept), so the gate keeps rejecting
+    indefinitely.  The self-recovery path counts consecutive rejects
+    and resets the gating state once the threshold is crossed.
+
+    Live failure mode this guards against: 2026-05-23 12:23 UTC
+    incident — diff calibrator silent for 200+ s after the MF
+    concurrently went phantom-stormy.  The MF self-recovered via
+    Costas re-lock + step-adoption within ~3 min; without this
+    fix the diff calibrator could not.
+    """
+
+    def test_consecutive_rejects_counter_increments(self):
+        from hf_timestd.core.bpsk_pps_calibrator_diff import (
+            DIFF_REJECT_RECOVERY_THRESHOLD,
+        )
+        cal = BpskPpsCalibratorDiff(sample_rate=SR)
+        # Trigger one synthetic reject — counter should be 1, no reset.
+        cal._record_reject_and_maybe_recover("gap")
+        assert cal._consecutive_rejects == 1
+        assert cal.recovery_resets == 0
+        # And N-1 more — still no reset.
+        for _ in range(DIFF_REJECT_RECOVERY_THRESHOLD - 2):
+            cal._record_reject_and_maybe_recover("position")
+        assert cal._consecutive_rejects == DIFF_REJECT_RECOVERY_THRESHOLD - 1
+        assert cal.recovery_resets == 0
+
+    def test_threshold_crossed_triggers_state_reset(self):
+        from hf_timestd.core.bpsk_pps_calibrator_diff import (
+            DIFF_REJECT_RECOVERY_THRESHOLD,
+        )
+        cal = BpskPpsCalibratorDiff(sample_rate=SR)
+        # Seed state as if the calibrator had been locked.
+        cal._last_edge_rtp = 1_000_000
+        cal._position_history = [47916.17 + 0.001 * i for i in range(15)]
+        cal._running_max = 1.234
+        # Now hit the reject threshold.
+        for _ in range(DIFF_REJECT_RECOVERY_THRESHOLD):
+            cal._record_reject_and_maybe_recover("position")
+        # All gate state must be reset.
+        assert cal._last_edge_rtp is None
+        assert cal._position_history == []
+        assert cal._running_max is None
+        assert cal._consecutive_rejects == 0
+        assert cal.recovery_resets == 1
+
+    def test_accept_resets_consecutive_counter(self):
+        """A burst of N-1 rejects followed by an accept must NOT
+        leave the counter near threshold — otherwise one more reject
+        a long time later would prematurely fire recovery."""
+        from hf_timestd.core.bpsk_pps_calibrator_diff import (
+            DIFF_REJECT_RECOVERY_THRESHOLD,
+        )
+        cal = BpskPpsCalibratorDiff(sample_rate=SR)
+        # Send a clean signal to get a real accept.
+        signal = _make_bpsk_signal(
+            duration_s=3.0, edge_offset_samples=5.0,
+            transition_width_samples=2.0,
+        )
+        _run_diff(cal, signal)
+        assert cal.pps_ok >= 2
+        # Simulate N-1 rejects (just under threshold).
+        for _ in range(DIFF_REJECT_RECOVERY_THRESHOLD - 1):
+            cal._record_reject_and_maybe_recover("gap")
+        assert cal._consecutive_rejects == DIFF_REJECT_RECOVERY_THRESHOLD - 1
+        # Hand-simulate an accept by clearing the counter the same way
+        # process_samples does (the in-loop accept path sets it to 0).
+        cal._consecutive_rejects = 0
+        # Now a fresh single reject must NOT fire recovery.
+        cal._record_reject_and_maybe_recover("position")
+        assert cal._consecutive_rejects == 1
+        assert cal.recovery_resets == 0
+
+    def test_end_to_end_recovery_after_position_wedge(self):
+        """Bootstrap on position X, then shift to position Y so the
+        position-stability gate would reject everything.  Without
+        self-recovery, calibrator stays wedged forever; with it, the
+        next peak after threshold-many rejects re-acquires at Y."""
+        from hf_timestd.core.bpsk_pps_calibrator_diff import (
+            DIFF_POSITION_HISTORY_BOOTSTRAP,
+            DIFF_POSITION_TOL_SAMPLES,
+            DIFF_REJECT_RECOVERY_THRESHOLD,
+        )
+        cal = BpskPpsCalibratorDiff(sample_rate=SR)
+        # Pre-seed gate state for "previously locked at position X".
+        # Do NOT seed _running_max: leaving it None means only the
+        # K*median threshold applies, so synthetic peaks reach the
+        # peak-iteration loop and exercise the gate paths we care
+        # about.  In production, _running_max is also reset by the
+        # recovery path so this matches the post-recovery condition.
+        x = 47916.17
+        cal._position_history = [
+            x + 0.001 * i for i in range(DIFF_POSITION_HISTORY_BOOTSTRAP + 5)
+        ]
+        cal.chain_delay_samples = x
+        cal._last_edge_rtp = 1_000_000
+
+        # Now feed enough out-of-position edges to trip recovery.
+        # New position y differs from x by > DIFF_POSITION_TOL_SAMPLES.
+        y = x + (DIFF_POSITION_TOL_SAMPLES + 50.0)
+        # Each second sends one edge at y.  After
+        # DIFF_REJECT_RECOVERY_THRESHOLD rejected edges, state resets;
+        # the NEXT edge becomes the new bootstrap baseline at y.
+        # We feed enough seconds to cover threshold + bootstrap.
+        n_seconds = DIFF_REJECT_RECOVERY_THRESHOLD + 5
+        signal = _make_bpsk_signal(
+            duration_s=float(n_seconds),
+            edge_offset_samples=y,
+            transition_width_samples=2.0,
+        )
+        # Start RTP such that each synthesized edge gives a gap close
+        # to 1 s (so gap gate doesn't also reject — we want to isolate
+        # the position-gate wedge).  The synth signal puts the first
+        # edge at sample index ~y; we want that to be 1_000_000 + SR
+        # after _last_edge_rtp, so rtp_start = 1_000_000 + SR - y.
+        rtp_start = int(1_000_000 + SR - y) & 0xFFFFFFFF
+        _run_diff(cal, signal, rtp_start=rtp_start)
+
+        # Recovery must have fired at least once.
+        assert cal.recovery_resets >= 1, (
+            f"self-recovery never fired; "
+            f"position_rejects={cal.peaks_rejected_position}, "
+            f"gap_rejects={cal.peaks_rejected_gap}, "
+            f"accepts={cal.pps_ok}"
+        )
+        # Post-recovery, the calibrator must have accepted at least one
+        # new edge.  Without recovery this would be 0 — every peak after
+        # the initial position-rejection would be gap-rejected forever.
+        assert cal.pps_ok >= 1, (
+            f"no edges accepted post-recovery despite reset firing; "
+            f"recovery_resets={cal.recovery_resets}"
+        )
+        # And the calibrator's locked position must have *moved* from
+        # x — proof that it re-acquired on the new operating point,
+        # not just re-anchored on the stale one.
+        assert abs(cal.chain_delay_samples - x) > DIFF_POSITION_TOL_SAMPLES, (
+            f"post-recovery chain_delay={cal.chain_delay_samples} is "
+            f"still at old position x={x}; recovery did not re-acquire"
+        )
+
+
 class TestModuleConstants:
     def test_threshold_factor_default(self):
         # Documented as 100 in the module — flagging if someone
