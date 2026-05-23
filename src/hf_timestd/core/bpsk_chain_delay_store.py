@@ -6,8 +6,13 @@ the half-second wrap of their boxcar template (MF) or modulo one second
 of their integer-sample interpolation (diff).  At first lock a
 disambiguation step resolves which integer-sample multiple of the wrap
 is correct, by comparing the implied wall-time of the detected edge
-against an external timing authority (chrony's view of (system_clock -
-true_UTC) via T4 LAN GPS).
+against an external timing authority.
+
+**Per the RTP-reference invariant (METROLOGY.md §4.5), that reference
+MUST be a peer authority (T5 on-host GPS+PPS) or a fusion-derived
+offset (T3) — never the host wall clock proxy (T4 chronyc tracking).**
+See ``_get_disambiguation_reference`` in ``core_recorder_v2.py`` for
+the hierarchy that enforces this; T4 is a bootstrap-only fallback.
 
 The problem: chrony's *Last offset* shifts continuously as it
 disciplines the local clock.  Every restart re-runs this comparison

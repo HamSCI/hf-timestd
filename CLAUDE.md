@@ -59,8 +59,9 @@ docs/                    # Technical docs, QEX paper draft
 
 ## Architecture Notes
 
+- **Timing-authority invariant (read this first):** RTP timestamps from radiod are the only authoritative timing substrate; the host wall clock is a *derived* product and must never be used as a source.  Whether radiod's clock has GPS+PPS authority (RTP mode) or not (Fusion mode), the chrony feed is built as `rtp_time + rtp_to_utc_offset_ns`, where the offset comes from a peer authority (T5) or a fusion-derived measurement (T3), **never** from `chronyc tracking` on the host (T4 is bootstrap-only).  Fusion runs always-on — even in RTP mode — to provide authority backup if GPS+PPS fails and to study HF-fusion quality against the higher reference.  See `docs/METROLOGY.md` §4.5–§4.6 for the full hierarchy and the reasoning.  Any change that introduces a new use of `time.time()`, `datetime.now()`, or `chronyc tracking` in the timing path violates this invariant and needs to be reviewed against the doc before merging.
 - **Pipeline:** Recording (RTP -> binary IQ) -> Metrology (IQ -> HDF5 L1/L2) -> Fusion (Kalman + WLS -> Chrony SHM)
-- **Two modes:** RTP (GPSDO ground truth, testing) and FUSION (GPS-denied, production)
+- **Two modes:** RTP (GPSDO ground truth, testing) and FUSION (GPS-denied, production) — *which authority controls the chrony feed*, not *whether fusion runs*
 - **Service profiles** (archive/rtp/fusion/full) control which of the core services run
 - **Logging:** every `timestd-*` unit logs to journald — no per-service log files. See `docs/DEBUGGING.md`.
 - **HDF5 SWMR:** writers keep files open + flush; readers use `swmr=True`

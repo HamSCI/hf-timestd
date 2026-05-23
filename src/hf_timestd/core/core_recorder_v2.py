@@ -1350,8 +1350,8 @@ class CoreRecorderV2:
     def _get_disambiguation_reference(self):
         """Return the highest-rank non-T6 timing-authority offset estimate.
 
-        Walks the T-level hierarchy in descending rank order (T5 > T4 > T3),
-        returning the first probe that publishes an offset_ms with sigma <
+        Walks the T-level hierarchy in descending rank order, returning
+        the first probe that publishes an offset_ms with sigma <
         ``T6_DISAMBIGUATION_MAX_SIGMA_MS``.  Returns
         ``(offset_ms, sigma_ms, tier_name)`` or ``None`` if no suitable
         reference is available.
@@ -1361,23 +1361,56 @@ class CoreRecorderV2:
         is non-deterministic against GPS seconds — could be off by any
         integer-sample multiple). Once disambiguated, T6 trusts its own
         measurements; we do NOT continuously slew toward the reference.
-        T6 is the highest-quality timing authority available — its edges
-        come directly from the LB-1421 GPSDO via TS1, and the MF measures
-        them at ~150 ns precision. Tracking lower-quality references
-        (T3 fusion at ~100 µs, even T4 LAN GPS at ~10 µs) would only
-        contaminate T6's precision.
 
-        Reference order:
-          - T5 (highest): on-host GPS+PPS chrony refclock, not wired
-          - T4: LAN GPS+PPS via chrony tracking (chronyc tracking output)
-          - T3: HF fusion via /run/hf-timestd/fusion_status.json
+        ## RTP-reference invariant (METROLOGY.md §4.5)
+
+        Per the project-wide invariant, **data-label authority must be
+        derivable from RTP + a fusion-or-peer-derived offset, never from
+        the host wall clock**.  The reference order below reflects that:
+
+          - **T5** (highest): on-host GPS+PPS chrony refclock — direct
+            peer authority, no wall-clock dependence.  Not yet wired.
+          - **T3** (preferred fallback): HF Fusion offset via
+            ``/run/hf-timestd/fusion_status.json``.  Fusion is
+            always-on (per the operator-described architecture) and
+            computes ``(rtp_time − true_UTC)`` directly from HF time
+            stations — never via the host system clock.  This is the
+            clean reference under the invariant.
+          - **T4** (last-resort fallback): LAN GPS+PPS via
+            ``chronyc tracking``.  This reads ``system_clock − true_UTC``
+            and therefore couples the disambiguation to the host wall
+            clock — a soft violation of the invariant, tolerated only
+            when T5 and T3 are unavailable (e.g., cold start before
+            fusion has converged).  Sub-sample wrap-pick is correct
+            even with loose chrony, so this remains acceptable as a
+            bootstrap; it must not be the steady-state path.
         """
-        # T5: not yet wired (requires on-host GPS+PPS probe in core-recorder)
+        # T5: on-host GPS+PPS — not yet wired (requires direct refclock
+        # probe in core-recorder).  Add a check here once the probe lands.
 
-        # T4: chrony's tracking offset against the LAN GPS source.
-        # `Last offset` from `chronyc tracking` is (true_time - local_time);
-        # we want (system_clock - true_UTC) = -Last_offset.  RMS offset
-        # is the appropriate sigma estimate.
+        # T3 PREFERRED — fusion is the clean per-invariant reference.
+        # fusion_status.json carries the Kalman-fused offset between RTP
+        # and true UTC, computed end-to-end from HF time stations
+        # without ever consulting the host system clock.
+        try:
+            fusion_path = Path('/run/hf-timestd/fusion_status.json')
+            data = json.loads(fusion_path.read_text())
+            if data.get('schema') == 'v1':
+                fusion = data.get('fusion') or {}
+                if (fusion.get('available')
+                        and fusion.get('kalman_state') in ('LOCKED', 'ACQUIRING')):
+                    offset_ms = float(fusion['d_clock_fused_ms'])
+                    sigma_ms = float(fusion['uncertainty_ms'])
+                    if sigma_ms <= self.T6_DISAMBIGUATION_MAX_SIGMA_MS:
+                        return offset_ms, sigma_ms, 'T3'
+        except (FileNotFoundError, OSError, json.JSONDecodeError, KeyError, ValueError):
+            pass
+
+        # T4 BOOTSTRAP FALLBACK — soft violation of the invariant.  Only
+        # reached if fusion is unavailable or has not yet converged
+        # below T6_DISAMBIGUATION_MAX_SIGMA_MS.  Reads chrony's tracking
+        # offset against the LAN GPS source.  `Last offset` is
+        # (true_time − local_time); we negate for (system_clock − UTC).
         try:
             import subprocess
             result = subprocess.run(
@@ -1393,30 +1426,20 @@ class CoreRecorderV2:
                     elif line.startswith('RMS offset'):
                         rms_offset_sec = float(line.split(':', 1)[1].split()[0])
                 if last_offset_sec is not None and rms_offset_sec is not None:
-                    # Sign convention: chrony's "Last offset" is true−local.
-                    # We need system_clock − true_UTC = −Last_offset.
                     offset_ms = -last_offset_sec * 1000.0
                     sigma_ms = rms_offset_sec * 1000.0
                     if sigma_ms <= self.T6_DISAMBIGUATION_MAX_SIGMA_MS:
+                        logger.warning(
+                            "T6 disambiguation falling back to T4 chronyc "
+                            "tracking — fusion-derived T3 unavailable.  "
+                            "Once fusion converges, restart core-recorder "
+                            "to re-disambiguate against the invariant-"
+                            "compliant reference.  See METROLOGY.md §4.5."
+                        )
                         return offset_ms, sigma_ms, 'T4'
         except (FileNotFoundError, OSError,
                 subprocess.SubprocessError, ValueError, IndexError) as e:
             logger.debug(f"T4 chrony tracking unavailable: {e}")
-
-        # T3: fusion_status.json from timestd-fusion service (fallback).
-        try:
-            fusion_path = Path('/run/hf-timestd/fusion_status.json')
-            data = json.loads(fusion_path.read_text())
-            if data.get('schema') == 'v1':
-                fusion = data.get('fusion') or {}
-                if (fusion.get('available')
-                        and fusion.get('kalman_state') in ('LOCKED', 'ACQUIRING')):
-                    offset_ms = float(fusion['d_clock_fused_ms'])
-                    sigma_ms = float(fusion['uncertainty_ms'])
-                    if sigma_ms <= self.T6_DISAMBIGUATION_MAX_SIGMA_MS:
-                        return offset_ms, sigma_ms, 'T3'
-        except (FileNotFoundError, OSError, json.JSONDecodeError, KeyError, ValueError):
-            pass
 
         return None
 
