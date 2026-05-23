@@ -1657,6 +1657,57 @@ class CoreRecorderV2:
             )
             return False
 
+    def _t6_diff_disambiguate_via_t5_lb1421(
+        self, chain_delay_ns_raw: int, raw_wall_time_sec: float
+    ) -> bool:
+        """T5 (LB-1421 NMEA) disambiguation for the HFPS / diff path.
+
+        Mirrors :meth:`_t6_disambiguate_via_t5_lb1421` for apples-to-
+        apples comparison with HPPS: both detectors anchor their
+        one-shot integer-second resolution to the same direct-GPS
+        reference, so any HFPS-vs-HPPS difference is attributable to
+        the detector (Method 5 vs Method 2), not to the disambig
+        reference precision.
+
+        Writes to ``self._t6_diff_disambiguation_ns`` on success.
+        """
+        probe = getattr(self, '_lb1421_probe', None)
+        if probe is None:
+            return False
+        reading = probe.get_latest()
+        if reading is None:
+            logger.debug(
+                "HFPS T5 disambig: no fresh LB-1421 NMEA reading "
+                "(stale, no fix, or device closed)"
+            )
+            return False
+        delta_sec = raw_wall_time_sec - reading.pps_utc_sec
+        if abs(delta_sec) > 0.5:
+            logger.warning(
+                f"HFPS T5 disambig: host-clock anchor "
+                f"({raw_wall_time_sec:.3f}) and NMEA PPS UTC "
+                f"({reading.pps_utc_sec}) differ by "
+                f"{delta_sec:+.3f} s — too wide for unambiguous "
+                f"pairing.  Falling back to T4."
+            )
+            return False
+        effective_chain_delay_ns = int(round(
+            (raw_wall_time_sec - reading.pps_utc_sec) * 1e9
+        ))
+        self._t6_diff_disambiguation_ns = (
+            effective_chain_delay_ns - chain_delay_ns_raw
+        )
+        logger.info(
+            f"HFPS chain_delay disambiguated against T5 (LB-1421 NMEA): "
+            f"raw={chain_delay_ns_raw} ns, "
+            f"raw_wall_time={raw_wall_time_sec:.6f}, "
+            f"NMEA_PPS_UTC={reading.pps_utc_sec}, "
+            f"delta={delta_sec*1000:+.3f} ms, "
+            f"effective_chain_delay={effective_chain_delay_ns} ns "
+            f"(no integer-sample-shift step — direct GPS reference)"
+        )
+        return True
+
     def _t6_disambiguate_via_external_reference(self, result) -> None:
         """Fallback disambiguation path used when no fresh persisted
         chain_delay is available.  Walks the timing-tier hierarchy
@@ -2790,53 +2841,19 @@ class CoreRecorderV2:
                                         logger.warning(
                                             f"HFPS persisted sample_rate "
                                             f"{persisted.sample_rate} != current "
-                                            f"{sr_local}; falling back to T4"
+                                            f"{sr_local}; falling back to T5/T4"
                                         )
-                                    ref = self._get_disambiguation_reference()
-                                    if ref is None:
-                                        logger.info(
-                                            "HFPS chain_delay initial accept: no "
-                                            "usable non-T6 timing authority for "
-                                            "disambiguation; accepting raw value"
-                                        )
-                                        self._t6_diff_disambiguation_ns = 0
+                                    # T5 (LB-1421 NMEA) — direct GPS reference,
+                                    # mirroring the HPPS path so HFPS vs HPPS
+                                    # is a clean detector-only comparison.
+                                    # Falls through to T4 if T5 isn't wired
+                                    # or its reading is unavailable.
+                                    if self._t6_diff_disambiguate_via_t5_lb1421(
+                                            chain_delay_ns_raw, raw_wall_time_sec
+                                    ):
                                         self._t6_diff_disambiguated = True
-                                    else:
-                                        ref_offset_ms, ref_sigma_ms, ref_tier = ref
-                                        wall_time_sec_initial = (
-                                            raw_wall_time_sec
-                                            - chain_delay_ns_raw / 1e9
-                                        )
-                                        ref_time_initial = round(wall_time_sec_initial)
-                                        offset_sec_initial = (
-                                            wall_time_sec_initial - ref_time_initial
-                                        )
-                                        disagreement_sec = (
-                                            offset_sec_initial
-                                            - ref_offset_ms / 1000.0
-                                        )
-                                        shift_samples = round(
-                                            disagreement_sec * sr_local
-                                        )
-                                        self._t6_diff_disambiguation_ns = int(round(
-                                            shift_samples * 1e9 / sr_local
-                                        ))
-                                        self._t6_diff_disambiguated = True
-                                        logger.info(
-                                            f"HFPS chain_delay disambiguated "
-                                            f"against {ref_tier} "
-                                            f"(offset={ref_offset_ms:+.3f} ms, "
-                                            f"sigma={ref_sigma_ms:.3f} ms): "
-                                            f"raw_chain_delay={chain_delay_ns_raw} "
-                                            f"ns; disagreement "
-                                            f"{disagreement_sec*1000:+.3f} ms; "
-                                            f"shift {shift_samples} samples "
-                                            f"({self._t6_diff_disambiguation_ns} ns)"
-                                        )
-                                        # Eager refresh so the next
-                                        # restart inherits the T4-derived
-                                        # shift instead of re-walking
-                                        # chrony from a different state.
+                                        # Eager refresh — disambiguation should
+                                        # survive a crash within the first minute.
                                         if self._t6_diff_chain_delay_store is not None:
                                             self._t6_diff_chain_delay_store.save(
                                                 sample_rate=sr_local,
@@ -2846,6 +2863,64 @@ class CoreRecorderV2:
                                                 ),
                                             )
                                             self._t6_diff_saves_pending = 0
+                                    else:
+                                        ref = self._get_disambiguation_reference()
+                                        if ref is None:
+                                            logger.info(
+                                                "HFPS chain_delay initial accept: "
+                                                "no usable non-T6 timing authority "
+                                                "for disambiguation; accepting raw "
+                                                "value"
+                                            )
+                                            self._t6_diff_disambiguation_ns = 0
+                                            self._t6_diff_disambiguated = True
+                                        else:
+                                            ref_offset_ms, ref_sigma_ms, ref_tier = ref
+                                            wall_time_sec_initial = (
+                                                raw_wall_time_sec
+                                                - chain_delay_ns_raw / 1e9
+                                            )
+                                            ref_time_initial = round(
+                                                wall_time_sec_initial
+                                            )
+                                            offset_sec_initial = (
+                                                wall_time_sec_initial - ref_time_initial
+                                            )
+                                            disagreement_sec = (
+                                                offset_sec_initial
+                                                - ref_offset_ms / 1000.0
+                                            )
+                                            shift_samples = round(
+                                                disagreement_sec * sr_local
+                                            )
+                                            self._t6_diff_disambiguation_ns = int(round(
+                                                shift_samples * 1e9 / sr_local
+                                            ))
+                                            self._t6_diff_disambiguated = True
+                                            logger.info(
+                                                f"HFPS chain_delay disambiguated "
+                                                f"against {ref_tier} "
+                                                f"(offset={ref_offset_ms:+.3f} ms, "
+                                                f"sigma={ref_sigma_ms:.3f} ms): "
+                                                f"raw_chain_delay={chain_delay_ns_raw} "
+                                                f"ns; disagreement "
+                                                f"{disagreement_sec*1000:+.3f} ms; "
+                                                f"shift {shift_samples} samples "
+                                                f"({self._t6_diff_disambiguation_ns} ns)"
+                                            )
+                                            # Eager refresh so the next
+                                            # restart inherits the T4-derived
+                                            # shift instead of re-walking
+                                            # chrony from a different state.
+                                            if self._t6_diff_chain_delay_store is not None:
+                                                self._t6_diff_chain_delay_store.save(
+                                                    sample_rate=sr_local,
+                                                    effective_chain_delay_ns=(
+                                                        chain_delay_ns_raw
+                                                        + self._t6_diff_disambiguation_ns
+                                                    ),
+                                                )
+                                                self._t6_diff_saves_pending = 0
 
                             # Step 3: apply the locked disambiguation
                             # to the per-edge chain_delay and compute
