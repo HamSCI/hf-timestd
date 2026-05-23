@@ -533,14 +533,14 @@ class CoreRecorderV2:
                     from hf_timestd.core.chrony_shm import ChronySHM
                     self._t6_shm = ChronySHM(unit=2)
                     if self._t6_shm.connect():
-                        logger.info("T6 TSL3 SHM feed enabled (unit=2)")
+                        logger.info("T6 HPPS SHM feed enabled (unit=2)")
                     else:
-                        logger.warning("T6 TSL3 SHM unit=2 connect failed; "
+                        logger.warning("T6 HPPS SHM unit=2 connect failed; "
                                        "TSL3 disabled (chain_delay_correction "
                                        "still applied to channels)")
                         self._t6_shm = None
                 except Exception as e:
-                    logger.warning(f"T6 TSL3 SHM init failed: {e}")
+                    logger.warning(f"T6 HPPS SHM init failed: {e}")
                     self._t6_shm = None
 
                 # Init HFPS SHM feed (unit 3) — operational chrony
@@ -2458,7 +2458,7 @@ class CoreRecorderV2:
                 except Exception as e:
                     # SHM push is non-fatal — log once per ~60 s of failures
                     if not getattr(self, '_t6_shm_warned', False):
-                        logger.warning(f"T6 TSL3 SHM push failed: {e}")
+                        logger.warning(f"T6 HPPS SHM push failed: {e}")
                         self._t6_shm_warned = True
 
             # HFPS SHM feed (unit 3): push wall-time of the diff

@@ -37,9 +37,9 @@ TARGET_UNIT="timestd-core-recorder.service"
 
 log() { logger -t "$LOG_TAG" -- "$@"; echo "[$LOG_TAG] $*"; }
 
-# Parse `chronyc -n sources` for the TSL3 row.  Format (chrony 4.x):
+# Parse `chronyc -n sources` for the HPPS row.  Format (chrony 4.x):
 #   MS Name/IP address    Stratum Poll Reach LastRx Last sample
-#   #? TSL3                  0    0    0   442   -40us[ -14us] +/-   55us
+#   #* HPPS                  0    0  377     1   -40us[ -14us] +/-   55us
 #
 # We want LastRx (col 6 when MS counts as one token).  `awk` with the
 # # filter on the first column gets that.
@@ -51,10 +51,10 @@ lastrx_seconds() {
     local csv
     csv="$(chronyc -n -c sources 2>/dev/null)" || return 1
     # CSV columns: M,S,Name,Stratum,Poll,Reach,LastRx,LastSample,...
-    # We want field 7 (LastRx) for the TSL3 row.
+    # We want field 7 (LastRx) for the HPPS row.
     local lastrx
     lastrx="$(printf '%s\n' "$csv" \
-              | awk -F, '$3 == "TSL3" { print $7; exit }')"
+              | awk -F, '$3 == "HPPS" { print $7; exit }')"
     if [ -z "$lastrx" ]; then
         # Unit might be in a transient state ("-" or empty) — treat as
         # "no recent sample" to be conservative.  But also tolerate
@@ -88,7 +88,7 @@ main() {
     }
 
     if [ "$lastrx" = "INF" ]; then
-        log "TSL3 row missing or in transient state; treating as dark"
+        log "HPPS row missing or in transient state; treating as dark"
         lastrx="$LASTRX_THRESHOLD_S"
     fi
 

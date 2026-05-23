@@ -51,12 +51,12 @@ T_LEVELS_RANKED: tuple = ("T6", "T5", "T4", "T3", "T2", "T1", "T0")
 # refid as #x (falseticker) or #? (unselectable), we want to know about
 # it loudly rather than silently keep publishing a stale T-level.
 #
-# TSL1 (SHM unit 0) — fused raw L1 metrology, written by fusion service
-# TSL2 (SHM unit 1) — fused calibrated L2 timing, written by fusion service
-# TSL3 (SHM unit 2) — direct BPSK PPS, written by core_recorder T6 path
+# TSL1 (SHM unit 0) — LEGACY; raw L1 metrology, normally disabled
+# FUSE (SHM unit 1) — fused calibrated L2 timing, written by fusion service
+# HPPS (SHM unit 2) — direct BPSK PPS, written by core_recorder T6 path
 TIER_SHM_REFID: Dict[str, str] = {
-    "T6": "TSL3",
-    "T3": "TSL2",
+    "T6": "HPPS",
+    "T3": "FUSE",
 }
 
 # Chrony source-state characters indicating chrony accepts the source as

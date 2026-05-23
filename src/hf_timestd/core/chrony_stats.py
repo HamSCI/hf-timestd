@@ -2,8 +2,8 @@
 Chrony Statistics Collector
 
 Parses chronyc output to collect source comparison data for metrology validation.
-Runs periodically from the fusion service to track how TSL1/TSL2 compare against
-NTP and GPS sources over time.
+Runs periodically from the fusion service to track how FUSE and HPPS compare
+against NTP and GPS sources over time.
 
 Snapshots are written to the ``DIAG_chrony_stats`` SQLite table (one row per
 source per snapshot) via :func:`make_data_product_writer` and exposed via the
@@ -113,7 +113,7 @@ def parse_sources(output: str) -> List[ChronySource]:
     """Parse 'chronyc sources' output into ChronySource objects.
 
     Example line:
-    #? TSL1                          0   4    10    85  +1476us[+1475us] +/- 2000us
+    #* HPPS                          0   0   377     1    +12us[  +12us] +/-   55us
     ^* 192.168.0.203                 1   2   377     1  +4441ns[+4565ns] +/-   84us
     """
     sources = []
@@ -205,7 +205,7 @@ def parse_sourcestats(output: str) -> Dict[str, Dict[str, float]]:
     """Parse 'chronyc sourcestats' output into per-source stats.
 
     Example line:
-    TSL1                        6   3   399     -0.778      0.649  +1413us    25us
+    HPPS                        7   4     6     +0.001      0.012    +13us    10ns
     192.168.0.203              48  25   191     +0.001      0.052     +0ns  5632ns
     """
     stats = {}

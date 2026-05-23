@@ -4737,7 +4737,9 @@ def run_fusion_service(
                 chrony_shm_l1 = ChronySHM(unit=0)
                 if chrony_shm_l1.connect():
                     logger.info(
-                        "Chrony SHM L1 feed enabled (unit=0, refid=TSL1)"
+                        "Chrony SHM L1 feed enabled (unit=0, refid=TSL1) "
+                        "[legacy, normally disabled — see config "
+                        "enable_chrony_l1]"
                     )
                 else:
                     logger.warning(
@@ -4755,7 +4757,7 @@ def run_fusion_service(
             # Initialize L2 feed (SHM unit 1)
             chrony_shm_l2 = ChronySHM(unit=1)
             if chrony_shm_l2.connect():
-                logger.info("Chrony SHM L2 feed enabled (unit=1, refid=TSL2)")
+                logger.info("Chrony SHM FUSE feed enabled (unit=1, refid=FUSE)")
             else:
                 logger.warning(
                     "Failed to connect to Chrony SHM unit 1 - L2 feed disabled "
@@ -4785,8 +4787,8 @@ def run_fusion_service(
     logger.info("Starting Multi-Broadcast Fusion Service")
     logger.info(f"  Interval: {interval_sec} seconds")
     logger.info(f"  Output: {fusion.fusion_dir / 'fusion_fusion_timing_YYYYMMDD.h5'}")
-    logger.info(f"  Chrony SHM L1: {'enabled' if chrony_shm_l1 and chrony_shm_l1.connected else 'disabled (will retry)' if chrony_shm_l1 else 'disabled'}")
-    logger.info(f"  Chrony SHM L2: {'enabled' if chrony_shm_l2 and chrony_shm_l2.connected else 'disabled (will retry)' if chrony_shm_l2 else 'disabled'}")
+    logger.info(f"  Chrony SHM L1 (legacy): {'enabled' if chrony_shm_l1 and chrony_shm_l1.connected else 'disabled (will retry)' if chrony_shm_l1 else 'disabled'}")
+    logger.info(f"  Chrony SHM FUSE: {'enabled' if chrony_shm_l2 and chrony_shm_l2.connected else 'disabled (will retry)' if chrony_shm_l2 else 'disabled'}")
     # Initialize calibration file writer (wsprdaemon integration)
     calib_writer = None
     if calib_file:
@@ -5015,13 +5017,13 @@ def run_fusion_service(
                         if chrony_shm_l1 and not chrony_shm_l1.connected:
                             logger.info("Attempting Chrony SHM L1 reconnect...")
                             if chrony_shm_l1.connect():
-                                logger.info("Chrony SHM L1 reconnected (unit=0, refid=TSL1)")
+                                logger.info("Chrony SHM L1 reconnected (unit=0, refid=TSL1) [legacy]")
                                 if loop_metrics:
                                     loop_metrics.mark_event("shm_reconnect_l1")
                         if chrony_shm_l2 and not chrony_shm_l2.connected:
                             logger.info("Attempting Chrony SHM L2 reconnect...")
                             if chrony_shm_l2.connect():
-                                logger.info("Chrony SHM L2 reconnected (unit=1, refid=TSL2)")
+                                logger.info("Chrony SHM FUSE reconnected (unit=1, refid=FUSE)")
                                 if loop_metrics:
                                     loop_metrics.mark_event("shm_reconnect_l2")
 
@@ -5326,12 +5328,12 @@ def run_fusion_service(
                                 if update_success_l2:
                                     chrony_fed_this_cycle = True
                                     logger.debug(
-                                        f"Chrony SHM L2 (unit=1) updated: D_clock={result_l2.d_clock_fused_ms:+.3f}ms, "
+                                        f"Chrony SHM FUSE (unit=1) updated: D_clock={result_l2.d_clock_fused_ms:+.3f}ms, "
                                         f"uncertainty={result_l2.uncertainty_ms:.1f}ms, precision={precision_l2} "
                                         f"[{result_l2.n_stations}sta, {result_l2.quality_grade}]"
                                     )
                                 else:
-                                    logger.warning("Chrony SHM L2 write failed")
+                                    logger.warning("Chrony SHM FUSE write failed")
                             
                             # (the discontinuity reference last_chrony_d_clock is
                             # advanced unconditionally by the "always advance"
