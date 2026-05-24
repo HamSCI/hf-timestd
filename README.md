@@ -18,13 +18,13 @@ HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/CHU/BPM time standard
 - 📡 **Multi-channel recording** - Simultaneous WWV, WWVH, CHU, BPM (9 tuned frequencies, 17 logical broadcasts) in **binary IQ archive** format with JSON metadata sidecars.
 - 🎯 **Sub-millisecond timing** - ±0.5 ms via multi-broadcast fusion to UTC(NIST), with theoretical floor of ±0.036 ms (Cramér-Rao bound).
 - 🌐 **Real-time ionospheric model (v6.7)** - WAM-IPE + GIRO data for frequency-dependent, time-varying group delay predictions with multi-hop support (1F, 2F, 3F).
-- 🔗 **HDF5 SWMR Pipeline** - Single Writer Multiple Reader protocol with `h5clear` crash recovery. Writers keep files open and flush after each append; readers use `swmr=True`. Zero write/read contention.
+- 🗃️ **SQLite-backed measurement store** - Single shared database (`/var/lib/timestd/phase2/timestd.db`) for all inter-service L1/L2/L3 data. WAL mode for concurrent readers + a single writer per product, with millisecond commit cadence. (Replaces the pre-7.0 HDF5/SWMR pipeline; the `h5py` runtime dependency was dropped in the 2026-05-21 migration.)
 - 🌍 **Real-time GNSS VTEC Correction** - Local dual-frequency GPS provides direct ionospheric correction.
 - 🔬 **Hierarchical Estimation** - Per-broadcast Kalman filtering + WLS fusion for deterministic restart behavior.
 - ⏱️ **NTP-Based Bootstrap (v6.4)** - Fast RTP-to-UTC calibration using GPSDO wallclock (~2 min to LOCKED).
 - 🧠 **AI Discrimination** - Probabilistic Logistic Regression + Heuristic Voting for station ID.
 - 🌐 **Web UI** - Real-time monitoring via **FastAPI** dashboard with Allan Deviation, propagation analysis, and per-path dTEC visualization.
-- ⏰ **Dual Chrony feeds** - Independent L1 (geometric) and L2 (physics-corrected) SHM refclocks with separate Kalman filters.
+- ⏰ **Chrony SHM refclocks** - The L2 fusion feed (SHM unit 1 = `FUSE`) plus the T6 BPSK-PPS feeds (SHM unit 2 = `HPPS`, SHM unit 3 = `HFPS`). The legacy dual-feed (L1 raw at SHM unit 0) was retired 2026-05-23 — it produced byte-identical output to the L2 feed in single-station mode. Dual Kalman filtering (L1 raw + L2 calibrated) is still computed inside the fusion service for diagnostic comparison.
 - 📊 **Metrological Rigor (v6.2)** - Cramér-Rao uncertainty, multipath detection, Doppler correction, adaptive thresholds.
 
 ### Complete Feature Inventory
@@ -112,7 +112,7 @@ The ionosphere is the dominant error in all cases. Oscillator quality affects ti
 
 ## Quick Start
 
-**Prerequisites:** ka9q-radio running, Linux with multicast networking, Python 3.11+, HDF5 libraries.
+**Prerequisites:** ka9q-radio running, Linux with multicast networking, Python 3.11+, SQLite ≥3.37 (the system default on Debian 12/Ubuntu 22.04+ suffices).
 
 ### Production Mode (24/7 Operation)
 
@@ -216,9 +216,10 @@ cookbook and stage-by-stage troubleshooting.
 
 | Data Type | Path |
 |-----------|------|
-| **Raw IQ** | `/var/lib/timestd/raw_buffer/{CHANNEL}/` (Binary + JSON) |
-| **L2 Timing** | `/var/lib/timestd/phase2/{CHANNEL}/` (HDF5) |
-| **L3 Fusion** | `/var/lib/timestd/phase2/fusion/` (HDF5) |
+| **Raw IQ** | `/var/lib/timestd/raw_buffer/{CHANNEL}/` (Binary `.bin.zst` + JSON sidecars) |
+| **L1/L2/L3 measurements** | `/var/lib/timestd/phase2/timestd.db` (shared SQLite, WAL mode) |
+| **Per-channel CSV/JSON sidecars** | `/var/lib/timestd/phase2/{CHANNEL}/` (status, convergence state, time-series CSVs) |
+| **Authority history** | `/var/lib/timestd/authority_history.db` (SQLite — per-cycle T-tier snapshots) |
 | **IONEX** | `/var/lib/timestd/ionex/` |
 
 **Monitor:** Open `http://localhost:8000` for real-time monitoring (FastAPI Web API):
@@ -245,14 +246,16 @@ The system has an eight-service core pipeline plus a set of housekeeping units (
    • Writes Binary IQ (.bin.zst) + JSON sidecars (Reliable Capture)
      ↓
 2. METROLOGY (timestd-metrology)
-   • Reads Raw IQ -> Detects Tones -> L1/L2 Measurements (HDF5)
+   • Reads Raw IQ -> Detects Tones -> L1/L2 Measurements
+     (SQLite: /var/lib/timestd/phase2/timestd.db)
      ↓
 3. L2 CALIBRATION (timestd-l2-calibration)
-   • Applies geometric + ionospheric corrections -> L2 Timing
+   • Applies geometric + ionospheric corrections -> L2 Timing (SQLite)
      ↓
 4. FUSION (timestd-fusion) <------- 5. VTEC (timestd-vtec)
-   • Reads L2 HDF5 (crash-safe)     • GNSS VTEC monitoring
+   • Reads L2 SQLite (WAL mode)     • GNSS VTEC monitoring
    • Dual Kalman filtering          • (optional, requires GNSS)
+     (L1 + L2 diagnostic compare)
    • Feeds Chrony SHM unit 1 (FUSE) — one consumer of the
      annotation stream; HPPS (unit 2) and HFPS (unit 3) are
      fed by the T6 BPSK-PPS path in timestd-core-recorder
@@ -270,7 +273,7 @@ The system has an eight-service core pipeline plus a set of housekeeping units (
 ### Key Technologies
 
 - **Binary IQ Archive:** Compressed `.bin.zst` files with JSON metadata sidecars for raw 24 kHz IQ recording. Digital RF (MIT Haystack) is used for GRAPE packaging/upload only.
-- **HDF5 SWMR Pipeline:** Single Writer Multiple Reader protocol for all inter-service data exchange. Writer keeps the daily file open (`swmr_mode=True`) and flushes after each append; readers open with `swmr=True`. `h5clear -s` is run unconditionally on every open of an existing file, providing automatic crash recovery without manual intervention.
+- **SQLite Measurement Store:** Single shared database (`/var/lib/timestd/phase2/timestd.db`) for all L1/L2/L3 inter-service data exchange. WAL mode for concurrent readers; one writer per data product. Crash recovery is built into SQLite's WAL — no separate sweep utility required. Replaced the pre-7.0 HDF5/SWMR pipeline in the 2026-05-21 migration; `h5py` is no longer a runtime dependency.
 - **Ionospheric Correction:** GNSS VTEC (primary) and IONEX maps (fallback) correct for group delay ($\tau_{iono} \propto TEC/f^2$). Carrier-phase dTEC is the primary ionospheric science product.
 
 ---
