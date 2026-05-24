@@ -42,23 +42,53 @@ state) carries an annotation of the form:
 The authority tier indicates how well we can convert this sample's RTP
 timestamp into UTC.  Higher tier = better RTP→UTC conversion.
 
-| Tier   | Authority source                                                 | What it gives us                                          |
-|--------|------------------------------------------------------------------|-----------------------------------------------------------|
-| **T6** | GPS+PPS locally **plus** HF-injected PPS in the RTP stream       | T5 + a propagation cross-check                            |
-| **T5** | GPS+PPS direct to the radiod host (hardware PPS via PPS-API)     | Kernel-precise hardware PPS — the gold standard           |
-| **T4** | GPS+PPS over LAN (stratum-1 NTP peer locked to a local GPSDO)    | µs-class via a nearby disciplined host                    |
-| **T3** | HF Fusion (multi-station time-signal reception, no local GPS)    | sub-ms via consensus across WWV/WWVH/CHU/BPM etc.         |
-| **T2** | WAN NTP (internet NTP, no local GPS)                             | ms-class                                                  |
-| **T1** | GPSDO frequency only + wall clock (no PPS, no time-signal recv)  | Excellent rate, mediocre absolute epoch                   |
-| **T0** | No GPSDO, wall clock only                                        | Whatever the host has                                     |
+| Tier   | Authority source                                                                                              | What it gives us                                                                                |
+|--------|---------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------|
+| **T6** | TS-1 HF-injected BPSK PPS via the RX-888 ADC.  The TS-1's onboard GPS PPS is BPSK-modulated onto a clean GPSDO-disciplined carrier (default 84.225 MHz), coupled into the RX path, and recovered sample-precise from the IQ stream.  Hard-wired analog signal path; latency is the (calibrable, §8) chain delay only. | ns-class after §8 chain-delay calibration. The deployed best tier on bee1.                      |
+| **T5** | GPS+PPS delivered to the radiod host over USB (LBE-1421 USB-NMEA, plus any USB-PPS exposure on the same channel).  Software-mediated transport; precision floored by USB bus scheduling. | µs-to-ms class. Used for second-of-day disambiguation under T6, and as the standalone source when T6 is not available. |
+| **T4** | GPS+PPS delivered via a LAN timeserver — stratum-1 NTP peer locked to a local GPSDO. Network-mediated.        | ms-class via LAN jitter.                                                                        |
+| **T3** | HF Fusion (multi-station *received* time-signal consensus, no local GPS).                                     | sub-ms via consensus across WWV/WWVH/CHU/BPM etc. The regime our remote stations will operate in. |
+| **T2** | WAN NTP (internet NTP, no local GPS).                                                                         | ms-class.                                                                                       |
+| **T1** | GPSDO frequency-discipline only + wall clock (no PPS, no time-signal reception).                              | Excellent rate, mediocre absolute epoch.                                                        |
+| **T0** | No GPSDO, wall clock only.                                                                                    | Whatever the host has.                                                                          |
 
-**T6 sits above T5 because the HF-injected PPS is a *propagation
-cross-check* on top of T5's accurate local reference — not a competing
-absolute-time source.**  Architecturally, T6 cannot beat T5 in absolute
-accuracy (the HF-injected PPS arrives via the RF chain with
-ionospheric delay variation).  Its value is the science instrument
-sitting alongside the metrology: the HF-PPS *signal* carries
-information about the propagation path that nothing else gives us.
+**T6 sits above T5 because the TS-1 path is *hard-wired*** — the
+BPSK-modulated PPS travels as an analog RF signal from the TS-1
+through coax and through the RX-888 front-end into the ADC, where it
+is recovered sample-precise from the IQ stream.  The only latency is
+the static analog chain delay (TS-1 modulator → filter/attenuator →
+RX-888 front-end → ADC), and that is exactly what §8 calibrates and
+subtracts.  Once §8 is locked, the recovered PPS edge is good to
+ns-class.
+
+**T5 sits below T6 because the same GPSDO's PPS, delivered over USB
+(LBE-1421 USB-NMEA, possibly USB-PPS on the same channel), is
+software-mediated.**  USB scheduling jitter floors the deliverable
+precision at µs-to-ms class regardless of how good the underlying
+GPS PPS is.  T5 is the natural fallback when T6 drops out, and it
+provides the per-second calendar context (year/month/day/hour/min/sec)
+for T6 even while T6 is active.
+
+**T4 sits below T5 because LAN transport adds further jitter** beyond
+USB.  A nearby stratum-1 NTP peer locked to a local GPSDO is still
+ms-class — good enough to keep host clocks honest, not good enough to
+drive sample-precise science.
+
+**A note on cross-validation.**  When both T6 and T5 (or T6 and a
+host-side PPS-API path, e.g. TS-1 PPS OUT wired to a GPIO that the
+kernel PPS subsystem can stamp) are simultaneously available,
+comparing the two yields a continuous diagnostic on the analog chain
+delay — drifts in §8 become observable in real time.  That is a
+*science / metrology benefit*, not a separate tier; the tier of the
+published annotation is still T6.
+
+**Local vs. received HF.**  Unlike *received* HF-PPS from a distant
+transmitter (which has ionospheric path variation), the TS-1's local
+injection has no propagation-medium variability.  T3 (HF Fusion) and
+T6 (TS-1 local injection) both use HF, but the path physics is
+entirely different: T3 reasons over ionospheric paths to derive UTC;
+T6 receives a clean local signal whose only delay is the calibrable
+analog chain.
 
 T3 (Fusion without local GPS) is the regime our remote stations will
 operate in.  HF time-signal fusion delivers sub-ms UTC to a station
@@ -87,15 +117,31 @@ Other consumers include:
 ## 4. Per-station hardware variants
 
 Different stations have different combinations of:
-- TS-1 HF-PPS injector (present / absent)
-- Local GPS+PPS to radiod (present / absent)
-- LBE-1421 or similar GPSDO (assume **present** — without it the RTP
-  sample rate is not a calibrated ruler)
+- **TS-1 HF-PPS injector** (present / absent) — enables T6.  The
+  TS-1's onboard GPS supplies the PPS that gets BPSK-modulated into
+  the RX path.
+- **LBE-1421 USB GPS+PPS connection to the radiod host** (present /
+  absent) — enables T5.  Provides per-second calendar context for
+  T6 when both are present.
+- **LAN stratum-1 NTP peer locked to a local GPSDO** (present /
+  absent) — enables T4.
+- **LBE-1421 or similar GPSDO** for the frequency reference (assume
+  **present** — without it the RTP sample rate is not a calibrated
+  ruler, and the entire tier hierarchy is degraded by free-running
+  oscillator drift).
 
-The tier in play depends on what's wired at each station.  The
-*architecture* is uniform: same RTP substrate, same annotation schema,
-**different tier per station per epoch**.  We do the best we can with
-what each station has and we annotate honestly with what we know.
+The tier in play depends on which of the above is wired at each
+station.  The *architecture* is uniform: same RTP substrate, same
+annotation schema, **different tier per station per epoch**.  We do
+the best we can with what each station has and we annotate honestly
+with what we know.
+
+A possible future upgrade path for any T6 station: wire the TS-1
+PPS OUT jack to a host GPIO or short-cable RS232 port that the
+kernel PPS subsystem can timestamp.  That adds a second independent
+ns-class path running alongside T6, enabling continuous
+cross-validation of the §8 chain delay (see the "note on
+cross-validation" paragraph in §2).
 
 ## 5. Where chrony fits
 

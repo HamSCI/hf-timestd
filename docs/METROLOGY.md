@@ -225,8 +225,8 @@ radiod's `GPS_TIME` and `RTP_TIMESNAP` are both derived from `input_sample_index
 > | A-level (ADC timebase) ranking | ✅ | Reported by `radiod` / `core_recorder`. |
 > | T0–T2, T4 levels (chrony/NTP-based) | ✅ | Conventional chrony plumbing; behaviour matches the table. |
 > | T3 (Fusion HF-derived UTC) | ✅ | Produced by `multi_broadcast_fusion`. |
-> | T5 (local GPS+PPS, hardware) | ⚠️ | LB-1421 hardware PPS via PPS-API not wired to chrony as a refclock on bee1 yet (the LB-1421 NMEA *is* used by hf-timestd as the T5 disambig reference for the BPSK chain_delay calibration). Direct PPS-API path would tighten chrony's own discipline. |
-> | **T6 BPSK-PPS injection / detection** | ✅ | HPPS (matched-filter) and HFPS (diff calibrator) are implemented and live on bee1. The chrony-facade calibration has known weaknesses (one-shot disambig is sensitive to host-clock state at calibration moment — see [TIMING-PIPELINE-WIRING.md](TIMING-PIPELINE-WIRING.md) and the chrony-tuning notes); the **annotation product** (per-sample tier + offset + uncertainty) is operational. |
+> | T5 (USB-delivered GPS+PPS) | ✅ | LBE-1421 USB-NMEA is consumed by hf-timestd for second-of-day disambiguation (alongside T6) and as the standalone source when T6 is unavailable. Precision is USB-bus-jitter floored at µs-to-ms class. **Upgrade path:** wire the TS-1 PPS OUT jack to a host GPIO / RS232 input with kernel PPS-API support — that adds a *second* ns-class path alongside T6 (for continuous §8 chain-delay cross-validation), but does not promote T5 itself, since the T5 definition is the USB transport. |
+> | **T6 BPSK-PPS injection / detection** | ✅ | TS-1 HF-injected BPSK PPS coupled into the RX path, decoded sample-precise from the IQ stream (HPPS matched-filter + HFPS diff calibrator). Live on bee1. The chrony-facade calibration has known weaknesses (one-shot disambig is sensitive to host-clock state at calibration moment — see [TIMING-PIPELINE-WIRING.md](TIMING-PIPELINE-WIRING.md) and the chrony-tuning notes); the **annotation product** (per-sample tier + offset + uncertainty) is operational and is the deployed best tier. |
 > | Authority manager + `/run/hf-timestd/authority.json` v1 | ✅ | `AuthoritySnapshotStore` + `AuthorityManager` live; per-cycle records persisted to `/var/lib/timestd/authority_history.db`. |
 > | `chronyc selectopts` runtime gating | ⚠️ | `ChronyRefclockGate` exists; gating policy wired but not exercised in production rotation yet. |
 > | mDNS TXT-record extension | ❌ | Not advertised by any service today. |
@@ -254,8 +254,8 @@ Ranked from highest authority (most accurate, most independent of external state
 
 | T-level | Source | Hard prereq | (A1, T) uncertainty | (A0, T) uncertainty |
 |---|---|---|---|---|
-| **T6** | hf-timestd detects GPS-timed BPSK-PPS injected in HF payload | injector present + detection lock | ~μs | ~tens of μs (per-tick; drifts between ticks at TCXO rate) |
-| **T5** | system clock chronyed to on-host GPS+PPS (gpsd or direct PPS) | A1 + PPS wired to host | ~1–10 μs | *not available* |
+| **T6** | hf-timestd detects TS-1 HF-injected BPSK-PPS in the RX path (sample-precise from the IQ stream) | TS-1 injector present + detection lock + §8 chain-delay calibrated | ~ns (post-§8) | ~tens of μs (per-tick; drifts between ticks at TCXO rate) |
+| **T5** | GPS+PPS delivered over USB to the radiod host (LBE-1421 USB-NMEA, optionally USB-PPS on the same channel); consumed for second-of-day disambig under T6, or as the standalone source when T6 is unavailable | A1 + LBE-1421 USB connected to host | ~µs–few ms (USB-bus-jitter floored) | *not available* |
 | **T4** | system clock chronyed to LAN GPS+PPS timeserver via NTP | reachable GPS-backed peer | ~100 μs – few ms | ~1–5 ms (adds TCXO drift between syncs) |
 | **T3** | hf-timestd recovers UTC from WWV/WWVH/CHU tick Fusion | ≥2 stations detected + ionospheric model | ~0.5–2 ms | ~5–10 ms |
 | **T2** | system clock chronyed to public NTP via WAN | internet reachability; stratum ≤3 | ~1–50 ms | ~5–50 ms (NTP dominates; TCXO negligible at this scale) |
@@ -276,8 +276,8 @@ This is a hard invariant. Clients do **not** consult their own system clock for 
 
 **The offset is always applied, regardless of T-level.** Its magnitude and uncertainty tell the provenance story; the client code path is uniform:
 
-- **T5, T4**: radiod's RTP_TIMESNAP is derived from a GPS-disciplined system clock (on-host GPS+PPS or LAN GPS+PPS via NTP). RTP-time is inherently μs- to ms-accurate UTC. The published offset is near zero with μs/ms uncertainty; applying it is a no-op.
-- **T6**: hf-timestd's detection of GPS-timed BPSK-PPS injected into the HF payload produces a μs-level RTP→UTC offset **independent of radiod's clock source**. Measured near-zero if radiod already has GPS (cross-check confirmation), non-zero if it does not (active correction). Supersedes RTP-inherent accuracy at the μs level either way.
+- **T5, T4**: radiod's RTP_TIMESNAP is derived from a GPS-disciplined system clock (USB-delivered GPS+PPS for T5, LAN GPS+PPS via NTP for T4). RTP-time is inherently µs- to ms-accurate UTC. The published offset is near zero with µs/ms uncertainty; applying it is a no-op.
+- **T6**: hf-timestd's detection of TS-1 HF-injected BPSK-PPS in the RX path produces an ns-level (post-§8) RTP→UTC offset **independent of radiod's host clock source**. Measured near-zero if radiod already has GPS-disciplined system time (cross-check confirmation), non-zero if it does not (active correction). Supersedes RTP-inherent accuracy at the ns level either way.
 - **T3–T0**: hf-timestd's HF time-station tick analysis produces an offset with ms–seconds uncertainty. RTP origin is limited by radiod's available reference (stale NTP, free-running TCXO, or no reference at all), and the Fusion offset is the primary UTC correction.
 
 Because the offset is applied uniformly, no client branches on T-level. The authority manager publishes `(offset, σ, T_level, …)` as one tuple; clients read and apply. T-level is provenance metadata for sidecar recording and operator surfacing, not a control flow gate in consumer code.
@@ -294,9 +294,9 @@ Clients that subscribe to the governor radiod apply the offset directly. Clients
 
 #### T-Level Classification
 
-**T6 and T3 share an architecture.** Both are hf-timestd's payload-signal offset products — a known-timed signal is detected in the audio and correlated against RTP time. They differ only in signal: T6's injected BPSK-PPS has a tighter edge and no ionospheric path (~μs); T3's multi-hop HF ticks have larger, partially-modeled ionospheric delay (~ms). Both are independent of the system clock entirely and survive arbitrary system-clock drift as long as A holds.
+**T6 and T3 share an architecture.** Both are hf-timestd's payload-signal offset products — a known-timed signal is detected in the audio and correlated against RTP time. They differ only in signal: T6's TS-1-injected BPSK-PPS is a clean *local* signal with no propagation-medium variability, only the (calibrable, §8) analog chain delay (ns-class once §8 is locked); T3's *received* multi-hop HF ticks have larger, partially-modeled ionospheric delay (~ms). Both are independent of the system clock entirely and survive arbitrary system-clock drift as long as A holds.
 
-**T5 / T4 / T2 are system-clock disciplines.** They align the system clock itself, which hf-timestd then trusts as a proxy for UTC. Silent failure here — peer unreachable, drift accumulating — only becomes visible when something external cross-checks. This is the failure mode behind the 2026-04-20 incident, where T4 (192.168.1.80) became unreachable after a DHCP reassignment and the system drifted ~107 s over ~32 hours without alarm.
+**T5 / T4 / T2 are system-clock disciplines.** They align the system clock itself, which hf-timestd then trusts as a proxy for UTC. T5 (USB-delivered LBE-1421 GPS+PPS) is the lowest-jitter of the three but is still bounded by USB bus scheduling, putting it well below T6's RF/ADC path in absolute precision. Silent failure here — peer unreachable, drift accumulating — only becomes visible when something external cross-checks. This is the failure mode behind the 2026-04-20 incident, where T4 (192.168.1.80) became unreachable after a DHCP reassignment and the system drifted ~107 s over ~32 hours without alarm.
 
 **T1 is a degraded holdover, not a steady operating point.** When T2 and above all fail but A1 still holds, RTP timestamps remain rate-accurate; their UTC origin is whatever RTP_TIMESNAP was at the last good sync, with no drift (because A1 is perfect rate-wise). T1 is the "coasting on the GPSDO" state.
 
@@ -315,7 +315,7 @@ When multiple levels are simultaneously healthy, the higher wins as **active** a
 
 | Pair | Threshold | Rationale |
 |---|---|---|
-| T6 ↔ T5 | 50 μs | Both μs-class; agreement within combined uncertainty |
+| T6 ↔ T5 | 5 ms | T6 is ns-class; T5 is µs-to-ms-class (USB jitter floored). Threshold sized to T5's combined uncertainty — alarms only on disagreement beyond what USB transport explains. |
 | T3 ↔ T4 | 2 ms | T3 worst-case meets T4 typical |
 | T3 ↔ T2 | 5 ms | T2 NTP-level tolerance |
 
@@ -1316,8 +1316,8 @@ Each row summarizes the **published Fusion offset's uncertainty** at one T-level
 
 | T-level | Source (recap from §4.5) | σ single cycle (A1) | σ fused 10 min (A1) | σ single cycle (A0) | σ fused 10 min (A0) | Primary limiter |
 |---|---|---|---|---|---|---|
-| **T6** | Payload BPSK-PPS detection | ~μs | < 10 μs | ~tens μs per detection | ~100 μs¹ | BPSK-PPS SNR + coverage |
-| **T5** | Host-local GPS+PPS → system clock | 1–10 μs | < 10 μs | — | — | GPS+PPS jitter + chrony PLL |
+| **T6** | TS-1 HF-injected BPSK-PPS via RX-888 ADC | ~ns (post-§8) | ~ns | ~tens μs per detection | ~100 μs¹ | §8 chain-delay calibration stability; BPSK-PPS SNR + coverage |
+| **T5** | LBE-1421 USB-delivered GPS+PPS → system clock | ~µs–few ms | ~µs (chrony averaging) | — | — | USB bus jitter + chrony PLL |
 | **T4** | LAN GPS timeserver via NTP → system clock | 100 μs – few ms | ~300 μs | 1–5 ms | ~1.5 ms | LAN NTP jitter (+ TCXO drift between syncs at A0) |
 | **T3** | HF tick Fusion of WWV/WWVH/CHU | 3–15 ms | 0.3–1.0 ms | 5–20 ms | 1–3 ms | σ_iono single-cycle; A-level × window length for fused |
 | **T2** | Public NTP via WAN → system clock | 1–50 ms | ~10 ms | 5–50 ms | ~15 ms | NTP wander dominates; A-level invisible at this scale |
@@ -1328,7 +1328,7 @@ Each row summarizes the **published Fusion offset's uncertainty** at one T-level
 
 ² T1 has no ongoing UTC measurement — the offset is whatever it was at the last T ≥ 2 sync. At A1, rate is perfect, so the offset does not drift; only snapshot freshness matters. Uncertainty grows with coast time only via residual A1 rate error, which is sub-ms for coasts of hours.
 
-**Measured performance at A1/T5** (March 17–18, 2026): ±0.3 ms (1σ) fused uncertainty with GNSS VTEC correction applied; ±0.7 ms (1σ) with raw L1-only data products (no L2 calibration). Consistent with the A1/T3 10-minute fused prediction above, since the HF Fusion witness at T5 operates under the same σ_iono floor that gates T3.
+**Measured performance at A1/T5** (March 17–18, 2026, prior to TS-1/T6 integration): ±0.3 ms (1σ) fused uncertainty with GNSS VTEC correction applied; ±0.7 ms (1σ) with raw L1-only data products (no L2 calibration). Consistent with the A1/T3 10-minute fused prediction above, since the HF Fusion witness at T5 operates under the same σ_iono floor that gates T3. Post-TS-1 deployment (2026-05-23, HPPS @ ±1 ns σ=1 ns) the deployed best tier on bee1 is T6; these T5 numbers now characterize the fallback path rather than the steady-state operating point.
 
 ### 14.4 Key Insights
 
@@ -1337,8 +1337,8 @@ Each row summarizes the **published Fusion offset's uncertainty** at one T-level
 3. **A1 is the rate anchor, not the zero-point.** A1 alone gives T1 (rate perfect, zero unknown). The zero-point always comes from Axis T; A1 just keeps measurements within a fusion window coherent.
 4. **At T2-scale σ, the A-level is noise.** NTP wander (~10 ms) dominates so thoroughly that TCXO drift over an 8-second cycle (~5 ppm × 8 s ≈ 40 μs) is invisible. This is why §4.5 lists similar uncertainty for (A1, T2) and (A0, T2).
 5. **T3 and T6 degrade gracefully under A0.** Unlike T5 and T1, which §4.5 structurally gates on A1, the hf-timestd-derived levels survive GPSDO loss — the authority manager shifts from (A1, T3) to (A0, T3) without a T-level transition, only a σ inflation in the published offset. Operators see this as a widened sigma_ns in authority.json, not a failed probe.
-6. **Cross-check confirms provenance, not precision.** §4.5's disagreement thresholds (T6↔T5 @ 50 μs, T3↔T4 @ 2 ms, T3↔T2 @ 5 ms) raise `TIMING_DISAGREEMENT` when the active level's published offset diverges from a witness; they do not reduce the σ quoted above. The σ of the active level is whatever Axis T's source delivers; cross-check is an alarm on "is the active level still meaningful," not a noise reduction.
-7. **Default operating point is (A1, T5) when all peers are healthy**, downgrading to (A1, T3) active with (A1, T2) witness on LAN-GPS failure, and further to (A1, T2) active (no Fusion) if Fusion also loses lock. Each downgrade widens σ and is recorded in the `authority_history` sidecar entries (§4.5) so downstream reprocessing can tag samples by their σ at acquisition time.
+6. **Cross-check confirms provenance, not precision.** §4.5's disagreement thresholds (T6↔T5 @ 5 ms, T3↔T4 @ 2 ms, T3↔T2 @ 5 ms) raise `TIMING_DISAGREEMENT` when the active level's published offset diverges from a witness; they do not reduce the σ quoted above. The σ of the active level is whatever Axis T's source delivers; cross-check is an alarm on "is the active level still meaningful," not a noise reduction. The T6↔T5 threshold is sized to T5's USB-jitter floor, not to T6's precision — T6 itself reaches ns-class but the cross-check fires only when disagreement exceeds what T5's transport can explain.
+7. **Default operating point is (A1, T6) when the TS-1 path is healthy**, with (A1, T5) as the immediate fallback via the same LBE-1421's USB-NMEA. Subsequent downgrades: (A1, T3) active with (A1, T2) witness on LAN-GPS failure, and further to (A1, T2) active (no Fusion) if Fusion also loses lock. Each downgrade widens σ and is recorded in the `authority_history` sidecar entries (§4.5) so downstream reprocessing can tag samples by their σ at acquisition time.
 
 ### 14.5 Station Priority Policy
 
