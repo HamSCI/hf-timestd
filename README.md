@@ -234,6 +234,8 @@ cookbook and stage-by-stage troubleshooting.
 
 ## Architecture
 
+> **First principles**: [docs/ARCHITECTURE-FIRST-PRINCIPLES.md](docs/ARCHITECTURE-FIRST-PRINCIPLES.md) — the RTP sample counter is the timeline; UTC labels are per-sample annotations graded by T-tier; chrony is one downstream consumer of the annotation, not the architectural design center. Read this before any deeper architecture doc.
+
 The system has an eight-service core pipeline plus a set of housekeeping units (timers, maintenance, monitoring, GRAPE subsystem). In total [systemd/](systemd/) carries ~25 unit files; [docs/SERVICES.md](docs/SERVICES.md) (when present — see also [systemd/](systemd/)) covers the full set. The eight core services:
 
 ```text
@@ -251,7 +253,9 @@ The system has an eight-service core pipeline plus a set of housekeeping units (
 4. FUSION (timestd-fusion) <------- 5. VTEC (timestd-vtec)
    • Reads L2 HDF5 (crash-safe)     • GNSS VTEC monitoring
    • Dual Kalman filtering          • (optional, requires GNSS)
-   • Feeds Chrony SHM (TSL1/TSL2)
+   • Feeds Chrony SHM unit 1 (FUSE) — one consumer of the
+     annotation stream; HPPS (unit 2) and HFPS (unit 3) are
+     fed by the T6 BPSK-PPS path in timestd-core-recorder
      ↓
 6. PHYSICS (timestd-physics)
    • Carrier-phase dTEC + group-delay TEC validation
@@ -273,7 +277,8 @@ The system has an eight-service core pipeline plus a set of housekeeping units (
 
 ## Detailed Documentation
 
-- **[docs/OVERVIEW.md](docs/OVERVIEW.md)** — start here: 5-minute mental model, pipelines vs modes, terminology cheatsheet.
+- **[docs/ARCHITECTURE-FIRST-PRINCIPLES.md](docs/ARCHITECTURE-FIRST-PRINCIPLES.md)** — **read first** if you're touching anything timing-related: the substrate framing, T-tier hierarchy, and where chrony fits.
+- **[docs/OVERVIEW.md](docs/OVERVIEW.md)** — start here for a 5-minute mental model, pipelines vs modes, terminology cheatsheet.
 - **[INSTALLATION.md](INSTALLATION.md)** — setup and deployment (standalone + Pattern A editable-venv).
 - **[docs/DEBUGGING.md](docs/DEBUGGING.md)** — operator troubleshooting runbook: log access, stage-by-stage triage, failure recipes, diagnostic bundle.
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — system design and data flow.

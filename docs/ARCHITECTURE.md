@@ -1,15 +1,22 @@
 # HF Time Standard - System Architecture
 
-**Last Updated:** 2026-05-20  
+**Last Updated:** 2026-05-24  
 **Author:** Michael James Hauan (AC0G)  
 **Status:** CANONICAL - Single source of truth for system design  
 **Version:** 7.0.0  (single source of truth: `pyproject.toml`)
+
+> **Foundational principles**: read
+> [ARCHITECTURE-FIRST-PRINCIPLES.md](ARCHITECTURE-FIRST-PRINCIPLES.md)
+> before this doc.  It states the **substrate** (the RTP sample counter
+> is the timeline; UTC labels are per-sample annotations with a T-tier
+> quality grade; chrony is a downstream consumer, not the design
+> center).  Everything below assumes that framing.
 
 ---
 
 ## Document Purpose
 
-This document explains **WHY** the hf-timestd system is designed the way it is. For **WHAT** functions exist, see `docs/TECHNICAL_REFERENCE.md`. For **HOW** to deploy, see `docs/DEPLOYMENT_CORRESPONDENCE_CHECKLIST.md`.
+This document explains **WHY** the hf-timestd system is designed the way it is. For **WHAT** functions exist, see `docs/TECHNICAL_REFERENCE.md`. For **HOW** to deploy, see `docs/DEPLOYMENT_CORRESPONDENCE_CHECKLIST.md`. For **first principles** (substrate vs annotation, T-tier hierarchy, what role chrony plays), see [ARCHITECTURE-FIRST-PRINCIPLES.md](ARCHITECTURE-FIRST-PRINCIPLES.md).
 
 ---
 
@@ -79,20 +86,42 @@ The system serves a **dual purpose**:
 
 ## Dual-Purpose Architecture
 
-The system exploits a fundamental duality: the same observations serve both timing and ionospheric science.
+> **Read first**: [ARCHITECTURE-FIRST-PRINCIPLES.md](ARCHITECTURE-FIRST-PRINCIPLES.md).
+> The architecture rests on the RTP sample counter as the timeline,
+> with UTC labels (and per-sample tier annotations) layered on top.
+> "Dual purpose" here means the *same annotated sample stream* serves
+> both the science pipeline and the chrony-facing convenience layer —
+> they are two consumers of one product, not two parallel systems.
 
-### The Circular Dependency (And Its Resolution)
+The system exploits a fundamental duality: the same RTP-anchored
+sample stream serves both ionospheric science and host-clock
+discipline.  The RTP counter is the steel ruler; UTC annotations on
+top of it (at whatever T-tier the station currently supports) are
+what both consumers read.
 
-There's an apparent circularity:
-- To measure the ionosphere, we need good timing
-- To get good timing from fusion, we need to model the ionosphere
+### Why there is no circular dependency
 
-**Resolution:** The system operates in two modes:
+Reading older docs you'll sometimes find a "circular dependency"
+framing:
+- To measure the ionosphere we need good timing
+- To get good timing from fusion we need to model the ionosphere
 
-| Mode | Timing Source | Ionosphere Treatment | Primary Output |
-|------|---------------|---------------------|----------------|
-| **RTP Mode** | GPS+PPS (external) | Measured as residual | TEC, TID events |
-| **Fusion Mode** | Broadcast fusion | Modeled (IRI-2020) | D_clock, UTC |
+This framing was an artifact of treating chrony as the design center.
+The actual architecture is **not circular** — it is a hierarchy
+(see [ARCHITECTURE-FIRST-PRINCIPLES.md §2](ARCHITECTURE-FIRST-PRINCIPLES.md)):
+
+| Active tier         | What provides UTC                            | Ionospheric science                              |
+|---------------------|----------------------------------------------|--------------------------------------------------|
+| **T5/T4/T6**        | Local hardware PPS / LAN NTP                 | Measured as the residual the science wants       |
+| **T3** (Fusion)     | HF-station consensus, IRI-2020 path modeling | Improved iteratively from fusion residuals       |
+| **T2/T1/T0**        | Whatever the host has                        | Limited by absolute-time accuracy                |
+
+The tier in play tells us how good our UTC is for a given sample, and
+the ionospheric science consumes the same annotated stream that
+chrony does (when chrony is wired in at all).  Fusion-mode stations
+(T3) still produce science; they just lean more on the propagation
+model for absolute-time alignment because they lack a local hardware
+reference.
 
 ### Station Priority Policy (v6.5)
 
@@ -112,11 +141,26 @@ landing there should be redirected.)
 
 ## Timing-Only vs Full-Science Mode
 
-The pipeline has a hard boundary between the functions needed to discipline Chrony and the functions that produce ionospheric science products. Operators on resource-constrained hardware (Raspberry Pi, low-RAM systems, metered network connections) can opt out of the science layer without any effect on clock discipline.
+> **Reframing**: this section was historically titled in chrony-feed
+> terms.  The substrate principle is that the system always produces an
+> *annotated RTP sample stream* — the question is whether the
+> physics-overlay consumers run alongside the annotation core.
+> Resource-constrained stations can disable physics overlays without
+> affecting annotation quality.
+
+The pipeline has a hard boundary between the functions that **produce
+per-sample T-tier annotations** (always on) and the physics overlay
+that consumes those annotations to produce ionospheric science
+products (optional).  Operators on resource-constrained hardware
+(Raspberry Pi, low-RAM systems, metered network connections) can opt
+out of the physics overlay without any effect on the annotation core
+(and therefore without any effect on the chrony-feed consumer if it is
+wired in).
 
 ### The boundary
 
-**Timing-critical path** — must run to produce a Chrony feed:
+**Annotation core** — must run to produce the annotated RTP stream
+(which any downstream consumer, including chrony, reads):
 
 | Component | Product | Why critical |
 |-----------|---------|--------------|
@@ -129,7 +173,7 @@ The pipeline has a hard boundary between the functions needed to discipline Chro
 | `L2CalibrationService` | L2 timing with propagation correction | Required by fusion |
 | `MultiBroadcastFusion` + Kalman filter | — | Produces the Chrony SHM feed |
 
-**Physics-optional path** — adds science value; Chrony does not need these:
+**Physics overlay** — adds science value; the annotation core (and therefore any consumer including chrony) does not need these:
 
 | Component | Product | Controlled by |
 |-----------|---------|---------------|

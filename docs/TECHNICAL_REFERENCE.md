@@ -4,7 +4,13 @@
 
 **Author:** Michael James Hauan (AC0G)  
 **Version:** 7.0.0 (canonical: `pyproject.toml`)  
-**Last Updated:** 2026-05-20
+**Last Updated:** 2026-05-24
+
+> **Foundational principles**: read
+> [ARCHITECTURE-FIRST-PRINCIPLES.md](ARCHITECTURE-FIRST-PRINCIPLES.md)
+> first.  The RTP sample counter is the timeline; UTC labels are
+> per-sample annotations with a T-tier quality grade; chrony is a
+> downstream consumer of the annotation, not the design center.
 
 ---
 
@@ -184,11 +190,24 @@ Phase 3 fusion results.
 
 ---
 
-## Real-Time Core vs Physics Overlay — Separation of Concerns
+## Annotation Core vs Physics Overlay — Separation of Concerns
 
-### What is strictly necessary for UTC recapture (GPSDO mode)
+> **Foundational principles**: see
+> [ARCHITECTURE-FIRST-PRINCIPLES.md](ARCHITECTURE-FIRST-PRINCIPLES.md).
+> Older drafts of this section described the boundary in chrony-feed
+> terms.  The substrate framing is that **annotations on the RTP
+> sample stream** are the product; chrony is one consumer of those
+> annotations.  Whether physics-overlay services run alongside the
+> annotation core is the boundary; both run on top of the same RTP
+> substrate.
 
-The real-time chrony feed requires **no ionospheric physics model** to produce a valid, converged UTC estimate. The following are sufficient:
+### What is strictly necessary for the annotation core (UTC labelling on the RTP stream)
+
+The real-time annotation produces a per-sample T-tier UTC estimate that
+is the input to all downstream consumers (chrony refclock feed, the
+science pipeline, fusion ingest, DASI2 distribution).  It requires **no
+ionospheric physics model** to produce a valid, converged UTC estimate.
+The following are sufficient:
 
 | Component | What it needs | Module |
 |---|---|---|
@@ -200,7 +219,7 @@ The real-time chrony feed requires **no ionospheric physics model** to produce a
 
 **The per-broadcast Kalman filter is the key resilience mechanism.** After ~10–20 minutes of observations it has *learned* the actual delay per path from data, making any ionospheric model advisory rather than mandatory. Physics models only matter for cold-start initialization and long-outage recovery — both handled by inflated uncertainty windows.
 
-### What is NOT required for the chrony feed
+### What is NOT required for the annotation core (and therefore not required by any downstream consumer including chrony)
 
 - IRI-2020 / WAM-IPE / GIRO / IONEX
 - Mode identification (1F / 2F / 3F)
@@ -234,7 +253,7 @@ The `l2_calibration_service` geometric fallback uses the Haversine formula (grea
 
 ### What L2 calibration service is responsible for
 
-`l2_calibration_service.py` is a **physics annotation layer**, not a real-time necessity. It converts L1 raw-TOA to L2 calibrated timing by applying geometric + ionospheric corrections and ISO GUM uncertainty budgets. Fusion reads both L1 and L2; it falls back to L1-only mode automatically (`force_l1_only`) if no L2 data is available. The TSL1 chrony feed therefore continues uninterrupted even if the L2 service is stopped.
+`l2_calibration_service.py` is a **physics annotation layer**, not part of the annotation core. It converts L1 raw-TOA to L2 calibrated timing by applying geometric + ionospheric corrections and ISO GUM uncertainty budgets. Fusion reads both L1 and L2; it falls back to L1-only mode automatically (`force_l1_only`) if no L2 data is available. The annotation stream — and therefore the chrony-feed consumer along with it — continues uninterrupted even if the L2 service is stopped.
 
 ---
 

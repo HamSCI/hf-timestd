@@ -2,8 +2,16 @@
 
 **Prepared for:** Time metrology professionals, "time nuts", and general users  
 **System Version:** 7.0.0 (canonical: `pyproject.toml`)  
-**Last Updated:** 2026-05-20  
+**Last Updated:** 2026-05-24  
 **Author:** Michael James Hauan (AC0G)
+
+> **Foundational principles**: see
+> [ARCHITECTURE-FIRST-PRINCIPLES.md](ARCHITECTURE-FIRST-PRINCIPLES.md).
+> The metrological story rests on the RTP sample counter as substrate.
+> The T-tier hierarchy described in §4.5 of this doc grades the
+> *annotation* on top of that substrate.  Chrony SHM feeds (mentioned
+> below) are one *consumer* of the annotation, not the architectural
+> goal.
 
 ---
 
@@ -210,16 +218,17 @@ radiod's `GPS_TIME` and `RTP_TIMESNAP` are both derived from `input_sample_index
 > - ⚠️ Partial: the building blocks exist but some pieces of the policy / wiring described here are not yet running.
 > - ❌ Designed but not implemented; the schema/policy is recorded here as the contract a future implementation must satisfy.
 >
-> Status of the §4.5 / §4.6 content as of 2026-05-20 (review item D-H5):
+> Status of the §4.5 / §4.6 content as of 2026-05-24:
 >
 > | Component | Status | Notes |
 > |---|---|---|
 > | A-level (ADC timebase) ranking | ✅ | Reported by `radiod` / `core_recorder`. |
-> | T0–T5 levels (chrony/NTP-based) | ✅ | These are conventional chrony plumbing; behaviour matches the table. |
+> | T0–T2, T4 levels (chrony/NTP-based) | ✅ | Conventional chrony plumbing; behaviour matches the table. |
 > | T3 (Fusion HF-derived UTC) | ✅ | Produced by `multi_broadcast_fusion`. |
-> | **T6 BPSK-PPS injection / detection** | ❌ | **Not implemented.** No injector exists; the detector is not in the code base. This subsection records the design that a future T6 must implement. ARCHITECTURE.md correctly lists PPS injection under "Future Options". |
-> | Authority manager + `/run/hf-timestd/authority.json` v1 | ⚠️ | `FusionStatusWriter` publishes `fusion_status.json` (per `multi_broadcast_fusion.py`); the full `authority.json` schema below + multi-source A/T selection logic is **not yet** integrated into a separate authority manager. Schema treated as design until that lands. |
-> | `chronyc selectopts` runtime gating | ❌ | Not wired in production; the configuration described below is the target. |
+> | T5 (local GPS+PPS, hardware) | ⚠️ | LB-1421 hardware PPS via PPS-API not wired to chrony as a refclock on bee1 yet (the LB-1421 NMEA *is* used by hf-timestd as the T5 disambig reference for the BPSK chain_delay calibration). Direct PPS-API path would tighten chrony's own discipline. |
+> | **T6 BPSK-PPS injection / detection** | ✅ | HPPS (matched-filter) and HFPS (diff calibrator) are implemented and live on bee1. The chrony-facade calibration has known weaknesses (one-shot disambig is sensitive to host-clock state at calibration moment — see [TIMING-PIPELINE-WIRING.md](TIMING-PIPELINE-WIRING.md) and the chrony-tuning notes); the **annotation product** (per-sample tier + offset + uncertainty) is operational. |
+> | Authority manager + `/run/hf-timestd/authority.json` v1 | ✅ | `AuthoritySnapshotStore` + `AuthorityManager` live; per-cycle records persisted to `/var/lib/timestd/authority_history.db`. |
+> | `chronyc selectopts` runtime gating | ⚠️ | `ChronyRefclockGate` exists; gating policy wired but not exercised in production rotation yet. |
 > | mDNS TXT-record extension | ❌ | Not advertised by any service today. |
 >
 > Treat the rest of §4.5 / §4.6 as the **contract** an authority

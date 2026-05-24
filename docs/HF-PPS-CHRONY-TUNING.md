@@ -8,6 +8,25 @@ signal regime on the test bench (bee1) is more turbulent than the
 original tuning anticipated, so this is the kind of file that gets
 updated when the regime changes again.
 
+> **Scope of this document**: this is a tuning guide for one specific
+> consumer of the hf-timestd annotation stream — the chrony SHM
+> refclock feed for the T6 BPSK-PPS tier (and the parallel HFPS feed
+> via the diff calibrator).  It is NOT the architectural description
+> of the system.
+>
+> For the architectural framing — RTP sample counter as the substrate,
+> Tn annotations on top, chrony as one downstream consumer of those
+> annotations — see
+> [ARCHITECTURE-FIRST-PRINCIPLES.md](ARCHITECTURE-FIRST-PRINCIPLES.md).
+> For the metrological story see
+> [METROLOGY.md](METROLOGY.md).  For the SHM-facing conventions and
+> wiring see [TIMING-PIPELINE-WIRING.md](TIMING-PIPELINE-WIRING.md).
+>
+> The tuning constants below exist to make the chrony-facing facade
+> work cleanly.  They affect chrony's view of the source, not the
+> underlying annotation quality.  Treat this document as a downstream
+> operational guide, not a design center.
+
 ---
 
 ## 1. What we are doing

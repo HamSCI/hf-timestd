@@ -1,6 +1,8 @@
 # Timing pipeline — wiring the wall-clock contract
 
-**Status:** open design discussion, no policy decisions yet.
+**Status:** living design document. The principle in §1 below was
+adopted as the architectural foundation and is now codified in
+[ARCHITECTURE-FIRST-PRINCIPLES.md](ARCHITECTURE-FIRST-PRINCIPLES.md).
 **Audience:** Rob, Michael — and future contributors arriving cold.
 **Why this exists:** the timing pipeline has working components but
 inconsistent wiring between them. The +237 ms TSL3 chronyc reading of
@@ -8,6 +10,15 @@ inconsistent wiring between them. The +237 ms TSL3 chronyc reading of
 codebase document mutually contradictory contracts for how UTC reaches
 a data record. This document picks a contract and traces every wire
 that needs to honour it.
+
+> **Read first**:
+> [ARCHITECTURE-FIRST-PRINCIPLES.md](ARCHITECTURE-FIRST-PRINCIPLES.md)
+> states the substrate framing this document operates under: the RTP
+> sample counter is the timeline, UTC labels are per-sample annotations
+> graded by T-tier, and chrony is one downstream consumer of the
+> annotation stream.  This document describes the SHM-facing
+> conventions ("Pattern A / Pattern B") that present the annotation to
+> chrony; those are facade choices, not architectural choices.
 
 This is the runtime sibling of `METROLOGY.md §4.5` (which defines the
 T-level taxonomy and the `authority.json` schema) and presupposes
