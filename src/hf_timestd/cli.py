@@ -155,6 +155,17 @@ def _handle_inventory(args):
                 'data_sinks':                  data_sinks,
                 'uses_timing_calibration':     False,
                 'provides_timing_calibration': bool(timing.get('authority')),
+                # CONTRACT-v0.7 §18 — hf-timestd is the *producer* of
+                # timing-authority annotations for other clients, not a
+                # subscriber to a peer authority. The applied-authority
+                # field is therefore null (= §18 default mode: the
+                # instance's own RTP→UTC mapping is uncorrected from a
+                # peer, because there is no peer above it).
+                #
+                # Future: if a higher-tier sibling becomes available
+                # (e.g. a stratum-0 LAN authority above this one), this
+                # field would name the source/tier/sigma we're applying.
+                'timing_authority_applied':    None,
                 # Standalone fallback: clients can read these from their own
                 # config file when sigmond/coordination.env are absent.
                 'radiod_status_dns':           ka9q.get('status_address', ''),
@@ -185,7 +196,7 @@ def _handle_inventory(args):
         'client':           'hf-timestd',
         'version':          version,
         'git':              GIT_INFO,
-        'contract_version': '0.6',
+        'contract_version': '0.7',
         'config_path':      str(config_path),
         'log_paths': {
             # As of v6.12 every timestd-* unit writes to journald.
