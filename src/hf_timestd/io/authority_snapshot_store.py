@@ -204,10 +204,61 @@ class AuthoritySnapshotStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.executescript(_CREATE_TABLE + ";\n" + _CREATE_INDEX_T_LEVEL + ";")
+        self._migrate_missing_columns()
         self._conn.commit()
         logger.info(
             "AuthoritySnapshotStore initialised at %s", self.db_path,
         )
+
+    def _migrate_missing_columns(self) -> None:
+        """Forward-only schema migration.
+
+        ``CREATE TABLE IF NOT EXISTS`` only creates the table when it's
+        absent — it never alters an existing table.  Adding a column to
+        ``COLUMNS`` without an explicit ALTER would silently fail every
+        INSERT on existing DBs, the cycle's snapshot would be lost, and
+        the operator would only notice via journal warnings (or absent
+        rows in queries — the symptom that bit Phase 2A T5 rollout).
+        This helper bridges the gap: it diffs the live schema against
+        ``COLUMNS`` and emits ``ALTER TABLE ADD COLUMN`` for each
+        missing field.
+
+        Forward-only: removed or renamed columns are NOT dropped — a
+        downgrade-then-upgrade cycle must work, so unknown old columns
+        are left alone.  Renames are not supported (treat them as
+        add-new + leave-old).
+
+        Idempotent — re-running on an up-to-date schema is a no-op.
+        """
+        cur = self._conn.execute(
+            "PRAGMA table_info(authority_snapshot)"
+        )
+        existing = {row[1] for row in cur.fetchall()}  # row[1] = column name
+        for column in COLUMNS:
+            if column in existing:
+                continue
+            # _column_sql returns "name TYPE [PRIMARY KEY]" — we strip
+            # any constraints SQLite forbids in ALTER ADD COLUMN
+            # (PRIMARY KEY, UNIQUE, NOT NULL without default).  Our only
+            # constraint today is PRIMARY KEY on utc_published, which
+            # cannot be added by ALTER — but it's also impossible to
+            # reach this branch for utc_published, since CREATE TABLE
+            # IF NOT EXISTS would have put the table there on first
+            # init.  Defensive guard anyway.
+            if column == "utc_published":
+                continue
+            type_sql = (
+                "INTEGER" if column in _INT_COLUMNS
+                else "REAL" if column in _REAL_COLUMNS
+                else "TEXT"
+            )
+            self._conn.execute(
+                f"ALTER TABLE authority_snapshot ADD COLUMN {column} {type_sql}"
+            )
+            logger.info(
+                "AuthoritySnapshotStore: added missing column %s %s",
+                column, type_sql,
+            )
 
     def insert(self, snapshot: dict) -> None:
         """Append a snapshot row.  Unknown keys in ``snapshot`` are

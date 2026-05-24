@@ -225,5 +225,123 @@ class TestColumnCoverage(unittest.TestCase):
         self.assertEqual(row_keys, set(COLUMNS))
 
 
+class TestForwardMigration(unittest.TestCase):
+    """``CREATE TABLE IF NOT EXISTS`` does NOT alter an existing
+    table.  Without the explicit migration, adding any column to
+    ``COLUMNS`` would silently break every INSERT on a live DB —
+    the symptom that bit Phase 2A T5 rollout on bee1.  These tests
+    pin the migration behavior so future column additions are safe.
+    """
+
+    def _seed_old_schema(self, path: Path, columns: tuple) -> None:
+        """Hand-create a table whose schema is a strict subset of
+        ``COLUMNS`` — simulates an older AuthoritySnapshotStore that
+        didn't know about the newer fields."""
+        with sqlite3.connect(str(path)) as conn:
+            cols_sql = ", ".join(
+                "utc_published TEXT NOT NULL PRIMARY KEY" if c == "utc_published"
+                else f"{c} TEXT"
+                for c in columns
+            )
+            conn.execute(f"CREATE TABLE authority_snapshot ({cols_sql})")
+            conn.commit()
+
+    def test_missing_columns_added_on_init(self):
+        """Opening a store against an old DB must add every missing
+        column from COLUMNS via ALTER TABLE."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "auth.db"
+            # Simulate a pre-T5 DB: drop the t5_* columns from the
+            # set the seeded schema gets.
+            old_columns = tuple(
+                c for c in COLUMNS if not c.startswith("t5_")
+            )
+            self._seed_old_schema(path, old_columns)
+            # Sanity: old schema really lacks t5_available.
+            with sqlite3.connect(str(path)) as conn:
+                pre_cols = {r[1] for r in conn.execute(
+                    "PRAGMA table_info(authority_snapshot)"
+                )}
+            self.assertNotIn("t5_available", pre_cols)
+            # Init the new store — must auto-add t5_* columns.
+            with AuthoritySnapshotStore(path) as store:
+                del store  # initialisation is the only thing under test
+            with sqlite3.connect(str(path)) as conn:
+                post_cols = {r[1] for r in conn.execute(
+                    "PRAGMA table_info(authority_snapshot)"
+                )}
+            # Every COLUMN now exists.
+            self.assertEqual(post_cols, set(COLUMNS))
+
+    def test_migrated_db_accepts_full_insert(self):
+        """After migration, a normal full-snapshot insert must
+        round-trip cleanly — the schema fix isn't useful if writes
+        still fail."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "auth.db"
+            old_columns = tuple(
+                c for c in COLUMNS if not c.startswith("t5_")
+            )
+            self._seed_old_schema(path, old_columns)
+            with AuthoritySnapshotStore(path) as store:
+                snap = _full_snapshot()
+                # Include T5 fields so the test actually exercises
+                # the newly-added columns.
+                snap["t5_available"] = 1
+                snap["t5_offset_ms"] = 0.0
+                snap["t5_sigma_ms"] = 5.0
+                snap["t5_valid_fix"] = 1
+                snap["t5_pps_utc_sec"] = 1716501000
+                snap["t5_nmea_age_sec"] = 0.5
+                store.insert(snap)
+            with sqlite3.connect(str(path)) as conn:
+                row = conn.execute(
+                    "SELECT t5_available, t5_pps_utc_sec, t5_sigma_ms "
+                    "FROM authority_snapshot LIMIT 1"
+                ).fetchone()
+        self.assertEqual(row, (1, 1716501000, 5.0))
+
+    def test_migration_is_idempotent(self):
+        """Opening a store against an already-current DB must be a
+        no-op — no spurious ALTERs, no errors on second open."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "auth.db"
+            with AuthoritySnapshotStore(path) as s1:
+                del s1
+            with AuthoritySnapshotStore(path) as s2:
+                # Second open against the current schema — should
+                # initialise cleanly and accept inserts.
+                s2.insert(_full_snapshot())
+            with sqlite3.connect(str(path)) as conn:
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM authority_snapshot"
+                ).fetchone()[0]
+        self.assertEqual(count, 1)
+
+    def test_extra_old_columns_preserved(self):
+        """Forward-only: an old column we no longer declare must
+        NOT be dropped.  Downgrade-then-upgrade cycles must work."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "auth.db"
+            # Seed with a column not in COLUMNS — simulates a future
+            # version that added a field we don't know about yet.
+            with sqlite3.connect(str(path)) as conn:
+                cols_sql = ", ".join(
+                    "utc_published TEXT NOT NULL PRIMARY KEY" if c == "utc_published"
+                    else f"{c} TEXT"
+                    for c in COLUMNS
+                )
+                cols_sql += ", future_v3_only_column TEXT"
+                conn.execute(f"CREATE TABLE authority_snapshot ({cols_sql})")
+                conn.commit()
+            with AuthoritySnapshotStore(path) as store:
+                del store
+            with sqlite3.connect(str(path)) as conn:
+                post_cols = {r[1] for r in conn.execute(
+                    "PRAGMA table_info(authority_snapshot)"
+                )}
+            self.assertIn("future_v3_only_column", post_cols)
+
+
 if __name__ == "__main__":
     unittest.main()
