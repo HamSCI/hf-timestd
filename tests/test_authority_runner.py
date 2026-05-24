@@ -145,6 +145,78 @@ class TestBuildAuthorityRunnerFromConfig(unittest.TestCase):
         self.assertEqual(runner.interval_sec, 10.0)
         self.assertEqual(runner.manager.upgrade_hysteresis, 2)
 
+    def test_t5_lb1421_precedence_over_chrony_refid(self) -> None:
+        """When both lb1421_status_path and chrony refid are configured,
+        the substrate-grounded LbeT5DirectProbe must win — chrony T5 is
+        the legacy fallback for hosts without LBE-1421."""
+        cfg = {
+            "timing": {
+                "authority_manager": {
+                    "t5": {
+                        "lb1421_status_path": "/var/lib/timestd/status/core-recorder-status.json",
+                        "refid": "GPS",
+                        "sigma_floor_ms": 3.0,
+                    },
+                }
+            }
+        }
+        runner = build_authority_runner_from_config(
+            config=cfg,
+            fusion_status_path=self.tmp / "fusion_status.json",
+            authority_output_path=self.tmp / "authority.json",
+        )
+        from hf_timestd.core.lbe_t5_direct_probe import LbeT5DirectProbe
+        t5_probes = [p for p in runner.manager.probes if p.t_level == "T5"]
+        self.assertEqual(len(t5_probes), 1)
+        self.assertIsInstance(t5_probes[0], LbeT5DirectProbe)
+        self.assertEqual(t5_probes[0].sigma_floor_ms, 3.0)
+
+    def test_t5_lb1421_enabled_flag_alone_registers_direct_probe(self) -> None:
+        """Operators can opt into LBE-direct T5 with just the
+        enabled flag (defaults take care of status_path)."""
+        cfg = {
+            "timing": {
+                "authority_manager": {
+                    "t5": {"lb1421_enabled": True},
+                }
+            }
+        }
+        runner = build_authority_runner_from_config(
+            config=cfg,
+            fusion_status_path=self.tmp / "fusion_status.json",
+            authority_output_path=self.tmp / "authority.json",
+        )
+        from hf_timestd.core.lbe_t5_direct_probe import LbeT5DirectProbe
+        t5_probes = [p for p in runner.manager.probes if p.t_level == "T5"]
+        self.assertEqual(len(t5_probes), 1)
+        self.assertIsInstance(t5_probes[0], LbeT5DirectProbe)
+        # Defaults pick up the canonical status file path.
+        self.assertEqual(
+            str(t5_probes[0].status_path),
+            "/var/lib/timestd/status/core-recorder-status.json",
+        )
+
+    def test_t5_chrony_refid_still_works_without_lb1421(self) -> None:
+        """Hosts without LBE-1421 keep the chrony-shaped T5 — the
+        existing config shape (refid only) must still build a
+        ChronyTrackingProbe."""
+        cfg = {
+            "timing": {
+                "authority_manager": {
+                    "t5": {"refid": "GPS"},
+                }
+            }
+        }
+        runner = build_authority_runner_from_config(
+            config=cfg,
+            fusion_status_path=self.tmp / "fusion_status.json",
+            authority_output_path=self.tmp / "authority.json",
+        )
+        from hf_timestd.core.chrony_tracking_probe import ChronyTrackingProbe
+        t5_probes = [p for p in runner.manager.probes if p.t_level == "T5"]
+        self.assertEqual(len(t5_probes), 1)
+        self.assertIsInstance(t5_probes[0], ChronyTrackingProbe)
+
     def test_t2_alone_with_no_t4_peers_matches_any_server(self) -> None:
         cfg = {
             "timing": {

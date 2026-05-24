@@ -99,6 +99,13 @@ COLUMNS = (
     "t6_recapture_count",
     "t6_last_recapture_reason",
     "t6_last_recapture_age_sec",
+    # --- T5 (LbeT5DirectProbe — LBE-1421 USB-NMEA, substrate-grounded) ---
+    "t5_available",
+    "t5_offset_ms",
+    "t5_sigma_ms",
+    "t5_valid_fix",             # 0/1, NULL when no probe attached
+    "t5_pps_utc_sec",
+    "t5_nmea_age_sec",
     # --- T4 (ChronyTrackingProbe) ---
     "t4_available",
     "t4_offset_ms",
@@ -130,6 +137,9 @@ _INT_COLUMNS = frozenset({
     "t6_sustained_breach",
     "t6_anchor_residual_samples",
     "t6_recapture_count",
+    "t5_available",
+    "t5_valid_fix",
+    "t5_pps_utc_sec",
     "t4_available",
     "t3_available",
 })
@@ -138,6 +148,9 @@ _REAL_COLUMNS = frozenset({
     "t6_sigma_ms",
     "t6_breach_duration_sec",
     "t6_last_recapture_age_sec",
+    "t5_offset_ms",
+    "t5_sigma_ms",
+    "t5_nmea_age_sec",
     "t4_offset_ms",
     "t4_sigma_ms",
     "t3_offset_ms",

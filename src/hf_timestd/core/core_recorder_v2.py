@@ -3320,6 +3320,35 @@ class CoreRecorderV2:
                     },
                 }
 
+            # T5 LBE-1421 status block — published so the AuthorityRunner
+            # side (LbeT5DirectProbe) can decide T5 availability without
+            # opening a second handle to /dev/lb1421-nmea.  Always emitted
+            # when the lb1421 probe is attached, even when it has no
+            # current reading — the absence of fix is itself the signal.
+            lb_probe = getattr(self, '_lb1421_probe', None)
+            if lb_probe is not None:
+                reading = lb_probe.get_latest(require_valid_fix=False)
+                if reading is not None:
+                    age_sec = round(time.monotonic() - reading.host_monotonic_at_read, 3)
+                    status['t5_lbe1421'] = {
+                        'enabled': True,
+                        'valid_fix': bool(reading.valid_fix),
+                        'pps_utc_sec': int(reading.pps_utc_sec),
+                        'age_sec': age_sec,
+                        'device': str(getattr(lb_probe, 'device', '')),
+                    }
+                else:
+                    status['t5_lbe1421'] = {
+                        'enabled': True,
+                        'valid_fix': False,
+                        'pps_utc_sec': None,
+                        'age_sec': None,
+                        'device': str(getattr(lb_probe, 'device', '')),
+                        'reason': 'no reading yet',
+                    }
+            # If no probe is attached, no t5_lbe1421 block at all —
+            # LbeT5DirectProbe treats absence as "not configured".
+
             # Write atomically
             temp_file = self.status_file.with_suffix('.tmp')
             with open(temp_file, 'w') as f:

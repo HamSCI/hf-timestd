@@ -622,6 +622,7 @@ class AuthorityManager:
 
         if results is not None:
             _flatten_t6(snapshot, results.get("T6"))
+            _flatten_t5(snapshot, results.get("T5"))
             _flatten_t4(snapshot, results.get("T4"))
             _flatten_t3(snapshot, results.get("T3"))
 
@@ -665,6 +666,25 @@ def _flatten_t6(snapshot: Dict[str, Any], r: Optional[ProbeResult]) -> None:
         snapshot["t6_last_recapture_age_sec"] = dm.get(
             "last_recapture_age_sec"
         )
+
+
+def _flatten_t5(snapshot: Dict[str, Any], r: Optional[ProbeResult]) -> None:
+    """Pull LbeT5DirectProbe (or ChronyTrackingProbe-T5) detail into
+    the flat snapshot columns.  The probe-shape is generic, so this
+    works for either source; the substrate-specific fields
+    (valid_fix, pps_utc_sec, nmea_age_sec) only populate when the
+    probe is LbeT5DirectProbe (the others leave them None)."""
+    if r is None:
+        return
+    snapshot["t5_available"] = 1 if r.available else 0
+    snapshot["t5_offset_ms"] = r.offset_ms
+    snapshot["t5_sigma_ms"] = r.sigma_ms
+    d = r.detail or {}
+    valid_fix = d.get("valid_fix")
+    if valid_fix is not None:
+        snapshot["t5_valid_fix"] = 1 if valid_fix else 0
+    snapshot["t5_pps_utc_sec"] = d.get("pps_utc_sec")
+    snapshot["t5_nmea_age_sec"] = d.get("nmea_age_sec")
 
 
 def _flatten_t4(snapshot: Dict[str, Any], r: Optional[ProbeResult]) -> None:

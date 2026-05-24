@@ -33,6 +33,7 @@ from hf_timestd.core.chrony_tracking_probe import (
 from hf_timestd.core.coarse_time_source import CoarseTimeFileSource
 from hf_timestd.core.fusion_status_probe import FusionStatusProbe
 from hf_timestd.core.gpsdo_probe import GpsdoProbe
+from hf_timestd.core.lbe_t5_direct_probe import LbeT5DirectProbe
 from hf_timestd.io.authority_snapshot_store import AuthoritySnapshotStore
 
 log = logging.getLogger(__name__)
@@ -248,7 +249,25 @@ def build_authority_runner_from_config(
             sigma_floor_ms=sigma_floor_ms,
         ))
 
-    if "refid" in t5_cfg or t5_cfg.get("enabled"):
+    # T5 source precedence: substrate-grounded LbeT5DirectProbe
+    # (reads the t5_lbe1421 block from core-recorder-status.json)
+    # wins when configured, falling back to ChronyTrackingProbe for
+    # deployments that expose T5 via a chrony refclock instead.
+    # See project_rtp_substrate_architecture: T5 is canonically the
+    # LBE-1421 USB-NMEA path.  The chrony route remains for environments
+    # without LBE-1421.
+    t5_lb1421_status = t5_cfg.get("lb1421_status_path")
+    if t5_lb1421_status or t5_cfg.get("lb1421_enabled"):
+        probes.append(LbeT5DirectProbe(
+            status_path=Path(
+                t5_lb1421_status
+                or "/var/lib/timestd/status/core-recorder-status.json"
+            ),
+            freshness_sec=float(t5_cfg.get("freshness_sec", 60.0)),
+            max_nmea_age_sec=float(t5_cfg.get("max_nmea_age_sec", 2.0)),
+            sigma_floor_ms=float(t5_cfg.get("sigma_floor_ms", 5.0)),
+        ))
+    elif "refid" in t5_cfg or t5_cfg.get("enabled"):
         probes.append(ChronyTrackingProbe(
             t_level="T5",
             source_matcher=match_refclock(t5_cfg.get("refid")),

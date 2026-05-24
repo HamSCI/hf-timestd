@@ -544,6 +544,72 @@ class TestSnapshotStore(unittest.TestCase):
         self.assertEqual(row["t6_anchor_discontinuity"], 0)
         self.assertEqual(row["t6_anchor_residual_samples"], 12)
 
+    def test_t5_substrate_fields_flattened(self) -> None:
+        """LbeT5DirectProbe substrate fields (valid_fix, pps_utc_sec,
+        nmea_age_sec) round-trip into their dedicated columns.  The
+        offset/sigma fields come from the generic ProbeResult shape
+        and use the same code path as T4/T3."""
+        from hf_timestd.io.authority_snapshot_store import AuthoritySnapshotStore
+        import sqlite3
+        db = self.tmp / "auth.db"
+        store = AuthoritySnapshotStore(db)
+        try:
+            t5 = FakeProbe("T5")
+            t5.set(ProbeResult(
+                "T5", available=True,
+                offset_ms=0.0, sigma_ms=5.0,
+                detail={
+                    "valid_fix": True,
+                    "pps_utc_sec": 1716501000,
+                    "nmea_age_sec": 0.42,
+                    "device": "/dev/lb1421-nmea",
+                },
+            ))
+            mgr = self._mgr_with_store([t5], store)
+            mgr.tick()
+        finally:
+            store.close()
+        with sqlite3.connect(str(db)) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM authority_snapshot"
+            ).fetchone()
+        self.assertEqual(row["t5_available"], 1)
+        self.assertEqual(row["t5_offset_ms"], 0.0)
+        self.assertEqual(row["t5_sigma_ms"], 5.0)
+        self.assertEqual(row["t5_valid_fix"], 1)
+        self.assertEqual(row["t5_pps_utc_sec"], 1716501000)
+        self.assertAlmostEqual(row["t5_nmea_age_sec"], 0.42)
+
+    def test_t5_unavailable_flattens_with_zero_available(self) -> None:
+        """Unavailable T5 should populate t5_available=0 (so historical
+        queries can distinguish 'never configured' (NULL) from
+        'configured but currently unavailable')."""
+        from hf_timestd.io.authority_snapshot_store import AuthoritySnapshotStore
+        import sqlite3
+        db = self.tmp / "auth.db"
+        store = AuthoritySnapshotStore(db)
+        try:
+            t5 = FakeProbe("T5")
+            t5.set(ProbeResult(
+                "T5", available=False,
+                reason="no valid fix",
+            ))
+            mgr = self._mgr_with_store([t5], store)
+            mgr.tick()
+        finally:
+            store.close()
+        with sqlite3.connect(str(db)) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM authority_snapshot"
+            ).fetchone()
+        self.assertEqual(row["t5_available"], 0)
+        # Substrate detail fields stay NULL — nothing to flatten when
+        # the detail dict is empty.
+        self.assertIsNone(row["t5_valid_fix"])
+        self.assertIsNone(row["t5_pps_utc_sec"])
+
     def test_no_store_is_legacy_noop(self) -> None:
         """When no snapshot_store is provided, tick still works and
         authority.json is written as before — no DB activity."""
