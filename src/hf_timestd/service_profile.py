@@ -225,8 +225,42 @@ def apply_profile(profile: ServiceProfile, dry_run: bool = False) -> Dict[str, s
     'disabled', or 'skipped'.
 
     Requires root privileges unless dry_run=True.
+
+    Implementation notes:
+      * `--no-reload` is passed to every enable/disable so we don't
+        trigger systemd's implicit daemon-reload after each call.  A
+        single `systemctl daemon-reload` at the start (below) ensures
+        systemd's view of unit files is current; per-unit reloads
+        afterward are redundant and were observed to cascade-bounce
+        long-running services like timestd-core-recorder.service
+        (one operator-visible install.sh run produced 10 reloads in
+        3 seconds, which coincided with a core-recorder restart that
+        in turn cascade-stopped all 9 metrology@* instances via
+        Requires=).
+      * `timeout=120` (not 30) accommodates Type=notify services
+        whose ExecStart legitimately takes >30 seconds to send
+        READY=1.  timestd-core-recorder.service is the prime
+        example: IRI2020 init + multicast joins + ring-buffer
+        allocation routinely take 35–45 seconds.  At timeout=30 the
+        subprocess.run would fire while systemd was still mid-start
+        and we'd report a false-positive error; downstream units
+        with Requires= on the still-pending unit would then queue
+        behind it and also time out.
     """
     actions = {}
+
+    # Reload once up front so systemd has the current view of all unit
+    # files before we start enabling/disabling.  Suppresses the implicit
+    # reload that `systemctl enable/disable` would otherwise do per call.
+    if not dry_run:
+        try:
+            subprocess.run(
+                ['systemctl', 'daemon-reload'],
+                capture_output=True, text=True, timeout=10, check=True,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+                FileNotFoundError) as e:
+            logger.warning(f"daemon-reload failed (continuing): {e}")
 
     for unit in profile.systemd_units(active=True):
         if dry_run:
@@ -234,8 +268,8 @@ def apply_profile(profile: ServiceProfile, dry_run: bool = False) -> Dict[str, s
         else:
             try:
                 subprocess.run(
-                    ['systemctl', 'enable', '--now', unit],
-                    capture_output=True, text=True, timeout=30,
+                    ['systemctl', 'enable', '--no-reload', '--now', unit],
+                    capture_output=True, text=True, timeout=120,
                     check=True,
                 )
                 actions[unit] = 'enabled'
@@ -251,8 +285,8 @@ def apply_profile(profile: ServiceProfile, dry_run: bool = False) -> Dict[str, s
         else:
             try:
                 subprocess.run(
-                    ['systemctl', 'disable', '--now', unit],
-                    capture_output=True, text=True, timeout=30,
+                    ['systemctl', 'disable', '--no-reload', '--now', unit],
+                    capture_output=True, text=True, timeout=120,
                     check=True,
                 )
                 actions[unit] = 'disabled'
