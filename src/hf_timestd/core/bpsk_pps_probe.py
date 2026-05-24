@@ -29,15 +29,41 @@ ChronyTrackingProbe.  When the system is well-disciplined Δ is
 sub-µs; when the anchor is stale (V1) Δ inflates to whatever
 accumulated error the anchor inherited.
 
-sigma_ms is computed from observed jitter: the producer maintains a
-60-sample rolling std-dev of ``chain_delay_ns`` (the BPSK matched
-filter's per-PPS edge-position estimate) and publishes it as
-``l6_pps.chain_delay_ns_std_ns``.  This IS the physical uncertainty
-of the BPSK PPS measurement.  The probe converts to ms, clamps below
-by ``sigma_floor_ms`` (calibration uncertainty floor we can't directly
-measure — antenna cable temperature, BPSK detector bias, half-
-quantization-step), and falls back to ``sigma_floor_ms`` on producers
-that don't emit the std field yet.
+sigma_ms is the honest annotation uncertainty for the T6 label —
+the larger of three components:
+
+  1. **Matched-filter jitter** — the producer's 60-sample rolling
+     std-dev of ``chain_delay_ns`` (the BPSK matched filter's
+     per-PPS edge-position estimate), published as
+     ``l6_pps.chain_delay_ns_std_ns``.  This is the physical noise
+     of the BPSK PPS measurement itself.
+
+  2. **Substrate residual** — ``|local_minus_source_ns|`` in ms.
+     This is the per-cycle bias of our model: how far our
+     RTP-projected UTC label sits from the BPSK source's integer
+     PPS second.  In nominal operation it is sub-µs; in the V1
+     anchor-staleness regime it can inflate to hundreds of ms.
+     A σ that ignores this bias publishes optimism the substrate
+     contradicts.
+
+  3. **Calibration floor** — ``sigma_floor_ms``, the irreducible
+     calibration uncertainty (antenna cable thermal drift, BPSK
+     detector bias, half-quantization-step) that the observed
+     jitter cannot directly see.
+
+The published sigma is ``max(jitter, residual, floor)``.  This
+bounds the total label error (bias + noise) honestly: when the
+anchor is fresh and the substrate cross-check is small the
+floor or jitter dominates and σ is sub-µs; when the V1
+anchor-staleness regime fires σ inflates to match the actual
+residual so downstream consumers see the truth without having
+to parse the breach flags.
+
+Substrate evaluation 2026-05-24 found median |residual| ≈ 5 µs
+when T6 is active, with p99 ≈ 294 ms — see
+``docs/T6-ANNOTATION-VALUE-2026-05-24.md``.  The previous σ
+publication (jitter only, clamped to floor) misrepresented the
+p99 tail by ~5 orders of magnitude.
 """
 from __future__ import annotations
 
@@ -181,10 +207,12 @@ class BpskPpsProbe:
             std_window = int(std_window_raw) if std_window_raw is not None else None
         except (TypeError, ValueError):
             std_window = None
-        if std_ns is None:
-            sigma_ms = self.sigma_floor_ms
-        else:
-            sigma_ms = max(std_ns / 1_000_000.0, self.sigma_floor_ms)
+        # Honest σ: max of measurement noise (matched-filter jitter),
+        # model bias (substrate residual), and calibration floor.
+        # See class docstring for rationale.
+        jitter_ms = (std_ns / 1_000_000.0) if std_ns is not None else 0.0
+        residual_ms = abs(residual_ns) / 1_000_000.0
+        sigma_ms = max(jitter_ms, residual_ms, self.sigma_floor_ms)
 
         # Diagnostic: local_minus_source_ns std (post-anchor computation
         # stability, NOT the physical σ).  Forwarded as-is for the

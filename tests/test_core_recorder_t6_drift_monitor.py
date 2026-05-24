@@ -422,5 +422,119 @@ class TestProbeSigmaFromJitter(unittest.TestCase):
             path.unlink()
 
 
+class TestProbeSigmaHonestResidual(unittest.TestCase):
+    """sigma_ms must reflect the substrate residual when it exceeds
+    both the matched-filter jitter and the calibration floor.  This
+    is the V1 anchor-staleness honesty guarantee — see
+    ``docs/T6-ANNOTATION-VALUE-2026-05-24.md`` for the substrate
+    evaluation that motivated this behavior.
+
+    Pattern: max(jitter_ms, |residual|/1e6, floor_ms).
+    """
+
+    def _make_status(self, *, residual_ns, std_ns=None, window=60, ts=None):
+        from datetime import datetime, timezone
+        now = ts or datetime(2026, 5, 24, 17, 0, 0, tzinfo=timezone.utc)
+        block = {
+            'enabled': True,
+            'locked': True,
+            'pps_ok': 100,
+            'pps_noise': 0,
+            'pps_consecutive': 50,
+            'chain_delay_ns': 1234,
+            'local_minus_source_ns': residual_ns,
+        }
+        if std_ns is not None:
+            block['chain_delay_ns_std_ns'] = std_ns
+            block['chain_delay_ns_window'] = window
+        return {
+            'timestamp': now.isoformat().replace('+00:00', 'Z'),
+            'l6_pps': block,
+        }, now
+
+    def _write(self, status):
+        import json
+        import tempfile
+        with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as f:
+            json.dump(status, f)
+            return Path(f.name)
+
+    def test_residual_dominates_jitter_and_floor(self):
+        """A 280 ms residual (V1 anchor-staleness regime) inflates
+        sigma_ms to ~280 ms even when jitter and floor are sub-µs.
+        Without this the published sigma lies by ~5 orders of magnitude
+        — the exact failure the substrate eval identified."""
+        from hf_timestd.core.bpsk_pps_probe import BpskPpsProbe
+        # 280 ms = 280_000_000 ns; jitter 500 ns; floor 1 µs.
+        status, now = self._make_status(
+            residual_ns=280_000_000, std_ns=500.0,
+        )
+        path = self._write(status)
+        try:
+            probe = BpskPpsProbe(
+                status_path=path, now_fn=lambda: now,
+                sigma_floor_ms=0.001,
+            )
+            result = probe.poll()
+            self.assertTrue(result.available)
+            self.assertAlmostEqual(result.sigma_ms, 280.0, places=3)
+            # offset_ms should still be the signed residual.
+            self.assertAlmostEqual(result.offset_ms, 280.0, places=3)
+        finally:
+            path.unlink()
+
+    def test_residual_dominates_with_missing_jitter(self):
+        """Pre-jitter producers (no chain_delay_ns_std_ns) still get
+        honest sigma when the residual is large."""
+        from hf_timestd.core.bpsk_pps_probe import BpskPpsProbe
+        # 50 ms residual; no jitter; floor 1 µs.
+        status, now = self._make_status(residual_ns=50_000_000)
+        path = self._write(status)
+        try:
+            probe = BpskPpsProbe(
+                status_path=path, now_fn=lambda: now,
+                sigma_floor_ms=0.001,
+            )
+            result = probe.poll()
+            self.assertAlmostEqual(result.sigma_ms, 50.0, places=3)
+        finally:
+            path.unlink()
+
+    def test_jitter_dominates_when_residual_small(self):
+        """When residual is sub-floor (nominal operation), the larger
+        of jitter and floor still wins — backward-compatible with the
+        pre-honest behavior in good cycles."""
+        from hf_timestd.core.bpsk_pps_probe import BpskPpsProbe
+        # 100 ns residual; 7 µs jitter; floor 1 µs.
+        status, now = self._make_status(residual_ns=100, std_ns=7000.0)
+        path = self._write(status)
+        try:
+            probe = BpskPpsProbe(
+                status_path=path, now_fn=lambda: now,
+                sigma_floor_ms=0.001,
+            )
+            result = probe.poll()
+            self.assertAlmostEqual(result.sigma_ms, 0.007, places=6)
+        finally:
+            path.unlink()
+
+    def test_negative_residual_uses_abs(self):
+        """Residual sign is bias direction; magnitude is what bounds
+        the uncertainty."""
+        from hf_timestd.core.bpsk_pps_probe import BpskPpsProbe
+        status, now = self._make_status(residual_ns=-15_000_000)  # -15 ms
+        path = self._write(status)
+        try:
+            probe = BpskPpsProbe(
+                status_path=path, now_fn=lambda: now,
+                sigma_floor_ms=0.001,
+            )
+            result = probe.poll()
+            self.assertAlmostEqual(result.sigma_ms, 15.0, places=3)
+            self.assertAlmostEqual(result.offset_ms, -15.0, places=3)
+        finally:
+            path.unlink()
+
+
 if __name__ == '__main__':
     unittest.main()
