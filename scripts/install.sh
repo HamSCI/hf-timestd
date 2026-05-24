@@ -13,8 +13,13 @@
 # Options:
 #   --pull          Git pull before deploying
 #   --no-restart    Sync everything but don't restart services
-#   --restart-all   Also restart core-recorder (causes brief data gap)
-#   --force-pip     Force pip reinstall even if version matches
+#   --restart-all   Restart all timestd services after deploy (the only way
+#                   in-memory bytecode picks up Phase 4 source changes).
+#                   Causes brief data gaps (especially core-recorder's
+#                   ring buffer).  Without this, Phase 7 is a no-op:
+#                   Phase 5 (apply_profile) handles enable/disable + start.
+#   --force-pip     No-op under uv sync --frozen (always reproduces locked
+#                   state).  Preserved for muscle-memory compatibility.
 #   --reconfig      Re-run station configuration wizard
 #   --yes|-y        Accept defaults, no interactive prompts
 #   --verbose|-v    Verbose output
@@ -75,8 +80,9 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  --pull          Git pull before deploying"
             echo "  --no-restart    Sync everything but don't restart services"
-            echo "  --restart-all   Also restart core-recorder (causes brief data gap)"
-            echo "  --force-pip     Force pip reinstall even if version matches"
+            echo "  --restart-all   Restart all timestd services to pick up Phase 4 source changes"
+            echo "                  (causes brief data gaps).  Without this, Phase 7 is a no-op."
+            echo "  --force-pip     No-op under uv sync --frozen (preserved for compatibility)"
             echo "  --reconfig      Re-run station configuration wizard"
             echo "  --yes|-y        Accept defaults, no interactive prompts"
             echo "  --verbose|-v    Verbose output"
@@ -872,58 +878,74 @@ if [[ "$DO_RESTART" == "true" ]]; then
         log_info "First run — using start-services.sh for ordered startup..."
         bash "$PROJECT_DIR/scripts/start-services.sh"
     else
-        # Update: selective restart (services are already running)
-
-        # Metrology: restart each instance explicitly.
-        # 'systemctl restart target' does NOT start template instances that
-        # have never been loaded (e.g. first deploy after enable).
-        # Reset failed state first — workers may have hit StartLimitBurst
-        # from a previous bug and systemd refuses to restart them.
-        systemctl reset-failed 'timestd-metrology@*' 2>/dev/null || true
-        systemctl reset-failed timestd-metrology.target 2>/dev/null || true
-        systemctl reset-failed timestd-core-recorder 2>/dev/null || true
-        MET_STARTED=0
-        for entry in "${METROLOGY_CHANNELS[@]}"; do
-            CHANNEL="${entry%%=*}"
-            systemctl restart "timestd-metrology@${CHANNEL}.service" 2>/dev/null || true
-            MET_STARTED=$((MET_STARTED + 1))
-        done
-        log_info "  Restarted: $MET_STARTED metrology workers"
-
-        RESTART_SERVICES=(
-            "timestd-l2-calibration"
-            "timestd-fusion"
-            "timestd-physics"
-            "timestd-web-api"
-            "timestd-radiod-monitor"
-        )
-
-        for service in "${RESTART_SERVICES[@]}"; do
-            if systemctl is-enabled --quiet "$service" 2>/dev/null; then
-                systemctl restart "$service" 2>/dev/null || true
-                log_info "  Restarted: $service"
-            fi
-        done
-
-        # Core recorder: skip by default to avoid data gaps
+        # Update path.  Phase 5 (apply_profile) is the canonical "ensure
+        # right things are running" step -- it enables/disables units to
+        # match the profile and starts anything that should be running but
+        # isn't (systemctl enable --now is a true no-op on already-active
+        # units, verified empirically).  So Phase 7 has only ONE remaining
+        # job: refresh in-memory bytecode for already-running services so
+        # they pick up source changes from Phase 4 (uv sync).  That's a
+        # destructive operation (each restart bounces a service, briefly
+        # gaps its outputs); we now require --restart-all to opt in.
+        #
+        # Background: prior to 2026-05-24 this loop ran unconditionally on
+        # every deploy, restarting 5 services + 9 metrology workers each
+        # time.  Combined with timestd-fusion.service's ExecStartPre/Post
+        # chrony bounce (stops chrony, starts fusion, waits 3s, restarts
+        # chrony), this could cascade into 30s+ profile-apply timeouts and
+        # spurious metrology-cascade-stops.  See sigmond/CLAUDE.md "Fleet
+        # upgrade pattern" + the project_sigmond_uv_standardization memory
+        # for the full chain of events.
         if [[ "$RESTART_ALL" == "true" ]]; then
+            log_info "  --restart-all: bouncing services to load fresh bytecode"
+
+            # Metrology: restart each instance explicitly.
+            # 'systemctl restart target' does NOT start template instances that
+            # have never been loaded (e.g. first deploy after enable).
+            # Reset failed state first — workers may have hit StartLimitBurst
+            # from a previous bug and systemd refuses to restart them.
+            systemctl reset-failed 'timestd-metrology@*' 2>/dev/null || true
+            systemctl reset-failed timestd-metrology.target 2>/dev/null || true
+            systemctl reset-failed timestd-core-recorder 2>/dev/null || true
+            MET_STARTED=0
+            for entry in "${METROLOGY_CHANNELS[@]}"; do
+                CHANNEL="${entry%%=*}"
+                systemctl restart "timestd-metrology@${CHANNEL}.service" 2>/dev/null || true
+                MET_STARTED=$((MET_STARTED + 1))
+            done
+            log_info "  Restarted: $MET_STARTED metrology workers"
+
+            # try-restart instead of restart so disabled-by-profile services
+            # don't get started by accident; only refreshes services that
+            # were already running.
+            for service in \
+                timestd-l2-calibration \
+                timestd-fusion \
+                timestd-physics \
+                timestd-web-api \
+                timestd-radiod-monitor \
+                timestd-vtec ; do
+                if systemctl try-restart "$service" 2>/dev/null; then
+                    log_info "  Restarted: $service"
+                fi
+            done
+
+            # Core recorder: --restart-all gates a real restart (causes a brief
+            # data gap in the ring buffer; metrology@* may briefly observe
+            # missing chunks via Requires=).
             systemctl restart timestd-core-recorder 2>/dev/null || true
             log_info "  Restarted: timestd-core-recorder"
-        elif systemctl is-active --quiet timestd-core-recorder 2>/dev/null; then
-            log_warn "  timestd-core-recorder NOT restarted (use --restart-all)"
         else
-            # Not running — start it
-            systemctl start timestd-core-recorder 2>/dev/null || true
-            log_info "  Started: timestd-core-recorder"
+            log_info "  No services restarted (use --restart-all to refresh in-memory bytecode)"
+            log_info "  Phase 5 (apply_profile) already started any units that should be running."
         fi
 
-        # VTEC
-        if [[ "$VTEC_ENABLED" == "true" ]] && systemctl is-enabled --quiet timestd-vtec 2>/dev/null; then
-            systemctl restart timestd-vtec 2>/dev/null || true
-            log_info "  Restarted: timestd-vtec"
-        fi
-
-        # Ensure timers are running
+        # Always-on housekeeping: ensure timers are running (idempotent
+        # start, regardless of --restart-all).  Profile-apply takes care of
+        # enable; this is a defensive belt-and-suspenders to catch the
+        # rare case where the timer file was just added by Phase 4 and the
+        # enable in apply_profile would have run before daemon-reload saw
+        # the new file.
         for timer in timestd-ionex-download timestd-chrony-monitor timestd-pipeline-watchdog; do
             systemctl start "${timer}.timer" 2>/dev/null || true
         done
