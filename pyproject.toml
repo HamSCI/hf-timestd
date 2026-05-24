@@ -94,3 +94,12 @@ addopts = "-ra -q"
 testpaths = [
     "tests",
 ]
+
+[tool.uv.sources]
+# editable=true so a `git pull` of ka9q-python propagates to this consumer's
+# venv without a reinstall.  Matches the suite-wide "one source tree, many
+# editable consumers" convention; see sigmond/CLAUDE.md "Fleet upgrade pattern".
+# Without this, uv sync would resolve "ka9q-python>=3.14.0" from PyPI as a
+# non-editable wheel, stomping the existing editable install convention.  The
+# base PyPI declaration above still controls what published-package consumers get.
+ka9q-python = { path = "../ka9q-python", editable = true }

@@ -1081,7 +1081,7 @@ requires-dist = [
     { name = "flake8", marker = "extra == 'dev'", specifier = ">=6.0.0" },
     { name = "iri2020", git = "https://github.com/space-physics/iri2020.git" },
     { name = "jinja2", specifier = ">=3.0.0" },
-    { name = "ka9q-python", specifier = ">=3.14.0" },
+    { name = "ka9q-python", editable = "../ka9q-python" },
     { name = "lz4", marker = "extra == 'lz4'", specifier = ">=4.0.0" },
     { name = "matplotlib", specifier = ">=3.7.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
@@ -1224,16 +1224,22 @@ wheels = [
 
 [[package]]
 name = "ka9q-python"
-version = "3.15.1"
-source = { registry = "https://pypi.org/simple" }
+version = "3.16.1"
+source = { editable = "../ka9q-python" }
 dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d4/63/898c890ce857b6c8dc4ac914388f98d623997812d62d22b036a098c47da8/ka9q_python-3.15.1.tar.gz", hash = "sha256:def905d26456b66032eefbb78a92d09872e4e1e9ebca4b5acc16faff1426f45a", size = 260617, upload-time = "2026-05-21T11:42:49.659Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/68/1f/3d3126063e9d266f87c98bc040caf40db55668e6b574536b97b5bfce43dc/ka9q_python-3.15.1-py3-none-any.whl", hash = "sha256:8610c15bccbc7e2f15b102d22d135bf90f5449c4053152400210914fefb8fd51", size = 106927, upload-time = "2026-05-21T11:42:48.263Z" },
+
+[package.metadata]
+requires-dist = [
+    { name = "numpy", specifier = ">=1.24.0" },
+    { name = "opuslib", marker = "extra == 'opus'", specifier = ">=3.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0.0" },
+    { name = "textual", marker = "extra == 'tui'", specifier = ">=0.50" },
 ]
+provides-extras = ["dev", "tui", "opus"]
 
 [[package]]
 name = "kiwisolver"

@@ -1100,7 +1100,12 @@ Per-service overrides in [services] take precedence over the profile.
         timing_section = config.get('timing', {})
         lb1421_device = timing_section.get('lb1421_nmea_device', '').strip()
         if lb1421_device:
-            from pathlib import Path
+            # NB: Path is imported at module level (line 16).  Re-importing
+            # here would shadow that into a local-only binding for the
+            # entire main() function -- making the line-762
+            # `daemon_parser.add_argument('--archive-root', type=Path, ...)`
+            # raise UnboundLocalError because Python's bytecode compiler
+            # sees `Path` as a local variable assigned later.
             from .core.lb1421_t5_probe import Lb1421T5Probe
             lb1421_probe = Lb1421T5Probe(device=Path(lb1421_device))
             lb1421_probe.start()

@@ -390,14 +390,52 @@ log_info "All files synced to $INSTALL_DIR"
 # ════════════════════════════════════════════════════════════════════
 log_step "Phase 4: Python"
 
-# Create venv if missing
+# Ensure uv (https://astral.sh/uv) is on PATH.  Delegates to sigmond's
+# shared helper if present; falls back to an inline copy for the
+# bootstrap case.  Keep the inline body in sync with
+# sigmond/scripts/install/ensure_uv.sh.
+_ENSURE_UV_SH="/opt/git/sigmond/sigmond/scripts/install/ensure_uv.sh"
+if [[ -r "$_ENSURE_UV_SH" ]]; then
+    # shellcheck source=/dev/null
+    source "$_ENSURE_UV_SH"
+else
+    _ensure_uv() {
+        if command -v uv >/dev/null 2>&1; then
+            printf '[INFO]  uv %s at %s\n' "$(uv --version 2>/dev/null | awk '{print $2}')" "$(command -v uv)"
+            return 0
+        fi
+        printf '[INFO]  uv not found -- installing system-wide to /usr/local/bin\n'
+        command -v curl >/dev/null || { printf '[ERROR] curl not found (apt install curl)\n' >&2; return 1; }
+        if ! curl -LsSf https://astral.sh/uv/install.sh | env XDG_BIN_HOME=/usr/local/bin UV_NO_MODIFY_PATH=1 sh; then
+            printf '[ERROR] uv installer failed\n' >&2
+            return 1
+        fi
+        command -v uv >/dev/null || { printf '[ERROR] uv installer ran but uv is still not on PATH\n' >&2; return 1; }
+        printf '[INFO]  uv %s installed\n' "$(uv --version 2>/dev/null | awk '{print $2}')"
+    }
+fi
+_ensure_uv || { log_error "_ensure_uv failed"; exit 1; }
+
+# pyproject.toml's [tool.uv.sources] declares ka9q-python as a
+# path-based editable dep at ../ka9q-python.  uv sync needs the
+# directory to exist at /opt/git/sigmond/ka9q-python or it fails.
+if [[ ! -f /opt/git/sigmond/ka9q-python/pyproject.toml ]]; then
+    log_info "ka9q-python sibling repo not at /opt/git/sigmond/ka9q-python -- cloning"
+    mkdir -p /opt/git/sigmond
+    git clone https://github.com/mijahauan/ka9q-python /opt/git/sigmond/ka9q-python \
+        || { log_error "Failed to clone ka9q-python"; exit 1; }
+fi
+
+# Create venv if missing.  --seed populates pip/setuptools/wheel for
+# compatibility with tooling that shells out to pip; harmless overhead.
 if [[ ! -x "$VENV_DIR/bin/python" ]]; then
     log_info "Creating venv at $VENV_DIR..."
-    python3 -m venv "$VENV_DIR"
+    uv venv "$VENV_DIR" --python 3.11 --seed --quiet
     chown -R "$INSTALL_USER:$INSTALL_USER" "$VENV_DIR"
 fi
 
-# Get versions
+# Version detection (informational logging only -- uv sync always
+# reproduces the locked state regardless of installed version).
 PROJECT_VER=$(python3 -c "
 import re, pathlib
 text = pathlib.Path('$PROJECT_DIR/pyproject.toml').read_text()
@@ -411,51 +449,45 @@ try:
 except Exception:
     print('')" 2>/dev/null || echo "")
 
-NEED_PIP=true
 if [[ -z "$INSTALLED_VER" ]]; then
-    log_info "hf-timestd not installed — will install"
+    log_info "hf-timestd not installed — uv sync will install"
 elif [[ "$PROJECT_VER" != "$INSTALLED_VER" ]]; then
-    log_info "Version change: $INSTALLED_VER → $PROJECT_VER"
+    log_info "Version change: $INSTALLED_VER → $PROJECT_VER (uv sync will apply)"
 else
-    log_info "hf-timestd $INSTALLED_VER — reinstalling to sync source"
+    log_info "hf-timestd $INSTALLED_VER — uv sync will refresh from uv.lock"
 fi
 
-if [[ "$NEED_PIP" == "true" ]]; then
-    # Clean stale .pyc and editable installs
-    find "$VENV_DIR/lib" -name '*.pyc' -delete 2>/dev/null || true
-    find "$VENV_DIR/lib" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+# --force-pip is a no-op under uv sync --frozen (which always reproduces
+# the locked state).  Flag is preserved for muscle-memory compatibility.
+if [[ "$FORCE_PIP" == "true" ]]; then
+    log_info "--force-pip noted (no-op: uv sync --frozen always reproduces locked state)"
+fi
 
-    # Remove editable installs if present
-    if "$VENV_DIR/bin/pip" show hf-timestd 2>/dev/null | grep -q "Editable project location"; then
-        log_warn "Removing editable install..."
-        "$VENV_DIR/bin/pip" uninstall hf-timestd -y --quiet 2>/dev/null || true
-    fi
-    find "$VENV_DIR/lib" -name 'hf-timestd.egg-link' -delete 2>/dev/null || true
-    find "$VENV_DIR/lib" -name '__editable__.hf_timestd*' -delete 2>/dev/null || true
-    find /usr/local/lib/python*/dist-packages -name 'hf-timestd.egg-link' -delete 2>/dev/null || true
-    find /usr/local/lib/python*/dist-packages -name '__editable__.hf_timestd*' -delete 2>/dev/null || true
+# uv sync reads pyproject.toml + uv.lock, resolves [tool.uv.sources]
+# (ka9q-python editable from ../ka9q-python), installs hf-timestd
+# editable + every locked dep into $VENV_DIR.  --no-dev skips dev
+# extras (pytest, black, flake8, mypy); --extra lz4/gnss/iono pulls
+# in deps required by timestd-iono-reanalysis.service +
+# timestd-vtec.service (the lz4 transport, pyserial/pyubx2 for GNSS
+# UBX framing, netCDF4/boto3 for IRI ionosphere reanalysis).
+# --frozen requires uv.lock to be current; regenerate locally with
+# `uv lock` if siblings or deps have shifted.
+#
+# uv.lock supersedes the legacy constraints.txt approach: a committed
+# lockfile is itself a reproducible pinned dependency set, and uv
+# resolves much faster than pip + --constraint did.
+log_info "Syncing hf-timestd + extras (lz4, gnss, iono) into $VENV_DIR..."
+UV_PROJECT_ENVIRONMENT="$VENV_DIR" \
+    uv sync --project "$PROJECT_DIR" --frozen --no-dev \
+            --extra lz4 --extra gnss --extra iono --quiet
 
-    "$VENV_DIR/bin/pip" install --upgrade pip --quiet 2>/dev/null || true
-    # Uninstall first to ensure source changes are picked up (same version),
-    # then install normally so dependencies are preserved.
-    "$VENV_DIR/bin/pip" uninstall hf-timestd -y --quiet 2>/dev/null || true
-    # Use constraints.txt for reproducible builds across all nodes.
-    # Without this, pip resolves from live PyPI — different deploy times
-    # or Python versions silently produce different dependency trees.
-    CONSTRAINT_FILE="$PROJECT_DIR/constraints.txt"
-    if [[ -f "$CONSTRAINT_FILE" ]]; then
-        "$VENV_DIR/bin/pip" install "$PROJECT_DIR" --constraint "$CONSTRAINT_FILE" --quiet
-        log_info "Installed with constraints (reproducible)"
-    else
-        log_warn "No constraints.txt found — installing unconstrained (non-reproducible!)"
-        "$VENV_DIR/bin/pip" install "$PROJECT_DIR" --quiet
-    fi
+# Re-assert ownership in case uv touched files as root.
+chown -R "$INSTALL_USER:$INSTALL_USER" "$VENV_DIR"
 
-    INSTALLED_VER=$("$VENV_DIR/bin/python" -c "
+INSTALLED_VER=$("$VENV_DIR/bin/python" -c "
 from importlib.metadata import version
 print(version('hf-timestd'))" 2>/dev/null || echo "unknown")
-    log_info "Installed hf-timestd $INSTALLED_VER"
-fi
+log_info "Installed hf-timestd $INSTALLED_VER"
 
 # Verify critical import
 "$VENV_DIR/bin/python" -c "import hf_timestd" 2>/dev/null || { log_error "hf_timestd import FAILED"; exit 1; }
@@ -908,12 +940,16 @@ fi
 # ════════════════════════════════════════════════════════════════════
 log_step "Phase 8: Verify"
 
-# Check venv is using installed package (not repo)
+# Check venv is using the editable install from $PROJECT_DIR (the new
+# uv-native convention; matches sigmond/CLAUDE.md "Fleet upgrade
+# pattern" -- a git pull of /opt/git/sigmond/hf-timestd propagates to
+# the venv without a reinstall).
 INSTALLED_PATH=$("$VENV_DIR/bin/python3" -c "import hf_timestd; print(hf_timestd.__file__)" 2>/dev/null || echo "FAILED")
-if [[ "$INSTALLED_PATH" == *"/opt/hf-timestd/venv/"* ]]; then
-    log_info "Venv OK: using installed package"
-elif [[ "$INSTALLED_PATH" == *"/home/"* ]] || [[ "$INSTALLED_PATH" == *"$PROJECT_DIR"* ]]; then
-    log_warn "Venv may be using repo path (editable install?): $INSTALLED_PATH"
+if [[ "$INSTALLED_PATH" == *"$PROJECT_DIR"* ]]; then
+    log_info "Venv OK: editable install resolved to $PROJECT_DIR"
+elif [[ "$INSTALLED_PATH" == *"/opt/hf-timestd/venv/"* ]]; then
+    log_warn "Venv has hf-timestd as a wheel install at $INSTALLED_PATH"
+    log_warn "  (expected an editable install from $PROJECT_DIR -- re-run install.sh)"
 else
     log_warn "Could not verify package location: $INSTALLED_PATH"
 fi
