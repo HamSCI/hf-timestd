@@ -62,6 +62,11 @@ PROFILES: Dict[str, Set[str]] = {
 
     'fusion': _ALWAYS_ON | {
         'metrology', 'l2_calibration', 'fusion',
+        'vtec',  # gated by [gnss_vtec].enabled — suppressed on hosts
+                 # without a GNSS receiver (see active_services()).
+                 # Fusion reads gnss_vtec data via
+                 # multi_broadcast_fusion._read_gnss_vtec() when present,
+                 # so this is a natural augmentation of timing production.
         'web_api', 'radiod_monitor', 'pipeline_watchdog',
         'chrony_monitor', 'grape_daily', 'prune',
     },
