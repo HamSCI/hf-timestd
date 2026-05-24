@@ -69,6 +69,8 @@ PROFILES: Dict[str, Set[str]] = {
     'full': _ALWAYS_ON | {
         'metrology', 'l2_calibration', 'fusion',
         'physics', 'ionex_download', 'iono_reanalysis',
+        'vtec',  # gated by [gnss_vtec].enabled — suppressed on hosts
+                 # without a GNSS receiver (see active_services())
         'web_api', 'radiod_monitor', 'pipeline_watchdog',
         'chrony_monitor', 'grape_daily', 'prune',
     },
