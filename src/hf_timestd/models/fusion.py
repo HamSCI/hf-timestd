@@ -1,6 +1,6 @@
 from enum import Enum
 from typing import Optional, List
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 class FusionQualityGrade(str, Enum):
     A = "A"
@@ -115,5 +115,4 @@ class L3FusionTiming(BaseModel):
     adev_60s: Optional[float] = Field(None, description="Allan deviation at tau=60s")
     adev_1000s: Optional[float] = Field(None, description="Allan deviation at tau=1000s")
 
-    class Config:
-        use_enum_values = True
+    model_config = ConfigDict(use_enum_values=True)

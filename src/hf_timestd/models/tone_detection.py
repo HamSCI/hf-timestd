@@ -1,6 +1,6 @@
 from enum import Enum
 from typing import Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 class ToneQualityFlag(str, Enum):
     GOOD = "GOOD"
@@ -52,5 +52,4 @@ class L1ToneDetection(BaseModel):
     quality_flag: ToneQualityFlag
     processing_version: str
 
-    class Config:
-        use_enum_values = True
+    model_config = ConfigDict(use_enum_values=True)

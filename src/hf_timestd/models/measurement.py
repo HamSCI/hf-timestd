@@ -1,6 +1,6 @@
 from enum import Enum
 from typing import Optional, List
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 class QualityGrade(str, Enum):
     A = "A"
@@ -163,8 +163,7 @@ class L2TimingMeasurement(BaseModel):
         
         return self
 
-    class Config:
-        use_enum_values = True
+    model_config = ConfigDict(use_enum_values=True)
 
 
 class L1MetrologyMeasurement(BaseModel):
@@ -229,8 +228,7 @@ class L1MetrologyMeasurement(BaseModel):
             
         return self
 
-    class Config:
-        use_enum_values = True
+    model_config = ConfigDict(use_enum_values=True)
 
 
 class L2PhysicsMeasurement(BaseModel):
@@ -255,5 +253,4 @@ class L2PhysicsMeasurement(BaseModel):
     processing_version: str = "1.0.0"
     processed_at: str = Field(..., description="When this interpretation was made")
     
-    class Config:
-        use_enum_values = True
+    model_config = ConfigDict(use_enum_values=True)

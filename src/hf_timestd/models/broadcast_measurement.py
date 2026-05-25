@@ -44,7 +44,7 @@ Examples:
 
 from enum import Enum
 from typing import Optional, List, Dict, Any, Tuple
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 import math
 
 
@@ -117,8 +117,7 @@ class L1TickAnalysis(BaseModel):
     tick_seconds: Optional[List[int]] = Field(None, description="Second numbers of detected ticks")
     tick_snrs_db: Optional[List[float]] = Field(None, description="SNR of each tick")
     
-    class Config:
-        use_enum_values = True
+    model_config = ConfigDict(use_enum_values=True)
 
 
 # =============================================================================
@@ -255,8 +254,7 @@ class L1BroadcastMeasurement(BaseModel):
         """Convert to dictionary for serialization."""
         return self.model_dump(mode='json')
     
-    class Config:
-        use_enum_values = True
+    model_config = ConfigDict(use_enum_values=True)
 
 
 # =============================================================================
@@ -326,8 +324,7 @@ class L2BroadcastTiming(BaseModel):
         """Frequency in MHz."""
         return self.frequency_khz / 1000.0
     
-    class Config:
-        use_enum_values = True
+    model_config = ConfigDict(use_enum_values=True)
 
 
 # =============================================================================
