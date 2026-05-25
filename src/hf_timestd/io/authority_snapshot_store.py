@@ -106,6 +106,12 @@ COLUMNS = (
     "t5_valid_fix",             # 0/1, NULL when no probe attached
     "t5_pps_utc_sec",
     "t5_nmea_age_sec",
+    # Phase 2D — RTP-anchor age at the NMEA-read instant (seconds).
+    # Distinct from ``t5_nmea_age_sec`` (which is the NMEA reading's
+    # own age and saturates near 0).  Surfaces the anchor-staleness
+    # axis of the T5 anchor-disagreement bias for offline calibration
+    # of the USB-CDC scheduling-delay floor.
+    "t5_anchor_age_sec",
     # --- T4 (ChronyTrackingProbe) ---
     "t4_available",
     "t4_offset_ms",
@@ -151,6 +157,7 @@ _REAL_COLUMNS = frozenset({
     "t5_offset_ms",
     "t5_sigma_ms",
     "t5_nmea_age_sec",
+    "t5_anchor_age_sec",
     "t4_offset_ms",
     "t4_sigma_ms",
     "t3_offset_ms",

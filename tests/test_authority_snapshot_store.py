@@ -171,6 +171,26 @@ class TestInsert(unittest.TestCase):
             # Original row preserved (INSERT OR IGNORE — not OR REPLACE).
             self.assertEqual(rows[0][0], "T6")
 
+    def test_t5_anchor_age_sec_round_trips_as_real(self):
+        """Phase 2D — anchor-age column accepts float values and
+        round-trips as REAL.  Unblocks offline calibration of the
+        T5 anchor-disagreement bias against anchor freshness."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "auth.db"
+            with AuthoritySnapshotStore(path) as store:
+                store.insert(_full_snapshot(t5_anchor_age_sec=12.345))
+            with sqlite3.connect(str(path)) as conn:
+                row = conn.execute(
+                    "SELECT t5_anchor_age_sec FROM authority_snapshot"
+                ).fetchone()
+                col_type = next(
+                    r[2] for r in conn.execute(
+                        "PRAGMA table_info(authority_snapshot)"
+                    ) if r[1] == "t5_anchor_age_sec"
+                )
+            self.assertEqual(col_type, "REAL")
+            self.assertAlmostEqual(row[0], 12.345)
+
     def test_list_values_json_encoded(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "auth.db"

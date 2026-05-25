@@ -784,6 +784,7 @@ def _flatten_t5(snapshot: Dict[str, Any], r: Optional[ProbeResult]) -> None:
         snapshot["t5_valid_fix"] = 1 if valid_fix else 0
     snapshot["t5_pps_utc_sec"] = d.get("pps_utc_sec")
     snapshot["t5_nmea_age_sec"] = d.get("nmea_age_sec")
+    snapshot["t5_anchor_age_sec"] = d.get("anchor_age_sec")
 
 
 def _flatten_t4(snapshot: Dict[str, Any], r: Optional[ProbeResult]) -> None:

@@ -546,9 +546,9 @@ class TestSnapshotStore(unittest.TestCase):
 
     def test_t5_substrate_fields_flattened(self) -> None:
         """LbeT5DirectProbe substrate fields (valid_fix, pps_utc_sec,
-        nmea_age_sec) round-trip into their dedicated columns.  The
-        offset/sigma fields come from the generic ProbeResult shape
-        and use the same code path as T4/T3."""
+        nmea_age_sec, anchor_age_sec) round-trip into their dedicated
+        columns.  The offset/sigma fields come from the generic
+        ProbeResult shape and use the same code path as T4/T3."""
         from hf_timestd.io.authority_snapshot_store import AuthoritySnapshotStore
         import sqlite3
         db = self.tmp / "auth.db"
@@ -562,6 +562,7 @@ class TestSnapshotStore(unittest.TestCase):
                     "valid_fix": True,
                     "pps_utc_sec": 1716501000,
                     "nmea_age_sec": 0.42,
+                    "anchor_age_sec": 12.345,
                     "device": "/dev/lb1421-nmea",
                 },
             ))
@@ -580,6 +581,39 @@ class TestSnapshotStore(unittest.TestCase):
         self.assertEqual(row["t5_valid_fix"], 1)
         self.assertEqual(row["t5_pps_utc_sec"], 1716501000)
         self.assertAlmostEqual(row["t5_nmea_age_sec"], 0.42)
+        self.assertAlmostEqual(row["t5_anchor_age_sec"], 12.345)
+
+    def test_t5_anchor_age_nulls_when_substrate_omits_it(self) -> None:
+        """Pre-Phase-2B core_recorder versions (or any probe path that
+        doesn't populate ``detail['anchor_age_sec']``) must land as
+        NULL in the column — not crash, not 0."""
+        from hf_timestd.io.authority_snapshot_store import AuthoritySnapshotStore
+        import sqlite3
+        db = self.tmp / "auth.db"
+        store = AuthoritySnapshotStore(db)
+        try:
+            t5 = FakeProbe("T5")
+            t5.set(ProbeResult(
+                "T5", available=True,
+                offset_ms=0.0, sigma_ms=5.0,
+                detail={
+                    "valid_fix": True,
+                    "pps_utc_sec": 1716501000,
+                    "nmea_age_sec": 0.42,
+                    # No anchor_age_sec — Phase 2A / pre-2B path.
+                    "device": "/dev/lb1421-nmea",
+                },
+            ))
+            mgr = self._mgr_with_store([t5], store)
+            mgr.tick()
+        finally:
+            store.close()
+        with sqlite3.connect(str(db)) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT t5_anchor_age_sec FROM authority_snapshot"
+            ).fetchone()
+        self.assertIsNone(row["t5_anchor_age_sec"])
 
     def test_t5_unavailable_flattens_with_zero_available(self) -> None:
         """Unavailable T5 should populate t5_available=0 (so historical
