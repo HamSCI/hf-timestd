@@ -1,12 +1,15 @@
 #!/bin/bash
 # =============================================================================
-# Chrony TSL1/TSL2 Reach Monitor
+# Chrony FUSE/HPPS Reach Monitor
 # =============================================================================
-# Monitors the Chrony TSL1 and TSL2 (Time Standard Layer 1/2) source reach
-# values and alerts if low.
+# Monitors the Chrony FUSE and HPPS refclock SHM source reach values and
+# alerts if low.  FUSE and HPPS are the two timing inputs hf-timestd
+# publishes via chrony's SHM driver (see /etc/chrony/chrony.conf):
 #
-# TSL1 = L1 Metrology timing (raw measurements)
-# TSL2 = L2 Calibrated timing (Kalman-filtered, higher quality)
+#   FUSE = fused authority output from timestd-fusion (SHM 1)
+#   HPPS = high-precision T6 BPSK direct measurement (SHM 2)
+#
+# (HFPS exists on SHM 3 but is a slower-cadence backup not gated here.)
 #
 # Reach is an octal value (0-377) representing the last 8 poll attempts:
 #   377 (octal) = 11111111 (binary) = 8/8 successful polls (optimal)
@@ -19,7 +22,7 @@
 # Exit codes:
 #   0 = OK (at least one source reach >= threshold)
 #   1 = WARNING (all sources reach < threshold)
-#   2 = CRITICAL (no TSL sources found or chronyd not running)
+#   2 = CRITICAL (neither FUSE nor HPPS source found, or chronyd not running)
 # =============================================================================
 
 set -euo pipefail
@@ -46,7 +49,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --help|-h)
-            echo "Chrony TSL1/TSL2 Reach Monitor"
+            echo "Chrony FUSE/HPPS Reach Monitor"
             echo ""
             echo "Usage: $0 [OPTIONS]"
             echo ""
@@ -126,12 +129,12 @@ if systemctl is-active --quiet timestd-fusion 2>/dev/null; then
     fi
 fi
 
-# Get TSL1 and TSL2 source info (new naming convention)
-TSL1_LINE=$(chronyc sources 2>/dev/null | grep "TSL1" || true)
-TSL2_LINE=$(chronyc sources 2>/dev/null | grep "TSL2" || true)
+# Get FUSE and HPPS source info
+FUSE_LINE=$(chronyc sources 2>/dev/null | grep "FUSE" || true)
+HPPS_LINE=$(chronyc sources 2>/dev/null | grep "HPPS" || true)
 
-if [[ -z "$TSL1_LINE" ]] && [[ -z "$TSL2_LINE" ]]; then
-    echo "CRITICAL: Neither TSL1 nor TSL2 source found in chronyc sources"
+if [[ -z "$FUSE_LINE" ]] && [[ -z "$HPPS_LINE" ]]; then
+    echo "CRITICAL: Neither FUSE nor HPPS source found in chronyc sources"
     echo "  Fusion service may not be writing to Chrony SHM"
     exit 2
 fi
@@ -168,29 +171,29 @@ check_source_reach() {
 }
 
 # Check both sources - OK if at least one meets threshold
-TSL1_OK=false
-TSL2_OK=false
+FUSE_OK=false
+HPPS_OK=false
 BEST_REACH=0
 
-if [[ -n "$TSL1_LINE" ]]; then
-    TSL1_REACH_OCT=$(echo "$TSL1_LINE" | awk '{print $5}')
-    TSL1_REACH_DEC=$((8#$TSL1_REACH_OCT))
-    if [[ $TSL1_REACH_DEC -ge $THRESHOLD_DEC ]]; then
-        TSL1_OK=true
+if [[ -n "$FUSE_LINE" ]]; then
+    FUSE_REACH_OCT=$(echo "$FUSE_LINE" | awk '{print $5}')
+    FUSE_REACH_DEC=$((8#$FUSE_REACH_OCT))
+    if [[ $FUSE_REACH_DEC -ge $THRESHOLD_DEC ]]; then
+        FUSE_OK=true
     fi
-    if [[ $TSL1_REACH_DEC -gt $BEST_REACH ]]; then
-        BEST_REACH=$TSL1_REACH_DEC
+    if [[ $FUSE_REACH_DEC -gt $BEST_REACH ]]; then
+        BEST_REACH=$FUSE_REACH_DEC
     fi
 fi
 
-if [[ -n "$TSL2_LINE" ]]; then
-    TSL2_REACH_OCT=$(echo "$TSL2_LINE" | awk '{print $5}')
-    TSL2_REACH_DEC=$((8#$TSL2_REACH_OCT))
-    if [[ $TSL2_REACH_DEC -ge $THRESHOLD_DEC ]]; then
-        TSL2_OK=true
+if [[ -n "$HPPS_LINE" ]]; then
+    HPPS_REACH_OCT=$(echo "$HPPS_LINE" | awk '{print $5}')
+    HPPS_REACH_DEC=$((8#$HPPS_REACH_OCT))
+    if [[ $HPPS_REACH_DEC -ge $THRESHOLD_DEC ]]; then
+        HPPS_OK=true
     fi
-    if [[ $TSL2_REACH_DEC -gt $BEST_REACH ]]; then
-        BEST_REACH=$TSL2_REACH_DEC
+    if [[ $HPPS_REACH_DEC -gt $BEST_REACH ]]; then
+        BEST_REACH=$HPPS_REACH_DEC
     fi
 fi
 
@@ -198,7 +201,7 @@ fi
 SUCCESS_PCT=$((BEST_REACH * 100 / 255))
 
 # Determine status - OK if at least one source is good
-if [[ "$TSL1_OK" == "true" ]] || [[ "$TSL2_OK" == "true" ]]; then
+if [[ "$FUSE_OK" == "true" ]] || [[ "$HPPS_OK" == "true" ]]; then
     STATUS="OK"
     EXIT_CODE=0
 else
@@ -208,10 +211,10 @@ fi
 
 # Output
 if [[ "$VERBOSE" == "true" ]] || [[ $EXIT_CODE -ne 0 ]]; then
-    echo "$STATUS: Chrony TSL reach (best) = $BEST_REACH (decimal) = $SUCCESS_PCT%"
+    echo "$STATUS: Chrony FUSE/HPPS reach (best) = $BEST_REACH (decimal) = $SUCCESS_PCT%"
     echo "  Threshold: $THRESHOLD_DEC (decimal)"
-    [[ -n "$TSL1_LINE" ]] && echo "  TSL1: $TSL1_LINE"
-    [[ -n "$TSL2_LINE" ]] && echo "  TSL2: $TSL2_LINE"
+    [[ -n "$FUSE_LINE" ]] && echo "  FUSE: $FUSE_LINE"
+    [[ -n "$HPPS_LINE" ]] && echo "  HPPS: $HPPS_LINE"
 fi
 
 # Run alert command if provided and status is not OK
@@ -221,7 +224,7 @@ fi
 
 # Restart logic - only if BOTH sources have zero reach
 if [[ "$RESTART_ON_FAILURE" == "true" ]] && [[ "$BEST_REACH" -eq 0 ]]; then
-    echo "CRITICAL: All Chrony TSL sources have reach 0. Attempting to restart chrony..."
+    echo "CRITICAL: Both FUSE and HPPS chrony sources have reach 0. Attempting to restart chrony..."
     # Debian/Ubuntu = 'chrony', RHEL/Fedora = 'chronyd'
     if systemctl list-units --type=service --no-pager 2>/dev/null | grep -q 'chrony.service'; then
         systemctl restart chrony
