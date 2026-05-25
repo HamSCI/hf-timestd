@@ -4,6 +4,7 @@ import numpy as np
 from pathlib import Path
 from datetime import datetime, timezone
 import shutil
+from unittest.mock import MagicMock
 
 from hf_timestd.core.metrology_engine import MetrologyEngine
 from hf_timestd.models import L1MetrologyMeasurement, StationID
@@ -34,18 +35,44 @@ def test_engine_initialization(engine):
     assert engine.frequency_mhz == 10.0
 
 def test_geometric_prediction(engine):
-    # WWV is at 40.67, -105.04
-    # Receiver is at 40.0, -105.0
-    # Very close (~75km)
-    
+    """Exercise the vacuum-hop fallback (priority 3 in
+    `_predict_geometric_delay`'s docstring) and verify it produces
+    plausible great-circle distance + 1-hop F2 slant delay.
+
+    Note: this function never returns pure direct-LOS delay.  Even the
+    "last resort" path uses a 1-hop F2 reflection (~300 km up + down)
+    plus a 40.3/f² ionospheric group-delay term — see
+    ``_vacuum_hop_fallback_delay`` in metrology_engine.py.  So a 75 km
+    great-circle path produces ~2–3 ms of delay (not 0.25 ms LOS),
+    and that is correct.
+
+    To make this test deterministic regardless of which propagation
+    model happens to be wired up, we suppress paths 1 and 2:
+      * ``arrival_matrix`` is None by default (path 1 skipped).
+      * Inject a stub HFPropagationModel whose ``predict()`` returns
+        ``primary_delay_ms = 0``, forcing the function to fall through
+        to the vacuum-hop fallback.
+    """
+    # WWV is at 40.67, -105.04; receiver is at 40.0, -105.0; ~75 km.
+    # Suppress path 1 (arrival_matrix) and path 2 (HFPropagationModel)
+    # so the function falls through to the vacuum-hop fallback.
+    engine.arrival_matrix = None
+    stub_prediction = MagicMock(primary_delay_ms=0.0)
+    engine._prop_model_fallback = MagicMock(
+        predict=MagicMock(return_value=stub_prediction)
+    )
+
     delay, dist, unc = engine._predict_geometric_delay("WWV")
     assert dist < 100.0
-    assert delay < 1.0 # < 1ms light time
-    
-    # WWVH is far
+    # 1-hop F2 slant (~600 km) + 40.3/f² iono at 10 MHz; expect a few ms.
+    assert 0.5 < delay < 10.0
+    assert engine._last_prediction_meta["data_source"] == "vacuum_fallback"
+
+    # WWVH (~5300 km from CO) — multi-hop F2 fallback.
     delay_h, dist_h, unc_h = engine._predict_geometric_delay("WWVH")
     assert dist_h > 5000.0
-    assert delay_h > 15.0
+    assert delay_h > 15.0  # multi-hop slant + iono > 15 ms
+    assert engine._last_prediction_meta["data_source"] == "vacuum_fallback"
 
 def test_process_minute_no_signal(engine):
     # Empty/Noise IQ buffer
