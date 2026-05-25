@@ -1,5 +1,7 @@
 # CLAUDE.md
 
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 ## Project Overview
 
 HF Time Standard Analysis (`hf-timestd`) — a Python system that receives HF time standard broadcasts (WWV, WWVH, CHU, BPM) via ka9q-radio RTP streams, produces sub-millisecond UTC timing measurements for Chrony clock discipline, and generates ionospheric science products (dTEC, TEC, propagation mode identification).
@@ -20,11 +22,32 @@ sudo ./scripts/install.sh
 sudo ./scripts/deploy.sh           # refuses on dirty tree
 sudo ./scripts/deploy.sh --pull    # git pull then deploy
 
-# CLI
+# CLI surface (selection — there are ~15 subcommands; see `hf-timestd --help`)
 hf-timestd version --json
-hf-timestd profile show              # active profile + services
+hf-timestd inventory --json          # sigmond client-contract resource view
+hf-timestd validate --json           # config validation
+hf-timestd status                    # health check
+hf-timestd quality                   # timing quality report
+hf-timestd profile show|list        # operational profile (archive/rtp/fusion/full)
+sudo hf-timestd profile set fusion   # switch profile (restarts services)
 hf-timestd service status            # per-service config + systemd state
-sudo hf-timestd profile set fusion   # switch operational profile
+hf-timestd daemon                    # recorder daemon
+hf-timestd data summary              # storage usage
+hf-timestd data clean-{data,analytics,uploads,all}
+hf-timestd grape daily               # full GRAPE pipeline (decimate → spec → package → upload)
+hf-timestd grape {decimate,spectrogram,package,upload,test-upload,status}
+hf-timestd calibrate                 # BPSK-PPS calibration utilities
+hf-timestd discover                  # available radiod channels
+hf-timestd create-channels           # provision channels in radiod
+```
+
+### Tests
+
+```bash
+uv run pytest tests/                          # full suite
+uv run pytest tests/test_<area>.py -v         # one file
+uv run pytest tests/test_<area>.py::TestClass::test_X  # one test
+uv run pytest -k authority -v                 # by keyword
 ```
 
 ## Project Structure
@@ -69,69 +92,45 @@ docs/                    # Technical docs, QEX paper draft
 - **GRAPE spectrogram:** Edge tapering at gap boundaries (half-cosine, 5s); full-window validity masking (NFFT=512 → ±25.6s). No zero interpolation.
 - **Config:** TOML-based (`config/timestd-config.toml.template`); production at `/etc/hf-timestd/`
 
+## Client contract: PROVIDER (not subscriber)
+
+hf-timestd participates in the HamSCI client contract differently from
+the recorders: it is the **timing-authority producer** that other
+clients (psk-recorder, wspr-recorder, hfdl-recorder, mag-recorder…)
+optionally subscribe to via §18.
+
+- **§18 (timing authority, new in contract v0.7)** — hf-timestd
+  publishes the authority snapshot fields (`utc_anchor_ns`, `tier`,
+  `sigma_ns`, `snapshot_age_s`, plus the radiod-subscriber extras
+  `rtp_anchor_sample`, `rate_samples_per_utc_sec`, `radiod_id`, and the
+  non-radiod `host_monotonic_at_anchor`). The producer-side reference
+  is `docs/ARCHITECTURE-FIRST-PRINCIPLES.md`; the contract document
+  (`/opt/git/sigmond/sigmond/docs/CLIENT-CONTRACT.md`) names what
+  subscribers may rely on without specifying the wire protocol.
+- **Self-describe surfaces** — `inventory`/`validate`/`version --json`
+  via `cli.py` (no separate `contract.py` module like the recorders;
+  inventory is assembled inline). Reports
+  `provides_timing_calibration = true` per the §3 amendment.
+- Recent authority work is in the `authority_*` modules under
+  `src/hf_timestd/core/` (see commit log: Phase 2A/2B `T5` substrate
+  work).
+
 ## Dependencies of Note
 
 - `h5py>=3.8.0,<3.16.0` — h5py 3.16 bundles HDF5 2.0.0 which breaks SWMR in long-running processes
 - `ka9q-python>=3.3` — RTP stream interface to ka9q-radio
 - `pylap` (optional) — PHaRLAP ray tracing for propagation mode identification
 
-## General Workflow Orchestration in Any Project
+## Further reading
 
-### 1. Plan Mode Default
-- Enter plan mode for ANY non-trivial task (3+ steps or architectural decisions)
-- If something goes sideways, STOP and re-plan immediately — don't keep pushing
-- Use plan mode for verification steps, not just building
-- Write detailed specs upfront to reduce ambiguity
+`docs/` is extensive (~50 files). The load-bearing ones:
 
-### 2. Subagent Strategy
-- Use subagents liberally to keep main context window clean
-- Offload research, exploration, and parallel analysis to subagents
-- For complex problems, throw more compute at it via subagents
-- One task per subagent for focused execution
-
-### 3. Self-Improvement Loop
-- After ANY correction from the user: update `tasks/lessons.md` with the pattern
-- Write rules for yourself that prevent the same mistake
-- Ruthlessly iterate on these lessons until mistake rate drops
-- Review lessons at session start for relevant project
-
-### 4. Verification Before Done
-- Never mark a task complete without proving it works
-- Diff behavior between main and your changes when relevant
-- Ask yourself: "Would a staff engineer approve this?"
-- Run tests, check logs, demonstrate correctness
-
-### 5. Demand Elegance (Balanced)
-- For non-trivial changes: pause and ask "is there a more elegant way?"
-- If a fix feels hacky: "Knowing everything I know now, implement the elegant solution"
-- Skip this for simple, obvious fixes — don't over-engineer
-- Challenge your own work before presenting it
-
-### 6. Autonomous Bug Fixing
-- When given a bug report: just fix it. Don't ask for hand-holding
-- Point at logs, errors, failing tests — then resolve them
-- Zero context switching required from the user
-- Go fix failing CI tests without being told how
-
-## Task Management
-
-1. **Plan First**: Write plan to `tasks/todo.md` with checkable items
-2. **Verify Plan**: Check in before starting implementation
-3. **Track Progress**: Mark items complete as you go
-4. **Explain Changes**: High-level summary at each step
-5. **Document Results**: Add review section to `tasks/todo.md`
-6. **Capture Lessons**: Update `tasks/lessons.md` after corrections
-
-## Core Principles
-
-- **Simplicity First**: Make every change as simple as possible. Impact minimal code.
-- **No Laziness**: Find root causes. No temporary fixes. Senior developer standards.
-- **Minimal Impact**: Changes should only touch what's necessary. Avoid introducing bugs.
-
-1. Don’t assume. Don’t hide confusion. Surface tradeoffs.
-
-2. Minimum code that solves the problem. Nothing speculative.
-
-3. Touch only what you must. Clean up only your own mess.
-
-4. Define success criteria. Loop until verified.
+- `docs/METROLOGY.md` — timing hierarchy §4.5–§4.6 (the canonical
+  reference for the timing-authority invariant above).
+- `docs/ARCHITECTURE-FIRST-PRINCIPLES.md` — producer-side reference
+  for the §18 contract surface.
+- `docs/ARCHITECTURE.md` — pipeline + service layering.
+- `docs/DEBUGGING.md` — journald-only logging patterns.
+- `docs/TIMING-PIPELINE-WIRING.md` — RTP / chrony / fusion wiring.
+- `docs/PHASE_ENGINE_ARCHITECTURE.md` / `PHYSICS.md` — DSP internals.
+- `docs/GRAPE_DAILY_PROCESSING.md` — daily PSWS upload pipeline.
