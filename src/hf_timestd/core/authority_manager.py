@@ -143,6 +143,8 @@ class AuthorityManager:
         governor_radiod_provider: Optional[Callable[[], Optional[str]]] = None,
         mdns_advertiser: Optional["MdnsFusionAdvertiser"] = None,
         snapshot_store: Optional["AuthoritySnapshotStore"] = None,
+        demote_t6_on_breach: bool = False,
+        demote_t6_on_breach_min_cycles: int = 3,
     ):
         self.probes = list(probes)
         self.output_path = Path(output_path)
@@ -164,11 +166,25 @@ class AuthorityManager:
         # overwritten in authority.json) is queryable hours/days
         # later.  None = no archiving (legacy behaviour preserved).
         self.snapshot_store = snapshot_store
+        # Phase 2B — when True AND T6's drift_monitor reports a
+        # sustained breach for ``demote_t6_on_breach_min_cycles``
+        # consecutive ticks AND T5 is available past
+        # ``upgrade_hysteresis``, the manager demotes the active
+        # tier from T6 to T5 for as long as the breach persists.
+        # Default False preserves Phase 2A behaviour byte-for-byte;
+        # operator opt-in is the Phase 2C cutover.
+        self.demote_t6_on_breach = bool(demote_t6_on_breach)
+        self.demote_t6_on_breach_min_cycles = int(demote_t6_on_breach_min_cycles)
 
         self._avail_counters: Dict[str, int] = {lvl: 0 for lvl in T_LEVELS_RANKED}
         self._t_active: Optional[str] = None
         self._last_transition_utc: Optional[str] = None
         self._last_bootstrap: Optional["BootstrapState"] = None
+        # Phase 2B — consecutive ticks where T6 was the picked tier
+        # AND drift_monitor.sustained_breach was True.  Drives the
+        # demote-on-breach hysteresis; resets when the breach clears
+        # or T6 stops being the picked tier.
+        self._t6_consecutive_breach_ticks: int = 0
 
     def tick(self) -> AuthorityState:
         """Run one authority-decision cycle: poll probes, update
@@ -196,7 +212,15 @@ class AuthorityManager:
         results = self._poll_all()
         self._update_hysteresis(results)
         active = self._pick_active(results)
+        # Phase 2B — demote T6→T5 when the drift monitor reports a
+        # sustained breach for ``demote_t6_on_breach_min_cycles``
+        # consecutive ticks.  No-op when the feature flag is off,
+        # which is the default.  Flag accumulates here so the cross-
+        # check downstream sees the post-demotion active.
+        active, demote_flag = self._maybe_demote_breached_t6(active, results)
         active, witnesses, flags = self._cross_check(active, results)
+        if demote_flag is not None:
+            flags = list(flags) + [demote_flag]
         # V7: append a chrony-feedback flag if chrony has rejected the
         # SHM segment we feed for the active tier.  Silent no-op when
         # chronyc is unavailable.
@@ -311,6 +335,63 @@ class AuthorityManager:
             ):
                 return lvl
         return None
+
+    def _maybe_demote_breached_t6(
+        self,
+        active: Optional[str],
+        results: Dict[str, ProbeResult],
+    ) -> tuple:
+        """Phase 2B — demote T6→T5 when T6's drift monitor reports a
+        sustained breach for ``demote_t6_on_breach_min_cycles``
+        consecutive ticks AND T5 is available past hysteresis.
+
+        Returns ``(active_after_demotion, disagreement_flag_or_None)``.
+        The flag, when emitted, lands in ``state.disagreement_flags``
+        so downstream consumers (sigmond TUI, snapshot store) can
+        observe that the active T5 cycle was triggered by a T6 breach
+        rather than a normal T6 unavailability.
+
+        State machine:
+
+        * counter increments while T6 is picked AND
+          ``T6.detail.drift_monitor.sustained_breach`` is True;
+        * counter resets to 0 in every other case (T6 not picked,
+          breach cleared, drift_monitor missing).
+
+        Default flag-off (``demote_t6_on_breach == False``) makes
+        this method a no-op while still maintaining the counter for
+        post-hoc telemetry.
+        """
+        # Always maintain the breach counter so observability is
+        # consistent regardless of whether the feature flag is on.
+        is_t6_breached_this_tick = False
+        if active == "T6":
+            t6_res = results.get("T6")
+            if t6_res is not None and t6_res.detail:
+                dm = t6_res.detail.get("drift_monitor")
+                if isinstance(dm, dict) and dm.get("sustained_breach"):
+                    is_t6_breached_this_tick = True
+        if is_t6_breached_this_tick:
+            self._t6_consecutive_breach_ticks += 1
+        else:
+            self._t6_consecutive_breach_ticks = 0
+
+        if not self.demote_t6_on_breach:
+            return active, None
+        if active != "T6":
+            return active, None
+        if self._t6_consecutive_breach_ticks < self.demote_t6_on_breach_min_cycles:
+            return active, None
+        t5_res = results.get("T5")
+        if t5_res is None or not t5_res.available:
+            return active, None
+        if self._avail_counters.get("T5", 0) < self.upgrade_hysteresis:
+            return active, None
+        flag = (
+            f"demote-t6-breach->t5:"
+            f"{self._t6_consecutive_breach_ticks}cycles"
+        )
+        return "T5", flag
 
     def _cross_check(
         self, active: Optional[str], results: Dict[str, ProbeResult]
@@ -485,11 +566,29 @@ class AuthorityManager:
             if isinstance(st, list):
                 stations = [str(s) for s in st]
         elif active in TRUST_SIGMA_MS:
-            # T5/T4/T2/T1 — trust-based: RTP-time is authoritative,
-            # publish offset=0 with tier sigma so consumers know the
-            # offset is a no-op, not missing data.
-            offset_ns = 0
-            sigma_ns = int(round(TRUST_SIGMA_MS[active] * 1_000_000))
+            # T5/T4/T2/T1 — trust-based.  Phase 2B: when a probe
+            # carries the RTP-substrate-grounded marker in its detail
+            # (e.g., LbeT5DirectProbe forwarding an anchor
+            # disagreement measured against the ka9q anchor), honor
+            # the probe's offset_ms / sigma_ms as the published
+            # rtp_to_utc_offset_ns.  Without the marker (e.g.,
+            # ChronyTrackingProbe at a T5 site without LBE-1421, T4
+            # LAN NTP peer, T2 WAN), fall through to legacy trust-
+            # tier defaults so the probe's chrony-residual offset_ms
+            # is not mis-republished as an RTP-anchor disagreement.
+            a_res = results[active]
+            anchor_grounded = (
+                a_res.detail.get("rtp_anchor_grounded") is True
+                if a_res.detail else False
+            )
+            if anchor_grounded and a_res.offset_ms is not None:
+                offset_ns = int(round(a_res.offset_ms * 1_000_000))
+            else:
+                offset_ns = 0
+            if anchor_grounded and a_res.sigma_ms is not None:
+                sigma_ns = int(round(a_res.sigma_ms * 1_000_000))
+            else:
+                sigma_ns = int(round(TRUST_SIGMA_MS[active] * 1_000_000))
         # active == "T0" or None → offset_ns / sigma_ns remain None
 
         return AuthorityState(

@@ -20,18 +20,27 @@ missing), the probe is unavailable — exactly the right
 degradation, because losing core-recorder breaks the substrate
 anyway.
 
-Phase 2A semantics (observe-only):
+Phase 2B semantics (active-tier capable):
 
-  offset_ms: 0.0 (T5 is a trust-tier reference at integer-second
-             precision; not directly measuring host-clock skew)
-  sigma_ms:  sigma_floor_ms (default 5 ms — USB-NMEA scheduling
-             jitter floor)
+  offset_ms: anchor-disagreement (signed) when core_recorder
+             populates ``t5_lbe1421.anchor_offset_ns`` — the RTP
+             anchor's UTC prediction minus NMEA's pps_utc_sec at the
+             NMEA-read instant.  Falls back to 0.0 (Phase 2A trust-
+             tier) when the field is absent — happens when the
+             anchor is too stale to extrapolate, or core_recorder is
+             at a pre-Phase-2B version.
+  sigma_ms:  honest σ — max(floor, |offset|).  When the anchor is
+             calm and the substrate residual is sub-floor, this
+             collapses to ``sigma_floor_ms`` (default 5 ms — USB-
+             NMEA scheduling jitter floor).  When the anchor has
+             drifted (V1 anchor-staleness regime), σ widens to
+             bound the observed disagreement honestly so downstream
+             cross-checks aren't misled by an under-claim.  Mirrors
+             ``9755e53`` BpskPpsProbe honest-σ pattern.
 
-Phase 2B will use offset_ms / sigma_ms to drive active-tier
-selection.  Until then, the only thing that matters is the
-``available`` flag — it tells operators whether T5 fallback is
-even possible at the moment, via the new t5_* columns in
-authority_snapshot.
+The ``available`` flag still tracks whether T5 fallback is even
+possible — the t5_* columns in authority_snapshot remain the
+operator observability surface.
 """
 from __future__ import annotations
 
@@ -153,10 +162,25 @@ class LbeT5DirectProbe:
                 reason=f"NMEA stale {nmea_age:.1f}s > {self.max_nmea_age_sec:.1f}s",
             )
 
-        # T5 is available.  Phase 2A: trust-tier semantics — offset
-        # 0 and σ at the configured floor.  Detail fields let
-        # operators see what the underlying NMEA reading looks like
-        # without parsing core-recorder-status.json themselves.
+        # T5 is available.  Phase 2B: forward the substrate-grounded
+        # anchor-disagreement offset when core_recorder published it.
+        # Otherwise fall back to Phase 2A trust-tier semantics (offset
+        # 0, σ at the configured floor).
+        anchor_offset_raw = t5.get("anchor_offset_ns")
+        anchor_offset_ns: Optional[int]
+        try:
+            anchor_offset_ns = (
+                int(anchor_offset_raw) if anchor_offset_raw is not None else None
+            )
+        except (TypeError, ValueError):
+            anchor_offset_ns = None
+        if anchor_offset_ns is not None:
+            offset_ms = anchor_offset_ns / 1_000_000.0
+            sigma_ms = max(self.sigma_floor_ms, abs(offset_ms))
+        else:
+            offset_ms = 0.0
+            sigma_ms = self.sigma_floor_ms
+
         detail = {
             "pps_utc_sec": t5.get("pps_utc_sec"),
             "valid_fix": True,
@@ -164,12 +188,22 @@ class LbeT5DirectProbe:
             "device": t5.get("device"),
             "status_age_sec": round(age_sec, 3),
             "sigma_floor_ms": self.sigma_floor_ms,
+            "anchor_offset_ns": anchor_offset_ns,
+            "anchor_age_sec": t5.get("anchor_age_sec"),
+            # Phase 2B marker — tells AuthorityManager._build_state
+            # that this probe's offset_ms is an RTP-substrate-grounded
+            # measurement (NMEA-vs-anchor disagreement) suitable for
+            # publishing as rtp_to_utc_offset_ns.  Set only when the
+            # substrate actually supplied an anchor_offset_ns;
+            # otherwise we're at Phase 2A trust-tier defaults and
+            # the manager should publish offset=0 with TRUST_SIGMA_MS.
+            "rtp_anchor_grounded": anchor_offset_ns is not None,
         }
         return ProbeResult(
             self.t_level,
             available=True,
-            offset_ms=0.0,
-            sigma_ms=self.sigma_floor_ms,
+            offset_ms=offset_ms,
+            sigma_ms=sigma_ms,
             detail=detail,
         )
 

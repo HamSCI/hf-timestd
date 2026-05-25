@@ -127,6 +127,14 @@ def build_authority_runner_from_config(
         #                          # 30 (former default) was too strict given typical
         #                          # 10-15% noise rate causing brief consec resets
         # sigma_ms = 0.050       # published T6 uncertainty (50 µs default)
+        # Phase 2B — demote T6 → T5 when the drift monitor reports a
+        # sustained breach for ``demote_on_breach_min_cycles`` consecutive
+        # ticks AND T5 is available past hysteresis.  Default off to keep
+        # legacy behaviour byte-compat; flip to true (Phase 2C cutover) to
+        # let T5 take over when the RTP anchor is drifted enough that T6's
+        # SHM feed is misleading chrony.
+        # demote_on_breach = false
+        # demote_on_breach_min_cycles = 3
 
         [timing.authority_manager.t5]
         refid = "GPS"            # optional — default: any refclock
@@ -333,6 +341,13 @@ def build_authority_runner_from_config(
             )
             snapshot_store = None
 
+    # Phase 2B — demote-on-breach knobs, default off so existing
+    # deployments stay byte-compat.  See AuthorityManager docstring.
+    demote_t6_on_breach = bool(t6_cfg.get("demote_on_breach", False))
+    demote_t6_on_breach_min_cycles = int(
+        t6_cfg.get("demote_on_breach_min_cycles", 3)
+    )
+
     manager = AuthorityManager(
         probes=probes,
         output_path=authority_output_path,
@@ -343,5 +358,7 @@ def build_authority_runner_from_config(
         governor_radiod_provider=governor_radiod_provider,
         mdns_advertiser=mdns_advertiser,
         snapshot_store=snapshot_store,
+        demote_t6_on_breach=demote_t6_on_breach,
+        demote_t6_on_breach_min_cycles=demote_t6_on_breach_min_cycles,
     )
     return AuthorityRunner(manager=manager, interval_sec=interval_sec)

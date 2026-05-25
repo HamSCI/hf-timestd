@@ -643,5 +643,255 @@ class TestSnapshotStore(unittest.TestCase):
         self.assertTrue(self.out.exists())
 
 
+def _t6_breached(offset_ms=0.0, sigma_ms=0.05):
+    """T6 ProbeResult with drift_monitor.sustained_breach=True."""
+    return ProbeResult(
+        "T6", True, offset_ms=offset_ms, sigma_ms=sigma_ms,
+        detail={"drift_monitor": {"sustained_breach": True}},
+    )
+
+
+def _t6_calm(offset_ms=0.0, sigma_ms=0.05):
+    """T6 ProbeResult with drift_monitor.sustained_breach=False."""
+    return ProbeResult(
+        "T6", True, offset_ms=offset_ms, sigma_ms=sigma_ms,
+        detail={"drift_monitor": {"sustained_breach": False}},
+    )
+
+
+def _t5_anchor_grounded(offset_ms, sigma_ms):
+    """T5 ProbeResult with the Phase 2B rtp_anchor_grounded marker."""
+    return ProbeResult(
+        "T5", True, offset_ms=offset_ms, sigma_ms=sigma_ms,
+        detail={"rtp_anchor_grounded": True,
+                "anchor_offset_ns": int(round(offset_ms * 1_000_000))},
+    )
+
+
+class TestAuthorityManagerPhase2BDemoteOnBreach(unittest.TestCase):
+    """Phase 2B — demote T6 → T5 when drift_monitor.sustained_breach
+    has been sticky for ``demote_t6_on_breach_min_cycles`` consecutive
+    ticks AND T5 is available past hysteresis.  Default off; flag-on
+    is the operator opt-in for the Phase 2C cutover.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.out = self.tmp / "authority.json"
+        self.clock = _Clock(datetime(2026, 5, 25, 9, 0, 0, tzinfo=timezone.utc))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _mgr(self, *, demote, min_cycles=3, hyst=1, probes):
+        return AuthorityManager(
+            probes=probes, output_path=self.out,
+            a_level_provider=lambda: "A1",
+            upgrade_hysteresis=hyst,
+            now_fn=self.clock,
+            demote_t6_on_breach=demote,
+            demote_t6_on_breach_min_cycles=min_cycles,
+        )
+
+    def test_default_off_no_demotion_even_after_many_breach_ticks(self):
+        """The Phase 2A invariant: with demote_t6_on_breach=False (the
+        default), T6 stays active through any number of breach ticks.
+        Byte-compat is the entire point of the default-off ship plan."""
+        t6 = FakeProbe("T6", _t6_breached())
+        t5 = FakeProbe("T5", _t5_anchor_grounded(offset_ms=150.0, sigma_ms=150.0))
+        mgr = self._mgr(demote=False, probes=[t6, t5])
+        for _ in range(20):
+            state = mgr.tick()
+        self.assertEqual(state.t_level_active, "T6")
+        self.assertNotIn(
+            "demote-t6-breach",
+            "".join(state.disagreement_flags),
+        )
+        # The counter is still maintained for telemetry — but does
+        # nothing to selection.
+        self.assertGreaterEqual(mgr._t6_consecutive_breach_ticks, 1)
+
+    def test_breach_below_min_cycles_does_not_demote(self):
+        t6 = FakeProbe("T6", _t6_breached())
+        t5 = FakeProbe("T5", _t5_anchor_grounded(offset_ms=150.0, sigma_ms=150.0))
+        mgr = self._mgr(demote=True, min_cycles=3, probes=[t6, t5])
+        for _ in range(2):
+            state = mgr.tick()
+        self.assertEqual(state.t_level_active, "T6")
+        self.assertEqual(mgr._t6_consecutive_breach_ticks, 2)
+
+    def test_breach_at_min_cycles_demotes_to_t5_with_flag(self):
+        t6 = FakeProbe("T6", _t6_breached())
+        t5 = FakeProbe("T5", _t5_anchor_grounded(offset_ms=150.0, sigma_ms=150.0))
+        mgr = self._mgr(demote=True, min_cycles=3, probes=[t6, t5])
+        for _ in range(3):
+            state = mgr.tick()
+        self.assertEqual(state.t_level_active, "T5")
+        self.assertTrue(any(
+            f.startswith("demote-t6-breach->t5:")
+            for f in state.disagreement_flags
+        ))
+
+    def test_breach_clears_resets_counter_and_recovers_to_t6(self):
+        t6 = FakeProbe("T6", _t6_breached())
+        t5 = FakeProbe("T5", _t5_anchor_grounded(offset_ms=150.0, sigma_ms=150.0))
+        mgr = self._mgr(demote=True, min_cycles=3, hyst=1, probes=[t6, t5])
+        # Build up to demotion.
+        for _ in range(3):
+            mgr.tick()
+        self.assertEqual(mgr._t_active, "T5")
+        # Breach clears.  Counter resets; T6 (which ranks higher than
+        # T5) wins again on the next tick.
+        t6.set(_t6_calm())
+        state = mgr.tick()
+        self.assertEqual(state.t_level_active, "T6")
+        self.assertEqual(mgr._t6_consecutive_breach_ticks, 0)
+
+    def test_demotion_blocked_when_t5_unavailable(self):
+        """If T5 isn't actually available (e.g., LBE-1421 disconnected),
+        the demotion must not happen — we'd be promoting nothing.
+        T6 stays active even past the breach threshold; the operator
+        sees the breach flag persisting and the lack of T5 fallback
+        is visible in t_level_available."""
+        t6 = FakeProbe("T6", _t6_breached())
+        t5 = FakeProbe("T5", _unavail("T5"))
+        mgr = self._mgr(demote=True, min_cycles=3, probes=[t6, t5])
+        for _ in range(6):
+            state = mgr.tick()
+        self.assertEqual(state.t_level_active, "T6")
+        self.assertNotIn(
+            "demote-t6-breach",
+            "".join(state.disagreement_flags),
+        )
+
+    def test_demotion_respects_t5_upgrade_hysteresis(self):
+        """T5 must have been continuously available for
+        upgrade_hysteresis ticks before it can be the demotion
+        target — otherwise we'd flap into a not-yet-trusted T5.
+
+        Both T6 and T5 share the same upgrade_hysteresis value, so we
+        choose a moderate value (2) and walk through the state
+        transitions: T6 promotes to active first while T5 is still
+        unavailable, then T5 comes up but stays in warm-up for the
+        first tick before becoming eligible for demotion.
+        """
+        t6 = FakeProbe("T6", _t6_breached())
+        t5 = FakeProbe("T5", _unavail("T5"))
+        mgr = self._mgr(demote=True, min_cycles=1, hyst=2, probes=[t6, t5])
+        # Tick 1: T6 avail=1 (< 2), active=None, no T5.
+        mgr.tick()
+        # Tick 2: T6 avail=2 → active=T6.  T5 still unavailable.
+        # Breach counter ticks to 1 but no demote (T5 not eligible).
+        state = mgr.tick()
+        self.assertEqual(state.t_level_active, "T6")
+        # Tick 3: T5 comes up but its avail=1 (< 2) → still in warm-up.
+        # T6 stays active even though breach is sticky.
+        t5.set(_t5_anchor_grounded(offset_ms=150.0, sigma_ms=150.0))
+        state = mgr.tick()
+        self.assertEqual(state.t_level_active, "T6",
+                         "should hold T6 while T5 still in warm-up")
+        # Tick 4: T5 avail=2 ≥ hyst → eligible.  Breach still sticky.
+        # Demote fires.
+        state = mgr.tick()
+        self.assertEqual(state.t_level_active, "T5")
+
+    def test_counter_resets_when_t6_picks_returns_to_calm(self):
+        """A flapping breach (breach ticks interleaved with calm ticks)
+        should NOT accumulate toward demotion — only consecutive
+        breaches count, mirroring the Layer 2 sustained-breach
+        philosophy already enforced inside core_recorder."""
+        t6 = FakeProbe("T6", _t6_breached())
+        t5 = FakeProbe("T5", _t5_anchor_grounded(offset_ms=150.0, sigma_ms=150.0))
+        mgr = self._mgr(demote=True, min_cycles=3, probes=[t6, t5])
+        mgr.tick()
+        mgr.tick()
+        t6.set(_t6_calm())
+        mgr.tick()  # resets counter
+        t6.set(_t6_breached())
+        state = mgr.tick()  # counter = 1 again
+        self.assertEqual(state.t_level_active, "T6")
+        self.assertEqual(mgr._t6_consecutive_breach_ticks, 1)
+
+
+class TestAuthorityManagerPhase2BTrustTierAnchorGrounded(unittest.TestCase):
+    """Phase 2B — when a trust-tier probe carries
+    detail.rtp_anchor_grounded=True, _build_state must publish that
+    probe's offset_ms / sigma_ms as rtp_to_utc_offset_ns and sigma_ns.
+    Without the marker (ChronyTrackingProbe-as-T5 sites, T4/T2/T1
+    trust witnesses), legacy behaviour stands: offset=0 with
+    TRUST_SIGMA_MS for the tier."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.out = self.tmp / "authority.json"
+        self.clock = _Clock(datetime(2026, 5, 25, 9, 0, 0, tzinfo=timezone.utc))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _mgr(self, probes, hyst=1):
+        return AuthorityManager(
+            probes=probes, output_path=self.out,
+            a_level_provider=lambda: "A1",
+            upgrade_hysteresis=hyst,
+            now_fn=self.clock,
+        )
+
+    def _read(self):
+        with self.out.open() as f:
+            return json.load(f)
+
+    def test_anchor_grounded_t5_publishes_probe_offset(self):
+        t5 = FakeProbe("T5", _t5_anchor_grounded(offset_ms=42.0, sigma_ms=42.0))
+        mgr = self._mgr([t5])
+        state = mgr.tick()
+        self.assertEqual(state.t_level_active, "T5")
+        self.assertEqual(state.rtp_to_utc_offset_ns, 42_000_000)
+        self.assertEqual(state.sigma_ns, 42_000_000)
+        payload = self._read()
+        self.assertEqual(payload["rtp_to_utc_offset_ns"], 42_000_000)
+        self.assertEqual(payload["sigma_ns"], 42_000_000)
+
+    def test_t5_without_marker_stays_trust_tier(self):
+        """ChronyTrackingProbe-as-T5 path: forwards a chrony-residual
+        offset_ms (not RTP-anchor-grounded) and no detail marker.
+        Manager must publish offset=0 + tier σ — the chrony residual
+        is for cross-check only, never as rtp_to_utc_offset_ns."""
+        chrony_t5 = ProbeResult(
+            "T5", True, offset_ms=12.0, sigma_ms=TRUST_SIGMA_MS["T5"],
+            detail={"name": "GPS", "state": "*"},
+        )
+        t5 = FakeProbe("T5", chrony_t5)
+        mgr = self._mgr([t5])
+        state = mgr.tick()
+        self.assertEqual(state.t_level_active, "T5")
+        self.assertEqual(state.rtp_to_utc_offset_ns, 0)
+        self.assertEqual(
+            state.sigma_ns,
+            int(round(TRUST_SIGMA_MS["T5"] * 1_000_000)),
+        )
+
+    def test_t4_t2_t1_stay_trust_tier_byte_compat(self):
+        """T4/T2/T1 never gain the rtp_anchor_grounded marker — they
+        remain pure trust witnesses.  Confirm published shape is
+        offset=0 with TRUST_SIGMA_MS even when probe forwards an
+        offset (e.g., from chrony tracking)."""
+        for tier in ("T4", "T2", "T1"):
+            with self.subTest(tier=tier):
+                probe_result = ProbeResult(
+                    tier, True, offset_ms=5.0,
+                    sigma_ms=TRUST_SIGMA_MS[tier],
+                    detail={"name": "trust-witness"},
+                )
+                mgr = self._mgr([FakeProbe(tier, probe_result)])
+                state = mgr.tick()
+                self.assertEqual(state.t_level_active, tier)
+                self.assertEqual(state.rtp_to_utc_offset_ns, 0)
+                self.assertEqual(
+                    state.sigma_ns,
+                    int(round(TRUST_SIGMA_MS[tier] * 1_000_000)),
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

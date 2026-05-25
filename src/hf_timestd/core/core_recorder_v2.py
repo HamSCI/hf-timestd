@@ -343,6 +343,12 @@ class CoreRecorderV2:
         # ka9q's rtp_to_wallclock is no longer used on the T6 path.
         self._t6_latest_gps_time_ns = None
         self._t6_latest_rtp_timesnap = None
+        # time.monotonic() when the (gps_time, rtp_timesnap) pair was
+        # captured.  Phase 2B uses this to extrapolate the anchor's UTC
+        # prediction forward to the NMEA-read instant when computing the
+        # T5 anchor-disagreement offset.  None until the first anchor
+        # seed completes.
+        self._t6_latest_anchor_monotonic = None
         self._t6_timing_lock = threading.Lock()
         self._t6_timing_poll_thread = None
         self._t6_timing_poll_stop = threading.Event()
@@ -1386,6 +1392,17 @@ class CoreRecorderV2:
     T6_DRIFT_HARD_THRESHOLD_NS = 1_000_000  # 1 ms
     T6_DRIFT_SUSTAINED_SEC = 60.0
 
+    # Phase 2B — T5 anchor-disagreement offset.  Cap on anchor age
+    # (seconds, host monotonic) before we decline to compute the
+    # offset.  Extrapolating UTC across a stale anchor accumulates
+    # rate-mismatch error; bounding by 1.2× the timing poll cadence
+    # keeps the typical extrapolation window ≤ 6 s — small compared
+    # to the breach signal Phase 2B is targeting (≥ 1 ms = T6 hard
+    # threshold).  Beyond this, the t5_lbe1421 block omits the
+    # anchor_offset_ns field and LbeT5DirectProbe falls back to the
+    # Phase 2A trust-tier defaults.
+    T6_T5_OFFSET_MAX_ANCHOR_AGE_SEC = T6_TIMING_POLL_SEC * 1.2
+
     # V1 fix layer 3 — re-capture policy.  Consumes the Layer 2 flags
     # (_t6_drift_flag_{anchor_discontinuity,sustained}) and re-runs
     # the settled-capture gate + fresh discover_channels to replace
@@ -1543,6 +1560,56 @@ class CoreRecorderV2:
             logger.debug(f"T4 chrony tracking unavailable: {e}")
 
         return None
+
+    def _compute_t5_anchor_offset(self, reading):
+        """Phase 2B — anchor-disagreement offset for the T5 substrate.
+
+        Returns ``(offset_ns, anchor_age_sec)`` when the RTP anchor is
+        fresh enough to extrapolate to the NMEA-read instant, else
+        ``(None, anchor_age_sec_or_None)`` so callers can surface the
+        reason without recomputing.
+
+        Math: extrapolate the anchor's UTC view forward from its
+        capture moment to ``reading.host_monotonic_at_read`` via host
+        monotonic elapsed time (monotonic and UTC both advance at
+        1 s/s, modulo chrony slewing which doesn't touch monotonic).
+        Compare to ``reading.pps_utc_sec``.  The diff is the anchor's
+        drift relative to NMEA truth, modulo a positive bias of
+        ~USB_delay (~few hundred ms for USB-CDC) — Phase 2B accepts
+        this bias and absorbs it into honest σ downstream.  Phase 2C+
+        can calibrate the bias.
+
+        Used by ``_write_status`` to populate the ``anchor_offset_ns``
+        field of the ``t5_lbe1421`` block, which ``LbeT5DirectProbe``
+        then forwards as ``offset_ms`` for authority-state publication
+        and Phase 2B demote-on-breach selection.
+        """
+        if reading is None or not getattr(reading, "valid_fix", False):
+            return None, None
+        with self._t6_timing_lock:
+            gps_time_ns = self._t6_latest_gps_time_ns
+            anchor_mono = self._t6_latest_anchor_monotonic
+        if gps_time_ns is None or anchor_mono is None:
+            return None, None
+        anchor_age_sec = reading.host_monotonic_at_read - anchor_mono
+        if (anchor_age_sec < 0
+                or anchor_age_sec > self.T6_T5_OFFSET_MAX_ANCHOR_AGE_SEC):
+            return None, anchor_age_sec
+        # ka9q constants — inlined so the import surface stays local
+        # to this single path.  GPS_UTC_OFFSET = seconds between Unix
+        # and GPS epochs; GPS_LEAP_SECONDS = current leap (TAI-UTC-9).
+        GPS_UTC_OFFSET = 315964800
+        GPS_LEAP_SECONDS = 18
+        anchor_utc_at_set_sec = (
+            (gps_time_ns + 1_000_000_000 * (GPS_UTC_OFFSET - GPS_LEAP_SECONDS))
+            / 1_000_000_000
+        )
+        anchor_utc_at_nmea_read_sec = anchor_utc_at_set_sec + anchor_age_sec
+        true_utc_approx_sec = float(reading.pps_utc_sec)
+        offset_ns = int(round(
+            (anchor_utc_at_nmea_read_sec - true_utc_approx_sec) * 1_000_000_000
+        ))
+        return offset_ns, anchor_age_sec
 
     def attach_lb1421_probe(self, probe) -> None:
         """Inject an Lb1421T5Probe for use by T5 disambiguation.
@@ -1950,6 +2017,7 @@ class CoreRecorderV2:
                 with self._t6_timing_lock:
                     self._t6_latest_gps_time_ns = int(seed_gps)
                     self._t6_latest_rtp_timesnap = int(seed_rtp)
+                    self._t6_latest_anchor_monotonic = time.monotonic()
                 logger.info(
                     f"T6 timing anchor seeded: GPS_TIME={seed_gps}, "
                     f"RTP_TIMESNAP={seed_rtp}"
@@ -1993,6 +2061,7 @@ class CoreRecorderV2:
             with self._t6_timing_lock:
                 self._t6_latest_gps_time_ns = int(gps_ns)
                 self._t6_latest_rtp_timesnap = int(rtp_snap)
+                self._t6_latest_anchor_monotonic = time.monotonic()
             # V1 fix layer 2 — anchor-consistency check (Signal A).
             # Done outside the timing lock so the check can't stall the
             # SHM-update path on the rare contention.
@@ -2350,6 +2419,7 @@ class CoreRecorderV2:
         with self._t6_timing_lock:
             self._t6_latest_gps_time_ns = int(fresh_gps_ns)
             self._t6_latest_rtp_timesnap = int(fresh_rtp_snap)
+            self._t6_latest_anchor_monotonic = time.monotonic()
             self._t6_drift_anchor_gps_ns = int(fresh_gps_ns)
             self._t6_drift_anchor_rtp_timesnap = int(fresh_rtp_snap)
 
@@ -3337,6 +3407,22 @@ class CoreRecorderV2:
                         'age_sec': age_sec,
                         'device': str(getattr(lb_probe, 'device', '')),
                     }
+                    # Phase 2B — anchor-disagreement offset, populated
+                    # only when the reading has a valid fix AND the
+                    # RTP anchor is fresh enough to extrapolate.  When
+                    # omitted, LbeT5DirectProbe falls back to Phase 2A
+                    # trust-tier semantics (offset=0, σ=floor).
+                    offset_ns, anchor_age_sec = self._compute_t5_anchor_offset(reading)
+                    if offset_ns is not None:
+                        status['t5_lbe1421']['anchor_offset_ns'] = offset_ns
+                        status['t5_lbe1421']['anchor_age_sec'] = (
+                            round(anchor_age_sec, 3) if anchor_age_sec is not None else None
+                        )
+                    elif anchor_age_sec is not None:
+                        # Anchor present but too stale — surface that
+                        # so operators can correlate with the missing
+                        # offset.  Numeric anchor_age_sec, no offset.
+                        status['t5_lbe1421']['anchor_age_sec'] = round(anchor_age_sec, 3)
                 else:
                     status['t5_lbe1421'] = {
                         'enabled': True,

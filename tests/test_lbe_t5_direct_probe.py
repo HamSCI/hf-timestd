@@ -64,7 +64,8 @@ class LbeT5DirectProbeAvailableTests(unittest.TestCase):
             r = probe.poll()
         self.assertTrue(r.available)
         self.assertEqual(r.t_level, "T5")
-        self.assertEqual(r.offset_ms, 0.0)        # Phase 2A: trust-tier
+        # Phase 2A fallback (no anchor_offset_ns in status): trust-tier.
+        self.assertEqual(r.offset_ms, 0.0)
         self.assertEqual(r.sigma_ms, 5.0)
         # Detail surfaces what an operator needs to see at a glance.
         self.assertTrue(r.detail["valid_fix"])
@@ -72,6 +73,10 @@ class LbeT5DirectProbeAvailableTests(unittest.TestCase):
         self.assertAlmostEqual(r.detail["nmea_age_sec"], 0.5)
         self.assertEqual(r.detail["device"], "/dev/lb1421-nmea")
         self.assertEqual(r.detail["sigma_floor_ms"], 5.0)
+        # Phase 2B marker is False when there's no anchor_offset_ns
+        # populated — keeps AuthorityManager._build_state on the
+        # legacy trust-tier path.
+        self.assertFalse(r.detail["rtp_anchor_grounded"])
 
     def test_sigma_floor_is_configurable(self):
         from hf_timestd.core.lbe_t5_direct_probe import LbeT5DirectProbe
@@ -205,6 +210,117 @@ class LbeT5DirectProbeT_LevelTests(unittest.TestCase):
     def test_t_level_is_T5(self):
         from hf_timestd.core.lbe_t5_direct_probe import LbeT5DirectProbe
         self.assertEqual(LbeT5DirectProbe.t_level, "T5")
+
+
+class LbeT5DirectProbePhase2BAnchorOffsetTests(unittest.TestCase):
+    """Phase 2B — anchor_offset_ns plumbing.
+
+    The probe forwards core_recorder's measured RTP-anchor
+    disagreement as offset_ms (signed) with honest σ (max of floor
+    and |offset|), and marks the result rtp_anchor_grounded so the
+    manager publishes it as rtp_to_utc_offset_ns.  Absent the field
+    (Phase 2A producer, anchor too stale, or core_recorder pre-2B),
+    the probe falls back to the trust-tier zero with σ at the floor.
+    """
+
+    def _block_with_offset(self, *, anchor_offset_ns, anchor_age_sec=2.0):
+        return {
+            "enabled": True,
+            "valid_fix": True,
+            "pps_utc_sec": 1716501000,
+            "age_sec": 0.5,
+            "device": "/dev/lb1421-nmea",
+            "anchor_offset_ns": anchor_offset_ns,
+            "anchor_age_sec": anchor_age_sec,
+        }
+
+    def test_anchor_offset_forwarded_as_offset_ms(self):
+        from hf_timestd.core.lbe_t5_direct_probe import LbeT5DirectProbe
+        with tempfile.TemporaryDirectory() as d:
+            p = _write(_make_status(
+                t5_block=self._block_with_offset(anchor_offset_ns=42_000_000),
+            ), d)
+            probe = LbeT5DirectProbe(
+                status_path=p, now_fn=lambda: NOW, sigma_floor_ms=5.0,
+            )
+            r = probe.poll()
+        self.assertTrue(r.available)
+        # 42_000_000 ns = 42 ms.
+        self.assertAlmostEqual(r.offset_ms, 42.0)
+        # σ honest: max(floor=5, |offset|=42) = 42.
+        self.assertAlmostEqual(r.sigma_ms, 42.0)
+        self.assertEqual(r.detail["anchor_offset_ns"], 42_000_000)
+        self.assertAlmostEqual(r.detail["anchor_age_sec"], 2.0)
+        self.assertTrue(r.detail["rtp_anchor_grounded"])
+
+    def test_anchor_offset_signed_negative_drift(self):
+        from hf_timestd.core.lbe_t5_direct_probe import LbeT5DirectProbe
+        with tempfile.TemporaryDirectory() as d:
+            p = _write(_make_status(
+                t5_block=self._block_with_offset(anchor_offset_ns=-15_000_000),
+            ), d)
+            probe = LbeT5DirectProbe(
+                status_path=p, now_fn=lambda: NOW, sigma_floor_ms=5.0,
+            )
+            r = probe.poll()
+        self.assertAlmostEqual(r.offset_ms, -15.0)
+        # |offset| dominates the floor → 15 ms.
+        self.assertAlmostEqual(r.sigma_ms, 15.0)
+        self.assertTrue(r.detail["rtp_anchor_grounded"])
+
+    def test_sigma_floor_dominates_when_offset_smaller(self):
+        from hf_timestd.core.lbe_t5_direct_probe import LbeT5DirectProbe
+        with tempfile.TemporaryDirectory() as d:
+            p = _write(_make_status(
+                t5_block=self._block_with_offset(anchor_offset_ns=1_000_000),
+            ), d)
+            probe = LbeT5DirectProbe(
+                status_path=p, now_fn=lambda: NOW, sigma_floor_ms=5.0,
+            )
+            r = probe.poll()
+        self.assertAlmostEqual(r.offset_ms, 1.0)
+        # floor=5 > |offset|=1 → σ stays at the floor.
+        self.assertAlmostEqual(r.sigma_ms, 5.0)
+        self.assertTrue(r.detail["rtp_anchor_grounded"])
+
+    def test_missing_anchor_offset_falls_back_to_trust_tier(self):
+        """Phase 2A producer or anchor-too-stale → no anchor_offset_ns.
+        Probe must publish the legacy trust-tier shape so existing
+        deployments keep working byte-for-byte."""
+        from hf_timestd.core.lbe_t5_direct_probe import LbeT5DirectProbe
+        with tempfile.TemporaryDirectory() as d:
+            p = _write(_make_status(), d)  # default block has no anchor_offset_ns
+            probe = LbeT5DirectProbe(
+                status_path=p, now_fn=lambda: NOW, sigma_floor_ms=5.0,
+            )
+            r = probe.poll()
+        self.assertEqual(r.offset_ms, 0.0)
+        self.assertEqual(r.sigma_ms, 5.0)
+        self.assertIsNone(r.detail["anchor_offset_ns"])
+        self.assertFalse(r.detail["rtp_anchor_grounded"])
+
+    def test_unparseable_anchor_offset_falls_back(self):
+        """A garbage anchor_offset_ns (e.g., string from schema skew)
+        must not crash the probe — fall back to trust-tier."""
+        from hf_timestd.core.lbe_t5_direct_probe import LbeT5DirectProbe
+        block = {
+            "enabled": True,
+            "valid_fix": True,
+            "pps_utc_sec": 1716501000,
+            "age_sec": 0.5,
+            "device": "/dev/lb1421-nmea",
+            "anchor_offset_ns": "not-an-int",
+        }
+        with tempfile.TemporaryDirectory() as d:
+            p = _write(_make_status(t5_block=block), d)
+            probe = LbeT5DirectProbe(
+                status_path=p, now_fn=lambda: NOW, sigma_floor_ms=5.0,
+            )
+            r = probe.poll()
+        self.assertTrue(r.available)
+        self.assertEqual(r.offset_ms, 0.0)
+        self.assertEqual(r.sigma_ms, 5.0)
+        self.assertFalse(r.detail["rtp_anchor_grounded"])
 
 
 if __name__ == "__main__":
