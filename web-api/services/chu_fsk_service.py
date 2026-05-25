@@ -55,9 +55,6 @@ class CHUFSKService:
     def _get_latest_from_sqlite(self) -> Optional[Dict[str, Any]]:
         """Fall back to L2_chu_fsk SQLite for the most recent successful
         decode (last 3 days)."""
-        import sys
-        sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'src'))
-
         import math
 
         try:
@@ -367,8 +364,6 @@ class CHUFSKService:
         
         Reads L2/chu_fsk HDF5 products written by the FSK listener.
         """
-        import sys
-        sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'src'))
         from hf_timestd.io import make_data_product_reader
 
         timestamps = []

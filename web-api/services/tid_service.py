@@ -22,9 +22,6 @@ import logging
 
 import numpy as np
 
-# Add parent directory to path for hf_timestd imports
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'src'))
-
 from hf_timestd.io import make_data_product_reader
 from hf_timestd.data_product_registry import DataProductRegistry
 from config import config

@@ -15,8 +15,6 @@ from typing import Dict, Any, List, Optional
 import logging
 import math
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'src'))
-
 from hf_timestd.io import make_data_product_reader
 from config import config
 from hf_timestd.core.solar_zenith_calculator import (

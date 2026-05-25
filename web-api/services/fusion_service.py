@@ -10,9 +10,6 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 import logging
 
-# Add parent directory to path for hf_timestd imports
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'src'))
-
 from hf_timestd.io import make_data_product_reader
 from config import config
 

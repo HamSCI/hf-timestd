@@ -256,19 +256,10 @@ async def get_solar_elevation(
         t1 = _parse(end)
 
         # Import calculator (installed as part of hf_timestd package)
-        try:
-            from hf_timestd.core.solar_zenith_calculator import (
-                grid_to_latlon, calculate_midpoint, solar_position,
-                WWV_LOCATION, WWVH_LOCATION, CHU_LOCATION, BPM_LOCATION,
-            )
-        except ImportError:
-            # Fallback: add src to path
-            src = Path(__file__).parent.parent.parent / "src"
-            sys.path.insert(0, str(src))
-            from hf_timestd.core.solar_zenith_calculator import (
-                grid_to_latlon, calculate_midpoint, solar_position,
-                WWV_LOCATION, WWVH_LOCATION, CHU_LOCATION, BPM_LOCATION,
-            )
+        from hf_timestd.core.solar_zenith_calculator import (
+            grid_to_latlon, calculate_midpoint, solar_position,
+            WWV_LOCATION, WWVH_LOCATION, CHU_LOCATION, BPM_LOCATION,
+        )
 
         import math as _math
 

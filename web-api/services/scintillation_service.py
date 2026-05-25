@@ -23,8 +23,6 @@ import math
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'src'))
-
 try:
     from config import config as _web_config
 except Exception:

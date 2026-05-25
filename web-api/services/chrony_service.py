@@ -14,9 +14,6 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, List, Optional
 
-# Add parent directory to path for hf_timestd imports
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'src'))
-
 from hf_timestd.core.chrony_stats import (
     collect_chrony_snapshot,
     ChronySnapshot,
