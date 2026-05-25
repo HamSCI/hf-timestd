@@ -214,6 +214,7 @@ class SqliteDataProductWriter:
 
         ddl = f"CREATE TABLE IF NOT EXISTS {self.table} (\n    " + ",\n    ".join(cols) + "\n)"
         self._conn.execute(ddl)
+        self._migrate_missing_columns()
 
         # Non-unique index for time-range queries. Pick the best
         # ordering column the schema offers.
@@ -227,6 +228,52 @@ class SqliteDataProductWriter:
             self._conn.execute(
                 f"CREATE INDEX IF NOT EXISTS idx_{self.table}_chan_ts "
                 f"ON {self.table} (channel, {index_col})"
+            )
+
+    def _migrate_missing_columns(self) -> None:
+        """Forward-only schema migration for fields added to the JSON
+        schema after the live DB was created.
+
+        ``CREATE TABLE IF NOT EXISTS`` only creates absent tables — it
+        never alters an existing one.  When a new field is added to a
+        product schema (e.g. the way ``t5_*`` columns landed in the
+        authority_snapshot table during Phase 2A), every INSERT on
+        existing DBs silently drops the row with a "no column named X"
+        warning.  ``AuthoritySnapshotStore`` solved this in
+        ``fcd8fe6``; this is the same fix for the schema-driven
+        per-product writer.
+
+        Forward-only: unknown old columns are left in place
+        (downgrade-then-upgrade must work).  Renames are not
+        supported.  Idempotent — re-running against an up-to-date
+        table is a no-op.
+
+        Constraints are not re-applied.  SQLite forbids adding NOT
+        NULL columns to a non-empty table without a DEFAULT, and
+        validation already runs in ``_validate_field`` /
+        ``validate_measurement`` at write time, so the schema's
+        ``required`` flag is enforced before the row reaches SQLite
+        regardless.
+        """
+        cur = self._conn.execute(f"PRAGMA table_info({self.table})")
+        existing = {row[1] for row in cur.fetchall()}  # row[1] = column name
+
+        for field in self.schema["fields"]:
+            name = field["name"]
+            if name == "channel":
+                # The writer-injected leading column is always present;
+                # any schema-side ``channel`` field is intentionally
+                # skipped in _ensure_table for the same reason.
+                continue
+            if name in existing:
+                continue
+            sql_type = _sqlite_type_for_field(field)
+            self._conn.execute(
+                f"ALTER TABLE {self.table} ADD COLUMN {name} {sql_type}"
+            )
+            logger.info(
+                "SqliteDataProductWriter: added missing column %s.%s %s",
+                self.table, name, sql_type,
             )
 
     # ------------------------------------------------------------------

@@ -399,3 +399,161 @@ class TestSmoke:
             assert writer._conn is not None
             writer.write_test_measurement()
         assert writer._conn is None  # close() called on __exit__
+
+
+# ---------------------------------------------------------------------
+# Forward-only schema migration (mirrors authority_snapshot_store fcd8fe6)
+# ---------------------------------------------------------------------
+
+
+def _columns_of(db_path, table):
+    """Return live column names for a table by opening the DB
+    independently — avoids leaning on writer state during migration
+    assertions."""
+    conn = sqlite3.connect(str(db_path))
+    try:
+        cur = conn.execute(f"PRAGMA table_info({table})")
+        return [row[1] for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+class TestSchemaMigration:
+    """The exact failure mode that bit authority_snapshot_store on Phase
+    2A: adding fields to a JSON schema after a live DB exists silently
+    fails every INSERT because ``CREATE TABLE IF NOT EXISTS`` doesn't
+    alter.  The migration helper closes that gap."""
+
+    def test_missing_columns_added_on_init(self, temp_dir, temp_db):
+        """A pre-existing table missing several schema columns gains
+        them when a fresh writer opens against the same DB."""
+        # Pre-create the table with only a minimal subset of columns —
+        # simulating an older deployment where the schema had fewer
+        # fields.  No writer was used to create this; we hand-roll the
+        # DDL.
+        table = "L2_timing_measurements"
+        conn = sqlite3.connect(str(temp_db))
+        conn.execute(
+            f"CREATE TABLE {table} ("
+            "channel TEXT NOT NULL, "
+            "timestamp_utc TEXT, "
+            "clock_offset_ms REAL"
+            ")"
+        )
+        conn.close()
+        assert set(_columns_of(temp_db, table)) == {
+            "channel", "timestamp_utc", "clock_offset_ms",
+        }
+
+        writer = _make_writer(temp_dir, temp_db)
+        try:
+            cols_after = set(_columns_of(temp_db, table))
+            # The full live schema's fields should all be present now.
+            schema_fields = {f["name"] for f in writer.schema["fields"]}
+            # ``channel`` is writer-injected; everything else from the
+            # schema must be in the live table after migration.
+            missing = (schema_fields - {"channel"}) - cols_after
+            assert missing == set(), (
+                f"migration did not add expected columns: {missing}"
+            )
+            # The columns we hand-rolled originally are still there.
+            assert "timestamp_utc" in cols_after
+            assert "clock_offset_ms" in cols_after
+            assert "channel" in cols_after
+        finally:
+            writer.close()
+
+    def test_migrated_db_accepts_full_insert(
+        self, temp_dir, temp_db, sample_l2_measurement
+    ):
+        """After migration, a full write against the previously-stunted
+        table succeeds end-to-end (round-trip)."""
+        table = "L2_timing_measurements"
+        conn = sqlite3.connect(str(temp_db))
+        conn.execute(
+            f"CREATE TABLE {table} ("
+            "channel TEXT NOT NULL, "
+            "timestamp_utc TEXT"
+            ")"
+        )
+        conn.close()
+
+        writer = _make_writer(temp_dir, temp_db)
+        try:
+            writer.write_measurement(sample_l2_measurement)
+            assert writer.verify_last_write()
+            # Spot-check that one of the newly-added columns actually
+            # received the value (would've been silently dropped in
+            # the pre-migration world).
+            conn = sqlite3.connect(str(temp_db))
+            row = conn.execute(
+                f"SELECT clock_offset_ms, station FROM {table} "
+                "WHERE channel = ?",
+                (writer.channel,),
+            ).fetchone()
+            conn.close()
+            assert row[0] == pytest.approx(-2.14)
+            assert row[1] == "WWV"
+        finally:
+            writer.close()
+
+    def test_migration_is_idempotent(self, temp_dir, temp_db):
+        """Opening the same DB twice in a row does not re-ALTER or
+        otherwise error.  Live deployments restart services frequently
+        — every init must be safe."""
+        w1 = _make_writer(temp_dir, temp_db)
+        cols_first = set(_columns_of(temp_db, w1.table))
+        w1.close()
+
+        w2 = _make_writer(temp_dir, temp_db)
+        try:
+            cols_second = set(_columns_of(temp_db, w2.table))
+            assert cols_first == cols_second  # no spurious additions
+        finally:
+            w2.close()
+
+    def test_extra_old_columns_preserved(self, temp_dir, temp_db):
+        """Forward-only: a column that exists in the live DB but not
+        in the schema (e.g. removed by a later code change, or added
+        by a future version then downgraded) is left alone."""
+        table = "L2_timing_measurements"
+        conn = sqlite3.connect(str(temp_db))
+        conn.execute(
+            f"CREATE TABLE {table} ("
+            "channel TEXT NOT NULL, "
+            "timestamp_utc TEXT, "
+            "future_ghost_column REAL"  # not in any schema we know about
+            ")"
+        )
+        conn.close()
+
+        writer = _make_writer(temp_dir, temp_db)
+        try:
+            cols_after = set(_columns_of(temp_db, table))
+            assert "future_ghost_column" in cols_after
+        finally:
+            writer.close()
+
+    def test_migration_handles_multiple_tables(self, temp_dir, temp_db):
+        """Each writer migrates its own product table.  Opening two
+        writers for different products against the same DB doesn't
+        cross-contaminate."""
+        w_l2 = _make_writer(temp_dir, temp_db)
+        # Different product → different table.  The schemas package
+        # ships several; pick one we know exists.
+        w_l1 = _make_writer(
+            temp_dir, temp_db,
+            product="metrology_measurements", level="L1",
+        )
+        try:
+            l2_cols = set(_columns_of(temp_db, w_l2.table))
+            l1_cols = set(_columns_of(temp_db, w_l1.table))
+            assert w_l2.table != w_l1.table
+            # Each table has its own ``channel`` column.
+            assert "channel" in l2_cols and "channel" in l1_cols
+            # L2 timing column shouldn't leak into L1 metrology table.
+            assert "clock_offset_ms" in l2_cols
+            assert "clock_offset_ms" not in l1_cols
+        finally:
+            w_l2.close()
+            w_l1.close()
