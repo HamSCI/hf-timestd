@@ -15,6 +15,7 @@ import argparse
 import time
 from pathlib import Path
 from .core.core_recorder_v2 import CoreRecorderV2
+from .config_utils import resolve_ka9q_status
 
 
 # ============================================================================
@@ -168,7 +169,7 @@ def _handle_inventory(args):
                 'timing_authority_applied':    None,
                 # Standalone fallback: clients can read these from their own
                 # config file when sigmond/coordination.env are absent.
-                'radiod_status_dns':           ka9q.get('status_address', ''),
+                'radiod_status_dns':           resolve_ka9q_status({'ka9q': ka9q}),
                 # CONTRACT-v0.5 §16.3: declare data source.  hf-timestd
                 # uses ka9q-python; radiod_id is null at inventory time
                 # because sigmond resolves it via coordination.toml.
@@ -261,7 +262,7 @@ def _handle_validate_contract(args):
                     'instance': 'default',
                     'message':  'station.callsign is empty',
                 })
-            if not (cfg.get('ka9q', {}) or {}).get('status_address'):
+            if not resolve_ka9q_status(cfg):
                 issues.append({
                     'severity': 'warn',
                     'instance': 'default',
@@ -1080,7 +1081,7 @@ Per-service overrides in [services] take precedence over the profile.
             'output_dir': output_dir,
             'station': config.get('station', {}),
             'channels': _expand_channel_groups(recorder_section),
-            'status_address': config.get('ka9q', {}).get('status_address', '239.192.152.141'),
+            'status_address': resolve_ka9q_status(config, default='239.192.152.141'),
             'storage_quota': recorder_section.get('storage_quota', '75%'),
             'archive_root': archive_root,
             'derived_max_days': derived_max_days,
@@ -1127,7 +1128,7 @@ Per-service overrides in [services] take precedence over the profile.
             sys.exit(1)
         
         # Discovery mode
-        status_address = args.radiod or config.get('ka9q', {}).get('status_address', '239.192.152.141')
+        status_address = args.radiod or resolve_ka9q_status(config, default='239.192.152.141')
         manager = ChannelManager(status_address)
         channels = manager.discover_channels()
         
@@ -1150,7 +1151,7 @@ Per-service overrides in [services] take precedence over the profile.
             sys.exit(1)
         
         # Create channels mode
-        status_address = config.get('ka9q', {}).get('status_address', '239.192.152.141')
+        status_address = resolve_ka9q_status(config, default='239.192.152.141')
         manager = ChannelManager(status_address)
         
         # Build channel specifications

@@ -217,11 +217,14 @@ def build_authority_runner_from_config(
             a_level_provider = lambda: a_level_cfg  # noqa: E731
 
     # Governor-radiod identifier for the multi-radiod case
-    # (METROLOGY.md §4.5.1). Default: read [ka9q].status_address so the
+    # (METROLOGY.md §4.5.1). Default: read [ka9q].status (the
+    # multicast hostname per RADIOD-IDENTIFICATION.md §3.1; falls
+    # back to legacy status_address with DeprecationWarning).  The
     # name hf-timestd uses for its own input is what's exposed to
     # cross-host consumers (wspr-recorder, LAN NTP peers).
     if governor_radiod_provider is None:
-        governor_cfg = (config.get("ka9q", {}) or {}).get("status_address")
+        from ..config_utils import resolve_ka9q_status
+        governor_cfg = resolve_ka9q_status(config)
         if governor_cfg:
             governor_radiod_provider = lambda: str(governor_cfg)  # noqa: E731
 

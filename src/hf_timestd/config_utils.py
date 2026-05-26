@@ -455,6 +455,39 @@ class PathResolver:
         print("="*70 + "\n")
 
 
+def resolve_ka9q_status(config: Dict, default: str = "") -> str:
+    """Resolve the radiod mDNS control/status multicast name.
+
+    Per sigmond's docs/RADIOD-IDENTIFICATION.md §3.1, the canonical
+    field is ``[ka9q] status`` (the multicast hostname like
+    ``"bee1-status.local"``).  The legacy field ``[ka9q]
+    status_address`` is still accepted during the Phase 3
+    deprecation window with a DeprecationWarning.  When both are
+    set, ``status`` wins.
+
+    Args:
+        config: parsed TOML config dict
+        default: returned (without warning) when neither field is set
+
+    Returns:
+        The multicast hostname (str) — empty string if neither is set
+        AND no default is supplied.
+    """
+    ka9q = (config.get("ka9q") or {})
+    status = ka9q.get("status")
+    if status:
+        return str(status)
+    legacy = ka9q.get("status_address")
+    if legacy:
+        warnings.warn(
+            "[ka9q] status_address is deprecated; rename to "
+            "[ka9q] status per RADIOD-IDENTIFICATION.md §3.1",
+            DeprecationWarning, stacklevel=2,
+        )
+        return str(legacy)
+    return default
+
+
 def load_config_with_paths(config_file: Path, development_mode: bool = False) -> tuple[Dict, PathResolver]:
     """
     Load configuration and create path resolver

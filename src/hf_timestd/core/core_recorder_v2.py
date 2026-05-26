@@ -160,7 +160,12 @@ class CoreRecorderV2:
         else:
             self.status_address = config.get('status_address')
             if not self.status_address:
-                self.status_address = ka9q_section.get('status_address')
+                # Prefer new `status` field (RADIOD-IDENTIFICATION.md
+                # §3.1); fall back to legacy `status_address` with
+                # DeprecationWarning via resolve_ka9q_status.
+                from ..config_utils import resolve_ka9q_status
+                self.status_address = resolve_ka9q_status(
+                    {'ka9q': ka9q_section}) or None
 
         if not self.status_address:
             raise ValueError("Configuration missing 'status_address' in [ka9q] section")
@@ -3783,7 +3788,11 @@ def main():
         'recorder': recorder_section,
         'channels': channels,
         'channel_defaults': recorder_section.get('channel_defaults', {}),
-        'status_address': ka9q_section.get('status_address', '239.192.152.141'),
+        # Prefer [ka9q] status; fall back to legacy status_address
+        # with DeprecationWarning per RADIOD-IDENTIFICATION.md §3.1.
+        'status_address': (ka9q_section.get('status')
+                           or ka9q_section.get('status_address')
+                           or '239.192.152.141'),
         'ka9q': ka9q_section,
         'timing': config.get('timing', {}),
     }

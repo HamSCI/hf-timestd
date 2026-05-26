@@ -13,9 +13,19 @@ latitude = 0.0                          # Your latitude in decimal degrees (opti
 longitude = 0.0                         # Your longitude in decimal degrees (optional if grid_square is provided)
 
 [ka9q]
-# Your ka9q-radio status multicast address
-# Find this in your radiod config file or use: avahi-browse -rt _ka9q-ctl._udp
-status_address = "<YOUR_RADIOD_STATUS>"  # e.g., hf-status.local
+# REQUIRED: the mDNS control/status multicast name of the radiod to
+# consume from.  Discover available radiods on the LAN with:
+#   hf-timestd discover           (lists radiod hostnames + channels)
+#   avahi-browse -rt _ka9q-ctl._udp   (raw discovery)
+# Examples: "bee1-status.local", "hf-status.local".  Leave the
+# placeholder unchanged to make the daemon refuse to start until
+# the operator edits this file.
+status = "<YOUR_RADIOD_STATUS>"
+
+# Legacy field name accepted during the Phase 3 deprecation window
+# (sigmond RADIOD-IDENTIFICATION.md §6).  Greenfield installs should
+# use `status` above.
+# status_address = "hf-status.local"
 auto_create_channels = true
 # Data source mode: "radiod" (single antenna, 9 channels) or "phase-engine" (beamformed, 17 channels)
 source = "radiod"

@@ -511,8 +511,11 @@ if __name__ == '__main__':
     with open(args.config) as f:
         config = toml.load(f)
     
-    # Get status address
-    status_address = args.status_address or config.get('ka9q', {}).get('status_address', '239.192.152.141')
+    # Get status address (prefers [ka9q] status per RADIOD-IDENTIFICATION
+    # §3.1; falls back to legacy status_address with DeprecationWarning).
+    from .config_utils import resolve_ka9q_status
+    status_address = args.status_address or resolve_ka9q_status(
+        config, default='239.192.152.141')
     
     # Create channel manager
     manager = ChannelManager(status_address)
