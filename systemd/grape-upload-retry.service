@@ -14,13 +14,13 @@ WorkingDirectory=/var/lib/timestd
 # Operator identity (callsign, grid) from sigmond — CLIENT-CONTRACT §14.2
 EnvironmentFile=-/etc/sigmond/coordination.env
 
-Environment=PATH=/opt/hf-timestd/venv/bin:/usr/bin:/bin
+Environment=PATH=/opt/git/sigmond/hf-timestd/venv/bin:/usr/bin:/bin
 
 # `grape upload --resume` walks every <data-root>/upload/<YYYYMMDD>/
 # directory still on disk (= cleanup didn't run = upload not yet
 # confirmed), resets failed-status tasks back to pending, and drives
 # the queue.  Exits 0 cleanly when there's nothing to do.
-ExecStart=/opt/hf-timestd/venv/bin/python3 -m hf_timestd.cli grape upload --resume
+ExecStart=/opt/git/sigmond/hf-timestd/venv/bin/python3 -m hf_timestd.cli grape upload --resume
 
 StandardOutput=journal
 StandardError=journal

@@ -70,7 +70,7 @@ fi
 # =============================================================================
 log_step "Reading station ID from config..."
 
-STATION_ID=$(/opt/hf-timestd/venv/bin/python3 -c "
+STATION_ID=$(/opt/git/sigmond/hf-timestd/venv/bin/python3 -c "
 import tomllib
 with open('${CONFIG_FILE}', 'rb') as f:
     cfg = tomllib.load(f)

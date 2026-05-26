@@ -15,17 +15,17 @@ scp web-api/static/metrology.html bee1:/tmp/
 echo "Installing files on bee1..."
 ssh bee1 << 'EOF'
     # Backup existing files
-    sudo cp /opt/hf-timestd/venv/lib/python3.11/site-packages/hf_timestd/web-api/services/propagation_service.py \
-        /opt/hf-timestd/venv/lib/python3.11/site-packages/hf_timestd/web-api/services/propagation_service.py.backup
-    sudo cp /opt/hf-timestd/venv/lib/python3.11/site-packages/hf_timestd/web-api/static/propagation.html \
-        /opt/hf-timestd/venv/lib/python3.11/site-packages/hf_timestd/web-api/static/propagation.html.backup
-    sudo cp /opt/hf-timestd/venv/lib/python3.11/site-packages/hf_timestd/web-api/static/metrology.html \
-        /opt/hf-timestd/venv/lib/python3.11/site-packages/hf_timestd/web-api/static/metrology.html.backup
+    sudo cp /opt/git/sigmond/hf-timestd/venv/lib/python3.11/site-packages/hf_timestd/web-api/services/propagation_service.py \
+        /opt/git/sigmond/hf-timestd/venv/lib/python3.11/site-packages/hf_timestd/web-api/services/propagation_service.py.backup
+    sudo cp /opt/git/sigmond/hf-timestd/venv/lib/python3.11/site-packages/hf_timestd/web-api/static/propagation.html \
+        /opt/git/sigmond/hf-timestd/venv/lib/python3.11/site-packages/hf_timestd/web-api/static/propagation.html.backup
+    sudo cp /opt/git/sigmond/hf-timestd/venv/lib/python3.11/site-packages/hf_timestd/web-api/static/metrology.html \
+        /opt/git/sigmond/hf-timestd/venv/lib/python3.11/site-packages/hf_timestd/web-api/static/metrology.html.backup
     
     # Install new files
-    sudo cp /tmp/propagation_service.py /opt/hf-timestd/venv/lib/python3.11/site-packages/hf_timestd/web-api/services/
-    sudo cp /tmp/propagation.html /opt/hf-timestd/venv/lib/python3.11/site-packages/hf_timestd/web-api/static/
-    sudo cp /tmp/metrology.html /opt/hf-timestd/venv/lib/python3.11/site-packages/hf_timestd/web-api/static/
+    sudo cp /tmp/propagation_service.py /opt/git/sigmond/hf-timestd/venv/lib/python3.11/site-packages/hf_timestd/web-api/services/
+    sudo cp /tmp/propagation.html /opt/git/sigmond/hf-timestd/venv/lib/python3.11/site-packages/hf_timestd/web-api/static/
+    sudo cp /tmp/metrology.html /opt/git/sigmond/hf-timestd/venv/lib/python3.11/site-packages/hf_timestd/web-api/static/
     
     # Clean up temp files
     rm /tmp/propagation_service.py /tmp/propagation.html /tmp/metrology.html

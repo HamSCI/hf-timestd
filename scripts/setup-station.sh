@@ -504,8 +504,8 @@ export WIZ_ARCHIVE_ENABLED="$ARCHIVE_ENABLED"
 
 PYTHON_BIN="python3"
 # If venv exists (re-run scenario), prefer it for consistency
-if [[ -x "/opt/hf-timestd/venv/bin/python3" ]]; then
-    PYTHON_BIN="/opt/hf-timestd/venv/bin/python3"
+if [[ -x "/opt/git/sigmond/hf-timestd/venv/bin/python3" ]]; then
+    PYTHON_BIN="/opt/git/sigmond/hf-timestd/venv/bin/python3"
 fi
 
 "$PYTHON_BIN" - "$TEMPLATE" "$CONFIG_PATH" <<'PYEOF'
@@ -778,10 +778,10 @@ TIMESTD_MODE=production
 TIMESTD_DATA_ROOT=/var/lib/timestd
 TIMESTD_LOG_DIR=/var/log/hf-timestd
 TIMESTD_CONFIG=$CONFIG_PATH
-TIMESTD_PROJECT=/opt/hf-timestd
-TIMESTD_INSTALL_DIR=/opt/hf-timestd
-TIMESTD_WEBUI=/opt/hf-timestd/web-api
-TIMESTD_VENV=/opt/hf-timestd/venv
+TIMESTD_PROJECT=/opt/git/sigmond/hf-timestd
+TIMESTD_INSTALL_DIR=/opt/git/sigmond/hf-timestd
+TIMESTD_WEBUI=/opt/git/sigmond/hf-timestd/web-api
+TIMESTD_VENV=/opt/git/sigmond/hf-timestd/venv
 TIMESTD_LOG_LEVEL=INFO"
 
 if [[ "$EUID" -eq 0 ]]; then

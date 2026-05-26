@@ -14,7 +14,7 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 REPO_DIR="/home/mjh/git/hf-timestd"
-INSTALL_DIR="/opt/hf-timestd"
+INSTALL_DIR="/opt/git/sigmond/hf-timestd"
 
 echo "Step 1: Installing systemd-python dependency..."
 $INSTALL_DIR/venv/bin/pip install systemd-python>=235

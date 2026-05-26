@@ -7,6 +7,6 @@ Type=oneshot
 # Operator identity (callsign, grid) from sigmond — CLIENT-CONTRACT §14.2
 EnvironmentFile=-/etc/sigmond/coordination.env
 
-ExecStart=/opt/hf-timestd/scripts/pipeline-watchdog.sh
+ExecStart=/opt/git/sigmond/hf-timestd/scripts/pipeline-watchdog.sh
 User=root
 Nice=19

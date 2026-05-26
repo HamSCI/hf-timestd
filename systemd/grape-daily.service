@@ -11,11 +11,11 @@ WorkingDirectory=/var/lib/timestd
 # Operator identity (callsign, grid) from sigmond — CLIENT-CONTRACT §14.2
 EnvironmentFile=-/etc/sigmond/coordination.env
 
-Environment=PATH=/opt/hf-timestd/venv/bin:/usr/bin:/bin
+Environment=PATH=/opt/git/sigmond/hf-timestd/venv/bin:/usr/bin:/bin
 
 # Full orchestrated pipeline: decimate → spectrogram → package → upload
 # Gates enforce: all 9 channels decimated + all 9 spectrograms generated before upload
-ExecStart=/opt/hf-timestd/venv/bin/python3 -m hf_timestd.cli grape daily
+ExecStart=/opt/git/sigmond/hf-timestd/venv/bin/python3 -m hf_timestd.cli grape daily
 
 # Logging
 StandardOutput=journal

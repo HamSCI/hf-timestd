@@ -31,7 +31,7 @@ Group=root
 # resilient, this can revert to 120/300.
 Environment=HPPS_LASTRX_THRESHOLD_S=600
 Environment=HPPS_RESTART_COOLDOWN_S=1800
-ExecStart=/opt/hf-timestd/scripts/hpps-watchdog.sh
+ExecStart=/opt/git/sigmond/hf-timestd/scripts/hpps-watchdog.sh
 
 StandardOutput=journal
 StandardError=journal

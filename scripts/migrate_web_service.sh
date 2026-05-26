@@ -4,7 +4,7 @@ set -e
 # Configuration
 # Detect if running on localhost (bee1)
 HOSTNAME=$(hostname)
-REMOTE_DIR="/opt/hf-timestd"
+REMOTE_DIR="/opt/git/sigmond/hf-timestd"
 LOCAL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 echo "🚀 Migrating Web UI to Web API service on $HOSTNAME..."

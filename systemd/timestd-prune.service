@@ -16,7 +16,7 @@ Group=timestd
 # Operator identity (callsign, grid) from sigmond — CLIENT-CONTRACT §14.2
 EnvironmentFile=-/etc/sigmond/coordination.env
 
-ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.quota_manager \
+ExecStart=/opt/git/sigmond/hf-timestd/venv/bin/python -m hf_timestd.quota_manager \
     --data-root /var/lib/timestd \
     --threshold 80 \
     --min-days 2 \

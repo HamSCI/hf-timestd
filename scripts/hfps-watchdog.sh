@@ -1,5 +1,5 @@
 #!/bin/bash
-# /opt/hf-timestd/scripts/hfps-watchdog.sh
+# /opt/git/sigmond/hf-timestd/scripts/hfps-watchdog.sh
 #
 # Restart timestd-core-recorder if HFPS (T6 diff-detector SHM
 # refclock) goes dark.  Apples-to-apples sibling of hpps-watchdog.sh

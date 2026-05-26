@@ -1,5 +1,5 @@
 #!/bin/bash
-# /opt/hf-timestd/scripts/hpps-watchdog.sh
+# /opt/git/sigmond/hf-timestd/scripts/hpps-watchdog.sh
 #
 # Restart timestd-core-recorder if HPPS (T6 BPSK SHM refclock) goes
 # dark.  Targets the specific failure mode where the matched-filter

@@ -10,7 +10,7 @@ set -e
 
 # Configuration
 SRC_DIR="/home/mjh/git/hf-timestd"
-INSTALL_DIR="/opt/hf-timestd"
+INSTALL_DIR="/opt/git/sigmond/hf-timestd"
 VENV_PIP="$INSTALL_DIR/venv/bin/pip"
 VENV_PYTHON="$INSTALL_DIR/venv/bin/python3"
 

@@ -25,7 +25,7 @@ EnvironmentFile=-/etc/hf-timestd/environment
 Environment=MALLOC_ARENA_MAX=2
 
 # Working directory (production installation path)
-WorkingDirectory=/opt/hf-timestd
+WorkingDirectory=/opt/git/sigmond/hf-timestd
 
 # /run/hf-timestd — tmpfs created by systemd, owned by User=timestd.
 # Used by the QualitySnapshotWriter to write quality.json for sigmond's
@@ -44,14 +44,14 @@ ExecStartPre=+/usr/bin/chown -R timestd:timestd /var/lib/timestd/raw_buffer
 ExecStartPre=+/usr/bin/chown -R timestd:timestd /dev/shm/timestd
 
 # Core recorder V2 uses RadiodStream for RTP handling (no manual multicast)
-ExecStart=/opt/hf-timestd/venv/bin/python3 -m hf_timestd.core.core_recorder_v2 \
+ExecStart=/opt/git/sigmond/hf-timestd/venv/bin/python3 -m hf_timestd.core.core_recorder_v2 \
     --config /etc/hf-timestd/timestd-config.toml
     
 # Wait up to 5 minutes for startup (health check waits for 1st minute of data)
 TimeoutStartSec=300
 
 # Health check disabled - causes issues on some systems
-# ExecStartPost=/opt/hf-timestd/scripts/health-check-recorder.sh
+# ExecStartPost=/opt/git/sigmond/hf-timestd/scripts/health-check-recorder.sh
 
 # AGGRESSIVE restart policy - data loss is unacceptable
 Restart=always

@@ -23,7 +23,7 @@ Group=root
 # cooldown still prevents thrash within either side.
 Environment=HFPS_LASTRX_THRESHOLD_S=600
 Environment=HFPS_RESTART_COOLDOWN_S=1800
-ExecStart=/opt/hf-timestd/scripts/hfps-watchdog.sh
+ExecStart=/opt/git/sigmond/hf-timestd/scripts/hfps-watchdog.sh
 
 StandardOutput=journal
 StandardError=journal

@@ -16,7 +16,7 @@
 #      source tree.  An editable install into a directory the service
 #      user cannot reach will succeed as root but fail at systemd
 #      runtime — we catch that here before pip writes a broken .pth.
-#   4. `pip install -e .` into /opt/hf-timestd/venv.  No-op unless
+#   4. `pip install -e .` into /opt/git/sigmond/hf-timestd/venv.  No-op unless
 #      pyproject.toml or its dependencies changed; refreshes
 #      entry-point shims.  Post-install verify runs as the service
 #      user, not root.
@@ -53,7 +53,7 @@ set -euo pipefail
 # ── Paths and defaults ──────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-INSTALL_DIR="/opt/hf-timestd"
+INSTALL_DIR="/opt/git/sigmond/hf-timestd"
 VENV_DIR="$INSTALL_DIR/venv"
 DEPLOY_TOML="$PROJECT_DIR/deploy.toml"
 

@@ -31,8 +31,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 # ── Paths ───────────────────────────────────────────────────────────
+# Sigmond-suite convention: source + venv live together under the
+# canonical clone path so there's exactly one tree per consumer
+# (no `/opt/hf-timestd/` duplication via rsync).  INSTALL_DIR equals
+# PROJECT_DIR so the rsync steps below are source==dest no-ops and
+# the venv is rebuilt in place rather than into a sibling tree.
 INSTALL_USER="timestd"
-INSTALL_DIR="/opt/hf-timestd"
+INSTALL_DIR="$PROJECT_DIR"
 CONFIG_DIR="/etc/hf-timestd"
 DATA_ROOT="/var/lib/timestd"
 VENV_DIR="$INSTALL_DIR/venv"

@@ -34,7 +34,7 @@ fi
 
 # Configuration
 MAIN_CONFIG="/etc/hf-timestd/timestd-config.toml"
-VENV_DIR="/opt/hf-timestd/venv"
+VENV_DIR="/opt/git/sigmond/hf-timestd/venv"
 
 # Auto-detect radiod co-location (for CPU affinity path watcher only)
 RADIOD_LOCAL=false
@@ -45,7 +45,7 @@ fi
 # Read active profile from config — determines which services to start
 ACTIVE_UNITS=$($VENV_DIR/bin/python3 -c "
 import sys
-sys.path.insert(0, '/opt/hf-timestd/venv/lib/python3/site-packages')
+sys.path.insert(0, '/opt/git/sigmond/hf-timestd/venv/lib/python3/site-packages')
 try:
     import toml
     from hf_timestd.service_profile import ServiceProfile

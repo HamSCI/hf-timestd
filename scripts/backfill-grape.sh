@@ -8,7 +8,7 @@ if [[ "$1" == "--config" && -n "$2" ]]; then
     CONFIG="$2"; shift 2
 fi
 
-PYTHON="/opt/hf-timestd/venv/bin/python3"
+PYTHON="/opt/git/sigmond/hf-timestd/venv/bin/python3"
 CLI="hf_timestd.cli"
 DATA_ROOT="/var/lib/timestd"
 

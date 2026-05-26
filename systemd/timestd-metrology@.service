@@ -25,7 +25,7 @@ EnvironmentFile=/etc/hf-timestd/metrology-channels/%i.env
 # fragmentation. Default is 8×ncpus arenas; 2 is sufficient for Python+GIL.
 Environment=MALLOC_ARENA_MAX=2
 
-ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.core.metrology_service \
+ExecStart=/opt/git/sigmond/hf-timestd/venv/bin/python -m hf_timestd.core.metrology_service \
     --output-dir ${DATA_ROOT}/phase2/%i \
     --channel-name %i \
     --frequency-hz ${FREQUENCY_HZ} \

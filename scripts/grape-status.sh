@@ -14,7 +14,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-PYTHON="/opt/hf-timestd/venv/bin/python3"
+PYTHON="/opt/git/sigmond/hf-timestd/venv/bin/python3"
 DATA_ROOT="/var/lib/timestd"
 LOG_FILE="/var/log/hf-timestd/grape-status.log"
 

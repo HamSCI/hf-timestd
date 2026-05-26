@@ -56,7 +56,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Configuration
-INSTALL_DIR="/opt/hf-timestd"
+INSTALL_DIR="/opt/git/sigmond/hf-timestd"
 VENV_DIR="$INSTALL_DIR/venv"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DATA_ROOT="/var/lib/timestd"
@@ -265,5 +265,5 @@ log_info "  journalctl -u timestd-metrology -f | grep -i 'pll\|comparison\|winne
 log_info "  tail -f $DATA_ROOT/phase2/*/decoder_comparison/*.h5"
 echo ""
 log_info "After 7 days, check:"
-log_info "  /opt/hf-timestd/venv/bin/python -m hf_timestd.decoder_comparison_report"
+log_info "  /opt/git/sigmond/hf-timestd/venv/bin/python -m hf_timestd.decoder_comparison_report"
 echo ""

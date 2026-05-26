@@ -48,7 +48,7 @@ Environment=MALLOC_ARENA_MAX=2
 Environment=LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
 
 # Run as the installed module from the venv
-ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.core.multi_broadcast_fusion \
+ExecStart=/opt/git/sigmond/hf-timestd/venv/bin/python -m hf_timestd.core.multi_broadcast_fusion \
     --data-root /var/lib/timestd \
     --interval 8.0 \
     --enable-chrony \

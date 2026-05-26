@@ -19,7 +19,7 @@ WorkingDirectory=/var/lib/timestd
 WatchdogSec=180
 
 # Run L2 calibration service (reads station info and channels from config)
-ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.core.l2_calibration_service \
+ExecStart=/opt/git/sigmond/hf-timestd/venv/bin/python -m hf_timestd.core.l2_calibration_service \
     --config /etc/hf-timestd/timestd-config.toml \
     --poll-interval 60.0 \
     --log-level INFO

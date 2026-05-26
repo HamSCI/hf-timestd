@@ -9,8 +9,8 @@ set -euo pipefail
 
 # Configuration
 IONEX_DIR="/var/lib/timestd/ionex"
-VENV_PYTHON="/opt/hf-timestd/venv/bin/python3"
-SCRIPT_DIR="/opt/hf-timestd/scripts"
+VENV_PYTHON="/opt/git/sigmond/hf-timestd/venv/bin/python3"
+SCRIPT_DIR="/opt/git/sigmond/hf-timestd/scripts"
 IONEX_SCRIPT="$SCRIPT_DIR/ionex_integration.py"
 
 # Ensure IONEX directory exists

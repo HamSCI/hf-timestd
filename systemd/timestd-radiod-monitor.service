@@ -7,7 +7,7 @@ After=network.target
 Type=simple
 User=timestd
 Group=timestd
-WorkingDirectory=/opt/hf-timestd
+WorkingDirectory=/opt/git/sigmond/hf-timestd
 
 # Environment from file
 # Operator identity (callsign, grid) from sigmond — CLIENT-CONTRACT §14.2
@@ -16,8 +16,8 @@ EnvironmentFile=-/etc/sigmond/coordination.env
 EnvironmentFile=-/etc/hf-timestd/environment
 
 # Run the radiod health monitor
-ExecStart=/opt/hf-timestd/venv/bin/python3 \
-    /opt/hf-timestd/scripts/monitor_radiod_health.py \
+ExecStart=/opt/git/sigmond/hf-timestd/venv/bin/python3 \
+    /opt/git/sigmond/hf-timestd/scripts/monitor_radiod_health.py \
     /var/lib/timestd/state/radiod-status.json \
     10
 

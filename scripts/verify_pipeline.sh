@@ -261,7 +261,7 @@ else
     LIVE_PROBE_OK=false
     if [[ -n "$RADIOD_STATUS_ADDR" ]]; then
         # Quick multicast probe via Python ka9q module
-        PROBE_RESULT=$(timeout 5 /opt/hf-timestd/venv/bin/python3 -c "
+        PROBE_RESULT=$(timeout 5 /opt/git/sigmond/hf-timestd/venv/bin/python3 -c "
 from ka9q import RadiodControl
 try:
     c = RadiodControl('$RADIOD_STATUS_ADDR')

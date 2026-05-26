@@ -20,7 +20,7 @@ EnvironmentFile=-/etc/hf-timestd/environment
 Environment=NETRC=/etc/hf-timestd/earthdata-netrc
 
 # Run the download script
-ExecStart=/opt/hf-timestd/scripts/download_ionex_daily.sh
+ExecStart=/opt/git/sigmond/hf-timestd/scripts/download_ionex_daily.sh
 
 # Retry on failure (up to 3 attempts with 5 minute delay)
 Restart=on-failure

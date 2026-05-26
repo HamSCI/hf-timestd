@@ -15,7 +15,7 @@ elif [ -f "$PROJECT_DIR/config/environment" ]; then
 fi
 
 # Production paths
-VENV_PATH="${TIMESTD_VENV:-/opt/hf-timestd/venv}"
+VENV_PATH="${TIMESTD_VENV:-/opt/git/sigmond/hf-timestd/venv}"
 DEFAULT_CONFIG="${TIMESTD_CONFIG:-/etc/hf-timestd/timestd-config.toml}"
 DATA_ROOT="${TIMESTD_DATA_ROOT:-/var/lib/timestd}"
 LOG_DIR="${TIMESTD_LOG_DIR:-/var/log/hf-timestd}"

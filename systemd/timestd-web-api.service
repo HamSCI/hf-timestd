@@ -8,13 +8,13 @@ StartLimitBurst=5
 Type=notify
 User=timestd
 Group=timestd
-WorkingDirectory=/opt/hf-timestd/web-api
+WorkingDirectory=/opt/git/sigmond/hf-timestd/web-api
 # NOTE: No PYTHONPATH set - the venv has hf_timestd installed as a proper package
 # Setting PYTHONPATH to a non-existent or repo path causes import confusion
 # Operator identity (callsign, grid) from sigmond — CLIENT-CONTRACT §14.2
 EnvironmentFile=-/etc/sigmond/coordination.env
 
-Environment="PATH=/opt/hf-timestd/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="PATH=/opt/git/sigmond/hf-timestd/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 Environment=MALLOC_ARENA_MAX=2
 
 # Watchdog: restart if no heartbeat for 60s (6 heartbeats at 10s each)
@@ -22,7 +22,7 @@ WatchdogSec=60
 NotifyAccess=main
 
 # Run with uvicorn directly
-ExecStart=/opt/hf-timestd/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
+ExecStart=/opt/git/sigmond/hf-timestd/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
 
 # Resource limits - yield to radiod which handles real-time USB/FFT
 Nice=5

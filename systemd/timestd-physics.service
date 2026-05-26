@@ -25,7 +25,7 @@ EnvironmentFile=-/etc/sigmond/coordination.env
 Environment=MALLOC_ARENA_MAX=2
 
 # Run as the installed module from the venv
-ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.core.physics_fusion_service \
+ExecStart=/opt/git/sigmond/hf-timestd/venv/bin/python -m hf_timestd.core.physics_fusion_service \
     --data-root /var/lib/timestd \
     --output /var/lib/timestd/phase2/fusion
 

@@ -24,19 +24,19 @@ init = "scripts/setup-station.sh"
 edit = "scripts/config-review.sh"
 
 # ---------------------------------------------------------------------------
-# Build phase: install Python package into a venv at /opt/hf-timestd/venv.
+# Build phase: install Python package into a venv at /opt/git/sigmond/hf-timestd/venv.
 # Sigmond invokes these in order from the repo root.
 # ---------------------------------------------------------------------------
 
 [build]
 steps = [
-    "python3 -m venv /opt/hf-timestd/venv",
-    "/opt/hf-timestd/venv/bin/pip install --upgrade pip setuptools wheel",
-    "/opt/hf-timestd/venv/bin/pip install -e .",
+    "python3 -m venv /opt/git/sigmond/hf-timestd/venv",
+    "/opt/git/sigmond/hf-timestd/venv/bin/pip install --upgrade pip setuptools wheel",
+    "/opt/git/sigmond/hf-timestd/venv/bin/pip install -e .",
 ]
 produces = [
-    "/opt/hf-timestd/venv/bin/hf-timestd",
-    "/opt/hf-timestd/venv/bin/timestd",
+    "/opt/git/sigmond/hf-timestd/venv/bin/hf-timestd",
+    "/opt/git/sigmond/hf-timestd/venv/bin/timestd",
 ]
 
 # ---------------------------------------------------------------------------
@@ -54,12 +54,12 @@ produces = [
 # re-symlink them, but documenting them here keeps the contract honest).
 [[install.steps]]
 kind = "link"
-src  = "/opt/hf-timestd/venv/bin/hf-timestd"
+src  = "/opt/git/sigmond/hf-timestd/venv/bin/hf-timestd"
 dst  = "/usr/local/bin/hf-timestd"
 
 [[install.steps]]
 kind = "link"
-src  = "/opt/hf-timestd/venv/bin/timestd"
+src  = "/opt/git/sigmond/hf-timestd/venv/bin/timestd"
 dst  = "/usr/local/bin/timestd"
 
 # Systemd units — symlinked from the repo so `git pull` updates them.

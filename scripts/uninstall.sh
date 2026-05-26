@@ -86,8 +86,8 @@ fi
 # Production paths
 DATA_ROOT="/var/lib/timestd"
 CONFIG_DIR="/etc/hf-timestd"
-VENV_DIR="/opt/hf-timestd/venv"
-WEBUI_DIR="/opt/hf-timestd/web-api"
+VENV_DIR="/opt/git/sigmond/hf-timestd/venv"
+WEBUI_DIR="/opt/git/sigmond/hf-timestd/web-api"
 LOG_DIR="/var/log/hf-timestd"
 INSTALL_USER="timestd"
 
@@ -305,10 +305,10 @@ fi
 # =============================================================================
 log_step "Removing installation directories..."
 
-# Remove /opt/hf-timestd (except venv which was already removed)
-if [[ -d "/opt/hf-timestd" ]]; then
-    sudo rm -rf "/opt/hf-timestd"
-    log_info "  Removed: /opt/hf-timestd"
+# Remove /opt/git/sigmond/hf-timestd (except venv which was already removed)
+if [[ -d "/opt/git/sigmond/hf-timestd" ]]; then
+    sudo rm -rf "/opt/git/sigmond/hf-timestd"
+    log_info "  Removed: /opt/git/sigmond/hf-timestd"
 fi
 
 # Remove config directory

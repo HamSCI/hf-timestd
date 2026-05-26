@@ -1,6 +1,6 @@
 #!/bin/bash
 # External data freshness monitor with alerting
-# Run via cron every 5 minutes: */5 * * * * root /opt/hf-timestd/scripts/check-freshness-alert.sh
+# Run via cron every 5 minutes: */5 * * * * root /opt/git/sigmond/hf-timestd/scripts/check-freshness-alert.sh
 #
 # This provides an independent check outside of the service processes themselves,
 # catching failures that internal watchdogs might miss.

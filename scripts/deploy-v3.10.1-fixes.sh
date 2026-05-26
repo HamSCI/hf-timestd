@@ -49,7 +49,7 @@ echo "Step 3: Installing updated Python code..."
 echo "  - HDF5 writer SWMR mode check"
 
 cd "$REPO_ROOT"
-/opt/hf-timestd/venv/bin/pip install -e . --no-deps
+/opt/git/sigmond/hf-timestd/venv/bin/pip install -e . --no-deps
 echo "  ✅ Python code installed"
 
 # Step 4: Restart services

@@ -41,14 +41,14 @@ echo ""
 
 # Step 1: Copy monitoring script
 log_info "Installing Chrony reach monitoring script..."
-cp "$PROJECT_DIR/scripts/check-chrony-reach.sh" /opt/hf-timestd/scripts/
-chmod +x /opt/hf-timestd/scripts/check-chrony-reach.sh
-chown timestd:timestd /opt/hf-timestd/scripts/check-chrony-reach.sh
-log_info "  ✅ Installed: /opt/hf-timestd/scripts/check-chrony-reach.sh"
+cp "$PROJECT_DIR/scripts/check-chrony-reach.sh" /opt/git/sigmond/hf-timestd/scripts/
+chmod +x /opt/git/sigmond/hf-timestd/scripts/check-chrony-reach.sh
+chown timestd:timestd /opt/git/sigmond/hf-timestd/scripts/check-chrony-reach.sh
+log_info "  ✅ Installed: /opt/git/sigmond/hf-timestd/scripts/check-chrony-reach.sh"
 
 # Step 2: Test monitoring script
 log_info "Testing monitoring script..."
-if /opt/hf-timestd/scripts/check-chrony-reach.sh --verbose; then
+if /opt/git/sigmond/hf-timestd/scripts/check-chrony-reach.sh --verbose; then
     log_info "  ✅ Monitoring script works correctly"
 else
     log_warn "  ⚠️  Monitoring script returned non-zero (reach may be low)"

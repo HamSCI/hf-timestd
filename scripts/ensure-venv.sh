@@ -20,7 +20,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
-VENV_DIR="/opt/hf-timestd/venv"
+VENV_DIR="/opt/git/sigmond/hf-timestd/venv"
 PYTHON_BIN="python3"
 FORCE=false
 
@@ -30,7 +30,7 @@ usage() {
   echo "Ensures a working virtualenv exists and hf-timestd is installed."
   echo ""
   echo "Options:"
-  echo "  --venv PATH    Venv location (default: /opt/hf-timestd/venv)"
+  echo "  --venv PATH    Venv location (default: /opt/git/sigmond/hf-timestd/venv)"
   echo "  --python BIN   Python interpreter (default: python3)"
   echo "  --force        Reinstall even if version matches"
   # Accept and ignore legacy --mode flag for backward compat with systemd units
