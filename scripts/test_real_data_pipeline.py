@@ -136,8 +136,8 @@ def run_pipeline_test(
         streaming_latency_minutes=2
     )
     
-    # Connect to radiod
-    status_address = config['ka9q']['status_address']
+    # Connect to radiod (Phase 6: canonical field is `status`).
+    status_address = config['ka9q']['status']
     logger.info(f"Connecting to radiod at {status_address}...")
     
     try:

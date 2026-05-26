@@ -21,11 +21,6 @@ longitude = 0.0                         # Your longitude in decimal degrees (opt
 # placeholder unchanged to make the daemon refuse to start until
 # the operator edits this file.
 status = "<YOUR_RADIOD_STATUS>"
-
-# Legacy field name accepted during the Phase 3 deprecation window
-# (sigmond RADIOD-IDENTIFICATION.md §6).  Greenfield installs should
-# use `status` above.
-# status_address = "hf-status.local"
 auto_create_channels = true
 # Data source mode: "radiod" (single antenna, 9 channels) or "phase-engine" (beamformed, 17 channels)
 source = "radiod"

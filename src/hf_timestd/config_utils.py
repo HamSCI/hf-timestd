@@ -460,31 +460,23 @@ def resolve_ka9q_status(config: Dict, default: str = "") -> str:
 
     Per sigmond's docs/RADIOD-IDENTIFICATION.md §3.1, the canonical
     field is ``[ka9q] status`` (the multicast hostname like
-    ``"bee1-status.local"``).  The legacy field ``[ka9q]
-    status_address`` is still accepted during the Phase 3
-    deprecation window with a DeprecationWarning.  When both are
-    set, ``status`` wins.
+    ``"bee1-status.local"``).  Phase 6 cutover (this release)
+    removed acceptance of the legacy ``[ka9q] status_address``
+    field — operators with legacy configs must run
+    ``sudo smd radiod migrate --yes``.
 
     Args:
         config: parsed TOML config dict
-        default: returned (without warning) when neither field is set
+        default: returned when ``[ka9q] status`` is not set
 
     Returns:
-        The multicast hostname (str) — empty string if neither is set
-        AND no default is supplied.
+        The multicast hostname (str) — ``default`` if the field is
+        unset.
     """
     ka9q = (config.get("ka9q") or {})
     status = ka9q.get("status")
     if status:
         return str(status)
-    legacy = ka9q.get("status_address")
-    if legacy:
-        warnings.warn(
-            "[ka9q] status_address is deprecated; rename to "
-            "[ka9q] status per RADIOD-IDENTIFICATION.md §3.1",
-            DeprecationWarning, stacklevel=2,
-        )
-        return str(legacy)
     return default
 
 

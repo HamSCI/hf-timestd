@@ -31,7 +31,7 @@ MINIMAL_TOML = """\
 callsign = "AI6VN"
 
 [ka9q]
-status_address = "bee3-status.local"
+status = "bee3-status.local"
 
 [recorder]
 mode = "production"

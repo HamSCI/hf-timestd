@@ -109,7 +109,11 @@ def get_radiod_uptime(pid):
 
 
 def read_status_address_from_config(config_path: str = '/etc/hf-timestd/timestd-config.toml') -> str:
-    """Read [ka9q] status_address from the config file."""
+    """Read [ka9q] status from the config file.
+
+    Phase 6 cutover (RADIOD-IDENTIFICATION.md §3.1): the canonical
+    field name is `status` (was `status_address`).
+    """
     try:
         section = None
         with open(config_path, 'r') as f:
@@ -120,7 +124,7 @@ def read_status_address_from_config(config_path: str = '/etc/hf-timestd/timestd-
                     continue
                 if section == 'ka9q' and '=' in stripped and not stripped.startswith('#'):
                     key, _, value = stripped.partition('=')
-                    if key.strip() == 'status_address':
+                    if key.strip() == 'status':
                         # Strip inline TOML comments before unquoting
                         val = value.strip()
                         if val.startswith('"'):

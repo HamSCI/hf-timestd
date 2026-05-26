@@ -286,7 +286,7 @@ else
 fi
 
 # ── Radiod co-location (auto-detect for CPU affinity only) ──
-# hf-timestd connects via [ka9q] status_address regardless of where radiod
+# hf-timestd connects via [ka9q] status regardless of where radiod
 # runs.  The only reason to detect local radiod is CPU affinity pinning.
 if pgrep -x radiod &>/dev/null; then
     RADIOD_LOCAL=true
