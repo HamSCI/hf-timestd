@@ -187,3 +187,12 @@ packages = [
     "python3-venv",
     "python3-pip",
 ]
+
+# hf-timestd is a PSWS-singleton (one station_id per host); the verifier
+# audits per-channel cadence in the local product DB rather than a
+# remote upload queue, so kind = "local_db" (no --rx-call / --lost flags).
+[client_features.verifier]
+verb         = "timestd"
+description  = "hf-timestd per-channel cadence audit (local product DB)"
+kind         = "local_db"
+per_instance = false
