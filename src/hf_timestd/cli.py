@@ -197,7 +197,7 @@ def _handle_inventory(args):
         'client':           'hf-timestd',
         'version':          version,
         'git':              GIT_INFO,
-        'contract_version': '0.7',
+        'contract_version': '0.8',
         'config_path':      str(config_path),
         'log_paths': {
             # As of v6.12 every timestd-* unit writes to journald.
