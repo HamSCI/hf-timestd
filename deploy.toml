@@ -10,7 +10,7 @@
 name             = "hf-timestd"
 version          = "7.1.0"
 description      = "HF Time Standard Analysis — WWV/WWVH/CHU/BPM timing via ka9q-radio"
-contract_version = "0.7"
+contract_version = "0.8"
 license          = "MIT"
 
 # ---------------------------------------------------------------------------
