@@ -295,7 +295,13 @@ class DailyDRFPackager:
             'receiver_name': self.station.receiver_name,
             'lat': np.float32(lat),
             'long': np.float32(lon),
-            'center_frequencies': np.ascontiguousarray(frequencies, dtype=np.float64),
+            # PSWS expects center_frequencies in MHz, not Hz (matches legacy
+            # wsprdaemon wav2grape.conf, which lists frequencies as 2.5, 5, 10...
+            # in MHz). Sending Hz triggers "UNPLANNED FREQUENCY IN METADATA"
+            # rejection on the PSWS server side.
+            'center_frequencies': np.ascontiguousarray(
+                [f / 1e6 for f in frequencies], dtype=np.float64
+            ),
             'uuid_str': self.station.psws_station_id
         }
         
