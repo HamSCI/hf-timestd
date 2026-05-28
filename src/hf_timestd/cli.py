@@ -732,6 +732,30 @@ def main():
     quality_parser.add_argument('--snapshot-path',
         help='Path to the snapshot file (default: /run/hf-timestd/quality.json)')
 
+    # Config command — CLIENT-CONTRACT §14 JSON-roundtrip surface.
+    # Sigmond's in-TUI Textual wizard needs `show --json` + `apply
+    # --json -`.  hf-timestd had no `config` subcommand at all before
+    # this; whiptail / $EDITOR were the only edit surfaces.
+    config_parser = subparsers.add_parser('config',
+        help='Config show/apply (sigmond client-contract §14)')
+    config_sub = config_parser.add_subparsers(dest='config_command')
+
+    config_show_p = config_sub.add_parser('show',
+        help='Emit current config (TOML→JSON) on stdout')
+    config_show_p.add_argument('--json', action='store_true', default=True)
+    config_show_p.add_argument('--defaults', action='store_true',
+        help='(accepted for forward-compat; currently a no-op)')
+    config_show_p.add_argument('--config', '-c',
+        help='Configuration file path (default: $TIMESTD_CONFIG or /etc/hf-timestd/timestd-config.toml)')
+
+    config_apply_p = config_sub.add_parser('apply',
+        help='Apply a JSON payload (from stdin) to the config')
+    config_apply_p.add_argument('--json', action='store_true', default=True)
+    config_apply_p.add_argument('input', nargs='?', default='-',
+        help='JSON payload path or `-` for stdin (default)')
+    config_apply_p.add_argument('--config', '-c',
+        help='Configuration file path (default: $TIMESTD_CONFIG or /etc/hf-timestd/timestd-config.toml)')
+
     # Status command (machine-readable health check)
     status_parser = subparsers.add_parser('status',
         help='Show pipeline health status (machine-readable JSON)',
@@ -1037,6 +1061,15 @@ Per-service overrides in [services] take precedence over the profile.
         _handle_validate_contract(args)
     elif args.command == 'quality':
         _handle_quality(args)
+    elif args.command == 'config':
+        from . import configurator
+        sub = getattr(args, 'config_command', None)
+        if sub == 'show':
+            sys.exit(configurator.cmd_config_show(args))
+        if sub == 'apply':
+            sys.exit(configurator.cmd_config_apply(args))
+        print("usage: hf-timestd config {show|apply}", file=sys.stderr)
+        sys.exit(2)
     elif args.command == 'status':
         _handle_status(args)
     elif args.command == 'daemon':
