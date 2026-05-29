@@ -196,3 +196,14 @@ verb         = "timestd"
 description  = "hf-timestd per-channel cadence audit (local product DB)"
 kind         = "local_db"
 per_instance = false
+
+# hf-timestd is a singleton (one PSWS station_id per host); the TUI
+# Receiver Channels screen reads the absolute config_path rather than
+# the per-instance /etc/<client>/<instance>.toml convention.
+[client_features.receiver_channels]
+description     = "WWV/WWVH/CHU/BPM time-standard channels (per [recorder.channel_group.*])"
+per_instance    = false
+singleton_label = "(singleton)"
+config_path     = "/etc/hf-timestd/timestd-config.toml"
+parser_file     = "src/hf_timestd/sigmond_tui.py"
+parser_attr     = "parse_receiver_channels"
