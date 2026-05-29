@@ -1,0 +1,358 @@
+# hf-timestd operator-help sidecar.
+#
+# Per-key title / help / example / validator_hint / required, plus
+# `hidden = true` to keep tier-1 invariants off the wizard surface.
+#
+# Three-tier audit applied 2026-05-29.  hf-timestd is a PSWS
+# SINGLETON (one station_id per host — see project-hf-timestd-singleton
+# memory), so tier 3 (per-instance) collapses into tier 2 (per-host):
+# the whole config is host-level.
+#
+#   * tier 1 — install-canonical paths, radiod / Grape protocol
+#              constants, internal algorithm tuning; hidden.
+#   * tier 2 — operator-facing knobs (station identity, ka9q mDNS
+#              host, uploader account, feature flags); surfaced.
+#
+# The [recorder.channel_group.timestd] block and its inner
+# [[...channels]] array-of-tables (the WWV/CHU/WWVB sample list) are
+# wizard-skipped (nested arrays not editable in TUI).  Operators
+# drop to $EDITOR for that today.
+
+# --- Station identity ----------------------------------------------
+
+[station.callsign]
+title          = "Amateur callsign"
+help           = """Your amateur radio callsign (uppercase).
+Used as the operator identity for HamSCI / PSWS metadata."""
+example        = "AC0G"
+validator_hint = "1-9 letters/digits/slashes"
+required       = true
+
+[station.id]
+title          = "PSWS station ID (Grape)"
+help           = """The PSWS-assigned station ID for Grape uploads
+(format: S followed by six digits).  Co-resident clients
+(mag-recorder, hf-gps-tec) have their OWN PSWS station IDs --
+PSWS treats each measurement as its own station."""
+example        = "S000171"
+validator_hint = "S followed by 6 digits"
+required       = true
+
+[station.instrument_id]
+title          = "PSWS instrument ID"
+help           = """Per-instrument identifier under your PSWS station
+(Grape).  Set by PSWS when you registered the instrument."""
+example        = "172"
+required       = true
+
+[station.grid_square]
+title          = "Maidenhead grid square"
+help           = """Your Maidenhead locator (6 characters minimum)."""
+example        = "EM38ww40pk"
+validator_hint = "2 letters + 2 digits + 2-8 alphanumeric chars"
+required       = true
+
+[station.latitude]
+title          = "Station latitude (decimal degrees)"
+example        = "38.918461"
+validator_hint = "decimal degrees, -90.0 to 90.0"
+required       = true
+
+[station.longitude]
+title          = "Station longitude (decimal degrees)"
+example        = "-92.127974"
+validator_hint = "decimal degrees, -180.0 to 180.0"
+required       = true
+
+[station.description]
+title          = "Station description (free-form)"
+help           = """One-line description shown in PSWS metadata.
+Useful for distinguishing multiple stations under the same
+operator."""
+example        = "beelink rx888 SAS"
+required       = false
+
+# --- ka9q-radio binding --------------------------------------------
+
+[ka9q.status]
+title          = "ka9q-radio mDNS status host"
+help           = """The mDNS hostname of the radiod instance this
+recorder consumes RTP from -- always .local, never an IP."""
+example        = "bee1-status.local"
+validator_hint = "must end with .local"
+required       = true
+
+[ka9q.auto_create_channels]
+hidden = true
+
+[ka9q.source]
+hidden = true
+
+# --- Recorder (install-canonical / radiod-protocol constants) ------
+#
+# Tier 1 — paths, blocktime, engine choice, compression, ring/tiered
+# RAM percent, multistream design choice; all install-canonical or
+# protocol-level constants.
+
+[recorder.archive_root]
+title          = "Long-term archive root"
+help           = """Where hf-timestd writes Digital RF archives for
+local long-term retention.  Defaults to /mnt/timestd-archive on
+hosts with an external mount; override if you keep archives
+elsewhere."""
+example        = "/mnt/timestd-archive"
+required       = false
+
+[recorder.blocktime_ms]
+hidden = true
+
+[recorder.compression]
+hidden = true
+
+[recorder.compression_level]
+hidden = true
+
+[recorder.continuous]
+hidden = true
+
+[recorder.engine]
+hidden = true
+
+[recorder.hot_buffer_root]
+hidden = true
+
+[recorder.max_gap_seconds]
+hidden = true
+
+[recorder.mode]
+hidden = true
+
+[recorder.production_data_root]
+hidden = true
+
+[recorder.recording_interval]
+hidden = true
+
+[recorder.ring_ram_percent]
+hidden = true
+
+[recorder.save_digital_rf]
+hidden = true
+
+[recorder.shared_multistream]
+hidden = true
+
+[recorder.storage_quota]
+hidden = true
+
+[recorder.test_data_root]
+hidden = true
+
+[recorder.tiered_ram_percent]
+hidden = true
+
+[recorder.tiered_storage]
+hidden = true
+
+# --- Logging / monitoring / storage / services ---------------------
+#
+# All tier 1 — internal defaults set in code; the operator should
+# rarely touch these.
+
+[logging.console_output]
+hidden = true
+
+[logging.file_output]
+hidden = true
+
+[logging.level]
+hidden = true
+
+[monitoring.enable_metrics]
+hidden = true
+
+[storage.read_sqlite]
+hidden = true
+
+[storage.sqlite_path]
+hidden = true
+
+[storage.write_hdf5]
+hidden = true
+
+[storage.write_sqlite]
+hidden = true
+
+[services.profile]
+title          = "Service profile"
+help           = """Which services run on this host:
+
+  full      All hf-timestd services (recorder + metrology + uploader
+            + GNSS VTEC + L6 PPS + web UI).  Default for production.
+  minimal   Recorder + uploader only.  Use for resource-constrained
+            hosts where metrology isn't needed.
+"""
+example        = "full"
+validator_hint = '"full" or "minimal"'
+required       = false
+
+# --- Timing (internal — almost entirely tier 1) --------------------
+#
+# Authority "rtp" is the canonical RX888+GPSDO setup; the auto-
+# detected default has 160 ms/min drift per the wspr-recorder
+# comment that applies here too.  All authority_manager / coarse_time
+# / fusion_metrics / l6_pps tuning is internal algorithm state.
+
+[timing.always_run_fusion]
+hidden = true
+
+[timing.authority]
+hidden = true
+
+[timing.lb1421_nmea_device]
+hidden = true
+
+[timing.rtp_expected_accuracy_ms]
+hidden = true
+
+[timing.timing_snapshot_rate_hz]
+hidden = true
+
+[timing.validation_threshold_ms]
+hidden = true
+
+# --- Metrology feature flags ---------------------------------------
+
+[metrology.physics_products]
+title          = "Compute physics products?"
+help           = """When ON (default), hf-timestd's metrology
+service computes physics products (Doppler, phase, electron content
+estimates) from each cycle's measurements.  Turn OFF only for
+recorder-only deployments."""
+required       = false
+
+[metrology.realtime_iono]
+title          = "Run real-time ionospheric inversion?"
+help           = """When ON (default), the metrology service emits
+real-time ionospheric height estimates.  Turn OFF if you only need
+the raw measurements and will run the inversion offline."""
+required       = false
+
+# --- GNSS VTEC (external GNSS data source) -------------------------
+
+[gnss_vtec.enabled]
+title          = "Pull GNSS VTEC from an external server?"
+help           = """When ON, hf-timestd connects to a GNSS-VTEC
+server (e.g. SCINDA, a local rtklib instance) for collateral
+electron-content data.  Turn OFF if you don't have a GNSS source."""
+required       = false
+
+[gnss_vtec.host]
+title          = "GNSS-VTEC server host"
+help           = """IP or hostname of the GNSS-VTEC server.  Typically
+a local rtklib host on your LAN; set to the server's address."""
+example        = "192.168.1.80"
+required       = false
+
+[gnss_vtec.port]
+title          = "GNSS-VTEC server port"
+example        = "9000"
+required       = false
+
+[gnss_vtec.csv_path]
+hidden = true
+
+[gnss_vtec.hdf5_path]
+hidden = true
+
+[gnss_vtec.save_csv]
+hidden = true
+
+[gnss_vtec.save_hdf5]
+hidden = true
+
+# --- Uploader (PSWS-Grape) -----------------------------------------
+
+[uploader.enabled]
+title          = "Upload to PSWS-Grape?"
+help           = """When ON (default), hf-timestd runs its daily
+SFTP upload of compressed Digital RF cycles to PSWS.  Turn OFF
+for offline / development runs."""
+required       = false
+
+[uploader.upload_time]
+title          = "Daily upload time (HH:MM)"
+help           = """When the daily SFTP upload runs.  Format HH:MM
+in upload_timezone (default UTC).  00:30 is the canonical default
+(off-peak in most timezones)."""
+example        = "00:30"
+validator_hint = "HH:MM, 24-hour"
+required       = false
+
+# Tier 1 — UTC is the canonical PSWS timezone; never overridden.
+[uploader.upload_timezone]
+hidden = true
+
+# Tier 1 — sftp is the only supported protocol.
+[uploader.protocol]
+hidden = true
+
+# Tier 1 — retry / queue / backoff are internal defaults.
+[uploader.exponential_backoff]
+hidden = true
+
+[uploader.max_queue_size_gb]
+hidden = true
+
+[uploader.max_retries]
+hidden = true
+
+[uploader.retry_delay_seconds]
+hidden = true
+
+# Tier 1 — PSWS endpoint is fixed.
+[uploader.sftp.host]
+hidden = true
+
+[uploader.sftp.user]
+title          = "PSWS SFTP user (station ID)"
+help           = """SFTP login user on pswsnetwork.eng.ua.edu.
+Defaults to the PSWS station ID (the common case)."""
+example        = "S000171"
+required       = true
+
+[uploader.sftp.ssh_key]
+title          = "PSWS SSH private key path"
+help           = """Path to the SSH private key registered with PSWS.
+On hosts running mag-recorder too, this is typically
+/home/timestd/.ssh/id_rsa_psws -- the same key authorises uploads
+for any instrument under one operator's PSWS account."""
+example        = "/home/timestd/.ssh/id_rsa_psws"
+required       = true
+
+[uploader.sftp.bandwidth_limit_kbps]
+title          = "Upload bandwidth cap (kbit/s)"
+help           = """Max outbound bandwidth used by the daily SFTP
+upload.  500 kbit/s is the canonical default; raise on fast
+uplinks, lower if you share with realtime traffic.
+
+Special value: 0 means UNLIMITED."""
+example        = "500"
+validator_hint = "integer kbit/s; 0 = unlimited"
+required       = false
+
+[uploader.metadata.include_extended_metadata]
+hidden = true
+
+# --- Web UI --------------------------------------------------------
+
+[web_ui.port]
+title          = "Web UI port"
+help           = """Local web UI port for hf-timestd's status page.
+Default 8000."""
+example        = "8000"
+validator_hint = "1024..65535"
+required       = false
+
+[web_ui.refresh_interval]
+hidden = true
