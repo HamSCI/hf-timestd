@@ -27,14 +27,22 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
+_UNSET = object()
+
+
 def _device_doc(
     *,
     serial: str = "1421-TEST",
     written_utc: str | None = None,
-    pps_utc_sec: int | None = 1780168299,
+    pps_utc_sec: Any = _UNSET,  # default: current second - 1; pass None to omit
     fix_age_sec: float | None = 0.4,
     probe_interval_sec: int = 10,
 ) -> dict[str, Any]:
+    # Default to a fresh integer-UTC pair so the probe's host-vs-GPS
+    # consistency check passes — tests using a frozen past timestamp
+    # would otherwise see valid_fix=False.
+    if pps_utc_sec is _UNSET:
+        pps_utc_sec = int(time.time()) - 1
     """Build a minimal Schema-v1-compatible device report dict."""
     return {
         "schema": "v1",
@@ -83,11 +91,15 @@ class TestReadOnce:
         assert probe._read_once() is None
 
     def test_valid_file_yields_reading(self, tmp_path: Path):
-        _write(tmp_path / "1421-A.json", _device_doc(serial="1421-A"))
+        expected_pps = int(time.time()) - 1
+        _write(tmp_path / "1421-A.json",
+               _device_doc(serial="1421-A", pps_utc_sec=expected_pps))
         probe = Lb1421T5Probe(run_dir=tmp_path)
         r = probe._read_once()
         assert r is not None
-        assert r.pps_utc_sec == 1780168299
+        # _read_once returns the raw integer second from the JSON; the
+        # consumer-time projection happens in get_latest().
+        assert r.pps_utc_sec == expected_pps
         assert r.valid_fix is True
 
     def test_serial_filter_picks_matching_file(self, tmp_path: Path):
@@ -132,8 +144,20 @@ class TestReadOnce:
         assert r is not None
         assert r.valid_fix is False
 
-    def test_missing_fix_age_marks_valid_false(self, tmp_path: Path):
+    def test_missing_fix_age_returns_none(self, tmp_path: Path):
+        # Without fix_age_sec the probe cannot compute effective freshness
+        # OR run the host/GPS consistency check, so it returns None
+        # rather than a not-fresh reading.
         _write(tmp_path / "1421-A.json", _device_doc(fix_age_sec=None))
+        probe = Lb1421T5Probe(run_dir=tmp_path)
+        assert probe._read_once() is None
+
+    def test_host_gps_inconsistent_marks_valid_false(self, tmp_path: Path):
+        # pps_utc_sec a year in the past — host clock and NMEA truth
+        # disagree by far more than 1 sec → demote T5.
+        _write(tmp_path / "1421-A.json", _device_doc(
+            pps_utc_sec=int(time.time()) - 365 * 86400,
+        ))
         probe = Lb1421T5Probe(run_dir=tmp_path)
         r = probe._read_once()
         assert r is not None
@@ -187,6 +211,24 @@ class TestGetLatest:
         assert probe.get_latest(require_valid_fix=True) is None
         assert probe.get_latest(require_valid_fix=False) is not None
 
+    def test_get_latest_projects_pps_to_consumer_time(self, tmp_path: Path):
+        # Seed a stale raw pps_utc_sec; get_latest should return
+        # floor(time.time()), not the raw value — this is what keeps
+        # the ±0.5s disambig guard in
+        # _t6_disambiguate_via_t5_lb1421 within reach even when the
+        # gpsdo-monitor JSON is 5-10 s stale (probe_interval cadence).
+        probe = Lb1421T5Probe(run_dir=tmp_path)
+        stale_raw = int(time.time()) - 7  # 7 sec stale
+        probe._latest = Lb1421Reading(
+            pps_utc_sec=stale_raw,
+            host_monotonic_at_read=time.monotonic(),
+            valid_fix=True,
+        )
+        r = probe.get_latest()
+        assert r is not None
+        assert r.pps_utc_sec == int(time.time())
+        assert r.pps_utc_sec != stale_raw
+
 
 # -- background thread end-to-end ------------------------------------------
 
@@ -203,7 +245,9 @@ class TestBackgroundReader:
                     break
                 time.sleep(0.05)
             assert r is not None
-            assert r.pps_utc_sec == 1780168299
+            # get_latest projects pps_utc_sec to consumer time, so the
+            # returned value is floor(time.time()), not the raw value.
+            assert r.pps_utc_sec == int(time.time())
             assert r.valid_fix is True
         finally:
             probe.stop()
