@@ -1408,6 +1408,15 @@ class CoreRecorderV2:
                 logger.warning(f"WWVB decode failed: {exc}")
                 continue
 
+            # Noise discrimination — empirical from the AC0G 2026-05-30
+            # dusk validation run: every false-positive frame had par >= 1
+            # (Hamming "corrected" a noise time word), every real frame
+            # had par == 0.  See project_wwvb_status_2026_05_29.md for
+            # the data.  Reject anything with non-zero parity errors so
+            # the ledger reflects accepted decodes only.
+            accepted = [f for f in result.frames if f.frame.parity_errors == 0]
+            rejected = [f for f in result.frames if f.frame.parity_errors != 0]
+
             if self._wwvb_ledger is not None:
                 self._wwvb_ledger.record_pass(
                     ts=now,
@@ -1416,9 +1425,9 @@ class CoreRecorderV2:
                     carrier_offset_hz=result.carrier_offset_hz,
                     seconds_detected=result.seconds_detected,
                     bits=int(result.bits.size),
-                    frames=len(result.frames),
+                    frames=len(accepted),
                 )
-                for f in result.frames:
+                for f in accepted:
                     self._wwvb_ledger.record_frame(
                         ts=now,
                         minute_of_frame=f.frame.minute_of_frame,
@@ -1436,12 +1445,18 @@ class CoreRecorderV2:
                         mean_amp=mean_amp,
                     )
 
-            if result.frames:
+            for f in rejected:
+                logger.info(
+                    f"WWVB noise frame rejected: par={f.frame.parity_errors} "
+                    f"sync={f.sync_errors} minute={f.frame.minute_of_frame.isoformat()}"
+                )
+
+            if accepted:
                 logger.info(
                     f"WWVB decode: mean|iq|={mean_amp:.3e} "
                     f"carrier_off={result.carrier_offset_hz:+.3f}Hz "
                     f"secs={result.seconds_detected} "
-                    f"frames={len(result.frames)}"
+                    f"accepted={len(accepted)} rejected={len(rejected)}"
                 )
 
         logger.info("WWVB decode loop stopped")
