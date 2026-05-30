@@ -3,42 +3,32 @@
 The LBE-1421 is the GPS-disciplined oscillator on bee1: it locks to GPS,
 drives the 27 MHz reference into TS-1 (which generates the BPSK HF-PPS
 injected into the RF feed), AND emits NMEA sentences over its USB-CDC
-serial endpoint.  This module reads those NMEA sentences and exposes the
-absolute GPS UTC of the most-recent PPS edge as the T5 disambiguation
-reference for the BPSK PPS calibrator.
+serial endpoint.
 
-## Why this exists
+This module exposes the absolute GPS UTC of the most-recent valid RMC
+sentence as the T5 disambiguation reference for the BPSK PPS calibrator.
 
-Today the BPSK PPS calibrator's first-lock disambiguation walks the
-T-level hierarchy and lands on T4 chronyc-tracking — meaning we use the
-host system clock (disciplined by a LAN GPS NTP timeserver) to resolve
-the integer-second ambiguity of the matched-filter edge.  That detour
-inherits chrony's ~5 µs RMS discipline noise even though the LB-1421
-GPSDO is sitting on the very same machine, GPS-locked to sub-100 ns,
-emitting absolute UTC over USB.
+## Architecture (2026-05-30 rework — see project_t5_nmea_probe_race)
 
-The T5 path eliminates the detour:
+The probe is a **JSON-file poller**, not a serial reader.  The
+serial endpoint is owned exclusively by the `gpsdo-monitor` daemon,
+which publishes parsed NMEA state into `/run/gpsdo/<serial>.json`
+(Schema v1, additive contract).  This file:
 
-  LB-1421 NMEA $GNRMC ──► host /dev/ttyACM3
-                              │
-                              ▼  (~100-500 ms USB latency)
-                      Lb1421T5Probe
-                              │
-                              ▼  (integer-second precision)
-              core-recorder T6 disambiguation
-                              │
-                              ▼
-        effective_chain_delay = raw_wall_time − NMEA_UTC
+  - eliminates the dual-consumer race for `/dev/ttyACM3` that
+    previously starved both readers,
+  - removes any need for termios / baud / line-discipline setup,
+  - matches the same `/run/gpsdo/*.json` discovery convention that
+    `GpsdoProbe` already uses for A-level health.
 
 ## NMEA precision and pairing
 
 We do **not** care about sub-second precision in the NMEA timestamp —
-the LB-1421's $GNRMC time field carries the time of *sentence
-emission*, typically 100-500 ms after the PPS edge it implicitly
-references.  All that matters is the *integer second*.  As long as
-NMEA arrives within 1 s of the PPS edge it describes (always true at
-USB-CDC latencies), the integer-second tells us which GPS second the
-PPS fired in.
+the LB-1421's RMC time field carries the time of *sentence emission*,
+typically 100-500 ms after the PPS edge it implicitly references.  All
+that matters is the *integer second*.  As long as NMEA arrives within
+1 s of the PPS edge it describes (always true at USB-CDC latencies),
+the integer-second tells us which GPS second the PPS fired in.
 
 The BPSK matched filter has independently measured *where in the RTP
 stream* the polarity-flip occurred (sub-µs precision after chain_delay
@@ -51,35 +41,20 @@ This is the physical RF-path delay, derived without ever consulting
 the host system clock as a timing source — strictly T5-on-host, no
 chrony, no NTP.
 
-## Operational notes
-
-- The LB-1421 emits NMEA at 115200 baud (not the legacy 4800/9600 of
-  older GPS modules).  Apply `stty raw 115200 -echo` before reading.
-- The by-id symlink
-  ``/dev/serial/by-id/usb-Leo_Bodnar_Electronics_LBE-1421_GPSDO_Locked_Clock_Source_*-if00``
-  is stable across reboots; a udev rule in
-  ``deploy/udev-lb1421-nmea.rules`` adds ``/dev/lb1421-nmea`` as a
-  shorter alias.
-- Sentences seen on bee1: ``$GNGGA`` (position+fix), ``$GNRMC`` (recommended
-  minimum + status), ``$GNGSA``, ``$GPGSV``.  We parse $G[NP]RMC because
-  it carries both time and date in one sentence and indicates fix
-  validity (field 2: 'A' = active/valid, 'V' = void).
-
 ## Failure modes
 
-- USB disconnect: read loop logs and retries every 5 s.
-- Bad NMEA checksum: sentence skipped, debug-logged.
-- No fix (status='V'): reading is recorded but
-  ``get_latest(require_valid_fix=True)`` returns None.
-- Stale reading (> max_age_s): ``get_latest`` returns None.
-
-A T5 probe never blocks the disambig path — if T5 is unavailable for
-any reason the existing T4 chronyc-tracking fallback engages
-transparently.
+- gpsdo-monitor not running / file missing: probe returns no reading,
+  callers fall back to T4 chronyc-tracking transparently.
+- gpsdo-monitor running but device has no fix (RMC status 'V'): the
+  file's `pps_utc_sec` stays `None`; `get_latest(require_valid_fix=True)`
+  returns None.
+- File present but written_utc stale (gpsdo-monitor stalled): the
+  probe's `max_nmea_age_s` check rejects it.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -91,17 +66,23 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_DEVICE = Path("/dev/lb1421-nmea")
-DEFAULT_FALLBACK_DEVICE = Path("/dev/ttyACM3")
-DEFAULT_BAUD = 115200
+DEFAULT_RUN_DIR = Path("/run/gpsdo")
 
-# Background reader retry delay after a transient device-open / read error.
-RETRY_DELAY_S = 5.0
+# How often the reader thread polls the JSON file.  gpsdo-monitor
+# refreshes on its own probe_interval (default ~10 s), but RMC sentences
+# arrive at 1 Hz and the snapshot inside gpsdo-monitor's NmeaReader is
+# always current, so polling faster than the probe interval still gives
+# us per-second freshness once the daemon has caught up.
+DEFAULT_POLL_INTERVAL_S = 0.5
 
-# Default freshness window: a reading older than this is treated as stale.
-# 2.0 s = one NMEA-emission cycle (1 Hz) + generous margin for USB latency
-# and scheduling jitter.
+# Default freshness window for a reading exposed via get_latest().
+# 2.0 s = one NMEA-emission cycle (1 Hz) + generous margin.
 DEFAULT_MAX_AGE_S = 2.0
+
+# How fresh the JSON itself must be (gpsdo-monitor still writing).
+# Independent from NMEA fix freshness — protects against a stalled
+# publisher whose last-good NMEA pps_utc_sec is still in the file.
+DEFAULT_FILE_MAX_AGE_S = 30.0
 
 
 @dataclass(frozen=True)
@@ -113,11 +94,16 @@ class Lb1421Reading:
     discarded because it reflects sentence-emission delay, not the PPS
     edge itself).
 
-    ``host_monotonic_at_read`` is ``time.monotonic()`` at the moment the
-    NMEA line was read from the device — used to compute freshness.
+    ``host_monotonic_at_read`` is ``time.monotonic()`` at the moment
+    this probe read fresh data from the JSON file — used to compute
+    freshness on the consumer side.  Note: this is the *consumer's*
+    monotonic, not gpsdo-monitor's, because monotonic() is not
+    comparable across processes.
 
-    ``valid_fix`` is True iff the source RMC sentence's status field
-    was 'A' (active); False for 'V' (void / no fix).
+    ``valid_fix`` is True iff the source RMC sentence's status was 'A'
+    (active) when gpsdo-monitor read it.  Derived from the freshness of
+    ``health.fix_age_sec`` in the published JSON: True when fresh enough,
+    False otherwise.
     """
 
     pps_utc_sec: int
@@ -125,91 +111,31 @@ class Lb1421Reading:
     valid_fix: bool
 
 
-def parse_rmc(line: str) -> Optional[Lb1421Reading]:
-    """Parse a $G[NP]RMC NMEA sentence into a reading, or None on error.
-
-    Returns None for malformed sentences, checksum failures, or other
-    parse errors.  The caller decides whether to consume a no-fix
-    reading (status='V').
-
-    Sentence format::
-
-        $GxRMC,HHMMSS.SS,A,LLLL.LL,N,YYYYY.YY,W,SOG,COG,DDMMYY,MV,MVD,M*CS
-
-    Fields used:
-      2: UTC time (HHMMSS.SS)
-      3: status (A = valid, V = void)
-      10: date (DDMMYY)
-    """
-    if not line.startswith("$"):
-        return None
-    # Strip checksum if present
-    if "*" in line:
-        payload, checksum_str = line[1:].split("*", 1)
-        # Compute XOR of payload bytes; compare to hex checksum.
-        expected = 0
-        for ch in payload:
-            expected ^= ord(ch)
-        try:
-            given = int(checksum_str.strip(), 16)
-        except ValueError:
-            return None
-        if expected != given:
-            return None
-    else:
-        payload = line[1:].rstrip()
-    fields = payload.split(",")
-    if len(fields) < 10:
-        return None
-    if fields[0] not in ("GPRMC", "GNRMC"):
-        return None
-    time_str = fields[1]   # HHMMSS.SS
-    status = fields[2]     # A / V
-    date_str = fields[9]   # DDMMYY
-    if not time_str or not date_str:
-        return None
-    valid_fix = (status == "A")
-    try:
-        hh = int(time_str[0:2])
-        mm = int(time_str[2:4])
-        ss = int(time_str[4:6])
-        dd = int(date_str[0:2])
-        mo = int(date_str[2:4])
-        yy = int(date_str[4:6])
-        # NMEA 2-digit years roll over at 2000; for any plausible future
-        # use, year >= 2000.
-        year = 2000 + yy
-        dt = datetime(year, mo, dd, hh, mm, ss, tzinfo=timezone.utc)
-    except (ValueError, IndexError):
-        return None
-    pps_utc_sec = int(dt.timestamp())
-    return Lb1421Reading(
-        pps_utc_sec=pps_utc_sec,
-        host_monotonic_at_read=time.monotonic(),
-        valid_fix=valid_fix,
-    )
-
-
 class Lb1421T5Probe:
-    """Background reader of LB-1421 NMEA over USB-CDC.
+    """Background poller of gpsdo-monitor's per-device JSON.
 
-    Construct with a device path (default ``/dev/lb1421-nmea``).  Call
-    ``start()`` to begin the reader thread; consumers ask for the
-    most-recent reading via ``get_latest()``.
+    Construct with a ``run_dir`` (default ``/run/gpsdo``) and an
+    optional ``serial`` filter.  Call ``start()`` to begin the
+    background polling thread; consumers ask for the most-recent
+    reading via ``get_latest()``.
 
     The reader thread is a daemon; ``stop()`` is best-effort.
     """
 
     def __init__(
         self,
-        device: Path = DEFAULT_DEVICE,
+        run_dir: Path = DEFAULT_RUN_DIR,
         *,
-        fallback_device: Path = DEFAULT_FALLBACK_DEVICE,
-        baud: int = DEFAULT_BAUD,
+        serial: Optional[str] = None,
+        poll_interval_s: float = DEFAULT_POLL_INTERVAL_S,
+        file_max_age_s: float = DEFAULT_FILE_MAX_AGE_S,
+        nmea_max_age_s: float = DEFAULT_MAX_AGE_S,
     ) -> None:
-        self.device = device
-        self.fallback_device = fallback_device
-        self.baud = baud
+        self.run_dir = Path(run_dir)
+        self.serial = serial
+        self.poll_interval_s = float(poll_interval_s)
+        self.file_max_age_s = float(file_max_age_s)
+        self.nmea_max_age_s = float(nmea_max_age_s)
         self._latest: Optional[Lb1421Reading] = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -222,13 +148,14 @@ class Lb1421T5Probe:
         self._stop.clear()
         self._thread = threading.Thread(
             target=self._read_loop,
-            name="lb1421-nmea-reader",
+            name="lb1421-gpsdo-poller",
             daemon=True,
         )
         self._thread.start()
         logger.info(
-            f"Lb1421T5Probe: started reader thread (device={self.device}, "
-            f"fallback={self.fallback_device}, baud={self.baud})"
+            f"Lb1421T5Probe: started gpsdo-monitor poller "
+            f"(run_dir={self.run_dir}, serial={self.serial or '*'}, "
+            f"poll={self.poll_interval_s}s)"
         )
 
     def stop(self) -> None:
@@ -262,72 +189,85 @@ class Lb1421T5Probe:
             return None
         return reading
 
-    def _open_device(self) -> Optional[object]:
-        """Open the configured device, falling back if the by-id symlink
-        is absent.  Returns a file-like object or None on failure.
-        """
-        for path in (self.device, self.fallback_device):
-            try:
-                # Open in binary mode line-buffered; NMEA is ASCII but
-                # binary read is more robust against occasional non-text
-                # bytes during enumeration.
-                f = open(str(path), "rb", buffering=0)
-                logger.info(f"Lb1421T5Probe: opened {path}")
-                return f
-            except FileNotFoundError:
-                logger.debug(f"Lb1421T5Probe: {path} not present")
-                continue
-            except OSError as exc:
-                logger.warning(f"Lb1421T5Probe: open({path}) failed: {exc}")
-                continue
-        return None
+    # --- internal -------------------------------------------------------
 
     def _read_loop(self) -> None:
-        """Reader thread main loop.  Reads NMEA lines, parses, updates
-        ``self._latest`` under lock.  Reopens on any I/O error.
+        """Reader thread main loop.  Polls the gpsdo-monitor JSON file,
+        parses, updates ``self._latest`` under lock.
         """
-        f = None
-        partial = b""
         while not self._stop.is_set():
-            if f is None:
-                f = self._open_device()
-                if f is None:
-                    # Wait before retrying so we don't busy-loop.
-                    self._stop.wait(RETRY_DELAY_S)
-                    continue
             try:
-                chunk = f.read(256)
-            except OSError as exc:
-                logger.warning(f"Lb1421T5Probe: read failed: {exc}; reopening")
-                try:
-                    f.close()
-                except OSError:
-                    pass
-                f = None
-                self._stop.wait(RETRY_DELAY_S)
-                continue
-            if not chunk:
-                # EOF (device gone) — reopen.
-                try:
-                    f.close()
-                except OSError:
-                    pass
-                f = None
-                self._stop.wait(RETRY_DELAY_S)
-                continue
-            partial += chunk
-            while b"\n" in partial:
-                line, partial = partial.split(b"\n", 1)
-                line_str = line.decode("ascii", errors="replace").strip()
-                if not line_str.startswith("$"):
-                    continue
-                reading = parse_rmc(line_str)
-                if reading is None:
-                    continue
+                reading = self._read_once()
+            except Exception:
+                logger.exception("Lb1421T5Probe: unexpected error in poll")
+                reading = None
+            if reading is not None:
                 with self._lock:
                     self._latest = reading
-        if f is not None:
-            try:
-                f.close()
-            except OSError:
-                pass
+            self._stop.wait(self.poll_interval_s)
+
+    def _read_once(self) -> Optional[Lb1421Reading]:
+        """One poll cycle.  Returns a fresh Lb1421Reading or None."""
+        path = self._pick_file()
+        if path is None:
+            return None
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError) as e:
+            logger.debug(f"Lb1421T5Probe: {path} unreadable: {e}")
+            return None
+        if not isinstance(data, dict) or data.get("schema") != "v1":
+            return None
+
+        # File freshness — gpsdo-monitor still writing recently.
+        written_age = self._written_utc_age(data.get("written_utc"))
+        if written_age is None or written_age > self.file_max_age_s:
+            return None
+
+        health = data.get("health") or {}
+        pps_utc_sec = health.get("pps_utc_sec")
+        if not isinstance(pps_utc_sec, int):
+            return None
+
+        # NMEA freshness — last valid RMC inside the configured window.
+        # gpsdo-monitor publishes pps_utc_sec on every valid RMC, but
+        # never clears it if the fix goes void; we use fix_age_sec
+        # (seconds since last RMC-valid) to gate valid_fix.
+        fix_age = health.get("fix_age_sec")
+        if isinstance(fix_age, (int, float)):
+            valid_fix = float(fix_age) <= self.nmea_max_age_s
+        else:
+            valid_fix = False
+
+        return Lb1421Reading(
+            pps_utc_sec=int(pps_utc_sec),
+            host_monotonic_at_read=time.monotonic(),
+            valid_fix=valid_fix,
+        )
+
+    def _pick_file(self) -> Optional[Path]:
+        if not self.run_dir.is_dir():
+            return None
+        if self.serial is not None:
+            candidate = self.run_dir / f"{self.serial}.json"
+            return candidate if candidate.is_file() else None
+        # No explicit serial: pick the first per-device file, skipping
+        # index.json.  On bee1 there is one LB-1421; if a deployment
+        # ever has multiple GPSDOs, set `serial` explicitly.
+        for entry in sorted(self.run_dir.glob("*.json")):
+            if entry.name == "index.json":
+                continue
+            return entry
+        return None
+
+    def _written_utc_age(self, written_utc: object) -> Optional[float]:
+        if not isinstance(written_utc, str):
+            return None
+        try:
+            dt = datetime.fromisoformat(written_utc.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        age = time.time() - dt.timestamp()
+        return max(0.0, age)

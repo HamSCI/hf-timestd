@@ -1125,23 +1125,34 @@ Per-service overrides in [services] take precedence over the profile.
 
         # Start daemon mode
         recorder = CoreRecorderV2(recorder_config)
-        # Attach the T5 disambiguation reference (LB-1421 GPSDO NMEA
-        # over USB-CDC), if configured.  Gated by
+        # Attach the T5 disambiguation reference (LB-1421 GPSDO NMEA),
+        # if configured.  The probe consumes gpsdo-monitor's published
+        # per-device JSON under [timing].lb1421_gpsdo_run_dir (default
+        # /run/gpsdo).  Set [timing].lb1421_enabled = true (or supply a
+        # non-empty lb1421_nmea_device for backward-compat) to enable.
         #   [timing]
-        #   lb1421_nmea_device = "/dev/lb1421-nmea"
-        # Pass an empty string or omit the key to disable T5; the
-        # disambig will fall back to T4 chronyc tracking as before.
+        #   lb1421_enabled       = true
+        #   lb1421_gpsdo_run_dir = "/run/gpsdo"     # optional
+        #   lb1421_gpsdo_serial  = "1421-..."       # optional, filters by device
+        # The legacy lb1421_nmea_device key is accepted as an
+        # enable-signal only; the device path itself is no longer used
+        # because the probe reads gpsdo-monitor's JSON rather than the
+        # serial endpoint directly (see project_t5_nmea_probe_race).
         timing_section = config.get('timing', {})
-        lb1421_device = timing_section.get('lb1421_nmea_device', '').strip()
-        if lb1421_device:
+        lb1421_enabled = bool(timing_section.get('lb1421_enabled', False)) or bool(
+            timing_section.get('lb1421_nmea_device', '').strip()
+        )
+        if lb1421_enabled:
             # NB: Path is imported at module level (line 16).  Re-importing
             # here would shadow that into a local-only binding for the
             # entire main() function -- making the line-762
             # `daemon_parser.add_argument('--archive-root', type=Path, ...)`
             # raise UnboundLocalError because Python's bytecode compiler
             # sees `Path` as a local variable assigned later.
-            from .core.lb1421_t5_probe import Lb1421T5Probe
-            lb1421_probe = Lb1421T5Probe(device=Path(lb1421_device))
+            from .core.lb1421_t5_probe import Lb1421T5Probe, DEFAULT_RUN_DIR
+            run_dir = Path(timing_section.get('lb1421_gpsdo_run_dir', str(DEFAULT_RUN_DIR)))
+            serial = timing_section.get('lb1421_gpsdo_serial') or None
+            lb1421_probe = Lb1421T5Probe(run_dir=run_dir, serial=serial)
             lb1421_probe.start()
             recorder.attach_lb1421_probe(lb1421_probe)
         recorder.run()

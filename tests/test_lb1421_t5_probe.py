@@ -1,255 +1,225 @@
-"""Tests for the LBE-1421 GPSDO NMEA T5 disambiguation-reference probe."""
+"""Tests for the LBE-1421 GPSDO T5 disambiguation probe.
+
+The probe is a JSON-file poller that consumes gpsdo-monitor's published
+per-device files under `/run/gpsdo/<serial>.json` (Schema v1).  Tests
+synthesise those files in a tmp_path to exercise the probe end-to-end
+without a real serial device or daemon.
+"""
 
 from __future__ import annotations
 
-import os
-import threading
+import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from hf_timestd.core.lb1421_t5_probe import (
+    DEFAULT_RUN_DIR,
     Lb1421Reading,
     Lb1421T5Probe,
-    parse_rmc,
 )
 
 
-# Live-captured sentence from bee1 LBE-1421 2026-05-23 10:41:24 UTC.
-SAMPLE_GNRMC = (
-    "$GNRMC,104124.20,A,3855.12204,N,09207.65825,W,0.000,,230526,,,D*77"
-)
-SAMPLE_GPRMC = (
-    "$GPRMC,123456.78,A,3855.12204,N,09207.65825,W,0.000,,150301,,,A*62"
-)
-SAMPLE_RMC_NO_FIX = (
-    "$GNRMC,104124.20,V,,,,,0.000,,230526,,,N*4D"
-)
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
-# -- parse_rmc --------------------------------------------------------------
+def _device_doc(
+    *,
+    serial: str = "1421-TEST",
+    written_utc: str | None = None,
+    pps_utc_sec: int | None = 1780168299,
+    fix_age_sec: float | None = 0.4,
+    probe_interval_sec: int = 10,
+) -> dict[str, Any]:
+    """Build a minimal Schema-v1-compatible device report dict."""
+    return {
+        "schema": "v1",
+        "written_utc": written_utc or _now_iso(),
+        "probe_interval_sec": probe_interval_sec,
+        "host": "test",
+        "device": {
+            "model": "LBE-1421",
+            "pid": "0001",
+            "serial": serial,
+            "hid_path": "n/a",
+        },
+        "governs": [],
+        "health": {
+            "pll_locked": True,
+            "outputs_enabled": True,
+            "gps_fix": "3D",
+            "sats_used": 12,
+            "fix_age_sec": fix_age_sec,
+            "pps_utc_sec": pps_utc_sec,
+            "nmea_host_monotonic_at_read": 12345.6,
+        },
+        "outputs": {},
+        "pps_study": {"enabled": False, "window_sec": 0, "edges": 0},
+        "a_level_hint": "A1",
+        "a_level_reason": "test",
+    }
 
 
-class TestParseRmc:
-    def test_valid_gnrmc(self):
-        r = parse_rmc(SAMPLE_GNRMC)
+def _write(path: Path, doc: dict[str, Any]) -> None:
+    path.write_text(json.dumps(doc))
+
+
+# -- get_latest semantics (without the background thread) ------------------
+
+
+class TestReadOnce:
+    """Drive `_read_once()` directly — deterministic, no thread."""
+
+    def test_no_run_dir_returns_none(self, tmp_path: Path):
+        probe = Lb1421T5Probe(run_dir=tmp_path / "missing")
+        assert probe._read_once() is None
+
+    def test_no_files_returns_none(self, tmp_path: Path):
+        probe = Lb1421T5Probe(run_dir=tmp_path)
+        assert probe._read_once() is None
+
+    def test_valid_file_yields_reading(self, tmp_path: Path):
+        _write(tmp_path / "1421-A.json", _device_doc(serial="1421-A"))
+        probe = Lb1421T5Probe(run_dir=tmp_path)
+        r = probe._read_once()
         assert r is not None
-        # 2026-05-23 10:41:24 UTC
-        expected = int(
-            datetime(2026, 5, 23, 10, 41, 24, tzinfo=timezone.utc).timestamp()
-        )
-        assert r.pps_utc_sec == expected
+        assert r.pps_utc_sec == 1780168299
         assert r.valid_fix is True
 
-    def test_subsecond_truncated_to_integer(self):
-        # NMEA time field 104124.20 must round-DOWN to the integer
-        # second; the fractional part reflects sentence-emission
-        # latency, not the PPS edge itself.
-        r = parse_rmc(SAMPLE_GNRMC)
-        assert r is not None
-        # Confirm we're using the integer seconds without rounding up.
-        dt = datetime.fromtimestamp(r.pps_utc_sec, tz=timezone.utc)
-        assert dt.hour == 10
-        assert dt.minute == 41
-        assert dt.second == 24
+    def test_serial_filter_picks_matching_file(self, tmp_path: Path):
+        _write(tmp_path / "1421-A.json", _device_doc(
+            serial="1421-A", pps_utc_sec=111))
+        _write(tmp_path / "1421-B.json", _device_doc(
+            serial="1421-B", pps_utc_sec=222))
+        probe = Lb1421T5Probe(run_dir=tmp_path, serial="1421-B")
+        r = probe._read_once()
+        assert r is not None and r.pps_utc_sec == 222
 
-    def test_void_fix_status_recorded(self):
-        r = parse_rmc(SAMPLE_RMC_NO_FIX)
+    def test_serial_filter_missing_file_returns_none(self, tmp_path: Path):
+        _write(tmp_path / "1421-A.json", _device_doc(serial="1421-A"))
+        probe = Lb1421T5Probe(run_dir=tmp_path, serial="1421-MISSING")
+        assert probe._read_once() is None
+
+    def test_skips_index_json(self, tmp_path: Path):
+        _write(tmp_path / "index.json", {"schema": "v1", "devices": []})
+        probe = Lb1421T5Probe(run_dir=tmp_path)
+        assert probe._read_once() is None
+
+    def test_stale_file_rejected(self, tmp_path: Path):
+        # written_utc 10 min ago, file_max_age_s default 30 s.
+        old_iso = datetime.fromtimestamp(
+            time.time() - 600, tz=timezone.utc
+        ).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        _write(tmp_path / "1421-A.json", _device_doc(written_utc=old_iso))
+        probe = Lb1421T5Probe(run_dir=tmp_path)
+        assert probe._read_once() is None
+
+    def test_missing_pps_utc_sec_returns_none(self, tmp_path: Path):
+        _write(tmp_path / "1421-A.json", _device_doc(pps_utc_sec=None))
+        probe = Lb1421T5Probe(run_dir=tmp_path)
+        assert probe._read_once() is None
+
+    def test_stale_fix_marks_valid_false(self, tmp_path: Path):
+        # NMEA was valid once but fix has been stale for 5 sec; default
+        # nmea_max_age_s is 2.0, so valid_fix must come back False.
+        _write(tmp_path / "1421-A.json", _device_doc(fix_age_sec=5.0))
+        probe = Lb1421T5Probe(run_dir=tmp_path)
+        r = probe._read_once()
         assert r is not None
         assert r.valid_fix is False
 
-    def test_gprmc_also_accepted(self):
-        # The probe must accept both $GP (GPS-only) and $GN (multi-GNSS)
-        # variants; the LBE-1421 uses GN, but older GPS modules use GP
-        # and the same parsing logic applies.
-        r = parse_rmc(SAMPLE_GPRMC)
+    def test_missing_fix_age_marks_valid_false(self, tmp_path: Path):
+        _write(tmp_path / "1421-A.json", _device_doc(fix_age_sec=None))
+        probe = Lb1421T5Probe(run_dir=tmp_path)
+        r = probe._read_once()
         assert r is not None
-        # 2001-03-15 12:34:56 UTC
-        expected = int(
-            datetime(2001, 3, 15, 12, 34, 56, tzinfo=timezone.utc).timestamp()
-        )
-        assert r.pps_utc_sec == expected
+        assert r.valid_fix is False
 
-    def test_bad_checksum_rejected(self):
-        # Flip last hex digit
-        bad = SAMPLE_GNRMC[:-1] + "0"
-        assert parse_rmc(bad) is None
+    def test_wrong_schema_version_rejected(self, tmp_path: Path):
+        doc = _device_doc()
+        doc["schema"] = "v0"
+        _write(tmp_path / "1421-A.json", doc)
+        probe = Lb1421T5Probe(run_dir=tmp_path)
+        assert probe._read_once() is None
 
-    def test_missing_checksum_accepted(self):
-        # Some emitters don't append the *CS checksum.  The parser is
-        # permissive about this — only outright malformed lines are
-        # rejected.
-        nochk = SAMPLE_GNRMC.split("*")[0]
-        r = parse_rmc(nochk)
-        assert r is not None
+    def test_malformed_json_logged_and_skipped(self, tmp_path: Path):
+        (tmp_path / "1421-A.json").write_text("{not json")
+        probe = Lb1421T5Probe(run_dir=tmp_path)
+        assert probe._read_once() is None
 
-    def test_wrong_sentence_type_rejected(self):
-        # Non-RMC sentences should return None (we only consume RMC
-        # because it carries both time and date).
-        gga = "$GNGGA,104124.20,3855.1,N,09207.6,W,2,11,0.49,269.6,M,-30,M,,0*55"
-        assert parse_rmc(gga) is None
-
-    def test_empty_time_field_rejected(self):
-        # If the LB-1421 emits RMC during boot before time-fix, the time
-        # field may be empty — we must not crash, just skip the reading.
-        empty = "$GNRMC,,V,,,,,0.000,,,,,N*53"
-        assert parse_rmc(empty) is None
-
-    def test_malformed_line_rejected(self):
-        for bad in [
-            "",
-            "not nmea",
-            "$",
-            "$GNRMC",
-            "$GNRMC,abc,A,,,,,,,,,,,N*55",
-        ]:
-            assert parse_rmc(bad) is None, f"should reject: {bad!r}"
-
-    def test_invalid_checksum_hex_rejected(self):
-        bad = SAMPLE_GNRMC[:-2] + "ZZ"
-        assert parse_rmc(bad) is None
-
-    def test_year_2000_pivot(self):
-        # 2-digit year 00 → 2000 (not 1900).  This is the unambiguous
-        # convention for NMEA in any post-2000 deployment.
-        sentence = "$GNRMC,000000.00,A,0.0,N,0.0,W,0.000,,010100,,,A*72"
-        r = parse_rmc(sentence)
-        # If parse succeeds, year must be 2000.  (Checksum may be wrong
-        # for this synthetic; we don't care here.)
-        # Force parse by stripping checksum:
-        r = parse_rmc(sentence.split("*")[0])
-        assert r is not None
-        dt = datetime.fromtimestamp(r.pps_utc_sec, tz=timezone.utc)
-        assert dt.year == 2000
-
-    def test_reading_records_host_monotonic(self):
-        before = time.monotonic()
-        r = parse_rmc(SAMPLE_GNRMC)
-        after = time.monotonic()
-        assert r is not None
-        assert before <= r.host_monotonic_at_read <= after
+    def test_bad_written_utc_rejected(self, tmp_path: Path):
+        doc = _device_doc(written_utc="not-a-timestamp")
+        _write(tmp_path / "1421-A.json", doc)
+        probe = Lb1421T5Probe(run_dir=tmp_path)
+        assert probe._read_once() is None
 
 
-# -- Lb1421T5Probe (background reader) --------------------------------------
+# -- get_latest age-out and require_valid_fix gates -------------------------
 
 
-class TestProbeReader:
-    """Tests for the background reader, using a FIFO as the device file."""
-
-    @pytest.fixture
-    def fifo_path(self, tmp_path: Path):
-        path = tmp_path / "fake-nmea-fifo"
-        os.mkfifo(path)
-        yield path
-        # Cleanup: best-effort
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
-
-    def test_initial_get_latest_returns_none(self):
-        probe = Lb1421T5Probe(device=Path("/nonexistent"))
+class TestGetLatest:
+    def test_initial_get_latest_returns_none(self, tmp_path: Path):
+        probe = Lb1421T5Probe(run_dir=tmp_path)
         assert probe.get_latest() is None
 
-    def test_reader_thread_picks_up_sentence(self, fifo_path):
-        probe = Lb1421T5Probe(
-            device=fifo_path, fallback_device=Path("/nonexistent")
+    def test_freshness_window_respected(self, tmp_path: Path):
+        # Manually seed _latest with an old monotonic timestamp.
+        probe = Lb1421T5Probe(run_dir=tmp_path)
+        probe._latest = Lb1421Reading(
+            pps_utc_sec=1,
+            host_monotonic_at_read=time.monotonic() - 5.0,
+            valid_fix=True,
         )
+        assert probe.get_latest(max_age_s=2.0) is None
+        assert probe.get_latest(max_age_s=10.0) is not None
+
+    def test_require_valid_fix_filters(self, tmp_path: Path):
+        probe = Lb1421T5Probe(run_dir=tmp_path)
+        probe._latest = Lb1421Reading(
+            pps_utc_sec=1,
+            host_monotonic_at_read=time.monotonic(),
+            valid_fix=False,
+        )
+        assert probe.get_latest(require_valid_fix=True) is None
+        assert probe.get_latest(require_valid_fix=False) is not None
+
+
+# -- background thread end-to-end ------------------------------------------
+
+
+class TestBackgroundReader:
+    def test_thread_picks_up_seeded_file(self, tmp_path: Path):
+        _write(tmp_path / "1421-A.json", _device_doc())
+        probe = Lb1421T5Probe(run_dir=tmp_path, poll_interval_s=0.05)
         probe.start()
         try:
-            # Open writer side; this unblocks the reader's open().
-            # mkfifo open() blocks until both sides connect, so the
-            # writer-side open must happen for the reader to start.
-            with open(fifo_path, "wb", buffering=0) as w:
-                w.write(SAMPLE_GNRMC.encode("ascii") + b"\n")
-                # Give the reader thread a moment to process.
-                for _ in range(50):
-                    r = probe.get_latest(max_age_s=10.0)
-                    if r is not None:
-                        break
-                    time.sleep(0.05)
-                assert r is not None
-                assert r.valid_fix is True
+            for _ in range(40):  # up to 2 s
+                r = probe.get_latest(max_age_s=10.0)
+                if r is not None:
+                    break
+                time.sleep(0.05)
+            assert r is not None
+            assert r.pps_utc_sec == 1780168299
+            assert r.valid_fix is True
         finally:
             probe.stop()
 
-    def test_get_latest_respects_freshness(self, fifo_path):
-        probe = Lb1421T5Probe(
-            device=fifo_path, fallback_device=Path("/nonexistent")
-        )
+    def test_start_is_idempotent(self, tmp_path: Path):
+        probe = Lb1421T5Probe(run_dir=tmp_path, poll_interval_s=0.05)
         probe.start()
-        try:
-            with open(fifo_path, "wb", buffering=0) as w:
-                w.write(SAMPLE_GNRMC.encode("ascii") + b"\n")
-                for _ in range(50):
-                    r = probe.get_latest(max_age_s=10.0)
-                    if r is not None:
-                        break
-                    time.sleep(0.05)
-                assert r is not None
-            # No more writes; wait long enough for the reading to age out.
-            # Use a short max_age_s so we don't need a real second to pass.
-            time.sleep(0.2)
-            stale = probe.get_latest(max_age_s=0.1)
-            assert stale is None
-        finally:
-            probe.stop()
-
-    def test_get_latest_require_valid_fix(self, fifo_path):
-        probe = Lb1421T5Probe(
-            device=fifo_path, fallback_device=Path("/nonexistent")
-        )
-        probe.start()
-        try:
-            with open(fifo_path, "wb", buffering=0) as w:
-                w.write(SAMPLE_RMC_NO_FIX.encode("ascii") + b"\n")
-                for _ in range(50):
-                    r = probe.get_latest(max_age_s=10.0, require_valid_fix=False)
-                    if r is not None:
-                        break
-                    time.sleep(0.05)
-                assert r is not None
-                # The same reading must be filtered out when require_valid_fix
-                # is True (the default for production disambig use).
-                strict = probe.get_latest(max_age_s=10.0, require_valid_fix=True)
-                assert strict is None
-        finally:
-            probe.stop()
-
-    def test_garbage_lines_skipped(self, fifo_path):
-        probe = Lb1421T5Probe(
-            device=fifo_path, fallback_device=Path("/nonexistent")
-        )
-        probe.start()
-        try:
-            with open(fifo_path, "wb", buffering=0) as w:
-                # Mix of noise lines + one real sentence.  The noise
-                # must not crash the reader; the real one must be
-                # picked up.
-                w.write(b"garbage1\n")
-                w.write(b"\n")
-                w.write(b"$GPGSV,1,1,01,01,01,000,01*4F\n")  # non-RMC
-                w.write(SAMPLE_GNRMC.encode("ascii") + b"\n")
-                for _ in range(50):
-                    r = probe.get_latest(max_age_s=10.0)
-                    if r is not None:
-                        break
-                    time.sleep(0.05)
-                assert r is not None
-        finally:
-            probe.stop()
-
-    def test_start_is_idempotent(self):
-        probe = Lb1421T5Probe(
-            device=Path("/nonexistent-1"),
-            fallback_device=Path("/nonexistent-2"),
-        )
-        probe.start()
-        # Calling start() again must NOT spawn a second thread.
         t1 = probe._thread
         probe.start()
         t2 = probe._thread
         assert t1 is t2
         probe.stop()
+
+
+# -- module-level constants ------------------------------------------------
+
+
+def test_default_run_dir_is_run_gpsdo():
+    assert DEFAULT_RUN_DIR == Path("/run/gpsdo")

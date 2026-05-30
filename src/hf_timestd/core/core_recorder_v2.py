@@ -4036,23 +4036,32 @@ def main():
     
     # Run recorder
     recorder = CoreRecorderV2(recorder_config)
-    # Attach the T5 disambiguation reference (LB-1421 GPSDO NMEA over
-    # USB-CDC), if configured.  Gated by
+    # Attach the T5 disambiguation reference (LB-1421 GPSDO NMEA), if
+    # configured.  The probe consumes gpsdo-monitor's published per-device
+    # JSON under [timing].lb1421_gpsdo_run_dir (default /run/gpsdo); the
+    # gpsdo-monitor daemon is the sole owner of the serial endpoint (see
+    # project_t5_nmea_probe_race).  Gated by either:
     #   [timing]
-    #   lb1421_nmea_device = "/dev/lb1421-nmea"
-    # Pass an empty string or omit the key to disable T5; the disambig
-    # will fall back to T4 chronyc tracking as before.
+    #   lb1421_enabled       = true
+    #   lb1421_gpsdo_run_dir = "/run/gpsdo"     # optional
+    #   lb1421_gpsdo_serial  = "1421-..."       # optional, filter by device
+    # The legacy lb1421_nmea_device key is accepted as an enable-signal
+    # only; the device path itself is no longer used.
     timing_section = config.get('timing', {})
-    lb1421_device = str(timing_section.get('lb1421_nmea_device', '')).strip()
-    if lb1421_device:
-        from .lb1421_t5_probe import Lb1421T5Probe
-        lb1421_probe = Lb1421T5Probe(device=Path(lb1421_device))
+    lb1421_enabled = bool(timing_section.get('lb1421_enabled', False)) or bool(
+        str(timing_section.get('lb1421_nmea_device', '')).strip()
+    )
+    if lb1421_enabled:
+        from .lb1421_t5_probe import Lb1421T5Probe, DEFAULT_RUN_DIR
+        run_dir = Path(timing_section.get('lb1421_gpsdo_run_dir', str(DEFAULT_RUN_DIR)))
+        serial = timing_section.get('lb1421_gpsdo_serial') or None
+        lb1421_probe = Lb1421T5Probe(run_dir=run_dir, serial=serial)
         lb1421_probe.start()
         recorder.attach_lb1421_probe(lb1421_probe)
         logger.info(
             f"T5 LB-1421 NMEA probe attached "
-            f"(device={lb1421_device}); BPSK PPS disambig will prefer "
-            f"GPS direct over chronyc tracking."
+            f"(gpsdo run_dir={run_dir}, serial={serial or '*'}); BPSK PPS "
+            f"disambig will prefer GPS direct over chronyc tracking."
         )
     recorder.run()
 
