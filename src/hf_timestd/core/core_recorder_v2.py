@@ -2012,8 +2012,8 @@ class CoreRecorderV2:
             effective_chain_delay_ns - chain_delay_ns_raw
         )
         # Capture the (NMEA GPS second, BPSK edge RTP) pair for the
-        # NMEA-anchored SHM push path.  Subsequent edges count
-        # GPS seconds from this pair using GPSDO-accurate RTP deltas,
+        # NMEA-anchored SHM push path.  Subsequent edges count GPS
+        # seconds from this pair using GPSDO-accurate RTP deltas,
         # bypassing the ka9q anchor (which has the host-clock-bias-at-
         # refresh-moment baked in and produces the long-run drift).
         if edge_rtp is not None:

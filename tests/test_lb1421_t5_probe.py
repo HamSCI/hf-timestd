@@ -211,23 +211,22 @@ class TestGetLatest:
         assert probe.get_latest(require_valid_fix=True) is None
         assert probe.get_latest(require_valid_fix=False) is not None
 
-    def test_get_latest_projects_pps_to_consumer_time(self, tmp_path: Path):
-        # Seed a stale raw pps_utc_sec; get_latest should return
-        # floor(time.time()), not the raw value — this is what keeps
-        # the ±0.5s disambig guard in
-        # _t6_disambiguate_via_t5_lb1421 within reach even when the
-        # gpsdo-monitor JSON is 5-10 s stale (probe_interval cadence).
+    def test_get_latest_returns_raw_pps_utc_sec(self, tmp_path: Path):
+        # get_latest passes the raw NMEA integer second through —
+        # consumer-time projection would synthesise a wall-clock value
+        # which is explicitly disallowed by the timing architecture
+        # (broadcast-time sources or T5 NMEA are the integer-second
+        # authority, never wall clock).
         probe = Lb1421T5Probe(run_dir=tmp_path)
-        stale_raw = int(time.time()) - 7  # 7 sec stale
+        raw = int(time.time()) - 3
         probe._latest = Lb1421Reading(
-            pps_utc_sec=stale_raw,
+            pps_utc_sec=raw,
             host_monotonic_at_read=time.monotonic(),
             valid_fix=True,
         )
         r = probe.get_latest()
         assert r is not None
-        assert r.pps_utc_sec == int(time.time())
-        assert r.pps_utc_sec != stale_raw
+        assert r.pps_utc_sec == raw
 
 
 # -- background thread end-to-end ------------------------------------------
@@ -235,7 +234,9 @@ class TestGetLatest:
 
 class TestBackgroundReader:
     def test_thread_picks_up_seeded_file(self, tmp_path: Path):
-        _write(tmp_path / "1421-A.json", _device_doc())
+        expected_pps = int(time.time()) - 1
+        _write(tmp_path / "1421-A.json",
+               _device_doc(pps_utc_sec=expected_pps))
         probe = Lb1421T5Probe(run_dir=tmp_path, poll_interval_s=0.05)
         probe.start()
         try:
@@ -245,9 +246,7 @@ class TestBackgroundReader:
                     break
                 time.sleep(0.05)
             assert r is not None
-            # get_latest projects pps_utc_sec to consumer time, so the
-            # returned value is floor(time.time()), not the raw value.
-            assert r.pps_utc_sec == int(time.time())
+            assert r.pps_utc_sec == expected_pps
             assert r.valid_fix is True
         finally:
             probe.stop()

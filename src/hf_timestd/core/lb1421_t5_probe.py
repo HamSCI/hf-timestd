@@ -186,45 +186,25 @@ class Lb1421T5Probe:
           - the most-recent reading is older than ``max_age_s``,
           - ``require_valid_fix`` is True and the reading was status='V'.
 
-        ``pps_utc_sec`` is **projected forward to the consumer's
-        instant** before return.  ``_read_once`` captures the raw
-        integer UTC second of the most-recent observed RMC; this
-        method advances it to ``floor(time.time())`` so the integer
-        second the disambig pairs against is the one in which the
-        consumer's own ``raw_wall_time_sec`` resides.  Without this
-        projection a stale gpsdo-monitor JSON (10 s probe interval)
-        plus the 2 s ``get_latest`` staleness budget would yield
-        ``raw_wall_time_sec − pps_utc_sec`` values past the ±0.5 s
-        pairing guard in ``_t6_disambiguate_via_t5_lb1421``, forcing
-        the disambig to fall back to T4 chronyc-tracking — see
-        project_t5_nmea_probe_race.
+        ``pps_utc_sec`` is the raw integer UTC second from NMEA — the
+        GPSDO's reported time, NOT a host-clock projection.  The
+        consumer is responsible for pairing it against a same-vintage
+        RTP-derived edge wall time.  Freshness comes from the underlying
+        JSON publish cadence in gpsdo-monitor; if that cadence is too
+        slow for the disambig pairing guard, the fix belongs there
+        (publish on every RMC), not in synthesising a wall-clock value
+        here.
         """
         with self._lock:
             reading = self._latest
         if reading is None:
             return None
-        # Staleness gate: how long since the underlying JSON was read.
-        # Uses the *stored* host_monotonic_at_read (read-loop moment),
-        # not the about-to-be-projected one.
         age = time.monotonic() - reading.host_monotonic_at_read
         if age > max_age_s:
             return None
         if require_valid_fix and not reading.valid_fix:
             return None
-        # Project pps_utc_sec AND host_monotonic_at_read to consumer
-        # time so they stay temporally consistent — _compute_t5_anchor_offset
-        # (and any other downstream caller that pairs the two) sees a
-        # reading whose pps_utc_sec and anchor-age both correspond to the
-        # same wall-clock instant.  Mismatch here was the source of a
-        # spurious ~−470 ms anchor_offset_ns artifact noted in
-        # project_t5_nmea_probe_race.
-        now_wall = time.time()
-        now_mono = time.monotonic()
-        return Lb1421Reading(
-            pps_utc_sec=int(now_wall),
-            host_monotonic_at_read=now_mono,
-            valid_fix=reading.valid_fix,
-        )
+        return reading
 
     # --- internal -------------------------------------------------------
 
