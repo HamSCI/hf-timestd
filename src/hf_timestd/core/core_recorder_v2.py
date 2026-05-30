@@ -613,6 +613,24 @@ class CoreRecorderV2:
                             f"T6 diff-detector SHM init failed: {e}"
                         )
                         self._t6_diff_shm = None
+
+        # --- WWVB consumer state ---
+        # Dedicated RadiodStream + decode worker, plumbed exactly like T6
+        # (own UDP socket, own reader thread) but with no chrony feed, no
+        # ring buffer, no archive.  Output goes to the JSONL ledger only
+        # (Layer A+B per docs/WWVB-INTEGRATION.md §9 items 4-5; Layer C
+        # Fusion ingest is a follow-up).
+        self._wwvb_config = config.get('wwvb', {})
+        self._wwvb_stream = None
+        self._wwvb_channel_info = None
+        self._wwvb_buf: deque = deque()
+        self._wwvb_buf_samples: int = 0
+        self._wwvb_buf_lock = threading.Lock()
+        self._wwvb_decode_thread: Optional[threading.Thread] = None
+        self._wwvb_decode_stop = threading.Event()
+        self._wwvb_first_sample_logged = False
+        self._wwvb_ledger = None  # created lazily in _start_wwvb_stream
+
         self.ntp_status_lock = threading.Lock()
 
         # Timing Calibrator for SSRC registration
@@ -755,6 +773,11 @@ class CoreRecorderV2:
         if self._t6_calibrator is not None:
             self._start_t6_stream()
 
+        # Start WWVB consumer (dedicated RadiodStream, no archive, no
+        # ring) — gated on [wwvb] enabled = true.
+        if self._wwvb_config.get('enabled', False):
+            self._start_wwvb_stream()
+
         # Begin receiving on the shared MultiStream for the archive
         # channels.  T6 is intentionally NOT on this MultiStream — it
         # uses its own dedicated socket so the archive flush can't
@@ -879,6 +902,7 @@ class CoreRecorderV2:
         """Handle shutdown signals."""
         logger.info(f"Received signal {signum}, shutting down...")
         self._t6_timing_poll_stop.set()
+        self._wwvb_decode_stop.set()
         self.running = False
 
     def _start_lifetime_keepalive(self) -> None:
@@ -1245,6 +1269,182 @@ class CoreRecorderV2:
         except Exception as e:
             logger.error(f"Failed to start T6 BPSK PPS stream: {e}", exc_info=True)
             self._t6_stream = None
+
+    def _start_wwvb_stream(self):
+        """Provision the WWVB_60 channel on a dedicated RadiodStream and
+        spawn the periodic decode worker.
+
+        Architecture per docs/WWVB-INTEGRATION.md §2: in-process consumer
+        (T6-style dedicated socket + reader thread, isolated from the
+        shared archive MultiStream) feeding the JSONL ledger.  No archive
+        writer, no ring buffer attachment, no STATUS listener — WWVB
+        decodes at minute cadence, so neither sub-second timing-anchor
+        refresh nor the chrony-settled gate apply.
+        """
+        from ka9q import RadiodStream, Encoding
+        from .wwvb_ledger import WwvbLedger
+
+        cfg = self._wwvb_config
+        freq_hz = int(cfg.get('frequency_hz', 60_000))
+        sr = int(cfg.get('sample_rate', 24_000))
+        desc = cfg.get('description', 'WWVB_60')
+        ledger_dir = Path(cfg.get('ledger_dir', str(self.output_dir / 'wwvb')))
+
+        try:
+            channel_info = self.control.ensure_channel(
+                frequency_hz=freq_hz,
+                preset='iq',
+                sample_rate=sr,
+                encoding=Encoding.F32,
+                agc_enable=False,
+                gain=0.0,
+                timeout=30.0,
+                lifetime=RADIOD_LIFETIME_FRAMES,
+            )
+            self._wwvb_channel_info = channel_info
+            if channel_info is not None and getattr(channel_info, 'ssrc', 0):
+                self._lifetime_entries.append((self.control, channel_info.ssrc))
+
+            self._wwvb_ledger = WwvbLedger(ledger_dir)
+
+            self._wwvb_stream = RadiodStream(
+                channel=channel_info,
+                on_samples=self._wwvb_on_samples,
+                samples_per_packet=200,
+                # Same value as T6 — 256-packet resequencer gives ~3.2 s
+                # jitter tolerance at 80 pkt/sec, well clear of any
+                # archive-rollover stalls on the shared MultiStream.
+                resequence_buffer_size=256,
+            )
+            self._wwvb_stream.start()
+
+            self._wwvb_decode_stop.clear()
+            self._wwvb_decode_thread = threading.Thread(
+                target=self._wwvb_decode_loop,
+                name="WwvbDecode",
+                daemon=True,
+            )
+            self._wwvb_decode_thread.start()
+
+            logger.info(
+                f"WWVB stream started: {desc} at {freq_hz/1e3:.3f} kHz "
+                f"sr={sr} ledger={ledger_dir}"
+            )
+        except Exception as exc:
+            logger.error(f"Failed to start WWVB stream: {exc}", exc_info=True)
+            self._wwvb_stream = None
+            if self._wwvb_ledger is not None:
+                self._wwvb_ledger.close()
+                self._wwvb_ledger = None
+
+    def _wwvb_on_samples(self, samples, quality):
+        """RTP sample callback — append to rolling IQ buffer.
+
+        Bounded by window_s × sample_rate; oldest packets get dropped
+        from the front when the buffer overflows.  Decode runs on a
+        separate thread so an FFT in the demod path can never stall the
+        RTP receive loop.
+        """
+        cfg = self._wwvb_config
+        sample_rate = int(cfg.get('sample_rate', 24_000))
+        window_s = float(cfg.get('window_s', 90.0))
+        window_samples = int(window_s * sample_rate)
+
+        if not self._wwvb_first_sample_logged:
+            logger.info(
+                f"WWVB first samples: len={len(samples)}, "
+                f"dtype={getattr(samples, 'dtype', None)}, "
+                f"last_rtp_timestamp={getattr(quality, 'last_rtp_timestamp', None)}"
+            )
+            self._wwvb_first_sample_logged = True
+
+        with self._wwvb_buf_lock:
+            self._wwvb_buf.append(samples)
+            self._wwvb_buf_samples += len(samples)
+            while (self._wwvb_buf_samples > window_samples
+                   and len(self._wwvb_buf) > 1):
+                self._wwvb_buf_samples -= len(self._wwvb_buf[0])
+                self._wwvb_buf.popleft()
+
+    def _wwvb_decode_loop(self):
+        """Periodic decode worker — snapshots the buffer and calls
+        wwvb_demod.decode_iq, writing results to the ledger.
+
+        Wakes every ``decode_interval_s`` seconds.  Skips the decode if
+        the buffer hasn't yet accumulated ``min_buffer_s`` worth of
+        samples (a minute frame plus a few seconds of headroom).
+        """
+        from .wwvb_demod import decode_iq
+
+        cfg = self._wwvb_config
+        sample_rate = float(cfg.get('sample_rate', 24_000))
+        decode_interval_s = float(cfg.get('decode_interval_s', 30.0))
+        min_buffer_s = float(cfg.get('min_buffer_s', 65.0))
+        min_decode_samples = int(min_buffer_s * sample_rate)
+
+        logger.info(
+            f"WWVB decode loop started: interval={decode_interval_s}s "
+            f"min_buffer={min_buffer_s}s"
+        )
+
+        while not self._wwvb_decode_stop.is_set():
+            if self._wwvb_decode_stop.wait(decode_interval_s):
+                break
+            now = datetime.now(timezone.utc)
+            with self._wwvb_buf_lock:
+                have = self._wwvb_buf_samples
+                if have < min_decode_samples:
+                    logger.debug(
+                        f"WWVB buffering {have / sample_rate:.1f}s / "
+                        f"{min_buffer_s:.0f}s"
+                    )
+                    continue
+                iq = np.concatenate(list(self._wwvb_buf))
+
+            mean_amp = float(np.abs(iq).mean())
+            try:
+                result = decode_iq(iq, sample_rate=sample_rate)
+            except Exception as exc:
+                logger.warning(f"WWVB decode failed: {exc}")
+                continue
+
+            if self._wwvb_ledger is not None:
+                self._wwvb_ledger.record_pass(
+                    ts=now,
+                    buffer_s=have / sample_rate,
+                    mean_amp=mean_amp,
+                    carrier_offset_hz=result.carrier_offset_hz,
+                    seconds_detected=result.seconds_detected,
+                    bits=int(result.bits.size),
+                    frames=len(result.frames),
+                )
+                for f in result.frames:
+                    self._wwvb_ledger.record_frame(
+                        ts=now,
+                        minute_of_frame=f.frame.minute_of_frame,
+                        dst_state=(
+                            f.frame.dst_state.name
+                            if f.frame.dst_state is not None else None
+                        ),
+                        leap_second=(
+                            f.frame.leap_second.name
+                            if f.frame.leap_second is not None else None
+                        ),
+                        parity_errors=f.frame.parity_errors,
+                        sync_errors=f.sync_errors,
+                        inverted_polarity=f.inverted_polarity,
+                        mean_amp=mean_amp,
+                    )
+
+            if result.frames:
+                logger.info(
+                    f"WWVB decode: mean|iq|={mean_amp:.3e} "
+                    f"carrier_off={result.carrier_offset_hz:+.3f}Hz "
+                    f"secs={result.seconds_detected} "
+                    f"frames={len(result.frames)}"
+                )
+
+        logger.info("WWVB decode loop stopped")
 
     # Maximum sigma of a non-T6 reference we'll trust for disambiguation.
     #
@@ -3688,6 +3888,25 @@ class CoreRecorderV2:
             except Exception as e:
                 logger.debug(f"T6 stream stop: {e}")
 
+        # Stop WWVB decode loop and stream
+        self._wwvb_decode_stop.set()
+        if self._wwvb_decode_thread is not None:
+            try:
+                self._wwvb_decode_thread.join(timeout=5.0)
+            except Exception as e:
+                logger.debug(f"WWVB decode thread join: {e}")
+        if self._wwvb_stream is not None:
+            try:
+                self._wwvb_stream.stop()
+                logger.info("WWVB stream stopped")
+            except Exception as e:
+                logger.debug(f"WWVB stream stop: {e}")
+        if self._wwvb_ledger is not None:
+            try:
+                self._wwvb_ledger.close()
+            except Exception as e:
+                logger.debug(f"WWVB ledger close: {e}")
+
         # Remove T6 BPSK channel from radiod.  Unlike archived channels
         # (whose SSRC is deterministic from a stable description), the
         # T6 channel's SSRC is a hash of (freq, sample_rate, preset);
@@ -3795,6 +4014,7 @@ def main():
                            or '239.192.152.141'),
         'ka9q': ka9q_section,
         'timing': config.get('timing', {}),
+        'wwvb': config.get('wwvb', {}),
     }
     
     logger.info(f"Loaded {len(recorder_config['channels'])} channels from config")
