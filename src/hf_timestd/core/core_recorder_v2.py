@@ -2535,13 +2535,66 @@ class CoreRecorderV2:
                     # next disambig path will re-capture from a fresh
                     # T5/T4 reading — same behaviour as a cold start.
                     if persisted.anchor is not None:
-                        self._t6_native_anchor = persisted.anchor
-                        logger.info(
-                            f"T6 native anchor restored from store: "
-                            f"rtp={persisted.anchor.anchor_rtp}, "
-                            f"utc_ns={persisted.anchor.anchor_utc_ns}, "
-                            f"sr={persisted.anchor.sample_rate_hz}, "
-                            f"tier={persisted.anchor.captured_via_tier}"
+                        # Validate the persisted anchor's RTP namespace
+                        # against the current radiod session.  radiod
+                        # may restart and re-seed its RTP counter even
+                        # when the SSRC stays the same — when that
+                        # happens, the persisted ``anchor_rtp`` lives in
+                        # a different namespace from the current MF's
+                        # ``_last_edge_rtp``, and ``utc_ns_at_rtp`` would
+                        # do pure arithmetic between RTP values that
+                        # mean nothing relative to each other.  Observed
+                        # on bee1 2026-05-31 13:31 UTC: 245 M-sample
+                        # RTP-counter shift produced a +2 555 s HPPS
+                        # offset in chrony.
+                        #
+                        # Check: ``rtp_to_wallclock(anchor_rtp, channel)``
+                        # at restore time should be close to the
+                        # anchor's own ``anchor_utc_ns`` — chrony slewing
+                        # since capture shifts this by at most seconds,
+                        # so a > 30 s mismatch implies an RTP-namespace
+                        # discontinuity.  Refuse the load and force a
+                        # fresh first-lock disambig in the current
+                        # namespace.
+                        _RTP_NAMESPACE_MAX_DRIFT_S = 30.0
+                        if self._t6_channel_info is not None:
+                            try:
+                                from ka9q.rtp_recorder import rtp_to_wallclock
+                                wall = rtp_to_wallclock(
+                                    persisted.anchor.anchor_rtp,
+                                    self._t6_channel_info,
+                                )
+                                if wall is not None:
+                                    drift_s = (
+                                        wall - persisted.anchor.anchor_utc_ns / 1e9
+                                    )
+                                    if abs(drift_s) > _RTP_NAMESPACE_MAX_DRIFT_S:
+                                        logger.warning(
+                                            f"T6 persisted anchor's RTP "
+                                            f"namespace drifted "
+                                            f"{drift_s:+.1f} s since capture "
+                                            f"(radiod restarted with a new "
+                                            f"RTP-counter seed?); discarding "
+                                            f"persisted anchor + chain_delay "
+                                            f"and forcing a fresh disambig."
+                                        )
+                                        persisted = None
+                                        self._t6_disambiguation_ns = 0
+                            except Exception as e:
+                                logger.warning(
+                                    f"T6 persisted-anchor RTP-namespace "
+                                    f"check raised {e}; accepting persisted "
+                                    f"value (degraded mode)."
+                                )
+                if (persisted is not None
+                        and persisted.anchor is not None):
+                    self._t6_native_anchor = persisted.anchor
+                    logger.info(
+                        f"T6 native anchor restored from store: "
+                        f"rtp={persisted.anchor.anchor_rtp}, "
+                        f"utc_ns={persisted.anchor.anchor_utc_ns}, "
+                        f"sr={persisted.anchor.sample_rate_hz}, "
+                        f"tier={persisted.anchor.captured_via_tier}"
                         )
                     logger.info(
                         f"T6 chain_delay disambiguated against persisted "
