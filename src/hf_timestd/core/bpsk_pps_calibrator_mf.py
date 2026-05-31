@@ -196,6 +196,17 @@ class BpskPpsCalibratorMF:
         self._phase: float = 0.0
         self._phase_initialized = False
         self._alpha: Optional[float] = None
+        # Unwrapped raw-phase accumulator — for Wiener-tuning analysis.
+        # Each batch accumulates the full per-batch ``delta`` (the
+        # π-wrapped raw phase error) instead of the α-scaled loop
+        # increment.  Differentiating ``_phi_raw_unwrapped`` over time
+        # yields the *input* phase-noise rate spectrum the Costas loop
+        # sees — independent of the loop's own filtering — which is
+        # what a proper Wiener bandwidth derivation needs.  Logged in
+        # phase_log so a high-rate capture can compute the input PSD
+        # offline.  See ``docs/TSL3_COSTAS_DRIFT_2026-05-18.md`` "Layer
+        # B" for the rationale.
+        self._phi_raw_unwrapped: float = 0.0
 
         # Costas lock-quality state (Layer A TSL3 fix — see
         # _update_costas_lock and the COSTAS_* module constants).  The
@@ -325,6 +336,7 @@ class BpskPpsCalibratorMF:
     def reset(self) -> None:
         self._phase = 0.0
         self._phase_initialized = False
+        self._phi_raw_unwrapped = 0.0
         self._phase_ema = None
         self._dphase_ema = 0.0
         self._costas_locked = False
@@ -378,8 +390,10 @@ class BpskPpsCalibratorMF:
         phi_estimate = float(0.5 * np.angle(sq_mean))
         if not self._phase_initialized:
             self._phase = phi_estimate
+            self._phi_raw_unwrapped = phi_estimate
             self._phase_initialized = True
             phase_increment = 0.0
+            delta = 0.0
         else:
             # Wrap delta to [-π/2, π/2) — the squaring leaves a π
             # ambiguity, so phi_estimate may flip by π between batches
@@ -387,6 +401,11 @@ class BpskPpsCalibratorMF:
             delta = ((phi_estimate - self._phase) + np.pi / 2) % np.pi - np.pi / 2
             phase_increment = self._alpha * delta
             self._phase += phase_increment
+            # Unwrapped raw phase: same wrap-correction (π-ambiguity
+            # removal) as the loop's ``delta`` — but accumulated WITHOUT
+            # the α attenuation.  Diff of this is the raw input phase
+            # rate per batch.
+            self._phi_raw_unwrapped += delta
 
         # Costas lock-quality update (Layer A TSL3 fix).  Runs every
         # batch — including the buffer-fill phase — so the detector is
@@ -514,6 +533,7 @@ class BpskPpsCalibratorMF:
                 logger.info(
                     f"T6 MF phase_log: phase_rad={self._phase:+.4f} "
                     f"phase_deg={self._phase * 180.0 / np.pi:+.2f} "
+                    f"phi_raw={self._phi_raw_unwrapped:+.4f} "
                     f"peak_running={self._peak_running or 0:.2f} "
                     f"batch_max_y={batch_max_y:.2f} "
                     f"pps_consec={self.pps_consecutive} "
