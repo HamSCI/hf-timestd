@@ -641,17 +641,25 @@ class BpskPpsCalibratorMF:
         # peaks (see docs/TSL3_COSTAS_DRIFT_2026-05-18.md), so we accept
         # no edges and touch none of _last_edge_rtp / pps_* /
         # _chain_delay_samples / _peak_running.  The calibrator coasts on
-        # the last-good chain delay — TSL3 holds, like a leap-second
-        # hold — until the loop re-locks.  The gate is inert during
-        # acquisition (_acquired False) so the bootstrap can still walk
-        # the reference toward a consistent offset.
+        # the last-good chain delay — T6 / HPPS holds, like a leap-
+        # second hold — until the loop re-locks.  The gate is inert
+        # during acquisition (_acquired False) so the bootstrap can
+        # still walk the reference toward a consistent offset.
         #
-        # MAGNITUDE-CORRELATION MODE BYPASSES THIS GATE: |y_complex| is
-        # rotation-invariant, so a Costas excursion does not produce
-        # phantom peaks in the first place.  Edges are accepted purely
-        # on their MF magnitude + position-grid consistency.
-        if (not self._use_magnitude_correlation
-                and self._acquired and not self._costas_locked):
+        # 2026-05-31 update — gate now applies in MAGNITUDE-CORRELATION
+        # mode too.  An earlier comment claimed |y_complex| was
+        # Costas-invariant and bypassed the gate, but live data on
+        # bee1 disproved that: magnitude is invariant to PHASE error
+        # (|e^(jθ)| = 1) but NOT to FREQUENCY error accumulating across
+        # the half-second integration.  During a Costas excursion the
+        # loop briefly mistracks frequency; the half-second sum loses
+        # coherence and a sidelobe peak wins.  Observed live 2026-05-31
+        # 01:39:13 UTC: chain_delay snapped 423 ms → 369 ms in a single
+        # batch where dphase_ema spiked 7× and pps_phantom jumped 284,
+        # leading to a step-recovery cycle and biased re-lock.  Re-
+        # enabling the gate restores the documented coast-through-
+        # excursion behaviour.
+        if self._acquired and not self._costas_locked:
             # Still record the phantoms for the debug capture (Layer B
             # analysis) — but mutate no lock state.  Uses the frozen
             # _peak_running / threshold from before the excursion.
