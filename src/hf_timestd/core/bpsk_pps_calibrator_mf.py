@@ -153,7 +153,7 @@ class BpskPpsCalibratorMF:
         sample_rate: int,
         consecutive_required: int = 10,
         edge_tolerance_samples: int = 10,
-        costas_loop_bw_hz: float = 1.0,
+        costas_loop_bw_hz: float = 3.0,
         debug_dump_path: Optional[str] = None,
         debug_dump_seconds: float = 60.0,
         debug_dump_subthreshold_factor: float = 0.2,
