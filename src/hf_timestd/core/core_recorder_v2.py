@@ -1881,6 +1881,34 @@ class CoreRecorderV2:
             # Physical chain_delay = sub-second residual after the
             # integer-second alignment above.
             effective_chain_delay_ns = int(round(residual_sec * 1e9))
+            # Layer B physical-plausibility guard.  The RF chain
+            # delay from TS-1 BPSK modulator → coax → RX-888 ADC →
+            # radiod DSP is bounded by hardware geometry: typical
+            # in-shack RF paths land in 10-100 ms, with the upstream
+            # radiod filter group-delay being the dominant
+            # contribution (up to ~150 ms at narrow filter widths).
+            # A *captured* chain_delay much larger than that is a
+            # sidelobe / phantom peak, not a physical signal.  Layer
+            # B analysis on bee1 2026-05-31 12:08 UTC showed the MF
+            # producing 8 distinct chain_delay clusters spread across
+            # 0-980 ms during signal-degraded periods (peak_running
+            # ~67 vs healthy 94); capturing into any of the 4 sidelobe
+            # clusters at 200/466/808/955 ms freezes the anchor at a
+            # wrong value that no amount of MF jitter can shake out.
+            # Refuse the capture and fall through to T4; the next
+            # first-lock will retry.  See
+            # docs/TSL3_COSTAS_DRIFT_2026-05-18.md §"Layer B".
+            T6_PHYSICAL_CHAIN_DELAY_MAX_NS = 250_000_000  # 250 ms
+            if abs(effective_chain_delay_ns) > T6_PHYSICAL_CHAIN_DELAY_MAX_NS:
+                logger.warning(
+                    f"T6 T5 disambig: implied chain_delay "
+                    f"{effective_chain_delay_ns/1e6:+.1f} ms exceeds "
+                    f"physical-plausibility bound ±"
+                    f"{T6_PHYSICAL_CHAIN_DELAY_MAX_NS/1e6:.0f} ms — "
+                    f"sidelobe / phantom-peak capture.  Falling back "
+                    f"to T4."
+                )
+                return False
             # Back-derive disambig shift: effective = raw + disambig.
             self._t6_disambiguation_ns = (
                 effective_chain_delay_ns - result.chain_delay_ns
@@ -1976,6 +2004,19 @@ class CoreRecorderV2:
             )
             return False
         effective_chain_delay_ns = int(round(residual_sec * 1e9))
+        # Layer B physical-plausibility guard — same rationale as
+        # the HPPS path; see ``_t6_disambiguate_via_t5_lb1421``.
+        T6_PHYSICAL_CHAIN_DELAY_MAX_NS = 250_000_000
+        if abs(effective_chain_delay_ns) > T6_PHYSICAL_CHAIN_DELAY_MAX_NS:
+            logger.warning(
+                f"HFPS T5 disambig: implied chain_delay "
+                f"{effective_chain_delay_ns/1e6:+.1f} ms exceeds "
+                f"physical-plausibility bound ±"
+                f"{T6_PHYSICAL_CHAIN_DELAY_MAX_NS/1e6:.0f} ms — "
+                f"sidelobe / phantom-peak capture.  Falling back "
+                f"to T4."
+            )
+            return False
         self._t6_diff_disambiguation_ns = (
             effective_chain_delay_ns - chain_delay_ns_raw
         )
@@ -2061,6 +2102,19 @@ class CoreRecorderV2:
             effective_chain_delay_ns = int(
                 result.chain_delay_ns + self._t6_disambiguation_ns
             )
+            # Layer B physical-plausibility guard — same rationale as
+            # the T5 path; see ``_t6_disambiguate_via_t5_lb1421``.
+            T6_PHYSICAL_CHAIN_DELAY_MAX_NS = 250_000_000
+            if abs(effective_chain_delay_ns) > T6_PHYSICAL_CHAIN_DELAY_MAX_NS:
+                logger.warning(
+                    f"T6 {ref_tier} disambig: implied chain_delay "
+                    f"{effective_chain_delay_ns/1e6:+.1f} ms exceeds "
+                    f"physical-plausibility bound ±"
+                    f"{T6_PHYSICAL_CHAIN_DELAY_MAX_NS/1e6:.0f} ms — "
+                    f"sidelobe / phantom-peak capture.  Not capturing "
+                    f"anchor; calibrator will retry on next first-lock."
+                )
+                return
             pps_firing_utc_ns = (ref_time - (ref_offset_ms / 1000.0))
             pps_firing_utc_ns = int(round(pps_firing_utc_ns * 1e9))
             self._t6_native_anchor = NativeAnchor(
@@ -2447,6 +2501,26 @@ class CoreRecorderV2:
                     if self._t6_mf_chain_delay_store is not None
                     else None
                 )
+                # Layer B physical-plausibility guard on the persisted
+                # value — if a previous session captured into a
+                # sidelobe (chain_delay > ~250 ms), loading it would
+                # immediately publish wrong SHM values.  Refuse and
+                # fall through to fresh disambig.  Same rationale as
+                # the per-capture guard in
+                # ``_t6_disambiguate_via_t5_lb1421``.
+                _PERSIST_GUARD_NS = 250_000_000
+                if (persisted is not None
+                        and abs(persisted.effective_chain_delay_ns)
+                            > _PERSIST_GUARD_NS):
+                    logger.warning(
+                        f"T6 persisted effective_chain_delay "
+                        f"{persisted.effective_chain_delay_ns/1e6:+.1f} ms "
+                        f"exceeds physical-plausibility bound ±"
+                        f"{_PERSIST_GUARD_NS/1e6:.0f} ms — previous "
+                        f"session captured into a sidelobe.  Falling "
+                        f"through to fresh disambig."
+                    )
+                    persisted = None
                 if persisted is not None and persisted.sample_rate == sr_local:
                     from .bpsk_chain_delay_store import compute_disambiguation_ns
                     self._t6_disambiguation_ns = compute_disambiguation_ns(
