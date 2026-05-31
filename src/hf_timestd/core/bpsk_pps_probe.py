@@ -2,7 +2,7 @@
 BpskPpsProbe — T6 authority probe.
 
 Reads /var/lib/timestd/status/core-recorder-status.json (written by
-timestd-core-recorder) and translates the embedded ``l6_pps`` block
+timestd-core-recorder) and translates the embedded ``t6_pps`` block
 into a ProbeResult for the AuthorityManager. T6 outranks T5 in
 T_LEVELS_RANKED, so when this probe reports available, the manager
 promotes the active level to T6 (subject to upgrade hysteresis) and
@@ -12,8 +12,8 @@ The probe is deliberately strict so an injector glitch can't masquerade
 as a high-authority source:
   - status file missing/unparseable → unavailable
   - status timestamp stale beyond ``freshness_sec`` → unavailable
-  - ``l6_pps.enabled == false`` → unavailable
-  - ``l6_pps.locked == false`` → unavailable
+  - ``t6_pps.enabled == false`` → unavailable
+  - ``t6_pps.locked == false`` → unavailable
   - ``pps_consecutive < min_consecutive`` → unavailable (rides over
     a single bursty noise edge but drops T6 during sustained noise)
 
@@ -35,7 +35,7 @@ the larger of three components:
   1. **Matched-filter jitter** — the producer's 60-sample rolling
      std-dev of ``chain_delay_ns`` (the BPSK matched filter's
      per-PPS edge-position estimate), published as
-     ``l6_pps.chain_delay_ns_std_ns``.  This is the physical noise
+     ``t6_pps.chain_delay_ns_std_ns``.  This is the physical noise
      of the BPSK PPS measurement itself.
 
   2. **Substrate residual** — ``|local_minus_source_ns|`` in ms.
@@ -144,25 +144,30 @@ class BpskPpsProbe:
                 reason=f"stale {age_sec:.0f}s > {self.freshness_sec:.0f}s",
             )
 
-        l6 = data.get("l6_pps")
-        if not isinstance(l6, dict):
+        # Canonical key is "t6_pps" (T-tier authority hierarchy).
+        # Accept the legacy "l6_pps" key transparently — operators
+        # running mixed producer/consumer versions during the rename
+        # transition shouldn't see their probe go unavailable just
+        # because the producer side is on the old key.
+        t6 = data.get("t6_pps") or data.get("l6_pps")
+        if not isinstance(t6, dict):
             return ProbeResult(
                 self.t_level, available=False,
-                reason="l6_pps block missing",
+                reason="t6_pps block missing",
             )
 
-        if not l6.get("enabled"):
+        if not t6.get("enabled"):
             return ProbeResult(
                 self.t_level, available=False,
-                reason="l6_pps disabled",
+                reason="t6_pps disabled",
             )
-        if not l6.get("locked"):
+        if not t6.get("locked"):
             return ProbeResult(
                 self.t_level, available=False,
                 reason="not locked",
             )
 
-        consec = int(l6.get("pps_consecutive", 0))
+        consec = int(t6.get("pps_consecutive", 0))
         if consec < self.min_consecutive:
             return ProbeResult(
                 self.t_level, available=False,
@@ -171,15 +176,15 @@ class BpskPpsProbe:
 
         # Pattern B: forward the SHM residual Δ as offset_ms.
         # See docstring + docs/TIMING-PIPELINE-WIRING.md §4.1 / §9.
-        residual_ns_raw = l6.get("local_minus_source_ns")
+        residual_ns_raw = t6.get("local_minus_source_ns")
         if residual_ns_raw is None:
             # The producer is the same hf-timestd version we are; this
-            # field should always be present once a TSL3 SHM push has
+            # field should always be present once an HPPS SHM push has
             # happened.  Missing → cold start, no push yet, or schema
             # skew.  Either way the cascade can't use a missing offset.
             return ProbeResult(
                 self.t_level, available=False,
-                reason="local_minus_source_ns missing — no TSL3 SHM push yet",
+                reason="local_minus_source_ns missing — no HPPS SHM push yet",
             )
         try:
             residual_ns = int(residual_ns_raw)
@@ -195,8 +200,8 @@ class BpskPpsProbe:
         # the field — fall back to the floor (matches prior hardcoded
         # behavior so authority cross-checks stay stable on mixed
         # versions).
-        std_ns_raw = l6.get("chain_delay_ns_std_ns")
-        std_window_raw = l6.get("chain_delay_ns_window")
+        std_ns_raw = t6.get("chain_delay_ns_std_ns")
+        std_window_raw = t6.get("chain_delay_ns_window")
         std_ns: Optional[float]
         std_window: Optional[int]
         try:
@@ -217,17 +222,17 @@ class BpskPpsProbe:
         # Diagnostic: local_minus_source_ns std (post-anchor computation
         # stability, NOT the physical σ).  Forwarded as-is for the
         # debugging view; not used for the published sigma_ms.
-        lms_std_raw = l6.get("local_minus_source_ns_std_ns")
+        lms_std_raw = t6.get("local_minus_source_ns_std_ns")
         try:
             lms_std_ns = float(lms_std_raw) if lms_std_raw is not None else None
         except (TypeError, ValueError):
             lms_std_ns = None
 
         detail = {
-            "pps_ok": int(l6.get("pps_ok", 0)),
-            "pps_noise": int(l6.get("pps_noise", 0)),
+            "pps_ok": int(t6.get("pps_ok", 0)),
+            "pps_noise": int(t6.get("pps_noise", 0)),
             "pps_consecutive": consec,
-            "chain_delay_ns": l6.get("chain_delay_ns"),
+            "chain_delay_ns": t6.get("chain_delay_ns"),
             "chain_delay_ns_std_ns": std_ns,
             "chain_delay_ns_window": std_window,
             "local_minus_source_ns": residual_ns,
@@ -235,16 +240,34 @@ class BpskPpsProbe:
             "sigma_floor_ms": self.sigma_floor_ms,
             "age_sec": round(age_sec, 3),
         }
-        # V1 fix layer 2 — forward drift-monitor flags into the
-        # ProbeResult detail so they appear in authority.json and any
-        # downstream consumer (Layer 3 re-capture trigger, sigmond
-        # health dashboard) can observe T6 degradation without parsing
-        # the upstream status file directly.  Block is None on
-        # pre-Layer-2 producers — treated as "no signal yet", not a
-        # failure.
-        drift_monitor = l6.get("drift_monitor")
-        if isinstance(drift_monitor, dict):
-            detail["drift_monitor"] = drift_monitor
+        # hf-timestd-native (RTP, UTC) anchor — forward into the
+        # ProbeResult detail so downstream consumers (authority
+        # publication, sigmond health dashboard, science archive
+        # readers) can convert any RTP timestamp to UTC via pure
+        # arithmetic without re-reading the upstream status file.
+        # See hf_timestd.core.native_anchor.  Block is None during
+        # cold start or after invalidation.
+        native_anchor = t6.get("native_anchor")
+        if isinstance(native_anchor, dict):
+            detail["native_anchor"] = native_anchor
+
+        # Pattern B: the anchor-derived ``rtp_to_utc_offset_ns``
+        # bridges ka9q's host-clock-derived rtp_to_wallclock to the
+        # native anchor.  Authority_manager prefers this over the
+        # MF-jitter-based ``offset_ms`` when present because it's the
+        # honest substrate offset, not a per-edge measurement
+        # residual.  See ``CoreRecorderV2._compute_rtp_to_utc_offset_ns``.
+        rtp_to_utc_offset_ns_raw = t6.get("rtp_to_utc_offset_ns")
+        rtp_to_utc_offset_ns: Optional[int]
+        try:
+            rtp_to_utc_offset_ns = (
+                int(rtp_to_utc_offset_ns_raw)
+                if rtp_to_utc_offset_ns_raw is not None else None
+            )
+        except (TypeError, ValueError):
+            rtp_to_utc_offset_ns = None
+        if rtp_to_utc_offset_ns is not None:
+            detail["rtp_to_utc_offset_ns"] = rtp_to_utc_offset_ns
 
         return ProbeResult(
             self.t_level,

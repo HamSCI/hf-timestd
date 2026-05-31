@@ -82,6 +82,18 @@ delay — drifts in §8 become observable in real time.  That is a
 *science / metrology benefit*, not a separate tier; the tier of the
 published annotation is still T6.
 
+**Anchor capture vs. ongoing annotation.**  At first lock the cascade
+chooses *which* lower tier supplies the integer-second context the
+T6 anchor freezes against (T5 NMEA when available, else T4 / T3 /
+T2).  After that moment the anchor itself — a frozen
+``(anchor_rtp, anchor_utc_ns, sample_rate_hz)`` triple plus the
+RF chain delay — *carries both* integer and fractional UTC for every
+subsequent sample.  Pure arithmetic:
+``utc_ns(rtp) = anchor_utc_ns + (rtp − anchor_rtp) × 10⁹ / sample_rate_hz``.
+The cascade's role is to authorise the *capture*; it is not
+consulted per-edge.  See ``hf_timestd.core.native_anchor`` and
+``docs/TIMING-PIPELINE-WIRING.md`` §5.4.
+
 **Local vs. received HF.**  Unlike *received* HF-PPS from a distant
 transmitter (which has ionospheric path variation), the TS-1's local
 injection has no propagation-medium variability.  T3 (HF Fusion) and

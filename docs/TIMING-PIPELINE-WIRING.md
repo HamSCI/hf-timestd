@@ -216,13 +216,43 @@ Once BPSK calibrator locks (typically within ~30 s of receiving
 samples), T6 probe reports `available=True`. Sub-µs precision.
 
 - Cascade promotes T6
-- **Disambiguation**: T6 measures a sub-second edge offset, but doesn't
-  know which integer GPS second the edge belongs to. The current
-  one-shot disambiguation against T3/T4/T5 in `core_recorder_v2.py:1200-1268`
-  becomes redundant under Pattern B — the active cascade already
-  resolves "which second" via its lower-tier witnesses. T6's offset
-  contribution is *fractional only*; the integer-second comes from
-  the cascade.
+- **Anchor capture**: at the first stable lock the matched-filter
+  edge RTP is paired with the integer UTC second supplied by the
+  highest-rank available lower tier (T5 NMEA from the LB-1421 when
+  present, else T4 chronyc-tracking, else T3 fusion). That pairing
+  becomes a frozen ``(anchor_rtp, anchor_utc_ns, sample_rate_hz,
+  chain_delay_ns)`` triple — the **hf-timestd-native anchor**, see
+  ``hf_timestd.core.native_anchor`` — persisted across restarts
+  (``bpsk_chain_delay_store.py`` schema v2) so subsequent boots
+  restore the anchor verbatim instead of re-running the
+  disambiguation. The cascade's role is *anchor-capture
+  authorisation* at first lock; it is **not** consulted per-edge.
+
+  After capture, every subsequent sample's UTC label is pure
+  arithmetic against the anchor:
+
+  ```
+  utc_ns(rtp) = anchor_utc_ns + (rtp − anchor_rtp) × 10⁹ / sample_rate_hz
+  ```
+
+  T6 therefore carries **both** the integer and the fractional
+  contribution.  ``rtp_to_utc_offset_ns`` in the published cascade
+  state is the constant that bridges ka9q's host-clock-derived
+  ``rtp_to_wallclock`` to the native anchor (computed in
+  ``core_recorder_v2._compute_rtp_to_utc_offset_ns``) so legacy
+  consumers that still route through ``rtp_to_wallclock`` inherit
+  the anchor-equivalent UTC without a code change.
+
+  **Historical note**: a previous draft of this section said "T6's
+  offset contribution is fractional only; the integer-second comes
+  from the cascade." That described the per-edge cascade-pairing
+  design that was in code before the native-anchor refactor (2026-05-31).
+  Under that design every BPSK PPS edge had to re-pair against a
+  fresh lower-tier reading, and the ±0.5 s pairing guard would
+  reject any lower-tier reading that was stale by more than half a
+  second — which the gpsdo-monitor 10 s probe interval made routine.
+  The native-anchor design retires the per-edge re-pairing entirely
+  by freezing the integer second at capture.
 
 ### 5.5 Steady state
 

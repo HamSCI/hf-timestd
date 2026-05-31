@@ -558,7 +558,23 @@ class AuthorityManager:
 
         if active in ("T3", "T6"):
             a_res = results[active]
-            if a_res.offset_ms is not None:
+            # T6 with a captured native anchor publishes the anchor-
+            # derived ``rtp_to_utc_offset_ns`` directly — that's the
+            # substrate-honest offset, bridging ka9q's host-clock
+            # rtp_to_wallclock to the native anchor without the per-
+            # edge MF jitter that ``offset_ms`` (= local_minus_source_ns)
+            # carries.  When present, prefer it.  Falls back to the
+            # offset_ms path when the anchor isn't captured yet (cold
+            # start) or on T3.  See
+            # ``CoreRecorderV2._compute_rtp_to_utc_offset_ns`` and
+            # ``docs/TIMING-PIPELINE-WIRING.md`` §4 / §5.4.
+            anchor_offset_ns = (
+                a_res.detail.get("rtp_to_utc_offset_ns")
+                if a_res.detail else None
+            )
+            if active == "T6" and isinstance(anchor_offset_ns, int):
+                offset_ns = anchor_offset_ns
+            elif a_res.offset_ms is not None:
                 offset_ns = int(round(a_res.offset_ms * 1_000_000))
             if a_res.sigma_ms is not None:
                 sigma_ns = int(round(a_res.sigma_ms * 1_000_000))

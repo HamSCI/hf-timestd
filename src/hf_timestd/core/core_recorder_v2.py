@@ -272,9 +272,10 @@ class CoreRecorderV2:
         # exists only to feed the calibrator, not for storage.
         # NOTE: the public terminology was renamed L6→T6 (T-level authority
         # tier; see authority_manager.T_LEVELS_RANKED). The config section
-        # is still ``[timing.l6_pps]`` so existing /etc/hf-timestd/timestd-
-        # config.toml files keep working — rename the section in a
-        # deploy-coordinated commit.
+        # is canonically ``[timing.t6_pps]``; older deployed configs using
+        # the historical ``[timing.l6_pps]`` key still load with a
+        # one-time deprecation warning (see config-key backward-compat
+        # block in __init__).  Status JSON key is ``t6_pps``.
         self._t6_calibrator = None
         # Differential-detector sidecar (offline A/B analysis).  Opt-in
         # via t6_config['enable_diff_sidecar'] = True.  Runs alongside
@@ -327,7 +328,7 @@ class CoreRecorderV2:
         # accepted PPS edge, ~1 Hz).  std-dev across the window is the
         # observed BPSK matched-filter jitter — the dominant physical
         # uncertainty contribution to TSL3.  Published in the status
-        # JSON as l6_pps.chain_delay_ns_std_ns; BpskPpsProbe converts
+        # JSON as t6_pps.chain_delay_ns_std_ns; BpskPpsProbe converts
         # it to authority.t6_sigma_ms (floored at sigma_floor_ms so we
         # don't under-claim during calm windows).  60 samples ≈ 1 min
         # of recent history — long enough to average out per-PPS noise,
@@ -341,50 +342,23 @@ class CoreRecorderV2:
         # σ signal but stays visible in the probe.detail block for
         # debugging.
         self._t6_local_minus_source_history = deque(maxlen=60)
-        # V1 fix per docs/TIMING-PIPELINE-WIRING.md §10.3 path 2a (option 2):
-        # the RTP→wall_time math for TSL3 SHM uses a *fresh* GPS/RTP
-        # anchor — refreshed by _t6_timing_poll_loop — instead of the
-        # frozen ChannelInfo captured at discover_channels() time.
-        # ka9q's rtp_to_wallclock is no longer used on the T6 path.
-        self._t6_latest_gps_time_ns = None
-        self._t6_latest_rtp_timesnap = None
-        # time.monotonic() when the (gps_time, rtp_timesnap) pair was
-        # captured.  Phase 2B uses this to extrapolate the anchor's UTC
-        # prediction forward to the NMEA-read instant when computing the
-        # T5 anchor-disagreement offset.  None until the first anchor
-        # seed completes.
-        self._t6_latest_anchor_monotonic = None
-        self._t6_timing_lock = threading.Lock()
-        self._t6_timing_poll_thread = None
-        self._t6_timing_poll_stop = threading.Event()
-        # V1 fix layer 2 — drift monitor (TIMING-PIPELINE-WIRING.md §10.3).
-        # Two independent signals are tracked against the settled-capture
-        # anchor; both publish via ``_write_status`` → ``BpskPpsProbe`` →
-        # ``authority.json`` so downstream consumers can see degradation.
-        # Layer 2 is monitor-only — Layer 3 will use these flags to drive
-        # re-capture.  See ``_t6_check_anchor_consistency`` and
-        # ``_t6_check_delta_breach`` for the math.
-        self._t6_drift_first_breach_wall: Optional[float] = None
-        self._t6_drift_flag_sustained: bool = False
-        self._t6_drift_flag_anchor_discontinuity: bool = False
-        self._t6_drift_anchor_residual_samples: Optional[int] = None
-        # Consecutive polls on which the anchor residual has breached
-        # T6_ANCHOR_DISCONTINUITY_SAMPLES — the persistence gate that
-        # keeps reading noise from triggering a re-capture (Signal A).
-        self._t6_drift_residual_breach_count: int = 0
-        self._t6_drift_last_check_wall: Optional[float] = None
-        self._t6_drift_anchor_gps_ns: Optional[int] = None
-        self._t6_drift_anchor_rtp_timesnap: Optional[int] = None
-        # V1 fix layer 3 — re-capture state.  Reaction lives on the
-        # poll thread (the sample callback can't block on the
-        # 60-second settled-capture gate).  See _t6_react_to_flags
-        # and _t6_attempt_recapture.
-        self._t6_recapture_count: int = 0
-        self._t6_last_recapture_wall: Optional[float] = None
-        self._t6_last_recapture_reason: Optional[str] = None
-        self._t6_recapture_wall_history: deque = deque(
-            maxlen=self.T6_RECAPTURE_MAX_PER_HOUR + 1
-        )
+        # hf-timestd-native (RTP, UTC) anchor — the single source of
+        # truth for T6 RTP→UTC labelling.  Captured once at first
+        # BPSK PPS lock by pairing the matched-filter edge RTP with
+        # the LB-1421 USB-NMEA UTC second, or loaded from the schema-
+        # v2 ChainDelayStore at startup.  Pure arithmetic from this
+        # anchor onward — no host-clock-derived projection, no
+        # rtp_to_wallclock chain.  See
+        # ``hf_timestd.core.native_anchor`` and the §1 substrate
+        # principle in ``docs/ARCHITECTURE-FIRST-PRINCIPLES.md``.
+        #
+        # Lifecycle: None at startup until either (a) the v2 store
+        # restores it or (b) first-lock disambig captures it.
+        # Invalidated (set back to None) when the calibrator unlocks
+        # or the GPSDO drops to A0 — the next first-lock recaptures.
+        # No continuous drift-monitor feedback; the anchor is either
+        # valid or it isn't.
+        self._t6_native_anchor = None
         # Wrap-rejection guard: the BPSK calibrator algorithm has a known
         # cascade where a noise edge near the half-second mark from a real
         # edge displaces the reference and causes chain_delay to wrap by
@@ -462,7 +436,27 @@ class CoreRecorderV2:
         # injection, T5 is unavailable and the disambig falls through
         # to T4 chronyc tracking as before.
         self._lb1421_probe = None
-        self._t6_config = config.get('timing', {}).get('l6_pps', {})
+        # Config-key backward-compat: the canonical key is
+        # [timing.t6_pps] (matching the T-tier authority hierarchy).
+        # Older deployed configs still use [timing.l6_pps] (the
+        # historical "Level 6" name); accept either, prefer t6_pps,
+        # warn once on the legacy form so operators can migrate at
+        # their own cadence.
+        _timing_section = config.get('timing', {})
+        _t6_cfg = _timing_section.get('t6_pps')
+        _legacy_cfg = _timing_section.get('l6_pps')
+        if _t6_cfg is not None:
+            self._t6_config = _t6_cfg
+        elif _legacy_cfg is not None:
+            logger.warning(
+                "[timing.l6_pps] config key is deprecated — rename to "
+                "[timing.t6_pps] to match the T-tier authority "
+                "hierarchy.  Continuing to accept the legacy key for "
+                "now; future releases will require [timing.t6_pps]."
+            )
+            self._t6_config = _legacy_cfg
+        else:
+            self._t6_config = {}
         # Apply chain_delay calibration knob now that _t6_config is set
         # (referenced by HFPS NMEA-anchored SHM push).
         self._t6_chain_delay_calib_s = float(
@@ -471,7 +465,7 @@ class CoreRecorderV2:
         if self._t6_config.get('enabled', False):
             freq_hz = self._t6_config.get('frequency_hz')
             if freq_hz is None:
-                logger.error("timing.l6_pps.enabled=true but frequency_hz not set — T6 disabled")
+                logger.error("timing.t6_pps.enabled=true but frequency_hz not set — T6 disabled")
             else:
                 sr = int(self._t6_config.get('sample_rate',
                          self.channel_defaults.get('sample_rate', 24000)))
@@ -901,7 +895,6 @@ class CoreRecorderV2:
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals."""
         logger.info(f"Received signal {signum}, shutting down...")
-        self._t6_timing_poll_stop.set()
         self._wwvb_decode_stop.set()
         self.running = False
 
@@ -1249,23 +1242,6 @@ class CoreRecorderV2:
             )
             self._t6_stream.start()
             logger.info(f"T6 BPSK PPS stream started: {desc} at {freq_hz/1e6:.6f} MHz")
-
-            # V1 fix per docs/TIMING-PIPELINE-WIRING.md §10.3 path 2a option 2.
-            # Start the T6 timing-anchor refresh thread so the TSL3 SHM math
-            # uses a fresh (gps_time, rtp_timesnap) pair each push, not the
-            # ChannelInfo frozen at discover_channels() time.
-            if self._t6_timing_poll_thread is None:
-                self._t6_timing_poll_stop.clear()
-                self._t6_timing_poll_thread = threading.Thread(
-                    target=self._t6_timing_poll_loop,
-                    name="T6TimingPoll",
-                    daemon=True,
-                )
-                self._t6_timing_poll_thread.start()
-                logger.info(
-                    f"T6 timing-anchor refresh thread started "
-                    f"(interval={self.T6_TIMING_POLL_SEC}s)"
-                )
         except Exception as e:
             logger.error(f"Failed to start T6 BPSK PPS stream: {e}", exc_info=True)
             self._t6_stream = None
@@ -1568,78 +1544,6 @@ class CoreRecorderV2:
     # cadence, eliminating most of the per-T6-poll multicast overhead
     # while keeping discontinuity detection well within
     # T6_DRIFT_SUSTAINED_SEC (60 s).
-    T6_TIMING_POLL_SEC = 30.0
-    T6_TIMING_POLL_LISTEN_SEC = 0.5
-
-    # V1 fix layer 2 — drift monitor thresholds.  See
-    # docs/TIMING-PIPELINE-WIRING.md §10.3 step 2.
-    #
-    # Signal A (anchor consistency).  At each poll, we project the
-    # captured anchor's (gps_time, rtp_timesnap) forward by the elapsed
-    # gps_time and compare to radiod's freshly-reported rtp_timesnap.
-    # A residual above this threshold means either radiod restarted
-    # (RTP counter discontinuity) or the host clock took an unannounced
-    # step large enough to invalidate the anchor.  1000 samples ≈ 10 ms
-    # at 96 kHz.
-    #
-    # TSL3 anchor-churn fix (2026-05-18, docs/TIMING-PIPELINE-WIRING.md
-    # §10.3): a *single* discover_channels reading is far noisier than
-    # this threshold — measured noise floor ≈ ±400 samples, with
-    # intermittent outliers of tens of thousands of samples (radiod
-    # status-emit jitter / a stale status packet caught in the listen
-    # window).  Acting on one such reading re-captured the anchor every
-    # ~minute — exactly the "periodic refresh" §10.3 identifies as wrong
-    # (it re-injects chrony's slew + reading noise into Δ).  So the
-    # *residual* check raises the flag only after the threshold is
-    # breached on T6_ANCHOR_DISCONTINUITY_POLLS *consecutive* polls: a
-    # genuine radiod restart / clock step is a permanent discontinuity
-    # that breaches every poll, while a noise outlier is transient and
-    # resets the counter.  The anchor then stays frozen (the §10.3
-    # design) in normal operation.  (The counter-rollback check below is
-    # an unambiguous namespace change and still fires immediately.)
-    T6_ANCHOR_DISCONTINUITY_SAMPLES = 1000
-    # Consecutive breaching polls (at the 5 s poll cadence) required
-    # before the residual check flags a discontinuity.  5 → 25 s of
-    # sustained breach: a real restart/clock-step clears that trivially,
-    # a run of independent noise outliers effectively never does.
-    T6_ANCHOR_DISCONTINUITY_POLLS = 5
-    # Signal B (sustained Δ breach).  Δ = chrony's view of TSL3 offset.
-    # In settled operation |Δ| stays sub-µs.  A sustained breach of
-    # 1 ms for ≥ 60 s indicates the anchor has lost validity or the
-    # sample clock has walked far enough that the TSL3 SHM feed is
-    # misleading chrony.  Layer 3 uses these flags to drive
-    # re-capture; Layer 2 only surfaces them.
-    T6_DRIFT_HARD_THRESHOLD_NS = 1_000_000  # 1 ms
-    T6_DRIFT_SUSTAINED_SEC = 60.0
-
-    # Phase 2B — T5 anchor-disagreement offset.  Cap on anchor age
-    # (seconds, host monotonic) before we decline to compute the
-    # offset.  Extrapolating UTC across a stale anchor accumulates
-    # rate-mismatch error; bounding by 1.2× the timing poll cadence
-    # keeps the typical extrapolation window ≤ 6 s — small compared
-    # to the breach signal Phase 2B is targeting (≥ 1 ms = T6 hard
-    # threshold).  Beyond this, the t5_lbe1421 block omits the
-    # anchor_offset_ns field and LbeT5DirectProbe falls back to the
-    # Phase 2A trust-tier defaults.
-    T6_T5_OFFSET_MAX_ANCHOR_AGE_SEC = T6_TIMING_POLL_SEC * 1.2
-
-    # V1 fix layer 3 — re-capture policy.  Consumes the Layer 2 flags
-    # (_t6_drift_flag_{anchor_discontinuity,sustained}) and re-runs
-    # the settled-capture gate + fresh discover_channels to replace
-    # both anchors atomically.
-    #
-    # Anchor discontinuity (Signal A): bypasses hysteresis — namespace
-    # changes are binary, the old anchor is invalid the moment the
-    # rollback or large-residual is detected.  Re-capture immediately.
-    #
-    # Sustained breach (Signal B): honors hysteresis to prevent
-    # ping-pong when a degraded condition is just barely above
-    # threshold.  Cooldown caps re-captures at one per N seconds;
-    # per-hour cap protects against pathological feedback loops
-    # (e.g. chrony oscillating and dragging Δ in and out of breach).
-    T6_RECAPTURE_COOLDOWN_SEC = 300.0   # 5 min minimum between recaptures
-    T6_RECAPTURE_MAX_PER_HOUR = 5       # rate cap (sustained-breach only)
-
     # V1 fix layer 1 (settled-capture gate) per
     # docs/TIMING-PIPELINE-WIRING.md §10.3.  Block _start_t6_stream's
     # discover_channels call until chrony has been settled for
@@ -1781,56 +1685,6 @@ class CoreRecorderV2:
 
         return None
 
-    def _compute_t5_anchor_offset(self, reading):
-        """Phase 2B — anchor-disagreement offset for the T5 substrate.
-
-        Returns ``(offset_ns, anchor_age_sec)`` when the RTP anchor is
-        fresh enough to extrapolate to the NMEA-read instant, else
-        ``(None, anchor_age_sec_or_None)`` so callers can surface the
-        reason without recomputing.
-
-        Math: extrapolate the anchor's UTC view forward from its
-        capture moment to ``reading.host_monotonic_at_read`` via host
-        monotonic elapsed time (monotonic and UTC both advance at
-        1 s/s, modulo chrony slewing which doesn't touch monotonic).
-        Compare to ``reading.pps_utc_sec``.  The diff is the anchor's
-        drift relative to NMEA truth, modulo a positive bias of
-        ~USB_delay (~few hundred ms for USB-CDC) — Phase 2B accepts
-        this bias and absorbs it into honest σ downstream.  Phase 2C+
-        can calibrate the bias.
-
-        Used by ``_write_status`` to populate the ``anchor_offset_ns``
-        field of the ``t5_lbe1421`` block, which ``LbeT5DirectProbe``
-        then forwards as ``offset_ms`` for authority-state publication
-        and Phase 2B demote-on-breach selection.
-        """
-        if reading is None or not getattr(reading, "valid_fix", False):
-            return None, None
-        with self._t6_timing_lock:
-            gps_time_ns = self._t6_latest_gps_time_ns
-            anchor_mono = self._t6_latest_anchor_monotonic
-        if gps_time_ns is None or anchor_mono is None:
-            return None, None
-        anchor_age_sec = reading.host_monotonic_at_read - anchor_mono
-        if (anchor_age_sec < 0
-                or anchor_age_sec > self.T6_T5_OFFSET_MAX_ANCHOR_AGE_SEC):
-            return None, anchor_age_sec
-        # ka9q constants — inlined so the import surface stays local
-        # to this single path.  GPS_UTC_OFFSET = seconds between Unix
-        # and GPS epochs; GPS_LEAP_SECONDS = current leap (TAI-UTC-9).
-        GPS_UTC_OFFSET = 315964800
-        GPS_LEAP_SECONDS = 18
-        anchor_utc_at_set_sec = (
-            (gps_time_ns + 1_000_000_000 * (GPS_UTC_OFFSET - GPS_LEAP_SECONDS))
-            / 1_000_000_000
-        )
-        anchor_utc_at_nmea_read_sec = anchor_utc_at_set_sec + anchor_age_sec
-        true_utc_approx_sec = float(reading.pps_utc_sec)
-        offset_ns = int(round(
-            (anchor_utc_at_nmea_read_sec - true_utc_approx_sec) * 1_000_000_000
-        ))
-        return offset_ns, anchor_age_sec
-
     def attach_lb1421_probe(self, probe) -> None:
         """Inject an Lb1421T5Probe for use by T5 disambiguation.
 
@@ -1841,6 +1695,41 @@ class CoreRecorderV2:
         fall through to the existing chronyc-tracking path.
         """
         self._lb1421_probe = probe
+
+    def _compute_rtp_to_utc_offset_ns(self) -> Optional[int]:
+        """Pattern B: the offset that bridges ka9q's host-clock-derived
+        ``rtp_to_wallclock`` to the hf-timestd-native anchor.
+
+        For any RTP timestamp ``r``::
+
+            rtp_to_wallclock(r, channel) + offset_ns/1e9 == utc_ns_at_rtp(r, anchor)/1e9
+
+        The two sides are equal because the rate component is identical
+        (both ride the GPSDO-disciplined sample rate); only the *anchor*
+        differs, and that difference is constant across RTP samples,
+        equal to::
+
+            offset_ns = anchor.anchor_utc_ns − rtp_to_wallclock(anchor.anchor_rtp) × 1e9
+
+        Recomputed every status write because radiod's anchor refreshes
+        on its own cadence (sub-second under the v3.16 STATUS listener,
+        otherwise frozen at SSRC discovery).  Returns None when the
+        native anchor isn't captured yet or rtp_to_wallclock fails.
+        """
+        if (self._t6_native_anchor is None
+                or self._t6_channel_info is None):
+            return None
+        try:
+            from ka9q.rtp_recorder import rtp_to_wallclock
+            wall = rtp_to_wallclock(
+                int(self._t6_native_anchor.anchor_rtp) & 0xFFFFFFFF,
+                self._t6_channel_info,
+            )
+        except Exception:
+            return None
+        if wall is None:
+            return None
+        return int(self._t6_native_anchor.anchor_utc_ns - int(wall * 1e9))
 
     def _t5_implied_effective_chain_delay(self) -> Optional[float]:
         """Return T5-derived effective chain_delay (ns) for the current
@@ -1953,6 +1842,28 @@ class CoreRecorderV2:
             self._t6_disambiguation_ns = (
                 effective_chain_delay_ns - result.chain_delay_ns
             )
+            # Capture the hf-timestd-native (RTP, UTC) anchor for the
+            # T6 channel.  This is the moment everything in the
+            # native-anchor architecture pivots around — the only
+            # time the science path consults rtp_to_wallclock, and
+            # only to pair the matched-filter edge RTP with the
+            # NMEA-attested integer UTC second.  After this point the
+            # anchor lives in self._t6_native_anchor and all RTP→UTC
+            # labelling on the T6 path uses pure arithmetic against
+            # it.  See hf_timestd.core.native_anchor.
+            from .native_anchor import NativeAnchor
+            sr = int(self._t6_calibrator.sample_rate)
+            self._t6_native_anchor = NativeAnchor(
+                anchor_rtp=int(last_edge_rtp) & 0xFFFFFFFF,
+                anchor_utc_ns=(
+                    int(reading.pps_utc_sec) * 1_000_000_000
+                    + effective_chain_delay_ns
+                ),
+                sample_rate_hz=sr,
+                chain_delay_ns=int(effective_chain_delay_ns),
+                captured_at_utc_ns=int(reading.pps_utc_sec) * 1_000_000_000,
+                captured_via_tier="T5",
+            )
             logger.info(
                 f"T6 chain_delay disambiguated against T5 (LB-1421 NMEA): "
                 f"raw={result.chain_delay_ns} ns, "
@@ -1960,7 +1871,10 @@ class CoreRecorderV2:
                 f"NMEA_PPS_UTC={reading.pps_utc_sec}, "
                 f"delta={delta_sec*1000:+.3f} ms, "
                 f"effective_chain_delay={effective_chain_delay_ns} ns "
-                f"(no integer-sample-shift step — direct GPS reference)"
+                f"(no integer-sample-shift step — direct GPS reference); "
+                f"native_anchor: rtp={self._t6_native_anchor.anchor_rtp}, "
+                f"utc_ns={self._t6_native_anchor.anchor_utc_ns}, "
+                f"sr={sr}, tier=T5"
             )
             return True
         except Exception as e:
@@ -2079,6 +1993,27 @@ class CoreRecorderV2:
             self._t6_disambiguation_ns = int(round(
                 shift_samples * 1e9 / sr_local
             ))
+            # Capture the hf-timestd-native anchor against the
+            # cascade-resolved integer GPS second.  The effective
+            # chain delay just computed (= result.chain_delay_ns +
+            # disambig_ns) lets us back-derive the PPS firing UTC at
+            # this MF edge: ref_time after the integer-sample shift.
+            # captured_via_tier reflects which tier of the cascade
+            # supplied the integer second.
+            from .native_anchor import NativeAnchor
+            effective_chain_delay_ns = int(
+                result.chain_delay_ns + self._t6_disambiguation_ns
+            )
+            pps_firing_utc_ns = (ref_time - (ref_offset_ms / 1000.0))
+            pps_firing_utc_ns = int(round(pps_firing_utc_ns * 1e9))
+            self._t6_native_anchor = NativeAnchor(
+                anchor_rtp=int(last_edge_rtp) & 0xFFFFFFFF,
+                anchor_utc_ns=pps_firing_utc_ns + effective_chain_delay_ns,
+                sample_rate_hz=int(sr_local),
+                chain_delay_ns=effective_chain_delay_ns,
+                captured_at_utc_ns=pps_firing_utc_ns,
+                captured_via_tier=str(ref_tier),
+            )
             if shift_samples != 0:
                 logger.info(
                     f"T6 chain_delay disambiguated against {ref_tier} "
@@ -2087,13 +2022,18 @@ class CoreRecorderV2:
                     f"{result.chain_delay_ns} ns implied wall-time "
                     f"offset {offset_sec*1000:+.3f} ms; disagreement "
                     f"{disagreement_sec*1000:+.1f} ms; shifting "
-                    f"{shift_samples} samples ({self._t6_disambiguation_ns} ns)"
+                    f"{shift_samples} samples ({self._t6_disambiguation_ns} ns); "
+                    f"native_anchor: rtp={self._t6_native_anchor.anchor_rtp}, "
+                    f"utc_ns={self._t6_native_anchor.anchor_utc_ns}, "
+                    f"tier={ref_tier}"
                 )
             else:
                 logger.info(
                     f"T6 chain_delay disambiguated against {ref_tier}: "
                     f"already aligned within one sample "
-                    f"(disagreement {disagreement_sec*1000:+.3f} ms)"
+                    f"(disagreement {disagreement_sec*1000:+.3f} ms); "
+                    f"native_anchor: rtp={self._t6_native_anchor.anchor_rtp}, "
+                    f"tier={ref_tier}"
                 )
         except Exception as e:
             logger.warning(f"T6 disambiguation failed: {e}")
@@ -2218,225 +2158,6 @@ class CoreRecorderV2:
                     return None
         return None
 
-    def _t6_timing_poll_loop(self):
-        """Refresh the T6 (GPS/RTP) anchor periodically by re-querying
-        radiod's status stream.  Closes V1 for the TSL3 SHM path: every
-        SHM push uses a < T6_TIMING_POLL_SEC-old anchor instead of the
-        startup-frozen ChannelInfo.
-
-        Pattern mirrors stream_recorder_v2.py's timing poll thread —
-        we keep our own copy because the T6 stream is constructed
-        directly in core_recorder, not through stream_recorder.
-        """
-        # Seed from the initial ChannelInfo so the first SHM push has
-        # a valid anchor before this loop's first iteration completes.
-        if self._t6_channel_info is not None:
-            seed_gps = getattr(self._t6_channel_info, 'gps_time', None)
-            seed_rtp = getattr(self._t6_channel_info, 'rtp_timesnap', None)
-            if seed_gps is not None and seed_rtp is not None:
-                with self._t6_timing_lock:
-                    self._t6_latest_gps_time_ns = int(seed_gps)
-                    self._t6_latest_rtp_timesnap = int(seed_rtp)
-                    self._t6_latest_anchor_monotonic = time.monotonic()
-                logger.info(
-                    f"T6 timing anchor seeded: GPS_TIME={seed_gps}, "
-                    f"RTP_TIMESNAP={seed_rtp}"
-                )
-
-        our_ssrc = getattr(self._t6_channel_info, 'ssrc', None)
-        while not self._t6_timing_poll_stop.is_set():
-            # Wait first so the seed is the only value for the
-            # first T6_TIMING_POLL_SEC seconds (avoids a redundant
-            # discover_channels right after _start_t6_stream).
-            if self._t6_timing_poll_stop.wait(self.T6_TIMING_POLL_SEC):
-                return
-            try:
-                channels = discover_channels(
-                    self.status_address,
-                    listen_duration=self.T6_TIMING_POLL_LISTEN_SEC,
-                )
-            except Exception as e:
-                logger.debug(f"T6 timing poll: discover_channels failed: {e}")
-                continue
-
-            # Match by SSRC if known, else fall back to frequency.
-            fresh = None
-            if our_ssrc is not None:
-                fresh = channels.get(our_ssrc)
-            if fresh is None and self._t6_channel_info is not None:
-                target_freq = getattr(self._t6_channel_info, 'frequency', None)
-                if target_freq is not None:
-                    for info in channels.values():
-                        if abs(getattr(info, 'frequency', -1) - target_freq) < 1.0:
-                            fresh = info
-                            break
-
-            if fresh is None:
-                logger.debug("T6 timing poll: T6 channel not found in discovery")
-                continue
-            gps_ns = getattr(fresh, 'gps_time', None)
-            rtp_snap = getattr(fresh, 'rtp_timesnap', None)
-            if gps_ns is None or rtp_snap is None:
-                continue
-            with self._t6_timing_lock:
-                self._t6_latest_gps_time_ns = int(gps_ns)
-                self._t6_latest_rtp_timesnap = int(rtp_snap)
-                self._t6_latest_anchor_monotonic = time.monotonic()
-            # V1 fix layer 2 — anchor-consistency check (Signal A).
-            # Done outside the timing lock so the check can't stall the
-            # SHM-update path on the rare contention.
-            self._t6_check_anchor_consistency(int(gps_ns), int(rtp_snap))
-            # V1 fix layer 3 — react to flags raised by Signal A
-            # (just now) or Signal B (set asynchronously from the
-            # sample callback's _t6_check_delta_breach).
-            self._t6_react_to_flags()
-
-    def _t6_check_anchor_consistency(
-        self,
-        fresh_gps_ns: int,
-        fresh_rtp_timesnap: int,
-    ) -> None:
-        """Layer 2 Signal A — project the captured anchor forward and
-        compare to radiod's fresh status reading.
-
-        The captured anchor (``_t6_drift_anchor_gps_ns``,
-        ``_t6_drift_anchor_rtp_timesnap``) is set ONCE the first time
-        this method runs after the poll thread starts.  Subsequent
-        calls project the anchor forward using ``elapsed_gps`` ×
-        sample_rate and compare against the freshly-reported
-        ``rtp_timesnap``.  In healthy operation the residual is
-        bounded by sample-clock quantization + radiod's status-emit
-        jitter — a few samples at most.
-
-        A residual above ``T6_ANCHOR_DISCONTINUITY_SAMPLES`` signals
-        that either:
-          - radiod restarted (RTP counter discontinuity), or
-          - the host system clock took a large unannounced step,
-            or
-          - the captured anchor itself was wrong.
-
-        Layer 2 raises the flag; Layer 3 will react by re-capturing.
-
-        Also catches the simpler case where either counter went
-        backwards (clear-cut RTP-namespace change).
-        """
-        # Anchor not yet seeded — capture this first refresh as the
-        # reference point.  The settled-capture gate guarantees this
-        # initial reading was taken with ε_0 ≈ 0.
-        if (self._t6_drift_anchor_gps_ns is None
-                or self._t6_drift_anchor_rtp_timesnap is None):
-            self._t6_drift_anchor_gps_ns = fresh_gps_ns
-            self._t6_drift_anchor_rtp_timesnap = fresh_rtp_timesnap
-            self._t6_drift_last_check_wall = time.monotonic()
-            logger.info(
-                f"T6 drift monitor: anchor seeded "
-                f"(gps_time={fresh_gps_ns}, rtp_timesnap={fresh_rtp_timesnap})"
-            )
-            return
-
-        self._t6_drift_last_check_wall = time.monotonic()
-
-        # Counter rollback is unambiguous evidence of namespace change.
-        if (fresh_gps_ns < self._t6_drift_anchor_gps_ns
-                or fresh_rtp_timesnap < self._t6_drift_anchor_rtp_timesnap):
-            if not self._t6_drift_flag_anchor_discontinuity:
-                logger.warning(
-                    f"T6 drift monitor: counter rollback detected "
-                    f"(anchor gps={self._t6_drift_anchor_gps_ns}, rtp={self._t6_drift_anchor_rtp_timesnap}; "
-                    f"fresh gps={fresh_gps_ns}, rtp={fresh_rtp_timesnap}) — "
-                    f"likely radiod restart"
-                )
-            self._t6_drift_flag_anchor_discontinuity = True
-            return
-
-        # We need the T6 sample rate to project the anchor.  The
-        # calibrator owns it; if absent, we cannot evaluate the
-        # residual but the rollback check above still fires.
-        if self._t6_calibrator is None:
-            return
-        sample_rate = getattr(self._t6_calibrator, 'sample_rate', None)
-        if not sample_rate or sample_rate <= 0:
-            return
-
-        elapsed_gps_ns = fresh_gps_ns - self._t6_drift_anchor_gps_ns
-        expected_rtp_delta = int(round(
-            elapsed_gps_ns * sample_rate / 1_000_000_000
-        ))
-        actual_rtp_delta = fresh_rtp_timesnap - self._t6_drift_anchor_rtp_timesnap
-        residual_samples = actual_rtp_delta - expected_rtp_delta
-        self._t6_drift_anchor_residual_samples = residual_samples
-
-        # Persistence gate (TSL3 anchor-churn fix — see
-        # T6_ANCHOR_DISCONTINUITY_POLLS).  A single discover_channels
-        # reading carries hundreds of samples of noise with intermittent
-        # outliers of tens of thousands; a genuine radiod restart / clock
-        # step is a *permanent* discontinuity that breaches every poll.
-        # Flag only after the residual has breached the threshold on
-        # T6_ANCHOR_DISCONTINUITY_POLLS consecutive polls — a lone noisy
-        # reading is ignored and the anchor stays frozen.
-        if abs(residual_samples) > self.T6_ANCHOR_DISCONTINUITY_SAMPLES:
-            self._t6_drift_residual_breach_count += 1
-            if (self._t6_drift_residual_breach_count
-                    >= self.T6_ANCHOR_DISCONTINUITY_POLLS
-                    and not self._t6_drift_flag_anchor_discontinuity):
-                logger.warning(
-                    f"T6 drift monitor: anchor discontinuity raised "
-                    f"(residual={residual_samples} samples > "
-                    f"{self.T6_ANCHOR_DISCONTINUITY_SAMPLES} on "
-                    f"{self._t6_drift_residual_breach_count} consecutive "
-                    f"polls, elapsed_gps={elapsed_gps_ns/1e9:.1f}s)"
-                )
-                self._t6_drift_flag_anchor_discontinuity = True
-        else:
-            if self._t6_drift_residual_breach_count > 0:
-                logger.debug(
-                    "T6 drift monitor: anchor residual back within "
-                    "threshold after %d consecutive breach(es) — transient "
-                    "noise, anchor held",
-                    self._t6_drift_residual_breach_count,
-                )
-            self._t6_drift_residual_breach_count = 0
-
-    def _t6_check_delta_breach(self, delta_ns: int) -> None:
-        """Layer 2 Signal B — track sustained |Δ| > threshold.
-
-        Called from ``_process_t6_samples`` immediately after
-        ``_t6_last_local_minus_source_ns`` is updated.  Maintains the
-        sustained-breach state machine:
-          - first sample where |Δ| > threshold: arm the timer.
-          - subsequent samples while above threshold: check duration.
-          - sample where |Δ| ≤ threshold: clear timer.
-
-        Logs only on flag transitions to keep the journal quiet during
-        normal operation.
-        """
-        now_mono = time.monotonic()
-        if abs(delta_ns) > self.T6_DRIFT_HARD_THRESHOLD_NS:
-            if self._t6_drift_first_breach_wall is None:
-                self._t6_drift_first_breach_wall = now_mono
-                # No log here — single breaches are routine on cold
-                # start before chrony settles.  We only care about
-                # sustained breaches.
-                return
-            duration = now_mono - self._t6_drift_first_breach_wall
-            if (duration >= self.T6_DRIFT_SUSTAINED_SEC
-                    and not self._t6_drift_flag_sustained):
-                logger.warning(
-                    f"T6 drift monitor: sustained Δ breach raised "
-                    f"(|Δ|={abs(delta_ns)/1e6:.2f} ms > "
-                    f"{self.T6_DRIFT_HARD_THRESHOLD_NS/1e6:.0f} ms for "
-                    f"{duration:.0f}s >= {self.T6_DRIFT_SUSTAINED_SEC:.0f}s)"
-                )
-                self._t6_drift_flag_sustained = True
-        else:
-            if self._t6_drift_flag_sustained:
-                logger.info(
-                    f"T6 drift monitor: sustained Δ breach cleared "
-                    f"(|Δ|={abs(delta_ns)/1e6:.3f} ms back below threshold)"
-                )
-            self._t6_drift_first_breach_wall = None
-            self._t6_drift_flag_sustained = False
-
     def _register_t6_with_status_listener(self, channel_info) -> None:
         """Wire the T6 channel into ka9q-python's continuous STATUS
         listener so its ``gps_time`` / ``rtp_timesnap`` anchor is
@@ -2480,189 +2201,6 @@ class CoreRecorderV2:
                 f"Failed to wire T6 channel into STATUS listener "
                 f"(falling back to Layer-3 cadence): {e}"
             )
-
-    def _t6_recapture_cooldown_remaining_sec(self) -> Optional[float]:
-        """Time (seconds) remaining before a sustained-breach re-capture
-        is allowed.  Returns 0 when no cooldown is active; None when no
-        prior recapture (cooldown not engaged)."""
-        if self._t6_last_recapture_wall is None:
-            return None
-        elapsed = time.monotonic() - self._t6_last_recapture_wall
-        remaining = self.T6_RECAPTURE_COOLDOWN_SEC - elapsed
-        return remaining if remaining > 0 else 0.0
-
-    def _t6_react_to_flags(self) -> None:
-        """Layer 3 — consume Layer 2 flags and trigger re-capture when
-        appropriate.  Runs on the poll thread after every
-        _t6_check_anchor_consistency call, so:
-
-          * Signal A (anchor discontinuity) is acted on the same poll
-            tick it was raised — bypasses hysteresis.
-          * Signal B (sustained breach) is checked every 5 s; hysteresis
-            (cooldown + per-hour cap) gates the actual re-capture.
-
-        Discontinuity takes precedence — if both flags are set
-        simultaneously (e.g. a radiod restart that also produced a Δ
-        spike), the single re-capture clears both.
-        """
-        if self._t6_drift_flag_anchor_discontinuity:
-            self._t6_attempt_recapture(
-                reason="anchor_discontinuity",
-                bypass_hysteresis=True,
-            )
-            return
-        if self._t6_drift_flag_sustained:
-            self._t6_attempt_recapture(
-                reason="sustained_breach",
-                bypass_hysteresis=False,
-            )
-
-    def _t6_attempt_recapture(
-        self,
-        reason: str,
-        *,
-        bypass_hysteresis: bool = False,
-    ) -> bool:
-        """Re-run the settled-capture gate and replace both anchors
-        atomically.  Returns True on successful re-capture; False if
-        skipped (hysteresis) or failed (chrony not settled, discovery
-        timeout, fresh ChannelInfo missing fields).
-
-        The atomic swap relies on Python reference assignment being
-        single-bytecode: ``self._t6_channel_info = new_ci`` is a
-        STORE_ATTR that the SHM-path reader on the sample thread
-        can never observe in a torn state.  Worst case it sees the
-        old ChannelInfo for one PPS edge and the new one on the
-        next — never a mix.
-        """
-        now_mono = time.monotonic()
-
-        if not bypass_hysteresis:
-            if (self._t6_last_recapture_wall is not None
-                    and now_mono - self._t6_last_recapture_wall
-                        < self.T6_RECAPTURE_COOLDOWN_SEC):
-                # Inside cooldown.  Log once per cooldown window
-                # (the flag stays set so this would otherwise spam).
-                remaining = (
-                    self.T6_RECAPTURE_COOLDOWN_SEC
-                    - (now_mono - self._t6_last_recapture_wall)
-                )
-                logger.debug(
-                    "T6 Layer 3: re-capture (reason=%s) suppressed by "
-                    "cooldown (%.0fs remaining)", reason, remaining,
-                )
-                return False
-            hour_ago = now_mono - 3600.0
-            recent = [t for t in self._t6_recapture_wall_history
-                      if t >= hour_ago]
-            if len(recent) >= self.T6_RECAPTURE_MAX_PER_HOUR:
-                logger.warning(
-                    "T6 Layer 3: re-capture (reason=%s) suppressed by "
-                    "per-hour cap (%d recaptures in last 60 min) — "
-                    "investigate persistent drift source",
-                    reason, len(recent),
-                )
-                return False
-
-        # Re-run the settle gate.  This blocks the poll thread for up
-        # to T6_SETTLE_TIMEOUT_SEC (60 s) — acceptable since the SHM
-        # update path doesn't depend on the poll thread's freshness
-        # during re-capture.
-        if not self._wait_for_chrony_settled():
-            logger.warning(
-                "T6 Layer 3: re-capture requested (reason=%s) but "
-                "chrony did not settle within timeout — skipping; "
-                "flags remain set, will retry next poll cycle",
-                reason,
-            )
-            return False
-
-        # Fresh discover_channels for our SSRC.
-        try:
-            channels = discover_channels(
-                self.status_address,
-                listen_duration=self.T6_TIMING_POLL_LISTEN_SEC,
-            )
-        except Exception as exc:
-            logger.warning(
-                "T6 Layer 3: discover_channels failed during "
-                "re-capture (reason=%s): %s", reason, exc,
-            )
-            return False
-
-        our_ssrc = (
-            getattr(self._t6_channel_info, 'ssrc', None)
-            if self._t6_channel_info is not None else None
-        )
-        fresh = channels.get(our_ssrc) if our_ssrc is not None else None
-        if fresh is None and self._t6_channel_info is not None:
-            target_freq = getattr(self._t6_channel_info, 'frequency', None)
-            if target_freq is not None:
-                for info in channels.values():
-                    if abs(getattr(info, 'frequency', -1) - target_freq) < 1.0:
-                        fresh = info
-                        break
-        if fresh is None:
-            logger.warning(
-                "T6 Layer 3: T6 channel not found in discovery during "
-                "re-capture (reason=%s, ssrc=%s)", reason, our_ssrc,
-            )
-            return False
-
-        fresh_gps_ns = getattr(fresh, 'gps_time', None)
-        fresh_rtp_snap = getattr(fresh, 'rtp_timesnap', None)
-        if fresh_gps_ns is None or fresh_rtp_snap is None:
-            logger.warning(
-                "T6 Layer 3: fresh ChannelInfo missing gps_time/"
-                "rtp_timesnap during re-capture (reason=%s)", reason,
-            )
-            return False
-
-        # Snapshot old values for the log line BEFORE the swap.
-        old_gps = self._t6_drift_anchor_gps_ns
-        old_rtp = self._t6_drift_anchor_rtp_timesnap
-
-        # Build the new ChannelInfo via copy so we don't mutate the
-        # in-flight object the SHM path may be reading.  copy.copy()
-        # is sufficient — ChannelInfo is a flat dataclass.
-        import copy as _copy
-        new_ci = _copy.copy(self._t6_channel_info)
-        new_ci.gps_time = int(fresh_gps_ns)
-        new_ci.rtp_timesnap = int(fresh_rtp_snap)
-        # Reference swap — atomic across the GIL.
-        self._t6_channel_info = new_ci
-        # Re-register the new ChannelInfo with the continuous STATUS
-        # listener so subsequent in-place anchor mutations land on the
-        # current object, not the now-orphaned pre-recapture copy.
-        self._register_t6_with_status_listener(new_ci)
-
-        with self._t6_timing_lock:
-            self._t6_latest_gps_time_ns = int(fresh_gps_ns)
-            self._t6_latest_rtp_timesnap = int(fresh_rtp_snap)
-            self._t6_latest_anchor_monotonic = time.monotonic()
-            self._t6_drift_anchor_gps_ns = int(fresh_gps_ns)
-            self._t6_drift_anchor_rtp_timesnap = int(fresh_rtp_snap)
-
-        # Clear Layer 2 state — next poll re-evaluates from clean.
-        self._t6_drift_flag_anchor_discontinuity = False
-        self._t6_drift_flag_sustained = False
-        self._t6_drift_first_breach_wall = None
-        self._t6_drift_anchor_residual_samples = 0
-        self._t6_drift_residual_breach_count = 0
-
-        # Accounting.
-        self._t6_recapture_count += 1
-        self._t6_last_recapture_wall = now_mono
-        self._t6_last_recapture_reason = reason
-        self._t6_recapture_wall_history.append(now_mono)
-
-        logger.warning(
-            "T6 Layer 3: anchor re-captured (reason=%s, count=%d): "
-            "old (gps=%s, rtp=%s) → new (gps=%s, rtp=%s)",
-            reason, self._t6_recapture_count,
-            old_gps, old_rtp, fresh_gps_ns, fresh_rtp_snap,
-        )
-        return True
 
     def _t6_on_samples(self, samples, quality):
         """Sample callback for the BPSK PPS stream — feeds the calibrator."""
@@ -2860,6 +2398,20 @@ class CoreRecorderV2:
                         sample_rate=sr_local,
                     )
                     age_s = time.time() - persisted.saved_at_unix
+                    # Restore the hf-timestd-native anchor from the v2
+                    # store if present.  When the file is v1 (no
+                    # anchor field), persisted.anchor is None and the
+                    # next disambig path will re-capture from a fresh
+                    # T5/T4 reading — same behaviour as a cold start.
+                    if persisted.anchor is not None:
+                        self._t6_native_anchor = persisted.anchor
+                        logger.info(
+                            f"T6 native anchor restored from store: "
+                            f"rtp={persisted.anchor.anchor_rtp}, "
+                            f"utc_ns={persisted.anchor.anchor_utc_ns}, "
+                            f"sr={persisted.anchor.sample_rate_hz}, "
+                            f"tier={persisted.anchor.captured_via_tier}"
+                        )
                     logger.info(
                         f"T6 chain_delay disambiguated against persisted "
                         f"effective={persisted.effective_chain_delay_ns} ns "
@@ -2883,12 +2435,16 @@ class CoreRecorderV2:
                 effective = result.chain_delay_ns + self._t6_disambiguation_ns
                 self._t6_last_chain_delay_ns = effective
                 effective_chain_delay = effective
-                # Persist the just-locked effective value so the next
-                # restart skips disambiguation entirely.
+                # Persist the just-locked effective value AND the
+                # native anchor (when present) so the next restart
+                # skips disambiguation entirely and restores the
+                # anchor verbatim.  See bpsk_chain_delay_store schema
+                # v2.
                 if self._t6_mf_chain_delay_store is not None:
                     self._t6_mf_chain_delay_store.save(
                         sample_rate=sr_local,
                         effective_chain_delay_ns=effective,
+                        anchor=self._t6_native_anchor,
                     )
                     self._t6_mf_saves_pending = 0
                 logger.info(
@@ -3023,6 +2579,7 @@ class CoreRecorderV2:
                         self._t6_mf_chain_delay_store.save(
                             sample_rate=self._t6_calibrator.sample_rate,
                             effective_chain_delay_ns=self._t6_last_chain_delay_ns,
+                            anchor=self._t6_native_anchor,
                         )
                         self._t6_mf_saves_pending = 0
 
@@ -3057,7 +2614,7 @@ class CoreRecorderV2:
             # infrastructure stays in place for diagnostic use while we
             # investigate the jitter.  See docs/TIMING-PIPELINE-WIRING.md
             # §10.3 for current status.
-            if self._t6_shm is not None and self._t6_channel_info is not None:
+            if self._t6_shm is not None and self._t6_native_anchor is not None:
                 try:
                     last_edge_rtp = getattr(self._t6_calibrator, '_last_edge_rtp', None)
                     edge_advanced = (
@@ -3065,50 +2622,59 @@ class CoreRecorderV2:
                         and last_edge_rtp != self._t6_last_pushed_rtp
                     )
                     if edge_advanced:
-                        # Compute raw wall-time without ka9q applying
-                        # chain_delay (chain_delay_correction_ns kept None
-                        # on the T6 channel), then apply chain_delay
-                        # manually as a metrology operation.
-                        self._t6_channel_info.chain_delay_correction_ns = None
-                        from ka9q.rtp_recorder import rtp_to_wallclock
-                        raw_wall_time_sec = rtp_to_wallclock(last_edge_rtp, self._t6_channel_info)
-                        if raw_wall_time_sec is not None:
-                            wall_time_sec = raw_wall_time_sec - (effective_chain_delay / 1e9)
-                            ref_time = round(wall_time_sec)
-                            # Δ = the residual chrony will observe as the
-                            # TSL3 offset.  Stored for the BpskPpsProbe to
-                            # forward via authority.json — Pattern B.
-                            self._t6_last_local_minus_source_ns = int(round(
-                                (wall_time_sec - ref_time) * 1e9
-                            ))
-                            # Append to rolling histories for σ computation.
-                            # chain_delay_ns is the BPSK matched-filter
-                            # edge-position estimate — its std across the
-                            # window IS the observed BPSK jitter that
-                            # BpskPpsProbe forwards as authority t6_sigma_ms.
-                            # local_minus_source_ns is logged alongside for
-                            # diagnostics (it captures post-anchor-frozen
-                            # computation stability, near-zero in normal
-                            # operation; NOT a useful σ signal).
-                            self._t6_chain_delay_history.append(
-                                float(effective_chain_delay)
-                            )
-                            self._t6_local_minus_source_history.append(
-                                self._t6_last_local_minus_source_ns
-                            )
-                            # V1 fix layer 2 — Signal B (sustained Δ breach).
-                            self._t6_check_delta_breach(
-                                self._t6_last_local_minus_source_ns
-                            )
-                            # precision -14 = 61 us, matches T6 sigma claim of 50 us
-                            self._t6_shm.update(
-                                reference_time=float(ref_time),
-                                system_time=wall_time_sec,
-                                precision=-14,
-                            )
-                            self._t6_last_pushed_rtp = last_edge_rtp
-                            self._t6_shm_push_count += 1
-                            self._t6_shm_last_push_wall = time.monotonic()
+                        # Native-anchor RTP→UTC.  Pure arithmetic against
+                        # the captured (RTP, UTC) pair — no consultation
+                        # of the host clock, no rtp_to_wallclock chain.
+                        # See hf_timestd.core.native_anchor.
+                        from .native_anchor import utc_ns_at_rtp
+                        edge_utc_ns = utc_ns_at_rtp(
+                            int(last_edge_rtp) & 0xFFFFFFFF,
+                            self._t6_native_anchor,
+                        )
+                        # PPS firing UTC = sample UTC − RF chain delay.
+                        pps_firing_utc_ns = (
+                            edge_utc_ns - self._t6_native_anchor.chain_delay_ns
+                        )
+                        ref_time_ns = (
+                            int(round(pps_firing_utc_ns / 1e9))
+                            * 1_000_000_000
+                        )
+                        # Sub-integer-second residual.  With a stable
+                        # native anchor this is the MF's own per-edge
+                        # measurement jitter (sub-µs in steady state)
+                        # — the honest σ that
+                        # docs/T6-ANNOTATION-VALUE-2026-05-24.md
+                        # "Implications #2" asks the system to publish.
+                        self._t6_last_local_minus_source_ns = int(
+                            pps_firing_utc_ns - ref_time_ns
+                        )
+                        # Histories — chain_delay tracks the MF estimate
+                        # for each edge; local_minus_source tracks the
+                        # post-anchor residual.  Both feed the σ
+                        # publication via BpskPpsProbe.
+                        self._t6_chain_delay_history.append(
+                            float(effective_chain_delay)
+                        )
+                        self._t6_local_minus_source_history.append(
+                            self._t6_last_local_minus_source_ns
+                        )
+                        # Chrony SHM facade — push (reference_time,
+                        # system_time) so chrony can discipline the
+                        # host clock toward GPS truth.  The chrony
+                        # convenience layer (see
+                        # docs/ARCHITECTURE-FIRST-PRINCIPLES.md §5)
+                        # is the only place we observe time.time() in
+                        # the T6 path — and even here only at the
+                        # facade boundary, never feeding back into
+                        # the anchor.
+                        self._t6_shm.update(
+                            reference_time=ref_time_ns / 1e9,
+                            system_time=time.time(),
+                            precision=-14,
+                        )
+                        self._t6_last_pushed_rtp = last_edge_rtp
+                        self._t6_shm_push_count += 1
+                        self._t6_shm_last_push_wall = time.monotonic()
                 except Exception as e:
                     # SHM push is non-fatal — log once per ~60 s of failures
                     if not getattr(self, '_t6_shm_warned', False):
@@ -3508,7 +3074,7 @@ class CoreRecorderV2:
             
             # T6 BPSK PPS calibrator status
             if self._t6_calibrator is not None:
-                status['l6_pps'] = {
+                status['t6_pps'] = {
                     'enabled': True,
                     'locked': self._t6_calibrator.locked,
                     # Costas carrier-recovery loop health (Layer A TSL3
@@ -3568,46 +3134,35 @@ class CoreRecorderV2:
                     'local_minus_source_ns_window': len(
                         self._t6_local_minus_source_history
                     ),
-                    # V1 fix layer 2 — drift monitor flags.  See
-                    # docs/TIMING-PIPELINE-WIRING.md §10.3 and
-                    # _t6_check_anchor_consistency / _t6_check_delta_breach.
-                    # Forwarded by BpskPpsProbe into authority.json; Layer 3
-                    # will consume these to drive re-capture.
-                    'drift_monitor': {
-                        'sustained_breach': self._t6_drift_flag_sustained,
-                        'anchor_discontinuity': self._t6_drift_flag_anchor_discontinuity,
-                        'anchor_residual_samples': self._t6_drift_anchor_residual_samples,
-                        # Consecutive residual breaches — the persistence
-                        # gate's counter (flags only at
-                        # T6_ANCHOR_DISCONTINUITY_POLLS).
-                        'residual_breach_count': self._t6_drift_residual_breach_count,
-                        'breach_duration_sec': (
-                            round(time.monotonic() - self._t6_drift_first_breach_wall, 1)
-                            if self._t6_drift_first_breach_wall is not None else None
-                        ),
-                        'last_check_age_sec': (
-                            round(time.monotonic() - self._t6_drift_last_check_wall, 1)
-                            if self._t6_drift_last_check_wall is not None else None
-                        ),
-                        'hard_threshold_ns': self.T6_DRIFT_HARD_THRESHOLD_NS,
-                        'sustained_threshold_sec': self.T6_DRIFT_SUSTAINED_SEC,
-                        'anchor_discontinuity_samples_threshold':
-                            self.T6_ANCHOR_DISCONTINUITY_SAMPLES,
-                        # V1 fix layer 3 — re-capture state.
-                        'recapture_count': self._t6_recapture_count,
-                        'last_recapture_age_sec': (
-                            round(time.monotonic() - self._t6_last_recapture_wall, 1)
-                            if self._t6_last_recapture_wall is not None else None
-                        ),
-                        'last_recapture_reason': self._t6_last_recapture_reason,
-                        'recapture_cooldown_remaining_sec': (
-                            round(rem, 1)
-                            if (rem := self._t6_recapture_cooldown_remaining_sec()) is not None
-                            else None
-                        ),
-                        'recapture_cooldown_sec': self.T6_RECAPTURE_COOLDOWN_SEC,
-                        'recapture_max_per_hour': self.T6_RECAPTURE_MAX_PER_HOUR,
-                    },
+                    # hf-timestd-native (RTP, UTC) anchor — the single
+                    # source of truth for T6 RTP→UTC labelling.  See
+                    # docs/ARCHITECTURE-FIRST-PRINCIPLES.md §1 and
+                    # hf_timestd.core.native_anchor.  None when no
+                    # anchor has been captured yet (cold start before
+                    # first lock) or after invalidation (GPSDO unlock,
+                    # MF unlock, RTP discontinuity).
+                    'native_anchor': (
+                        self._t6_native_anchor.to_json()
+                        if self._t6_native_anchor is not None else None
+                    ),
+                    # Pattern B publication: the scalar offset that,
+                    # added to ``rtp_to_wallclock(rtp, t6_channel_info)``
+                    # for any RTP, yields the same UTC the native
+                    # anchor would compute by pure arithmetic.  Lets
+                    # legacy consumers (those that still route through
+                    # ka9q's host-clock-derived anchor) inherit the
+                    # native-anchor accuracy without a code change —
+                    # the cascade adds this number, the consumer
+                    # applies it, the resulting UTC is anchor-equivalent.
+                    # See docs/TIMING-PIPELINE-WIRING.md §4 (Pattern B)
+                    # and §5.4 (the cascade's role).  Computed once per
+                    # status write since the radiod anchor refreshes on
+                    # its own cadence and the offset is otherwise a
+                    # near-constant.  None when no anchor is captured.
+                    'rtp_to_utc_offset_ns': (
+                        self._compute_rtp_to_utc_offset_ns()
+                        if self._t6_native_anchor is not None else None
+                    ),
                 }
 
             # T5 LBE-1421 status block — published so the AuthorityRunner
@@ -3627,22 +3182,6 @@ class CoreRecorderV2:
                         'age_sec': age_sec,
                         'device': str(getattr(lb_probe, 'device', '')),
                     }
-                    # Phase 2B — anchor-disagreement offset, populated
-                    # only when the reading has a valid fix AND the
-                    # RTP anchor is fresh enough to extrapolate.  When
-                    # omitted, LbeT5DirectProbe falls back to Phase 2A
-                    # trust-tier semantics (offset=0, σ=floor).
-                    offset_ns, anchor_age_sec = self._compute_t5_anchor_offset(reading)
-                    if offset_ns is not None:
-                        status['t5_lbe1421']['anchor_offset_ns'] = offset_ns
-                        status['t5_lbe1421']['anchor_age_sec'] = (
-                            round(anchor_age_sec, 3) if anchor_age_sec is not None else None
-                        )
-                    elif anchor_age_sec is not None:
-                        # Anchor present but too stale — surface that
-                        # so operators can correlate with the missing
-                        # offset.  Numeric anchor_age_sec, no offset.
-                        status['t5_lbe1421']['anchor_age_sec'] = round(anchor_age_sec, 3)
                 else:
                     status['t5_lbe1421'] = {
                         'enabled': True,

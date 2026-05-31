@@ -38,12 +38,34 @@ sub-sample biases between them that we keep separate)::
 
     /var/lib/timestd/bpsk_<source>_chain_delay.json
     {
-      "schema": "v1",
+      "schema": "v2",
       "saved_at_unix": 1779475864.0,
       "sample_rate": 96000,
       "effective_chain_delay_ns": 559121877,
-      "source": "MF" | "diff"
+      "source": "MF" | "diff",
+
+      // schema v2 additions — the hf-timestd-native (RTP, UTC) anchor
+      // captured at first lock.  Lets subsequent restarts skip
+      // re-disambiguation entirely AND lets the SHM push / authority
+      // publication consult a pure substrate value instead of
+      // ka9q.rtp_to_wallclock(), which rides radiod's host-clock-
+      // derived (gps_time, rtp_timesnap) anchor.  See
+      // ``hf_timestd.core.native_anchor`` and
+      // ``docs/ARCHITECTURE-FIRST-PRINCIPLES.md`` §1.
+      "anchor_rtp": 2107252660,           // 32-bit RTP of the MF-detected PPS edge
+      "anchor_utc_ns": 1780000000000000000,
+      "chain_delay_ns": 559121877,        // = effective_chain_delay_ns; kept here for the anchor's pure-function use
+      "captured_at_utc_ns": 1779999999000000000,
+      "captured_via_tier": "T5"           // or "T4" / "T3"
     }
+
+Backward compatibility: a v1 file (no anchor fields) is loaded with
+``anchor=None``; the caller falls through to the disambig path and
+captures a fresh anchor at first lock, then re-saves as v2.  A v2
+file read by a v1-only client trips the existing
+``data.get("schema") != "v1"`` reject path and is treated as absent
+— which is safe (causes a re-disambig, never a wrong-value
+acceptance).
 
 Freshness gate: 1 h.  Beyond that the underlying RF path may have been
 re-cabled or radiod reconfigured; the persisted value is no longer
@@ -59,6 +81,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+
+from hf_timestd.core.native_anchor import NativeAnchor
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +105,9 @@ class PersistedChainDelay:
     sample_rate: int
     effective_chain_delay_ns: int
     source: str
+    # Schema v2 additions — None when loaded from a v1 file.
+    anchor: "Optional[NativeAnchor]" = None
+    schema: str = "v1"
 
 
 class ChainDelayStore:
@@ -128,10 +155,11 @@ class ChainDelayStore:
             )
             return None
         try:
-            if data.get("schema") != "v1":
+            schema = data.get("schema")
+            if schema not in ("v1", "v2"):
                 logger.warning(
                     f"ChainDelayStore[{self.source}]: unknown schema "
-                    f"{data.get('schema')!r}; treating as absent"
+                    f"{schema!r}; treating as absent"
                 )
                 return None
             if data.get("source") != self.source:
@@ -140,11 +168,31 @@ class ChainDelayStore:
                     f"(file says {data.get('source')!r}); treating as absent"
                 )
                 return None
+            anchor: Optional[NativeAnchor] = None
+            if schema == "v2":
+                try:
+                    anchor = NativeAnchor.from_json({
+                        "anchor_rtp": data["anchor_rtp"],
+                        "anchor_utc_ns": data["anchor_utc_ns"],
+                        "sample_rate_hz": data["sample_rate"],
+                        "chain_delay_ns": data["chain_delay_ns"],
+                        "captured_at_utc_ns": data["captured_at_utc_ns"],
+                        "captured_via_tier": data["captured_via_tier"],
+                    })
+                except (KeyError, TypeError, ValueError) as exc:
+                    logger.warning(
+                        f"ChainDelayStore[{self.source}]: v2 anchor "
+                        f"fields malformed ({exc}); falling back to v1 "
+                        f"chain_delay-only interpretation"
+                    )
+                    anchor = None
             entry = PersistedChainDelay(
                 saved_at_unix=float(data["saved_at_unix"]),
                 sample_rate=int(data["sample_rate"]),
                 effective_chain_delay_ns=int(data["effective_chain_delay_ns"]),
                 source=str(data["source"]),
+                anchor=anchor,
+                schema=schema,
             )
         except (KeyError, TypeError, ValueError) as exc:
             logger.warning(
@@ -176,20 +224,37 @@ class ChainDelayStore:
         *,
         sample_rate: int,
         effective_chain_delay_ns: int,
+        anchor: Optional[NativeAnchor] = None,
         now_unix: Optional[float] = None,
     ) -> None:
         """Atomically write the new state.  Never raises on I/O — a
         persistence failure must not take the calibrator down.
+
+        When ``anchor`` is supplied, writes schema v2 with the
+        hf-timestd-native (RTP, UTC) anchor embedded.  When ``anchor``
+        is ``None``, writes schema v1 for backward compatibility with
+        any older readers (none in-tree once this commit lands, but
+        the field is kept optional during the transition).
         """
         if now_unix is None:
             now_unix = time.time()
-        payload = {
-            "schema": "v1",
-            "saved_at_unix": float(now_unix),
-            "sample_rate": int(sample_rate),
-            "effective_chain_delay_ns": int(effective_chain_delay_ns),
-            "source": self.source,
-        }
+        if anchor is not None:
+            payload = {
+                "schema": "v2",
+                "saved_at_unix": float(now_unix),
+                "sample_rate": int(sample_rate),
+                "effective_chain_delay_ns": int(effective_chain_delay_ns),
+                "source": self.source,
+                **anchor.to_json(),
+            }
+        else:
+            payload = {
+                "schema": "v1",
+                "saved_at_unix": float(now_unix),
+                "sample_rate": int(sample_rate),
+                "effective_chain_delay_ns": int(effective_chain_delay_ns),
+                "source": self.source,
+            }
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(self.path.suffix + ".tmp")

@@ -172,6 +172,22 @@ to the V1 anchor-staleness failure mode already documented in
    would let consumers see when annotation is bad without
    parsing the breach flags. Consider this as a Layer 5
    addition to authority publication.
+
+   **Update 2026-05-31 — superseded by the native-anchor refactor.**
+   The dominant error source identified above (anchor staleness
+   driving `|local_minus_source_ns|` to the p99 of 294 ms / max of
+   476 ms) was the result of riding ka9q's host-clock-derived
+   `(gps_time, rtp_timesnap)` anchor through `rtp_to_wallclock` on
+   every PPS edge. The native-anchor refactor freezes the anchor at
+   first lock and never re-reads ka9q's anchor on the science path,
+   eliminating the staleness mechanism. Under the new design
+   `local_minus_source_ns` becomes the matched filter's *own*
+   per-edge measurement jitter — which is the MF σ floor (~ns-class
+   in steady state). The `max(jitter, residual)` honesty addition
+   is therefore no longer needed: jitter and residual are the same
+   number. See `hf_timestd.core.native_anchor`,
+   `docs/TIMING-PIPELINE-WIRING.md` §5.4, and
+   `[[project_native_anchor_2026-05-31]]`.
 3. **`authority.json` §18.4 gap.** The legacy scalar-offset form
    loses the per-sample residual signal that's actually
    diagnostic. The §18.4 anchor-pair + rate form

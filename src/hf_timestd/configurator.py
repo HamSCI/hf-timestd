@@ -55,7 +55,7 @@ DEFAULT_CONFIG_PATH = Path(
 
 # Sections allowed in the apply payload.  Covers hf-timestd's full
 # schema as observed on bee1; anything else is rejected.  Note the
-# nested sub-tables — recorder.channel_group, timing.l6_pps,
+# nested sub-tables — recorder.channel_group, timing.t6_pps,
 # timing.coarse_time, timing.fusion_metrics, uploader.sftp,
 # uploader.metadata — are delivered as values UNDER those parent
 # section keys (TOML loads them as `recorder.channel_group: {...}`),

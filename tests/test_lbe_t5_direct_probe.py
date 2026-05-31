@@ -24,7 +24,7 @@ def _make_status(
 ):
     status = {
         "timestamp": timestamp,
-        "l6_pps": {"enabled": False},
+        "t6_pps": {"enabled": False},
     }
     if not omit_t5:
         if t5_block is None:
@@ -115,7 +115,7 @@ class LbeT5DirectProbeUnavailableTests(unittest.TestCase):
     def test_status_timestamp_missing_unavailable(self):
         from hf_timestd.core.lbe_t5_direct_probe import LbeT5DirectProbe
         with tempfile.TemporaryDirectory() as d:
-            p = _write({"l6_pps": {}, "t5_lbe1421": {"enabled": True,
+            p = _write({"t6_pps": {}, "t5_lbe1421": {"enabled": True,
                        "valid_fix": True, "age_sec": 0.5}}, d)
             probe = LbeT5DirectProbe(status_path=p, now_fn=lambda: NOW)
             r = probe.poll()
