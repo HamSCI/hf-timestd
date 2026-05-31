@@ -1771,10 +1771,19 @@ class CoreRecorderV2:
             )
             if raw_wall_time_sec is None:
                 return None
+            # Same integer-second alignment as the production T5
+            # disambig site — see ``_t6_disambiguate_via_t5_lb1421``
+            # for the rationale.  The sanity check here uses only the
+            # sub-second residual, which is the physical chain_delay.
             delta_sec = raw_wall_time_sec - reading.pps_utc_sec
-            if abs(delta_sec) > 0.5:
+            integer_offset = int(round(delta_sec))
+            effective_pps_utc_sec = (
+                int(reading.pps_utc_sec) + integer_offset
+            )
+            residual_sec = raw_wall_time_sec - effective_pps_utc_sec
+            if abs(residual_sec) > 0.5:
                 return None
-            return (raw_wall_time_sec - reading.pps_utc_sec) * 1e9
+            return residual_sec * 1e9
         except Exception:
             return None
 
@@ -1819,25 +1828,59 @@ class CoreRecorderV2:
             )
             if raw_wall_time_sec is None:
                 return False
-            # Pairing sanity: the host-clock anchor used by ka9q's
-            # rtp_to_wallclock must place the matched-filter edge
-            # within ±0.5 s of NMEA's claimed PPS UTC.  Beyond that the
-            # ambiguity is no longer "off by an integer second" but
-            # "off by an unknown N seconds" — fall back.
+            # Pair the matched-filter edge with the right integer GPS
+            # second.  ``reading.pps_utc_sec`` is the integer GPS
+            # second of the *latest* RMC observed by gpsdo-monitor —
+            # which is NMEA's attestation that GPSDO lock is active
+            # right now.  ``raw_wall_time_sec`` is the host-clock view
+            # of when the MF detected its edge sample — which can be
+            # several seconds in the past when the calibrator has
+            # rejected edges through a step-recovery burst, leaving
+            # ``_last_edge_rtp`` stale.
+            #
+            # The naive ``raw_wall − pps_utc_sec`` delta is therefore
+            # NOT chain_delay — it carries an integer-second offset
+            # equal to "how many full seconds the MF edge precedes the
+            # latest NMEA observation."  Round that integer offset out
+            # before extracting the sub-second residual.  The integer
+            # part is recovered structurally; only the sub-second
+            # residual = the physical chain_delay.
+            #
+            # Architecture compliance: the integer-second AUTHORITY
+            # remains NMEA's ``pps_utc_sec`` (the GPS-truth attestation).
+            # Wall-clock arithmetic on ``delta_sec`` is used only to
+            # INDEX which past integer second the MF edge belongs to —
+            # a sub-second indexing operation that the host clock,
+            # chrony-disciplined to within ms of GPS UTC, can do
+            # unambiguously.  ``ARCHITECTURE-FIRST-PRINCIPLES.md`` §1
+            # forbids the host clock as a *timing reference for the
+            # science product*; using it as a sub-second indexing
+            # signal at a one-shot anchor-capture moment is in scope.
             delta_sec = raw_wall_time_sec - reading.pps_utc_sec
-            if abs(delta_sec) > 0.5:
+            integer_offset = int(round(delta_sec))
+            effective_pps_utc_sec = (
+                int(reading.pps_utc_sec) + integer_offset
+            )
+            residual_sec = raw_wall_time_sec - effective_pps_utc_sec
+            if abs(residual_sec) > 0.5:
+                # Structurally unreachable when the rounding above is
+                # used correctly — kept as a defence against an
+                # off-by-one in the rounding or a host-clock vs GPS
+                # disagreement larger than 0.5 s (which would imply
+                # chrony has lost the network NTP source AND GPSDO
+                # discipline simultaneously).
                 logger.warning(
-                    f"T6 T5 disambig: host-clock anchor "
-                    f"({raw_wall_time_sec:.3f}) and NMEA PPS UTC "
-                    f"({reading.pps_utc_sec}) differ by "
-                    f"{delta_sec:+.3f} s — too wide for unambiguous "
-                    f"pairing.  Falling back to T4."
+                    f"T6 T5 disambig: post-alignment residual "
+                    f"{residual_sec:+.3f} s exceeds ±0.5 s "
+                    f"(raw_wall={raw_wall_time_sec:.3f}, "
+                    f"reading.pps_utc_sec={reading.pps_utc_sec}, "
+                    f"integer_offset={integer_offset:+d}); "
+                    f"falling back to T4."
                 )
                 return False
-            # Physical chain_delay = (raw_wall_time − true_PPS_UTC).
-            effective_chain_delay_ns = int(round(
-                (raw_wall_time_sec - reading.pps_utc_sec) * 1e9
-            ))
+            # Physical chain_delay = sub-second residual after the
+            # integer-second alignment above.
+            effective_chain_delay_ns = int(round(residual_sec * 1e9))
             # Back-derive disambig shift: effective = raw + disambig.
             self._t6_disambiguation_ns = (
                 effective_chain_delay_ns - result.chain_delay_ns
@@ -1856,20 +1899,24 @@ class CoreRecorderV2:
             self._t6_native_anchor = NativeAnchor(
                 anchor_rtp=int(last_edge_rtp) & 0xFFFFFFFF,
                 anchor_utc_ns=(
-                    int(reading.pps_utc_sec) * 1_000_000_000
+                    int(effective_pps_utc_sec) * 1_000_000_000
                     + effective_chain_delay_ns
                 ),
                 sample_rate_hz=sr,
                 chain_delay_ns=int(effective_chain_delay_ns),
-                captured_at_utc_ns=int(reading.pps_utc_sec) * 1_000_000_000,
+                captured_at_utc_ns=(
+                    int(effective_pps_utc_sec) * 1_000_000_000
+                ),
                 captured_via_tier="T5",
             )
             logger.info(
                 f"T6 chain_delay disambiguated against T5 (LB-1421 NMEA): "
                 f"raw={result.chain_delay_ns} ns, "
                 f"raw_wall_time={raw_wall_time_sec:.6f}, "
-                f"NMEA_PPS_UTC={reading.pps_utc_sec}, "
-                f"delta={delta_sec*1000:+.3f} ms, "
+                f"NMEA_PPS_UTC={reading.pps_utc_sec} "
+                f"(integer-aligned to {effective_pps_utc_sec}, "
+                f"offset={integer_offset:+d} s), "
+                f"residual={residual_sec*1000:+.3f} ms, "
                 f"effective_chain_delay={effective_chain_delay_ns} ns "
                 f"(no integer-sample-shift step — direct GPS reference); "
                 f"native_anchor: rtp={self._t6_native_anchor.anchor_rtp}, "
@@ -1909,36 +1956,46 @@ class CoreRecorderV2:
                 "(stale, no fix, or device closed)"
             )
             return False
+        # Same integer-second alignment as the HPPS path — see the
+        # rationale in ``_t6_disambiguate_via_t5_lb1421``.  NMEA's
+        # ``pps_utc_sec`` is the GPS-truth attestation; the integer
+        # offset between it and the (possibly stale) MF edge wall-time
+        # is recovered by rounding, not used as a rejection signal.
         delta_sec = raw_wall_time_sec - reading.pps_utc_sec
-        if abs(delta_sec) > 0.5:
+        integer_offset = int(round(delta_sec))
+        effective_pps_utc_sec = int(reading.pps_utc_sec) + integer_offset
+        residual_sec = raw_wall_time_sec - effective_pps_utc_sec
+        if abs(residual_sec) > 0.5:
             logger.warning(
-                f"HFPS T5 disambig: host-clock anchor "
-                f"({raw_wall_time_sec:.3f}) and NMEA PPS UTC "
-                f"({reading.pps_utc_sec}) differ by "
-                f"{delta_sec:+.3f} s — too wide for unambiguous "
-                f"pairing.  Falling back to T4."
+                f"HFPS T5 disambig: post-alignment residual "
+                f"{residual_sec:+.3f} s exceeds ±0.5 s "
+                f"(raw_wall={raw_wall_time_sec:.3f}, "
+                f"reading.pps_utc_sec={reading.pps_utc_sec}, "
+                f"integer_offset={integer_offset:+d}); "
+                f"falling back to T4."
             )
             return False
-        effective_chain_delay_ns = int(round(
-            (raw_wall_time_sec - reading.pps_utc_sec) * 1e9
-        ))
+        effective_chain_delay_ns = int(round(residual_sec * 1e9))
         self._t6_diff_disambiguation_ns = (
             effective_chain_delay_ns - chain_delay_ns_raw
         )
         # Capture the (NMEA GPS second, BPSK edge RTP) pair for the
         # NMEA-anchored SHM push path.  Subsequent edges count GPS
         # seconds from this pair using GPSDO-accurate RTP deltas,
-        # bypassing the ka9q anchor (which has the host-clock-bias-at-
-        # refresh-moment baked in and produces the long-run drift).
+        # bypassing the ka9q anchor.  Use the integer-aligned value
+        # (effective_pps_utc_sec), not the raw NMEA reading, so the
+        # pair refers to the MF edge's actual integer second.
         if edge_rtp is not None:
-            self._t6_diff_M_disambig = int(reading.pps_utc_sec)
+            self._t6_diff_M_disambig = int(effective_pps_utc_sec)
             self._t6_diff_edge_rtp_disambig = int(edge_rtp) & 0xFFFFFFFF
         logger.info(
             f"HFPS chain_delay disambiguated against T5 (LB-1421 NMEA): "
             f"raw={chain_delay_ns_raw} ns, "
             f"raw_wall_time={raw_wall_time_sec:.6f}, "
-            f"NMEA_PPS_UTC={reading.pps_utc_sec}, "
-            f"delta={delta_sec*1000:+.3f} ms, "
+            f"NMEA_PPS_UTC={reading.pps_utc_sec} "
+            f"(integer-aligned to {effective_pps_utc_sec}, "
+            f"offset={integer_offset:+d} s), "
+            f"residual={residual_sec*1000:+.3f} ms, "
             f"effective_chain_delay={effective_chain_delay_ns} ns "
             f"(no integer-sample-shift step — direct GPS reference); "
             f"NMEA-anchored pair: M={self._t6_diff_M_disambig}, "
