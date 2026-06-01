@@ -30,7 +30,7 @@ dependencies = [
     "ka9q-python>=3.14.0",  # 3.14.0 adds RadiodControl(client_id=) for per-(client, radiod) multicast destination derivation (CONTRACT v0.3 §7); 3.11.0 added low_edge/high_edge kwargs T6 BPSK calibrator uses for ±25 kHz channel filter
     "pandas>=2.0.0",
     "matplotlib>=3.7.0",
-    "iri2020 @ git+https://github.com/space-physics/iri2020.git",
+    "iri2020 @ git+https://github.com/space-physics/iri2020.git@8b6ab9ea3e30fd0c0ed46f556d5d0854c53b20ee",
     "zstandard>=0.22.0",
     "sysv_ipc>=1.1.0",
     "fastapi>=0.104.0",

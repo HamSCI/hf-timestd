@@ -1079,7 +1079,7 @@ requires-dist = [
     { name = "digital-rf", specifier = ">=2.6.0" },
     { name = "fastapi", specifier = ">=0.104.0" },
     { name = "flake8", marker = "extra == 'dev'", specifier = ">=6.0.0" },
-    { name = "iri2020", git = "https://github.com/space-physics/iri2020.git" },
+    { name = "iri2020", git = "https://github.com/space-physics/iri2020.git?rev=8b6ab9ea3e30fd0c0ed46f556d5d0854c53b20ee" },
     { name = "jinja2", specifier = ">=3.0.0" },
     { name = "ka9q-python", editable = "../ka9q-python" },
     { name = "lz4", marker = "extra == 'lz4'", specifier = ">=4.0.0" },
@@ -1192,7 +1192,7 @@ wheels = [
 [[package]]
 name = "iri2020"
 version = "1.0.0"
-source = { git = "https://github.com/space-physics/iri2020.git#8b6ab9ea3e30fd0c0ed46f556d5d0854c53b20ee" }
+source = { git = "https://github.com/space-physics/iri2020.git?rev=8b6ab9ea3e30fd0c0ed46f556d5d0854c53b20ee#8b6ab9ea3e30fd0c0ed46f556d5d0854c53b20ee" }
 dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },

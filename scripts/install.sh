@@ -513,6 +513,9 @@ log_step "Phase 4b: pyLAP (optional)"
 
 PHARLAP_HOME="${PHARLAP_HOME:-/opt/pharlap_4.7.4}"
 PYLAP_REPO="https://github.com/mijahauan/PyLap.git"
+# Pin pylap to a known-good commit (never a bare branch/HEAD) per
+# sigmond/docs/native-binaries.md.  Bump when a newer PyLap is validated.
+PYLAP_REF="a61ded200c1aea68ee6f7f553c27520087449adc"   # main @ 2026-06-01
 PYLAP_DIR="/opt/pylap"
 
 if [[ -d "$PHARLAP_HOME/lib" ]]; then
@@ -524,15 +527,19 @@ if [[ -d "$PHARLAP_HOME/lib" ]]; then
         apt-get install -y gfortran
     fi
 
-    # Clone or update pylap fork
+    # Clone or update pylap fork, then pin to PYLAP_REF (reproducible build)
     if [[ -d "$PYLAP_DIR/.git" ]]; then
-        log_info "Updating pylap fork..."
-        git -C "$PYLAP_DIR" pull --ff-only 2>/dev/null || \
-            log_warn "pylap git pull failed (non-critical)"
+        log_info "Fetching pylap fork..."
+        git -C "$PYLAP_DIR" fetch --quiet origin 2>/dev/null || \
+            log_warn "pylap git fetch failed (non-critical)"
     else
         log_info "Cloning pylap fork..."
         git clone "$PYLAP_REPO" "$PYLAP_DIR" 2>/dev/null || \
             { log_warn "pylap clone failed — raytracing will use geometric fallback"; }
+    fi
+    if [[ -d "$PYLAP_DIR/.git" ]]; then
+        git -C "$PYLAP_DIR" checkout --quiet "$PYLAP_REF" 2>/dev/null || \
+            log_warn "pylap checkout $PYLAP_REF failed — using current checkout"
     fi
 
     # Build pylap into the venv if source is present
