@@ -158,6 +158,9 @@ units = [
     "timestd-ionex-download.timer",
     "timestd-iono-reanalysis.timer",
     "timestd-pipeline-watchdog.timer",
+    "timestd-hfps-watchdog.timer",
+    "timestd-hpps-watchdog.timer",
+    "timestd-prune.timer",
     "grape-daily.timer",
     "grape-upload-retry.timer",
 ]
