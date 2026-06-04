@@ -334,8 +334,13 @@ log_step "Phase 3: Sync"
 
 RSYNC_OPTS=(-a --exclude '__pycache__' --exclude '*.pyc' --exclude '*.egg-info')
 
-# Source tree (pyproject.toml + src/)
-cp "$PROJECT_DIR/pyproject.toml" "$INSTALL_DIR/pyproject.toml"
+# Source tree (pyproject.toml + src/).  Guard the copy: in the in-place
+# deploy model INSTALL_DIR == PROJECT_DIR (see line ~40), so an unguarded
+# `cp` of pyproject.toml onto itself aborts with "are the same file" and
+# fails Phase 3.  The rsync steps below already no-op on src==dest; this
+# makes the cp match.
+[[ "$PROJECT_DIR/pyproject.toml" -ef "$INSTALL_DIR/pyproject.toml" ]] || \
+    cp "$PROJECT_DIR/pyproject.toml" "$INSTALL_DIR/pyproject.toml"
 rsync "${RSYNC_OPTS[@]}" "$PROJECT_DIR/src/" "$INSTALL_DIR/src/"
 log_info "Source tree synced"
 
