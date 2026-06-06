@@ -427,13 +427,10 @@ def load_paths_from_config(config_path: Optional[str | Path] = None) -> TimeStdP
     with open(config_path, 'r') as f:
         config = toml.load(f)
     
-    # Determine data root based on mode
-    mode = config.get('recorder', {}).get('mode', 'test')
-    
-    if mode == 'production':
-        data_root = config.get('recorder', {}).get('production_data_root', '/var/lib/timestd')
-    else:
-        data_root = config.get('recorder', {}).get('test_data_root', '/tmp/timestd-test')
+    # Single data root.  The legacy recorder.mode test/production toggle was
+    # removed: it defaulted to "test" -> /tmp, which silently broke real
+    # recorders (the sandbox mounts /tmp read-only).
+    data_root = config.get('recorder', {}).get('production_data_root', '/var/lib/timestd')
     
     return TimeStdPaths(data_root)
 

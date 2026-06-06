@@ -28,12 +28,9 @@ source = "radiod"
 [recorder]
 # engine = "phase-engine" # Set to phase-engine to enable automatic multi-station channel expansion
 engine = "radiod"
-# Mode: "test" (uses /tmp) or "production" (uses /var/lib/timestd)
-# Start with "test" to verify operation, then switch to "production"
-mode = "test"
 
-# Data paths (auto-created based on mode)
-test_data_root = "/tmp/timestd-test"
+# Data root (auto-created).  The legacy test/production "mode" toggle was
+# removed — it defaulted to /tmp and silently broke real recorders.
 production_data_root = "/var/lib/timestd"
 
 # Recording parameters
