@@ -222,16 +222,14 @@ if [[ -n "$ALERT_COMMAND" ]] && [[ $EXIT_CODE -ne 0 ]]; then
     eval "$ALERT_COMMAND"
 fi
 
-# Restart logic - only if BOTH sources have zero reach
+# Own-only recovery (sigmond docs/timing-chain-architecture.md): this monitor
+# MUST NOT restart chrony.  chrony is shared with gpsd; restarting it broke the
+# GPS reference and caused a restart storm.  Report only — remediation of a stale
+# FUSE/HPPS feed is restarting the *writers* (fusion/core-recorder) or the
+# smd-timing reconciler, never chrony.  (RESTART_ON_FAILURE kept for compat.)
 if [[ "$RESTART_ON_FAILURE" == "true" ]] && [[ "$BEST_REACH" -eq 0 ]]; then
-    echo "CRITICAL: Both FUSE and HPPS chrony sources have reach 0. Attempting to restart chrony..."
-    # Debian/Ubuntu = 'chrony', RHEL/Fedora = 'chronyd'
-    if systemctl list-units --type=service --no-pager 2>/dev/null | grep -q 'chrony.service'; then
-        systemctl restart chrony
-    else
-        systemctl restart chronyd
-    fi
-    echo "Restarted chrony. Fusion service should auto-reconnect."
+    echo "CRITICAL: Both FUSE and HPPS chrony sources have reach 0."
+    echo "  (not restarting chrony — shared with gpsd; restart the writers instead)"
 fi
 
 exit $EXIT_CODE

@@ -802,18 +802,21 @@ CHRONY_CONF=""
 [[ -z "$CHRONY_CONF" && -f "/etc/chrony.conf" ]] && CHRONY_CONF="/etc/chrony.conf"
 
 if [[ -n "$CHRONY_CONF" ]]; then
-    if ! grep -q "refclock SHM 0 refid TSL1" "$CHRONY_CONF" 2>/dev/null; then
-        tee -a "$CHRONY_CONF" > /dev/null <<'CHREOF'
-
-# HF Time Standard Dual Chrony Refclock Configuration
-# L1 Feed: Raw metrology fusion (backup)
-refclock SHM 0 refid TSL1 poll 4 precision 1e-3 offset 0.0 delay 0.002
-# L2 Feed: Calibrated timing fusion (primary HF source)
-refclock SHM 1 refid TSL2 poll 4 precision 1e-4 offset 0.0 delay 0.001 trust
-# Enable measurement logging for metrology validation
-log tracking measurements statistics
-CHREOF
-        log_info "Chrony SHM refclocks configured"
+    # FUSE (SHM 1) + HPPS (SHM 2) refclocks -- matches the code: timestd-fusion
+    # writes ChronySHM(unit=1)=FUSE, core-recorder writes ChronySHM(unit=2)=HPPS.
+    # SHM 0 is RESERVED for the host's GPS (gpsd / refid LG29) -- hf-timestd must
+    # NOT use it (the old "refclock SHM 0 refid TSL1" collided with gpsd and put
+    # the GPS reference on internet NTP).  Installed as a conf.d drop-in
+    # (idempotent), never appended to chrony.conf.  Stable SHM ownership is owned
+    # by sigmond-shm-precreate.service (NTP0-3 root:0666) on a sigmond/DASI2 host;
+    # see sigmond docs/timing-chain-architecture.md.
+    if [[ -d /etc/chrony/conf.d ]]; then
+        install -m 0644 "$PROJECT_DIR/config/chrony-timestd-refclocks.conf" \
+            /etc/chrony/conf.d/timestd-refclocks.conf
+        log_info "Chrony FUSE/HPPS refclocks installed (conf.d)"
+    elif ! grep -q 'refid FUSE' "$CHRONY_CONF" 2>/dev/null; then
+        echo "include $PROJECT_DIR/config/chrony-timestd-refclocks.conf" >> "$CHRONY_CONF"
+        log_info "Chrony FUSE/HPPS refclocks included in $CHRONY_CONF"
     fi
 
     # Ensure chrony logging is enabled (may be missing on older installs)
@@ -831,21 +834,19 @@ print(c.get('gnss_vtec', {}).get('host', ''))" 2>/dev/null)
             echo -e "\n# GNSS Timeserver (ZED-F9P)\nserver $GNSS_HOST iburst prefer" >> "$CHRONY_CONF"
             log_info "Added GNSS timeserver: $GNSS_HOST"
         fi
-    else
-        # No GNSS timeserver — make TSL2 the preferred source
-        if grep -q "refclock SHM 1 refid TSL2.*trust$" "$CHRONY_CONF" 2>/dev/null; then
-            sed -i 's/refclock SHM 1 refid TSL2\(.*\) trust$/refclock SHM 1 refid TSL2\1 trust prefer/' "$CHRONY_CONF"
-        fi
     fi
 
     log_info "Chrony config: OK"
 fi
 
-# Chronyd service override (start after fusion for correct SHM permissions)
-if [[ -f "$PROJECT_DIR/systemd/chronyd-timestd-shm.conf" ]]; then
-    mkdir -p /etc/systemd/system/chronyd.service.d
-    cp "$PROJECT_DIR/systemd/chronyd-timestd-shm.conf" /etc/systemd/system/chronyd.service.d/timestd-shm.conf
-fi
+# NOTE: the old chronyd-timestd-shm.conf drop-in (ordering chrony After the
+# timestd writers so they would create the SHM first) is intentionally NOT
+# installed.  It made chrony depend on hf-timestd (backwards -- chrony is shared
+# infra), was written to chronyd.service.d (Debian uses chrony.service, so it
+# never applied), and is superseded by stable SHM ownership from
+# sigmond-shm-precreate.service (NTP0-3 root:0666 before any producer/consumer).
+# A pure standalone hf-timestd host without that oneshot needs an equivalent SHM
+# pre-create -- see sigmond docs/timing-chain-architecture.md.
 
 # ── UDP receive buffers ──
 if [[ ! -f "/etc/sysctl.d/99-timestd.conf" ]]; then
