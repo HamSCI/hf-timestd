@@ -52,16 +52,19 @@ log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
 CONFIG_PATH="$DEFAULT_CONFIG"
 RECONFIG=false
 
+NON_INTERACTIVE=false
 while [[ $# -gt 0 ]]; do
     case $1 in
         --config)  CONFIG_PATH="$2"; shift 2 ;;
         --reconfig) RECONFIG=true; shift ;;
+        --non-interactive) NON_INTERACTIVE=true; shift ;;
         --help|-h)
             echo "Usage: $0 [--config /path/to/config.toml] [--reconfig]"
             echo ""
             echo "Options:"
             echo "  --config PATH   Write config to PATH (default: $DEFAULT_CONFIG)"
             echo "  --reconfig      Re-run wizard even if config already exists"
+            echo "  --non-interactive  Use sigmond/field defaults, never prompt"
             echo "  --help          Show this help"
             exit 0
             ;;
@@ -81,7 +84,7 @@ fi
 if [[ -f "$CONFIG_PATH" && "$RECONFIG" == "false" ]]; then
     echo ""
     echo -e "${YELLOW}Configuration already exists:${NC} $CONFIG_PATH"
-    read -rp "Overwrite with new settings? [y/N] " overwrite
+    if [[ "${NON_INTERACTIVE:-false}" == "true" ]]; then overwrite=n; else read -rp "Overwrite with new settings? [y/N] " overwrite; fi
     if [[ ! "$overwrite" =~ ^[Yy]$ ]]; then
         log_info "Keeping existing configuration."
         exit 0
@@ -111,6 +114,15 @@ prompt() {
 
     if [[ -n "$help_text" ]]; then
         echo -e "  ${DIM}${help_text}${NC}"
+    fi
+
+    if [[ "${NON_INTERACTIVE:-false}" == "true" ]]; then
+        result="$default"
+        if [[ -z "$result" && "$required" == "true" ]]; then
+            echo -e "  ${DIM}(non-interactive) ${prompt_text}: left empty — set later with: smd config edit hf-timestd${NC}"
+        fi
+        printf -v "$varname" '%s' "$result"
+        return
     fi
 
     while true; do
@@ -165,6 +177,11 @@ prompt_yn() {
     local default="${3:-n}"
     local result=""
 
+    if [[ "${NON_INTERACTIVE:-false}" == "true" ]]; then
+        case "$default" in [Yy]*) printf -v "$varname" 'true' ;; *) printf -v "$varname" 'false' ;; esac
+        return
+    fi
+
     while true; do
         read -rp "  $prompt_text [$(echo "$default" | sed 's/y/Y\/n/;s/n/y\/N/')]: " result
         result="${result:-$default}"
@@ -187,6 +204,14 @@ prompt_choice() {
         echo -e "    $((i+1))) ${options[$i]}"
     done
     echo ""
+
+    if [[ "${NON_INTERACTIVE:-false}" == "true" ]]; then
+        local selected="${options[0]}"
+        selected="${selected%% —*}"; selected="${selected%% -*}"
+        selected="$(echo "$selected" | xargs)"
+        printf -v "$varname" '%s' "$selected"
+        return
+    fi
 
     while true; do
         read -rp "  $prompt_text [1-${#options[@]}]: " choice
@@ -240,7 +265,7 @@ echo "    - Timing source (radiod's clock authority)"
 echo "    - Optional: PSWS station/instrument IDs + TOKEN (for GRAPE uploads)"
 echo "    - Optional: GNSS VTEC receiver address (if you have a ZED-F9P)"
 echo ""
-read -rp "  Press Enter to continue..."
+[[ "${NON_INTERACTIVE:-false}" == "true" ]] || read -rp "  Press Enter to continue..."
 
 # =============================================================================
 # Section 1: Station Identity
@@ -461,7 +486,7 @@ echo ""
 echo -e "  ${BOLD}Config will be written to:${NC} $CONFIG_PATH"
 echo ""
 
-read -rp "  Write this configuration? [Y/n] " confirm
+if [[ "${NON_INTERACTIVE:-false}" == "true" ]]; then confirm=Y; else read -rp "  Write this configuration? [Y/n] " confirm; fi
 confirm="${confirm:-Y}"
 if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
     log_info "Aborted. No changes made."
