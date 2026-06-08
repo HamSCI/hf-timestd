@@ -666,6 +666,57 @@ class CoreRecorderV2:
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
     
+    def _register_started_recorder(self, key, recorder):
+        """Wire a just-started recorder into the lifetime keepalive + calibrator.
+        Factored out so the initial pass and the deferred-retry path register
+        channels identically."""
+        if recorder.config.ssrc:
+            self._lifetime_entries.append((self.control, recorder.config.ssrc))
+        if self.calibrator:
+            try:
+                if recorder.config.ssrc:
+                    self.calibrator.register_channel_ssrc(
+                        recorder.config.description, recorder.config.ssrc)
+                    logger.info(f"Registered SSRC {recorder.config.ssrc:x} for {recorder.config.description}")
+                else:
+                    logger.warning(f"Recorder {recorder.config.description} started but has no SSRC")
+            except Exception as e:
+                logger.warning(f"Failed to register SSRC for {key}: {e}")
+
+    def _start_deferred_recorder_retry(self, deferred, max_attempts=30, interval_s=20.0):
+        """Retry channels that did not start on the first pass (radiod slow to
+        create under load) in a background daemon thread, so the daemon comes up
+        promptly with the channels it got instead of crashing on the first slow
+        one.  Each success is wired in like a normal start."""
+        def _loop():
+            pending = list(deferred)
+            for attempt in range(1, max_attempts + 1):
+                if not pending:
+                    return
+                time.sleep(interval_s)
+                still = []
+                for key, recorder in pending:
+                    try:
+                        recorder.start()
+                    except Exception as e:
+                        logger.debug(
+                            f"{recorder.config.description}: deferred start "
+                            f"attempt {attempt} failed: {e}")
+                        still.append((key, recorder))
+                        continue
+                    logger.info(
+                        f"{recorder.config.description}: deferred channel started "
+                        f"(attempt {attempt})")
+                    self._register_started_recorder(key, recorder)
+                pending = still
+            if pending:
+                logger.error(
+                    f"{len(pending)} channel(s) never started after "
+                    f"{max_attempts} retries: "
+                    f"{[r.config.description for _, r in pending]}")
+        threading.Thread(
+            target=_loop, daemon=True, name="timestd-deferred-start").start()
+
     def run(self):
         """Main run loop."""
         self.running = True
@@ -739,27 +790,33 @@ class CoreRecorderV2:
         # does).  The legacy path is preserved verbatim below for
         # rollback safety.
         if not self._use_shared_multistream:
+            deferred = []
             for key, recorder in self.recorders.items():
-                recorder.start()
-                logger.info(f"Started recorder for {recorder.config.frequency_hz/1e6:.3f} MHz ({recorder.config.description})")
-
-                # Track for lifetime keepalive — legacy mode uses RadiodControl
-                # directly (per-channel RadiodStream + per-channel UDP socket).
-                if recorder.config.ssrc:
-                    self._lifetime_entries.append(
-                        (self.control, recorder.config.ssrc)
+                try:
+                    recorder.start()
+                except Exception as e:
+                    # radiod's channel-CREATE latency climbs with its channel
+                    # count, so on a busy shared radiod a create can exceed the
+                    # verify timeout.  A slow create must NOT crash the whole
+                    # recorder: defer this channel to a background retry and keep
+                    # going, so the daemon comes up with the channels it got and
+                    # fills the rest in as radiod catches up.
+                    logger.error(
+                        f"{recorder.config.description}: initial channel start "
+                        f"failed ({e}); deferring to background retry"
                     )
-
-                # Register SSRC now that recorder is started and SSRC is resolved
-                if self.calibrator:
-                    try:
-                        if recorder.config.ssrc:
-                            self.calibrator.register_channel_ssrc(recorder.config.description, recorder.config.ssrc)
-                            logger.info(f"Registered SSRC {recorder.config.ssrc:x} for {recorder.config.description}")
-                        else:
-                            logger.warning(f"Recorder {recorder.config.description} started but has no SSRC")
-                    except Exception as e:
-                        logger.warning(f"Failed to register SSRC for {key}: {e}")
+                    deferred.append((key, recorder))
+                    continue
+                logger.info(f"Started recorder for {recorder.config.frequency_hz/1e6:.3f} MHz ({recorder.config.description})")
+                self._register_started_recorder(key, recorder)
+            if deferred:
+                logger.warning(
+                    f"{len(deferred)}/{len(self.recorders)} channel(s) did not "
+                    f"start on the first pass (radiod create-rate under load); "
+                    f"retrying in background: "
+                    f"{[r.config.description for _, r in deferred]}"
+                )
+                self._start_deferred_recorder_retry(deferred)
         
         # Start T6 BPSK PPS stream (bare RadiodStream, no archive).  In
         # shared mode this just adds the channel to self._multi; the

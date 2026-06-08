@@ -21,6 +21,7 @@ This recorder only needs to:
 
 import numpy as np
 import logging
+import os
 import time
 import threading
 from pathlib import Path
@@ -37,6 +38,13 @@ from enum import Enum
 # we're running; on clean exit + crash the channel auto-destructs in
 # at most LIFETIME / 50 seconds.
 RADIOD_LIFETIME_FRAMES = 6000
+
+# Per-channel verify timeout for ensure_channel().  radiod's channel-CREATE
+# latency climbs with its existing channel count, so on a busy shared radiod
+# a create can take well over the old hard 10 s.  CoreRecorderV2 makes initial
+# provisioning non-fatal + retries; a more generous budget here lets more
+# channels land on the first pass.  Env-overridable for tuning.
+_CHANNEL_VERIFY_TIMEOUT_S = float(os.environ.get("TIMESTD_CHANNEL_VERIFY_TIMEOUT_S", "20"))
 
 from ka9q import RadiodStream, ChannelInfo, StreamQuality, RadiodControl
 
@@ -339,7 +347,7 @@ class StreamRecorderV2:
             'gain': self.config.gain,
             'destination': self.config.destination,
             'encoding': self.config.encoding,
-            'timeout': 10.0,
+            'timeout': _CHANNEL_VERIFY_TIMEOUT_S,
             'frequency_tolerance': 1.0,
             # Self-destruct timer; CoreRecorderV2 keeps it refreshed.
             'lifetime': RADIOD_LIFETIME_FRAMES,
@@ -470,7 +478,7 @@ class StreamRecorderV2:
             'gain': self.config.gain,
             'destination': self.config.destination,
             'encoding': self.config.encoding,
-            'timeout': 10.0,
+            'timeout': _CHANNEL_VERIFY_TIMEOUT_S,
             'frequency_tolerance': 1.0,
             # Self-destruct timer; CoreRecorderV2 keeps it refreshed.
             'lifetime': RADIOD_LIFETIME_FRAMES,
