@@ -276,7 +276,11 @@ echo ""
 
 # Cross-cutting fields published by sigmond (CONTRACT-v0.5 §14.2) are
 # silently auto-filled; we only prompt when sigmond hasn't supplied them.
-auto_or_prompt CALLSIGN "Callsign" STATION_CALL "Your amateur radio callsign (e.g. W1ABC)" true
+# Callsign is OPTIONAL (sigmond#3): the operant station id is the reporter id,
+# not the ham callsign — a reporter-only / SWL station has no callsign.  Marking
+# it required forced the interactive setup to loop forever on an empty value.
+# It is only needed for GRAPE/PSWS uploads, which the operator can add later.
+auto_or_prompt CALLSIGN "Callsign" STATION_CALL "Your amateur radio callsign — optional, only for GRAPE/PSWS uploads (e.g. W1ABC)" false
 
 GRID_SQUARE=""
 LATITUDE=""

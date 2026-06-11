@@ -1232,18 +1232,44 @@ if __name__ == "__main__":
 
     # --- Exclusive output-dir lock: prevent two writers on same HDF5 files ---
     output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # sigmond#2: distinguish a PERMISSIONS failure (dir/lock not writable by the
+    # metrology user) from a genuine DUPLICATE WRITER (lock held).  The old code
+    # caught every OSError and reported "already owns", sending operators to hunt
+    # a phantom second process when the real problem was ownership/permissions.
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    except PermissionError as e:
+        logger.critical(
+            f"Cannot create metrology output dir {output_dir}: {e}. "
+            f"Permissions problem — the dir (or its parent) must be writable by "
+            f"the metrology user (timestd); this is NOT a duplicate writer.")
+        sys.exit(1)
     lock_path = output_dir / '.metrology.lock'
     lock_fd = None
     try:
         lock_fd = open(lock_path, 'w')
+    except PermissionError as e:
+        logger.critical(
+            f"Cannot write metrology lock {lock_path}: {e}. "
+            f"Permissions problem — {output_dir} must be owned/writable by the "
+            f"metrology user (timestd); this is NOT a duplicate writer.")
+        sys.exit(1)
+    except OSError as e:
+        logger.critical(f"Cannot open metrology lock {lock_path}: {e}")
+        sys.exit(1)
+    # ONLY a BlockingIOError (LOCK_NB on a held lock) means another writer owns it.
+    try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         lock_fd.write(f'{os.getpid()}\n')
         lock_fd.flush()
-    except OSError:
+    except BlockingIOError:
         logger.critical(
             f"Another metrology process already owns {output_dir} — "
             f"refusing to start (duplicate writer would corrupt HDF5 files)")
+        sys.exit(1)
+    except OSError as e:
+        logger.critical(
+            f"Failed to acquire metrology lock on {output_dir}: {e}")
         sys.exit(1)
 
     try:
