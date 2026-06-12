@@ -4,6 +4,12 @@ Documentation=https://github.com/mijahauan/hf-timestd
 
 [Service]
 Type=oneshot
+# Exit 1 = HF refclock (FUSE/HPPS) feed degraded / below threshold: a valid
+# probe *finding* (weak antenna, GPS fallback active), NOT a unit failure.
+# Keeps the WARNING in the journal without marking the unit failed or firing
+# OnFailure. Exit 2 (chrony down or FUSE/HPPS absent) still fails the unit.
+# See scripts/check-chrony-reach.sh "Exit codes".
+SuccessExitStatus=1
 User=root
 Group=root
 

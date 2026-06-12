@@ -24,6 +24,17 @@ if [ ! -f "$IONEX_SCRIPT" ]; then
     exit 1
 fi
 
+# IONEX is OPTIONAL enrichment data (sharpens VTEC / ray-trace fidelity). If the
+# operator has not configured NASA Earthdata credentials, skip cleanly with a
+# clear message rather than leaving a permanently-failed unit that fires an
+# OnFailure alert on every timer tick. A genuine download failure WITH creds
+# present still exits 1 below (real transient fault -> retry + alert).
+if ! "$VENV_PYTHON" -c 'import sys; from hf_timestd.cddis_auth import check_earthdata_credentials as c; ok, msg = c(); print(msg); sys.exit(0 if ok else 1)'; then
+    echo "IONEX: NASA Earthdata credentials not configured/usable - skipping optional IONEX download."
+    echo "  (configure /etc/hf-timestd/earthdata-netrc to enable; see docs/NASA_EARTHDATA_SETUP.md)"
+    exit 0
+fi
+
 # Calculate yesterday's date
 # Strategy: Try Final first (most accurate), fall back to Rapid (~1 day latency)
 # With Rapid fallback, we only need to search back ~7 days

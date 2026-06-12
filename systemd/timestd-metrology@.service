@@ -1,4 +1,7 @@
 [Unit]
+# Alert (journal breadcrumb via service-alert.sh; email if mailutils present)
+# when this always-restart service finally gives up (StartLimit exhausted).
+OnFailure=timestd-alert@%n.service
 Description=HF-TimeStd Metrology — %i
 Documentation=https://github.com/mijahauan/hf-timestd
 # Phase 2: metrology reads from the core-recorder's ring buffer.
