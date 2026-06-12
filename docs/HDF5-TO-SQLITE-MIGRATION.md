@@ -1,6 +1,6 @@
 # HDF5 → SQLite migration — design
 
-**Status:** open design discussion, no implementation yet.
+**Status:** ✅ COMPLETE. Implemented across Phases 1–4; Phase 3b cut bee1 to SQLite-only writes (2026-05-20) and Phase 4 deleted the HDF5 backend (`io/hdf5_writer.py` / `io/hdf5_reader.py` removed; `io/dual_writer.py` now unconditionally returns `SqliteDataProductWriter`). The HDF5↔SQLite dual-write `timestd-sqlite-parity` verification units were removed 2026-06-12 as obsolete (no HDF5 store remains to compare against). The design discussion below is retained as a historical record.
 **Audience:** Rob, Michael — and future contributors arriving cold.
 **Why this exists:** the 2026-05-15 fusion-leak chase concluded that
 the residual ~184 MB/h RSS growth (after `_iri_cache` eviction and
