@@ -119,7 +119,22 @@ optionally subscribe to via §18.
 
 - `h5py>=3.8.0,<3.16.0` — h5py 3.16 bundles HDF5 2.0.0 which breaks SWMR in long-running processes
 - `ka9q-python>=3.3` — RTP stream interface to ka9q-radio
-- `pylap` (optional) — PHaRLAP ray tracing for propagation mode identification
+- `iri2020` (git pin in `pyproject.toml`) — IRI-2020 via the space-physics
+  package. **It compiles Fortran on first use, so it needs `gfortran`** (plus
+  `build-essential`). Without a Fortran compiler the build fails and
+  `IonosphericModel` silently falls back to its internal **parametric** tier
+  (`tier=parametric`, not `iri`) — degraded ionosphere with no hard error.
+  Resolution (2026-06-13): `gfortran` + `build-essential` are now declared apt
+  prerequisites in `scripts/install.sh`, so any fresh install gets them; the
+  same toolchain also covers the pyLAP build. On an existing host that predates
+  this, `sudo apt install build-essential gfortran` then re-run the installer.
+  Quick check: `hf-timestd data sources` (Raytrace line) / confirm IRI returns
+  `tier=iri` rather than `parametric`.
+- `pylap` (optional) — PHaRLAP ray tracing for propagation mode identification.
+  PHaRLAP is licence-restricted (DST) and never bundled — operator-staged via
+  `scripts/install-pharlap.sh`; pyLAP is built on install by
+  `scripts/ensure-pylap.sh` (also needs `gfortran`). See
+  `docs/EXTERNAL_PREREQUISITES.md` §3.
 
 ## Further reading
 
