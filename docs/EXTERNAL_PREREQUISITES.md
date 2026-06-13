@@ -7,6 +7,11 @@ automatically by `deploy.sh`.  This document is the single reference for
 Each item is marked **Required** or **Optional**.  Optional items degrade
 gracefully — the system runs without them but loses specific capabilities.
 
+> For the **suite-wide** view of every per-installation input across all
+> sigmond/dasi2 clients (station identity, reporter ids, credentials, hardware)
+> and the image-vs-clone provisioning plan, see
+> [`sigmond/docs/PROVISIONING-INPUTS.md`](../../sigmond/docs/PROVISIONING-INPUTS.md).
+
 ---
 
 ## Quick-Reference Matrix
