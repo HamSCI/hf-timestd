@@ -276,6 +276,8 @@ _sigmond_known=()
 [[ -n "${STATION_GRID:-}" ]]            && _sigmond_known+=("Grid square:        ${STATION_GRID}")
 [[ -n "${STATION_LAT:-}" ]]             && _sigmond_known+=("Latitude:           ${STATION_LAT}")
 [[ -n "${STATION_LON:-}" ]]             && _sigmond_known+=("Longitude:          ${STATION_LON}")
+[[ -n "${STATION_PSWS_STATION_ID:-}" ]] && _sigmond_known+=("PSWS station id:    ${STATION_PSWS_STATION_ID}")
+[[ -n "${STATION_PSWS_INSTRUMENT_ID:-}" ]] && _sigmond_known+=("PSWS instrument id: ${STATION_PSWS_INSTRUMENT_ID}")
 [[ -n "${SIGMOND_RADIOD_STATUS:-}" ]]   && _sigmond_known+=("ka9q-radio status:  ${SIGMOND_RADIOD_STATUS}")
 
 if [[ ${#_sigmond_known[@]} -gt 0 ]]; then
@@ -376,15 +378,23 @@ echo -e "  ${DIM}If you have a PSWS account, enter your station and instrument I
 echo -e "  ${DIM}You can set this up later by re-running this wizard.${NC}"
 echo ""
 
-prompt_yn PSWS_ENABLED "Enable PSWS/GRAPE uploads?" "n"
+# If sigmond published PSWS ids (from site-profile.toml via `smd config render`),
+# default the toggle on so the operator isn't asked to re-enter what's known.
+_psws_default="n"
+[[ -n "${STATION_PSWS_STATION_ID:-}" ]] && _psws_default="y"
+prompt_yn PSWS_ENABLED "Enable PSWS/GRAPE uploads?" "$_psws_default"
 
 STATION_ID=""
 INSTRUMENT_ID=""
 UPLOADER_ENABLED="false"
 
 if [[ "$PSWS_ENABLED" == "true" ]]; then
-    prompt STATION_ID "PSWS Station ID" "" "e.g. S000171 (shown on your PSWS site admin page)" true
-    prompt INSTRUMENT_ID "PSWS Instrument ID" "" "e.g. 172 (shown on your PSWS site admin page)" true
+    # Auto-fill from sigmond's STATION_PSWS_* (site-profile) when present,
+    # else prompt — same pattern as callsign/grid above.
+    auto_or_prompt STATION_ID "PSWS Station ID" STATION_PSWS_STATION_ID \
+        "e.g. S000171 (shown on your PSWS site admin page)" true
+    auto_or_prompt INSTRUMENT_ID "PSWS Instrument ID" STATION_PSWS_INSTRUMENT_ID \
+        "e.g. 172 (shown on your PSWS site admin page)" true
     UPLOADER_ENABLED="true"
 fi
 
