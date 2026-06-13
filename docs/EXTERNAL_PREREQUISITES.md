@@ -106,55 +106,137 @@ broadcast time stations (WWV, WWVH, CHU, BPM) are receivable.
 | **Why** | Enables physics-based ionospheric ray-tracing for multi-hop mode identification, MUF estimation, and propagation delay modeling |
 | **Without it** | `RaytraceEngine` falls back to geometric great-circle model with parametric ionospheric delay |
 
-### Obtain PHaRLAP
+> **Licence — why this is not bundled.** PHaRLAP is closed-source and DST's
+> release terms state it is *"not to be redistributed, under any circumstance,
+> to third parties, without DST's expressed written permission."* It therefore
+> **cannot** live in this (or any) repository. The operator obtains it once
+> from DST and stages the archive onto each host. Only pyLAP (our open binding
+> fork) and the build recipe live in the repo.
 
-PHaRLAP is **free for non-commercial research use** but requires registration:
+### Deployment models
 
-1. Visit <https://www.dst.defence.gov.au/opportunity/pharlap>
-2. Fill out the request form (academic/amateur radio use qualifies)
-3. You will receive a download link (typically within a few business days)
-4. Download the archive (`pharlap_4.7.4.tar.gz` or similar)
+hf-timestd ships in two deployment models; PHaRLAP/pyLAP is handled differently
+in each.
 
-### Install PHaRLAP
+**A. Golden image (DASI2 sites).** A reference host — PHaRLAP staged, pyLAP
+built into the venv — is imaged and cloned to the grant's own sites. Because
+every site is operated by the **single licensee** (the DASI2 grant), PHaRLAP
+travels inside the **private** image as internal deployment, not redistribution
+to a third party. Image-bake checklist:
+
+- [ ] PHaRLAP staged at `/opt/pharlap_4.7.4` (via `install-pharlap.sh`); `/opt/pharlap_4.7.4/.provenance` present
+- [ ] pyLAP built into the venv — `venv/bin/python -c "import pylap.raytrace_2d"` succeeds
+- [ ] build toolchain present (`gfortran`, `build-essential`) so a venv rebuild can self-heal
+- [ ] `PHARLAP_HOME` + `DIR_MODELS_REF_DAT` in `/etc/hf-timestd/environment`
+- [ ] DST licence files retained under `/opt/pharlap_4.7.4` (DISCLAIMER/RELEASE_LIMITATION/ACKNOWLEDGEMENT)
+- [ ] **the image is controlled** — never push it to a public/community registry
+      or share it outside the grant. It contains licence-restricted PHaRLAP, and
+      the built pyLAP `.so` statically links PHaRLAP object code, so the same
+      restriction applies to it.
+
+> pyLAP is deliberately not in the lockfile, so if a clone's bring-up rebuilds
+> the venv (`pip install -e .`), `deploy.toml [build].steps` runs
+> `scripts/ensure-pylap.sh`, which rebuilds pyLAP automatically when PHaRLAP is
+> present — a clone self-heals raytracing with no manual step.
+
+**B. sigmond clone + install (general operators).** The operator clones sigmond
+and runs the installer, which downloads/builds/configures the components. PHaRLAP
+is **not** included — the operator obtains it from DST themselves and supplies
+the archive:
 
 ```bash
-# Extract to /opt (recommended location)
-sudo mkdir -p /opt/pharlap_4.7.4
-sudo tar xzf pharlap_4.7.4.tar.gz -C /opt/pharlap_4.7.4 --strip-components=1
+sudo bash scripts/install.sh --pharlap-zip /path/to/pharlap_4.7.4.zip
+```
+
+Without it everything still installs and runs; raytracing uses the geometric
+fallback until PHaRLAP is supplied (then re-run the installer, or just
+`scripts/ensure-pylap.sh`).
+
+**Stand-alone operation.** Per the sigmond client contract, hf-timestd must
+function outside sigmond's oversight — and so does its PHaRLAP management. All of
+it is client-owned and sigmond-independent:
+
+- `scripts/install-pharlap.sh` — stage the operator's archive.
+- `scripts/ensure-pylap.sh` — build / self-heal pyLAP; paths are derived from
+  the script's own location, so a checkout anywhere works (no `/opt/git/sigmond`
+  assumption). Env vars (`TIMESTD_VENV`, `PHARLAP_HOME`, `PYLAP_DIR`) override.
+- `scripts/install.sh --pharlap-zip` — one-shot stage + build.
+- `hf-timestd data sources` — reports a `Raytrace:` line (available / PHaRLAP
+  present but pyLAP not built / geometric fallback) for self-diagnosis.
+
+sigmond's only involvement is invoking these *same* client scripts through
+`deploy.toml` `[build].steps` during `smd bringup`; it carries no PHaRLAP logic
+of its own. Removing sigmond changes nothing about how the client builds, runs,
+or reports raytracing.
+
+### Quick path (automated)
+
+The installer stages an operator-supplied PHaRLAP archive and builds pyLAP in
+one step — the build toolchain (`build-essential`, `gfortran`) is installed
+automatically as a declared prerequisite:
+
+```bash
+sudo bash scripts/install.sh --pharlap-zip /path/to/pharlap_4.7.4.zip
+# (or set PHARLAP_ZIP=/path/... in the environment)
+```
+
+This runs `scripts/install-pharlap.sh` (Phase 4b) to unpack PHaRLAP to
+`/opt/pharlap_4.7.4` with a sha256 provenance record, then clones the pinned
+pyLAP fork to `/opt/pylap` and builds it into the venv. The rest of this
+section documents the manual equivalent.
+
+### Obtain PHaRLAP
+
+PHaRLAP is **free for non-commercial research use** but requires registration
+and **must not be redistributed**:
+
+1. Visit <https://www.dst.defence.gov.au/partner-with-us/access-our-technology>
+2. Fill out the request form (academic/amateur radio use qualifies)
+3. You will receive a download link (typically within a few business days)
+4. Download the archive (`pharlap_4.7.4.zip`)
+
+### Stage PHaRLAP
+
+Use the staging helper — it validates the archive (Linux libs + IRI data),
+unpacks atomically to the destination, and records provenance:
+
+```bash
+sudo bash scripts/install-pharlap.sh --zip /path/to/pharlap_4.7.4.zip
+# options: --url URL (private artifact store), --dest DIR, --force
 
 # Verify the expected directory structure
-ls /opt/pharlap_4.7.4/lib/      # Should contain linux/, maca/, maci/
-ls /opt/pharlap_4.7.4/dat/      # Should contain iri2020/, igrf2025.dat, etc.
-ls /opt/pharlap_4.7.4/src/C/    # Should contain header files
+ls /opt/pharlap_4.7.4/lib/linux/   # libiri2020.a libmaths.a libpropagation.a
+ls /opt/pharlap_4.7.4/dat/iri2020/ # ccir*.asc, ursi*.asc, apf107.dat, ...
+cat /opt/pharlap_4.7.4/.provenance # sha256, source, version
 ```
+
+PHaRLAP 4.7.4's Linux libraries are **GCC/gfortran-compiled static archives** —
+there is **no Intel Fortran and no MATLAB MCR dependency** (earlier PHaRLAP
+releases needed Intel Fortran; 4.7.4 does not).
 
 ### Build pyLAP (Python wrapper)
 
 pyLAP is the Python interface to PHaRLAP.  We maintain a patched fork at
 <https://github.com/mijahauan/PyLap> with cross-platform PHaRLAP 4.7.4
-support (Linux x86_64, macOS arm64, macOS x86_64).
+support (Linux x86_64, macOS arm64, macOS x86_64) and numpy/GCC-14 fixes.
+`scripts/install.sh` Phase 4b clones it pinned to a known-good commit
+(`PYLAP_REF`) and builds it automatically; the manual equivalent is:
 
-**Prerequisites:** `gfortran` must be installed.
-
-```bash
-# Linux
-sudo apt install gfortran
-
-# macOS
-brew install gcc
-```
+**Prerequisites** (installed automatically by `install.sh`): `build-essential`
+and `gfortran` on Linux (`brew install gcc` on macOS).
 
 **Build and install into the hf-timestd venv:**
 
 ```bash
 git clone https://github.com/mijahauan/PyLap.git /opt/pylap
 export PHARLAP_HOME=/opt/pharlap_4.7.4
-/opt/hf-timestd/venv/bin/pip install /opt/pylap --no-build-isolation
+/opt/git/sigmond/hf-timestd/venv/bin/pip install /opt/pylap --no-build-isolation
 ```
 
 The build auto-detects the platform and links against the correct PHaRLAP
-static libraries.  Legacy IRI modules (iri2007, iri2012) are automatically
-skipped when their `.a` files are absent from PHaRLAP 4.7.4.
+static libraries (`libgfortran`/`libgomp` runtime).  Legacy IRI modules
+(iri2007, iri2012) are automatically skipped when their `.a` files are absent
+from PHaRLAP 4.7.4.
 
 ### Runtime Environment
 
@@ -175,20 +257,29 @@ echo 'DIR_MODELS_REF_DAT=/opt/pharlap_4.7.4/dat' | sudo tee -a /etc/hf-timestd/e
 
 ### Verify
 
+Confirm the binding imports and hf-timestd sees it as available:
+
 ```bash
 PHARLAP_HOME=/opt/pharlap_4.7.4 \
 DIR_MODELS_REF_DAT=/opt/pharlap_4.7.4/dat \
-/opt/hf-timestd/venv/bin/python -c "
-import importlib, math
-iri = importlib.import_module('pylap.iri2016')
-_, oarr = iri.iri2016(40.0, -90.0, 100.0, [2026, 1, 15, 18, 0], 100.0, 10.0, 50, {})
-foF2 = 8.98 * math.sqrt(max(oarr[0], 0)) / 1e6
-print(f'IRI OK — foF2={foF2:.1f} MHz, hmF2={oarr[1]:.0f} km')
+/opt/git/sigmond/hf-timestd/venv/bin/python -c "
+import pylap.raytrace_2d                      # compiled extension imports
+from hf_timestd.core import raytrace_engine as re
+print('pylap available:', re._PYLAP_AVAILABLE)
+eng = re.RaytraceEngine.build(receiver_lat=40.68, receiver_lon=-105.04)
+print('engine.is_available():', eng.is_available())
 "
 ```
 
-Expected output: `IRI OK — foF2=X.X MHz, hmF2=XXX km` (values depend on
-solar conditions at the queried date/time).
+Expected: `pylap available: True` and `engine.is_available(): True`.
+
+> **Note:** `RaytraceEngine.compute_modes()` builds a full IRI ionospheric grid
+> per call and runs each raytrace in a worker subprocess with a 120 s timeout.
+> The first (cold) call can be slow and may hit that timeout, falling back to
+> the geometric model — this is expected; raytracing is an advisory,
+> reanalysis-only overlay, not on the real-time path. The raytracer itself is
+> fast (a single `pylap.raytrace_2d` over a fixed grid returns in well under a
+> second).
 
 ---
 

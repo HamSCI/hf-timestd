@@ -8,19 +8,18 @@ PURPOSE
 
 This service provides real-time ionospheric data for the propagation model by:
 
-1. Fetching WAM-IPE 2D products (TEC, NmF2, HmF2) from NOAA's AWS S3 bucket
-   - Bucket: s3://noaa-nws-wam-ipe-pds/
-   - 5-minute cadence NetCDF files (*ipe05*.nc)
-   - No AWS credentials required (public bucket)
-
-2. Fetching GIRO ionosonde data for real-time hmF2/foF2 corrections
-   - Source: GIRO DIDBase via SAO-XML or URSI format
+1. Fetching GIRO ionosonde data for real-time hmF2/foF2 measurements
+   - Source: Lowell GIRO Data Center DIDBase (DIDBGetValues web service)
    - Provides ground-truth ionosonde measurements near the path midpoint
+
+2. Falling back to the IRI-2020 climatological model (via IonosphericModel,
+   driven by the weekly-refreshed F10.7/Ap/sunspot indices) where no nearby
+   ionosonde measurement is available, and to a crude internal parametric
+   model only if IRI itself is unavailable.
 
 3. Caching data locally to minimize network requests
    - Cache directory: /var/lib/timestd/iono_cache/
-   - WAM-IPE grids cached for 1 hour (updated every 5 min from NOAA)
-   - GIRO data cached for 15 minutes
+   - GIRO measurements cached for 15 minutes; station list cached on disk
 
 4. Providing interpolated ionospheric parameters at arbitrary lat/lon/time:
    - hmF2 (F2 layer peak height)
@@ -32,29 +31,39 @@ This service provides real-time ionospheric data for the propagation model by:
 DATA SOURCES
 ================================================================================
 
-WAM-IPE (primary):
-    - S3: s3://noaa-nws-wam-ipe-pds/
-    - HTTPS fallback: https://noaa-nws-wam-ipe-pds.s3.amazonaws.com/
-    - NOMADS: https://nomads.ncep.noaa.gov/pub/data/nccf/com/wfs/prod/
-    - Products: ipe05 (2D, 5-min) and ipe10 (3D, 10-min)
-    - Variables: TEC, NmF2, HmF2 on geographic grid
+GIRO (primary real-time):
+    - Station list: https://lgdc.uml.edu/common/DIDBFastStationList (HTML;
+      parsed for URSI code + lat/lon, with a bundled fallback table at
+      hf_timestd/data/giro_stations.tsv when the page is down).
+    - Measurements: https://lgdc.uml.edu/common/DIDBGetValues
+      (foF2,hmF2 with CS autoscaling confidence; dates as YYYY/MM/DD HH:MM:SS).
+    - The DIDBase server is intermittently overloaded (HTTP 503/404 flapping),
+      so all fetches go through net_fetch's retry/backoff session.
 
-GIRO (supplementary):
-    - DIDBase: https://lgdc.uml.edu/common/DIDBFast498
-    - Provides real-time ionosonde measurements
-    - Used to correct WAM-IPE systematic biases
+IRI-2020 (fallback base):
+    - Delegated to IonosphericModel; GIRO measurements are blended on top.
+
+WAM-IPE: DISABLED (enable_wamipe=False by default).
+    The operational Whole-atmosphere Forecast System feeds — both the public
+    S3 PDS (s3://noaa-nws-wam-ipe-pds/, prefix v1.2/wfs.*) and NOMADS
+    (nomads.ncep.noaa.gov/.../wfs/prod) — publish only the WAM *neutral*
+    atmosphere (variable `den`, kg m^-3, on a fixed-height grid). They carry
+    NO IPE ionosphere product: no electron density, NmF2, hmF2 or TEC. Neutral
+    density is not usable for HF ray-tracing, so this branch cannot supply the
+    ionospheric parameters it was written for. The fetch/parse code is retained
+    (guarded by enable_wamipe) for the day an actual IPE 2D product is
+    published, but it is inert by default and will never fabricate a grid from
+    defaults (see _parse_wamipe_netcdf). Audited 2026-06-13.
 
 ================================================================================
 ARCHITECTURE
 ================================================================================
 
     IonoDataService (singleton, thread-safe)
-        ├── _fetch_wamipe()      → downloads latest WAM-IPE NetCDF
-        ├── _fetch_giro()        → downloads latest GIRO ionosonde data
-        ├── _interpolate()       → bilinear interpolation on WAM-IPE grid
-        ├── get_hmF2()           → F2 peak height at (lat, lon, time)
-        ├── get_nmF2()           → F2 peak density at (lat, lon, time)
-        ├── get_tec()            → TEC at (lat, lon, time)
+        ├── _fetch_giro()        → fetch latest GIRO ionosonde measurements
+        ├── _fetch_wamipe()      → (disabled) WAM-IPE NetCDF, see note above
+        ├── _base_point()        → IRI-2020 base (else parametric climatology)
+        ├── get_iono_params()    → GIRO-corrected params at (lat, lon, time)
         ├── get_electron_density_profile() → Ne(h) for ray-tracing
         └── start() / stop()     → background update thread
 """
@@ -62,12 +71,13 @@ ARCHITECTURE
 import logging
 import math
 import os
+import re
 import time
 import threading
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Optional, Dict, Tuple, List, NamedTuple
+from typing import Optional, Dict, Tuple, List, Callable, NamedTuple
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -78,6 +88,11 @@ try:
     import requests as _requests
 except ImportError:  # pragma: no cover - optional dependency
     _requests = None
+
+try:
+    from . import net_fetch as _net_fetch
+except ImportError:  # pragma: no cover - defensive
+    _net_fetch = None
 
 logger = logging.getLogger(__name__)
 
@@ -95,9 +110,22 @@ WAMIPE_S3_BASE_URL = f"https://{WAMIPE_S3_BUCKET}.s3.amazonaws.com"
 # NOMADS fallback for WAM-IPE
 WAMIPE_NOMADS_BASE = "https://nomads.ncep.noaa.gov/pub/data/nccf/com/wfs/prod"
 
-# GIRO DIDBase
-GIRO_DIDBASE_URL = "https://lgdc.uml.edu/common/DIDBFastStationList"
-GIRO_SAO_URL = "https://lgdc.uml.edu/common/DIDBFast498"
+# GIRO DIDBase (Lowell GIRO Data Center)
+#   - station list: an HTML page listing URSI code + name + lat/lon
+#   - DIDBGetValues: the machine-readable scaled-characteristics web service
+#     (dates formatted YYYY/MM/DD HH:MM:SS; '#'-commented header + columns)
+GIRO_STATION_LIST_URL = "https://lgdc.uml.edu/common/DIDBFastStationList"
+GIRO_GETVALUES_URL = "https://lgdc.uml.edu/common/DIDBGetValues"
+
+# Bundled station fallback table (URSI<TAB>name<TAB>lat<TAB>lon), shipped as
+# package data and used when the live station-list page is unreachable.
+BUNDLED_STATIONS_FILE = Path(__file__).resolve().parent.parent / "data" / "giro_stations.tsv"
+
+# How many nearest ionosondes to poll each cycle. Polling the whole network
+# (~130 stations) every 5 min hammers a frequently-overloaded server and most
+# stations are too far to contribute; the nearest handful covers the operator's
+# region (full GIRO weight is within ~555 km, zero beyond ~3330 km).
+GIRO_MAX_STATIONS_POLLED = 12
 
 # GIRO correction weighting by great-circle distance from the query point
 # (P-M16). Full weight within ~5° (555 km), zero beyond ~30° (3330 km) —
@@ -311,11 +339,13 @@ class IonoDataService:
     def get_instance(
         cls,
         cache_dir: str = DEFAULT_CACHE_DIR,
-        enable_wamipe: bool = True,
-        enable_giro: bool = True
+        enable_wamipe: bool = False,
+        enable_giro: bool = True,
+        home_lat: Optional[float] = None,
+        home_lon: Optional[float] = None,
     ) -> 'IonoDataService':
         """Get or create the singleton instance.
-        
+
         Warning: The first caller's parameters win. Subsequent calls with
         different parameters will log a warning but return the existing instance.
         """
@@ -324,7 +354,9 @@ class IonoDataService:
                 cls._instance = cls(
                     cache_dir=cache_dir,
                     enable_wamipe=enable_wamipe,
-                    enable_giro=enable_giro
+                    enable_giro=enable_giro,
+                    home_lat=home_lat,
+                    home_lon=home_lon,
                 )
             else:
                 # Warn if parameters differ from existing instance
@@ -343,18 +375,38 @@ class IonoDataService:
     def __init__(
         self,
         cache_dir: str = DEFAULT_CACHE_DIR,
-        enable_wamipe: bool = True,
-        enable_giro: bool = True
+        enable_wamipe: bool = False,
+        enable_giro: bool = True,
+        home_lat: Optional[float] = None,
+        home_lon: Optional[float] = None,
+        enable_iri_fallback: bool = True,
     ):
         self.cache_dir = Path(cache_dir)
         self.enable_wamipe = enable_wamipe
         self.enable_giro = enable_giro
-        
+        # Operator location: used to poll only the nearest ionosondes.
+        self.home_lat = home_lat
+        self.home_lon = home_lon
+        # Use IRI-2020 (via IonosphericModel) as the no-grid base, with GIRO
+        # blended on top. Falls back to the crude internal climatology when
+        # IRI/PHaRLAP is unavailable.
+        self.enable_iri_fallback = enable_iri_fallback
+        self._iri_model = None          # lazily constructed IonosphericModel
+        self._iri_unavailable = False   # latch: stop retrying a missing IRI
+
+        # Shared retry/backoff HTTP session for GIRO (the DIDBase server
+        # flaps between 200/503/404); falls back to the bare requests module
+        # if net_fetch could not be imported.
+        if _net_fetch is not None:
+            self._session = _net_fetch.build_session()
+        else:  # pragma: no cover - defensive
+            self._session = _requests.Session() if _requests is not None else None
+
         # Current grids (thread-safe via lock)
         self._grid_lock = threading.RLock()
         self._current_grid: Optional[IonoGrid] = None
         self._previous_grid: Optional[IonoGrid] = None  # For temporal interpolation
-        
+
         # GIRO measurements cache
         self._giro_lock = threading.RLock()
         self._giro_stations: List[GiroStation] = []
@@ -658,6 +710,21 @@ class IonoDataService:
             hmF2 = self._extract_var(ds, ['HmF2', 'hmF2', 'hmf2', 'HMTF'])
             NmF2 = self._extract_var(ds, ['NmF2', 'nmF2', 'nmf2', 'NMTF'])
             TEC = self._extract_var(ds, ['TEC', 'tec', 'VTEC', 'vtec'])
+
+            # Never fabricate a grid from constant defaults. The operational
+            # WFS feeds publish only the WAM *neutral* atmosphere (no
+            # ionosphere variables), so an ipe05-style file with none of
+            # hmF2/NmF2/TEC is not the product we need. Filling defaults here
+            # would have served a uniform fake grid tagged source="wamipe" at
+            # full confidence — reject instead (see module docstring).
+            if hmF2 is None and NmF2 is None and TEC is None:
+                logger.warning(
+                    "WAM-IPE file %s has no ionosphere variables "
+                    "(hmF2/NmF2/TEC) — not an IPE product; discarding",
+                    filepath,
+                )
+                ds.close()
+                return None
             
             # Extract timestamp from attributes or filename
             timestamp = datetime.now(timezone.utc)
@@ -852,10 +919,12 @@ class IonoDataService:
                 self._fetch_giro_stations()
                 self._giro_stations_fetched = now
             
-            # Fetch latest measurements from nearby stations
-            # For now, fetch from all stations and let the caller pick the nearest
+            # Fetch latest measurements from the nearest ionosondes to the
+            # operator. Polling the whole network every cycle hammers a
+            # frequently-overloaded server and distant stations carry zero
+            # GIRO weight anyway.
             updated = 0
-            for station in self._giro_stations[:20]:  # Top 20 stations
+            for station in self._stations_to_poll():
                 try:
                     meas = self._fetch_giro_station_data(station.code)
                     if meas is not None:
@@ -876,126 +945,252 @@ class IonoDataService:
             self._stats['giro_failures'] += 1
             logger.warning(f"GIRO fetch failed: {e}")
     
-    def _fetch_giro_stations(self):
-        """Fetch GIRO station list."""
-        if _requests is None:
-            return
-        requests = _requests
-        
-        try:
-            resp = requests.get(GIRO_DIDBASE_URL, timeout=15)
-            if resp.status_code != 200:
-                return
-            
-            stations = []
-            for line in resp.text.strip().split('\n'):
-                parts = line.strip().split()
-                if len(parts) >= 4:
-                    try:
-                        code = parts[0]
-                        lat = float(parts[1])
-                        lon = float(parts[2])
-                        name = ' '.join(parts[3:])
-                        stations.append(GiroStation(
-                            code=code, name=name,
-                            latitude=lat, longitude=lon
-                        ))
-                    except (ValueError, IndexError):
+    # DIDBFastStationList is an HTML table; each station row carries the URSI
+    # code in a DIDBYearListForStation anchor followed by three <big> cells:
+    # name, latitude, longitude (degrees; longitude in 0..360).
+    _STATION_ROW_RE = re.compile(
+        r'ursiCode=(?P<code>[A-Za-z0-9]+)"[^>]*>[A-Za-z0-9]+</a>\s*</big>\s*</td>'
+        r'\s*<td[^>]*>\s*<big>\s*(?P<name>[^<]*?)\s*</big>\s*</td>'
+        r'\s*<td[^>]*>\s*<big>\s*(?P<lat>-?\d+(?:\.\d+)?)\s*</big>\s*</td>'
+        r'\s*<td[^>]*>\s*<big>\s*(?P<lon>-?\d+(?:\.\d+)?)\s*</big>\s*</td>',
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _parse_didbase_station_html(cls, html: str) -> List[GiroStation]:
+        """Parse the DIDBFastStationList HTML page into GiroStation records.
+
+        Longitudes on the page run 0..360; they are normalised to
+        [-180, 180) to match great_circle_distance and the rest of the
+        service. Returns an empty list if the page format is unrecognised
+        (e.g. an error/maintenance page), so the caller can fall back.
+        """
+        stations: List[GiroStation] = []
+        for m in cls._STATION_ROW_RE.finditer(html):
+            try:
+                lat = float(m['lat'])
+                lon = ((float(m['lon']) + 180.0) % 360.0) - 180.0
+            except (TypeError, ValueError):
+                continue
+            stations.append(GiroStation(
+                code=m['code'].upper(),
+                name=m['name'].strip(),
+                latitude=lat,
+                longitude=lon,
+            ))
+        return stations
+
+    def _load_bundled_stations(self) -> List[GiroStation]:
+        """Load the bundled station fallback table (package data / disk cache)."""
+        # Prefer the on-disk cache written from a previous live fetch, then
+        # the package-bundled snapshot.
+        for path in (self.cache_dir / "giro_stations.tsv", BUNDLED_STATIONS_FILE):
+            try:
+                if not path.is_file():
+                    continue
+                stations: List[GiroStation] = []
+                for line in path.read_text().splitlines():
+                    line = line.strip()
+                    if not line or line.startswith('#'):
                         continue
-            
+                    parts = line.split('\t')
+                    if len(parts) < 4:
+                        continue
+                    try:
+                        stations.append(GiroStation(
+                            code=parts[0].upper(),
+                            name=parts[1],
+                            latitude=float(parts[2]),
+                            longitude=float(parts[3]),
+                        ))
+                    except ValueError:
+                        continue
+                if stations:
+                    logger.info("GIRO: loaded %d stations from %s",
+                                len(stations), path)
+                    return stations
+            except OSError as e:
+                logger.debug("GIRO bundled station load failed (%s): %s", path, e)
+        return []
+
+    def _save_station_cache(self, stations: List[GiroStation]):
+        """Persist the parsed station list so restarts don't depend on the
+        flaky DIDBase page."""
+        try:
+            tmp = self.cache_dir / "giro_stations.tsv.tmp"
+            lines = ["# GIRO station list cache (URSI<TAB>name<TAB>lat<TAB>lon)"]
+            lines += [f"{s.code}\t{s.name}\t{s.latitude:.2f}\t{s.longitude:.2f}"
+                      for s in stations]
+            tmp.write_text("\n".join(lines) + "\n")
+            tmp.replace(self.cache_dir / "giro_stations.tsv")
+        except OSError as e:
+            logger.debug("GIRO station cache write failed: %s", e)
+
+    def _fetch_giro_stations(self):
+        """Refresh the GIRO ionosonde station list.
+
+        Parses the DIDBFastStationList HTML page. On any failure (network,
+        503/404 flap, or an unrecognised page) keeps any existing list and,
+        if we have none yet, loads the bundled/disk fallback so GIRO can
+        still operate.
+        """
+        stations: List[GiroStation] = []
+        if self._session is not None:
+            try:
+                resp = self._session.get(
+                    GIRO_STATION_LIST_URL,
+                    timeout=getattr(_net_fetch, "DEFAULT_TIMEOUT", (10, 30)),
+                )
+                if resp.status_code == 200:
+                    stations = self._parse_didbase_station_html(resp.text)
+                    if not stations:
+                        logger.warning(
+                            "GIRO station list returned %d bytes but no parseable "
+                            "rows (page format changed?) — using fallback",
+                            len(resp.text),
+                        )
+                else:
+                    logger.debug("GIRO station list HTTP %s", resp.status_code)
+            except Exception as e:
+                logger.debug("GIRO station list fetch failed: %s", e)
+
+        if stations:
             self._giro_stations = stations
-            logger.info(f"GIRO: loaded {len(stations)} ionosonde stations")
-            
-        except Exception as e:
-            logger.debug(f"GIRO station list fetch failed: {e}")
+            self._save_station_cache(stations)
+            logger.info("GIRO: loaded %d ionosonde stations (live)", len(stations))
+        elif not self._giro_stations:
+            self._giro_stations = self._load_bundled_stations()
     
+    def _stations_to_poll(self) -> List[GiroStation]:
+        """Select which ionosondes to query this cycle.
+
+        With a known operator location, return the GIRO_MAX_STATIONS_POLLED
+        nearest stations (by great-circle distance); otherwise fall back to
+        the first N of the list.
+        """
+        stations = self._giro_stations
+        if not stations:
+            return []
+        if self.home_lat is not None and self.home_lon is not None:
+            stations = sorted(
+                stations,
+                key=lambda s: great_circle_distance(
+                    self.home_lat, self.home_lon, s.latitude, s.longitude
+                ),
+            )
+        return stations[:GIRO_MAX_STATIONS_POLLED]
+
     def _fetch_giro_station_data(self, station_code: str) -> Optional[GiroMeasurement]:
-        """Fetch latest ionosonde measurement for a station."""
-        if _requests is None:
+        """Fetch latest ionosonde measurement for a station via DIDBGetValues."""
+        if self._session is None:
             return None
-        requests = _requests
-        
+
         now = datetime.now(timezone.utc)
-        # Request last 30 minutes of data
-        start = now - timedelta(minutes=30)
-        
+        # Request the last 60 minutes — digisondes autoscale roughly every
+        # 5-15 min, and a 30-min window occasionally missed the latest sounding.
+        start = now - timedelta(minutes=60)
+
+        # DIDBGetValues expects dates as 'YYYY/MM/DD HH:MM:SS'. DMUF=3000 asks
+        # for the standard 3000 km MUF factor column set; CS is the autoscaling
+        # confidence score we map to GiroMeasurement.confidence.
         params = {
             'ursiCode': station_code,
-            'fromDate': start.strftime('%Y-%m-%d %H:%M:%S'),
-            'toDate': now.strftime('%Y-%m-%d %H:%M:%S'),
-            'charName': 'foF2,hmF2',
+            'charName': 'foF2,hmF2,CS',
+            'DMUF': 3000,
+            'fromDate': start.strftime('%Y/%m/%d %H:%M:%S'),
+            'toDate': now.strftime('%Y/%m/%d %H:%M:%S'),
         }
-        
+
         try:
-            resp = requests.get(GIRO_SAO_URL, params=params, timeout=10)
+            resp = self._session.get(
+                GIRO_GETVALUES_URL, params=params,
+                timeout=getattr(_net_fetch, "DEFAULT_TIMEOUT", (10, 30)),
+            )
             if resp.status_code != 200:
                 return None
-            
-            # GIRO DIDBase fast-char response: '#'-prefixed comment lines
-            # (one of which names the columns) then whitespace-delimited
-            # data rows.  Parse foF2/hmF2 by *column name* from that
-            # header — a swapped or inserted column otherwise silently
-            # corrupts hmF2, which is blended into the propagation
-            # geometry at weight up to 1.0 (P-H20).  Fall back to the
-            # documented positional layout only when no header is present,
-            # and range-validate the result against ionospheric physics
-            # either way.
-            header_cols = None
-            data_lines = []
-            for line in resp.text.splitlines():
-                s = line.strip()
-                if not s:
-                    continue
-                if s.startswith('#'):
-                    toks = s.lstrip('#').split()
-                    if 'foF2' in toks and 'hmF2' in toks:
-                        header_cols = toks
-                else:
-                    data_lines.append(s)
-            if not data_lines:
-                return None
 
-            # Most recent measurement = last data row.
-            parts = data_lines[-1].split()
-            try:
-                if header_cols is not None:
-                    foF2 = float(parts[header_cols.index('foF2')])
-                    hmF2 = float(parts[header_cols.index('hmF2')])
-                    conf = 0.0
-                    for cs_name in ('CS', 'Confidence', 'confidence'):
-                        if cs_name in header_cols:
-                            conf = float(parts[header_cols.index(cs_name)])
-                            break
-                else:
-                    # No header — documented positional layout
-                    # (timestamp, foF2, hmF2, confidence).
-                    foF2 = float(parts[-3])
-                    hmF2 = float(parts[-2])
-                    conf = float(parts[-1])
-            except (ValueError, IndexError):
+            parsed = self._parse_didb_characteristics(resp.text)
+            if parsed is None:
                 return None
-
-            # Range-validate: a corrupted column (a QD letter, a
-            # confidence score, a timestamp field) will not fall inside
-            # both physical ranges — foF2 0.5–30 MHz, hmF2 100–600 km.
-            if not (0.5 <= foF2 <= 30.0 and 100.0 <= hmF2 <= 600.0):
-                logger.debug(
-                    f"GIRO {station_code}: parsed foF2={foF2} MHz / "
-                    f"hmF2={hmF2} km out of physical range — rejected"
-                )
-                return None
-
+            foF2, hmF2, conf01 = parsed
             return GiroMeasurement(
                 station_code=station_code,
                 timestamp=now,
                 foF2_MHz=foF2,
                 hmF2_km=hmF2,
-                confidence=min(1.0, max(0.0, conf) / 100.0),
+                confidence=conf01,
             )
-            
+
         except Exception as e:
             logger.debug(f"Caught exception: {e}")
             return None
+
+    @staticmethod
+    def _parse_didb_characteristics(
+        text: str,
+    ) -> Optional[Tuple[float, float, float]]:
+        """Parse a DIDBGetValues response into (foF2_MHz, hmF2_km, conf01).
+
+        DIDBGetValues returns '#'-prefixed metadata/comment lines — one of
+        which is the column header naming the requested characteristics
+        (e.g. ``#Time CS foF2 QD hmF2 QD``) — followed by whitespace-
+        delimited data rows. We parse foF2/hmF2/CS by *column name* from
+        that header: a swapped or inserted column would otherwise silently
+        corrupt hmF2, which is blended into the propagation geometry at
+        weight up to 1.0 (P-H20). The positional layout (foF2, hmF2, conf
+        as the last columns) is used only when no header is present.
+
+        The result is range-validated against ionospheric physics
+        (foF2 0.5–30 MHz, hmF2 100–600 km); anything outside is treated as
+        a parse error and rejected. ``conf01`` is the CS autoscaling score
+        normalised to 0–1. Returns None if no usable row is found.
+        """
+        header_cols = None
+        data_lines = []
+        for line in text.splitlines():
+            s = line.strip()
+            if not s:
+                continue
+            if s.startswith('#'):
+                toks = s.lstrip('#').split()
+                if 'foF2' in toks and 'hmF2' in toks:
+                    header_cols = toks
+            else:
+                data_lines.append(s)
+        if not data_lines:
+            return None
+
+        # Most recent measurement = last data row.
+        parts = data_lines[-1].split()
+        try:
+            if header_cols is not None:
+                foF2 = float(parts[header_cols.index('foF2')])
+                hmF2 = float(parts[header_cols.index('hmF2')])
+                conf = 0.0
+                for cs_name in ('CS', 'Confidence', 'confidence'):
+                    if cs_name in header_cols:
+                        conf = float(parts[header_cols.index(cs_name)])
+                        break
+            else:
+                # No header — documented positional layout
+                # (timestamp, foF2, hmF2, confidence).
+                foF2 = float(parts[-3])
+                hmF2 = float(parts[-2])
+                conf = float(parts[-1])
+        except (ValueError, IndexError):
+            return None
+
+        # Range-validate: a corrupted column (a QD letter, a confidence
+        # score, a timestamp field) will not fall inside both physical
+        # ranges — foF2 0.5–30 MHz, hmF2 100–600 km.
+        if not (0.5 <= foF2 <= 30.0 and 100.0 <= hmF2 <= 600.0):
+            logger.debug(
+                "GIRO: parsed foF2=%s MHz / hmF2=%s km out of physical "
+                "range — rejected", foF2, hmF2,
+            )
+            return None
+
+        return foF2, hmF2, min(1.0, max(0.0, conf) / 100.0)
     
     # =========================================================================
     # PUBLIC API
@@ -1128,8 +1323,8 @@ class IonoDataService:
                     f"max {WAMIPE_CACHE_MAX_AGE_S / 3600.0:.1f} h) — "
                     f"using climatological fallback"
                 )
-            # Fallback to climatological defaults
-            point = self._climatological_fallback(lat, lon, utc_time)
+            # Fallback base: IRI-2020 if available, else crude climatology.
+            point = self._base_point(lat, lon, utc_time)
         
         # Apply GIRO corrections if available
         giro_correction = self._get_giro_correction(lat, lon, utc_time)
@@ -1308,6 +1503,84 @@ class IonoDataService:
             
             return (meas.hmF2_km, meas.foF2_MHz, weight)
     
+    def _get_iri_model(self):
+        """Lazily construct the IonosphericModel (IRI-2020) used as the
+        no-grid base. Latches off if it cannot be built so we don't retry
+        an expensive import/initialisation on every call."""
+        if not self.enable_iri_fallback or self._iri_unavailable:
+            return None
+        if self._iri_model is None:
+            try:
+                from .ionospheric_model import IonosphericModel
+                self._iri_model = IonosphericModel(enable_iri=True)
+            except Exception as e:
+                logger.info(
+                    "IRI-2020 base model unavailable (%s) — using parametric "
+                    "climatology fallback", e
+                )
+                self._iri_unavailable = True
+                return None
+        return self._iri_model
+
+    def _base_point(
+        self, lat: float, lon: float, utc_time: datetime
+    ) -> IonoGridPoint:
+        """Best available base ionospheric point when no real-time grid is
+        usable: IRI-2020 (source="iri") if available, else the crude internal
+        parametric climatology (source="climatological_fallback").
+
+        GIRO measurements are blended on top of whatever base this returns,
+        so a nearby ionosonde refines IRI rather than crude climatology.
+        """
+        iri = self._get_iri_model()
+        if iri is not None:
+            try:
+                heights = iri.get_layer_heights(
+                    timestamp=utc_time, latitude=lat, longitude=lon
+                )
+                if heights is not None:
+                    foF2 = getattr(heights, 'foF2', None)
+                    if foF2:
+                        nmF2 = 1.24e10 * foF2 ** 2
+                    else:
+                        nmF2 = 1e12
+                        foF2 = float(np.sqrt(nmF2 / 1.24e10))
+                    tec = getattr(heights, 'tec_tecu', None)
+                    if tec is None:
+                        # IRI build without TEC: borrow the climatological TEC
+                        # so downstream slant-TEC estimates stay reasonable.
+                        tec = self._climatological_fallback(
+                            lat, lon, utc_time
+                        ).TEC_TECU
+                    # Label by the tier that actually produced the estimate:
+                    # IonosphericModel transparently falls back to its own
+                    # parametric model when the IRI binary is unavailable, and
+                    # tagging that "iri" would overstate the data quality.
+                    tier = getattr(heights, 'tier', None)
+                    tv = getattr(tier, 'value', '') or ''
+                    if 'IRI' in tv:
+                        src = 'iri'
+                    elif tv.lower().startswith('param'):
+                        src = 'parametric'
+                    elif tv.lower().startswith('static'):
+                        src = 'static'
+                    else:
+                        src = tv.lower() or 'iri'
+                    return IonoGridPoint(
+                        latitude=lat,
+                        longitude=lon,
+                        timestamp=utc_time,
+                        hmF2_km=float(heights.hmF2),
+                        NmF2_m3=float(nmF2),
+                        foF2_MHz=float(foF2),
+                        TEC_TECU=float(tec),
+                        hmE_km=float(getattr(heights, 'hmE', 110.0) or 110.0),
+                        source=src,
+                    )
+            except Exception as e:
+                logger.debug("IRI base point failed, using climatology: %s", e)
+        return self._climatological_fallback(lat, lon, utc_time)
+
     @staticmethod
     def _climatological_fallback(
         lat: float,

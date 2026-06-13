@@ -325,12 +325,26 @@ class MetrologyService:
         if self._realtime_iono and lat is not None and lon is not None:
             try:
                 from .iono_data_service import IonoDataService
-                self._iono_service = IonoDataService.get_instance()
+                # Pass the receiver location so GIRO polls the nearest
+                # ionosondes (full GIRO weight is within ~555 km).
+                self._iono_service = IonoDataService.get_instance(
+                    home_lat=lat, home_lon=lon,
+                )
                 self._iono_service.start()
                 logger.info("IonoDataService background fetcher started")
             except Exception as e:
                 logger.warning(f"IonoDataService not available: {e}")
-             
+
+            # Near-real-time space weather (F10.7 / Kp / Ap) feeds the
+            # parametric ionosphere path for the current day.
+            try:
+                from .space_weather import SpaceWeatherService
+                self._space_weather = SpaceWeatherService.get_instance()
+                self._space_weather.start()
+                logger.info("SpaceWeatherService background fetcher started")
+            except Exception as e:
+                logger.warning(f"SpaceWeatherService not available: {e}")
+
         logger.info(f"MetrologyService initialized for {channel_name}")
 
     # Poll interval for the ring-buffer consumer loop.

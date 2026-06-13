@@ -1,0 +1,13 @@
+[Unit]
+Description=Daily Space-Weather Health Check Timer
+Documentation=https://github.com/mijahauan/hf-timestd
+
+[Timer]
+# Daily at 07:00 UTC. SpaceWeatherService refreshes in-process every 30 min,
+# so a stale snapshot here means the service (or the network) is down.
+OnCalendar=*-*-* 07:00:00
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target

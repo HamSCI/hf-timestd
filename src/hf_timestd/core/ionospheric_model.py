@@ -235,7 +235,8 @@ class IonosphericModel:
         enable_calibration: bool = True,
         calibration_window_hours: float = 24.0,
         max_calibration_entries: int = 100,
-        ionex_dir: Optional[Path] = None
+        ionex_dir: Optional[Path] = None,
+        enable_space_weather: bool = True
     ):
         """
         Initialize the ionospheric model.
@@ -251,6 +252,11 @@ class IonosphericModel:
         self.enable_calibration = enable_calibration
         self.calibration_window_hours = calibration_window_hours
         self.max_calibration_entries = max_calibration_entries
+        # Use near-real-time F10.7 (from SpaceWeatherService) to drive the
+        # parametric tier when the caller doesn't supply one. IRI reads its
+        # own apf107.dat, so this mainly sharpens the parametric fallback for
+        # the current day, which the weekly apf107.dat refresh lags.
+        self.enable_space_weather = enable_space_weather
         
         # IRI-2020 availability (falls back to IRI-2016 if needed)
         self._iri_available: Optional[bool] = None  # None = not checked yet
@@ -808,6 +814,24 @@ class IonosphericModel:
             tec_tecu=heights.tec_tecu,
         )
     
+    def _live_f107(self) -> Optional[float]:
+        """Latest observed F10.7 from SpaceWeatherService, or None.
+
+        Reads the shared singleton (which seeds from its disk cache, so this
+        is cheap and works even if the background refresh thread was never
+        started). Returns None — not the climatological default — when no
+        real value is available, so the parametric model behaves exactly as
+        before in that case.
+        """
+        if not self.enable_space_weather:
+            return None
+        try:
+            from .space_weather import SpaceWeatherService
+            return SpaceWeatherService.get_instance().get_f107(default=None)
+        except Exception as e:
+            logger.debug("live F10.7 unavailable: %s", e)
+            return None
+
     def get_layer_heights(
         self,
         timestamp: Optional[datetime] = None,
@@ -837,9 +861,14 @@ class IonosphericModel:
         # Ensure timezone-aware
         if timestamp.tzinfo is None:
             timestamp = timestamp.replace(tzinfo=timezone.utc)
-        
+
+        # Supply near-real-time F10.7 if the caller didn't, so the parametric
+        # tier reflects today's solar activity rather than assuming moderate.
+        if f107 is None:
+            f107 = self._live_f107()
+
         heights: Optional[LayerHeights] = None
-        
+
         # TIER 1: Try IRI-2020 (or IRI-2016 fallback)
         if self.enable_iri and latitude is not None and longitude is not None:
             heights = self._get_iri_heights(timestamp, latitude, longitude)

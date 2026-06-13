@@ -45,8 +45,12 @@ class _FakeRequests:
 
 @pytest.fixture
 def service(tmp_path):
+    # enable_iri_fallback=False keeps these unit tests hermetic: the no-grid
+    # base is the in-module climatology, with no IonosphericModel / IRI /
+    # space-weather dependency pulled in.
     return IonoDataService(
         cache_dir=str(tmp_path), enable_wamipe=False, enable_giro=False,
+        enable_iri_fallback=False,
     )
 
 
@@ -96,15 +100,14 @@ def test_xml_body_is_not_parsed_as_netcdf(service, monkeypatch):
 
 # --- P-H20 — GIRO parsed by column name + range-validated -----------------
 
-def _giro(monkeypatch, text):
-    monkeypatch.setattr(
-        iono_data_service, '_requests',
-        _FakeRequests(_FakeResp(text=text)),
-    )
+def _giro(service, text):
+    # GIRO measurement fetching now uses the shared net_fetch session
+    # (service._session); stub it with a fake whose .get() returns `text`.
+    service._session = _FakeRequests(_FakeResp(text=text))
 
 
-def test_giro_parsed_by_header_column_name(service, monkeypatch):
-    _giro(monkeypatch,
+def test_giro_parsed_by_header_column_name(service):
+    _giro(service,
           "# Time CS foF2 QD hmF2 QD\n"
           "2026-05-18T12:00:00.000Z 100 8.5 // 280.0 //\n")
     m = service._fetch_giro_station_data('AB123')
@@ -113,16 +116,16 @@ def test_giro_parsed_by_header_column_name(service, monkeypatch):
     assert m.hmF2_km == pytest.approx(280.0)
 
 
-def test_giro_out_of_range_value_is_rejected(service, monkeypatch):
+def test_giro_out_of_range_value_is_rejected(service):
     # hmF2 column corrupted to 5 km — physically impossible.
-    _giro(monkeypatch,
+    _giro(service,
           "# Time CS foF2 QD hmF2 QD\n"
           "2026-05-18T12:00:00.000Z 100 8.5 // 5.0 //\n")
     assert service._fetch_giro_station_data('AB123') is None
 
 
-def test_giro_headerless_positional_fallback(service, monkeypatch):
-    _giro(monkeypatch, "2026-05-18T12:00:00.000Z 8.5 280.0 95\n")
+def test_giro_headerless_positional_fallback(service):
+    _giro(service, "2026-05-18T12:00:00.000Z 8.5 280.0 95\n")
     m = service._fetch_giro_station_data('AB123')
     assert m is not None
     assert m.foF2_MHz == pytest.approx(8.5)

@@ -666,6 +666,136 @@ def _install_sighup_log_handler():
     signal.signal(signal.SIGHUP, _reload)
 
 
+def _cmd_data_sources(args) -> int:
+    """`hf-timestd data sources` — report external data-source health.
+
+    Surfaces, for an operator, whether the space-weather / ionosphere feeds
+    are fresh: live (or cached) F10.7/Kp/Ap, the newest IONEX file, and the
+    apf107.dat last-entry date. Exits non-zero if anything critical is
+    missing/stale so it can double as a quick health probe.
+    """
+    import json as _json
+    import time as _time
+    from datetime import datetime, timezone
+
+    report = {}
+    problems = []
+
+    # --- space weather ---
+    try:
+        from .core.space_weather import SpaceWeatherService, F107_MAX_AGE_S, KP_MAX_AGE_S
+        sw = SpaceWeatherService.get_instance(cache_dir=args.cache_dir)
+        if args.refresh:
+            sw.refresh()
+        st = sw.get_stats()
+        report['space_weather'] = st
+        if st.get('f107') is None:
+            problems.append("no F10.7 available")
+        elif st.get('f107_stale'):
+            problems.append("F10.7 stale")
+        if st.get('kp') is None:
+            problems.append("no Kp available")
+        elif st.get('kp_stale'):
+            problems.append("Kp stale")
+    except Exception as e:
+        report['space_weather'] = {'error': str(e)}
+        problems.append(f"space_weather: {e}")
+
+    # --- IONEX (newest file age) ---
+    try:
+        from pathlib import Path
+        ionex_dir = Path(args.ionex_dir)
+        files = list(ionex_dir.glob('*.INX*')) + list(ionex_dir.glob('*.gz')) + \
+            list(ionex_dir.glob('*.Z'))
+        if files:
+            newest = max(files, key=lambda p: p.stat().st_mtime)
+            age_h = (_time.time() - newest.stat().st_mtime) / 3600.0
+            report['ionex'] = {'newest': newest.name, 'age_hours': round(age_h, 1),
+                               'count': len(files)}
+            if age_h > 72:
+                problems.append(f"IONEX newest is {age_h:.0f}h old")
+        else:
+            report['ionex'] = {'status': 'no files (optional; needs Earthdata creds)'}
+    except Exception as e:
+        report['ionex'] = {'error': str(e)}
+
+    # --- IRI indices (apf107.dat last entry) ---
+    try:
+        from pathlib import Path
+        apf = Path(args.apf107)
+        if apf.is_file():
+            last = apf.read_text().splitlines()[-1].split()
+            yy, mm, dd = int(last[0]), int(last[1]), int(last[2])
+            last_date = datetime(2000 + yy, mm, dd, tzinfo=timezone.utc)
+            age_d = (datetime.now(timezone.utc) - last_date).days
+            report['iri_indices'] = {'apf107_last': last_date.date().isoformat(),
+                                     'age_days': age_d}
+            if age_d > 14:
+                problems.append(f"apf107.dat last entry {age_d}d old")
+        else:
+            report['iri_indices'] = {'status': f'{apf} not found'}
+    except Exception as e:
+        report['iri_indices'] = {'error': str(e)}
+
+    # --- raytracing capability (PHaRLAP/pyLAP) — client self-report ---
+    # Stand-alone diagnosis: the client reports whether numerical raytracing is
+    # live without needing sigmond. Raytracing is optional/advisory, so a
+    # missing capability is informational, never a "problem".
+    try:
+        import os as _os
+        rt = {}
+        try:
+            import pylap.raytrace_2d  # noqa: F401
+            rt['pylap'] = True
+        except Exception:
+            rt['pylap'] = False
+        pharlap_home = _os.environ.get('PHARLAP_HOME', '/opt/pharlap_4.7.4')
+        rt['pharlap_home'] = pharlap_home
+        rt['pharlap'] = (Path(pharlap_home) / 'lib').is_dir()
+        rt['available'] = bool(rt['pylap'] and rt['pharlap'])
+        report['raytrace'] = rt
+    except Exception as e:
+        report['raytrace'] = {'error': str(e)}
+
+    report['problems'] = problems
+
+    if args.json:
+        print(_json.dumps(report, indent=2, default=str))
+    else:
+        sw = report.get('space_weather', {})
+        print("External data sources")
+        print("─────────────────────")
+        print(f"  F10.7 : {sw.get('f107')} sfu  [{sw.get('f107_source')}]"
+              f"{'  STALE' if sw.get('f107_stale') else ''}")
+        print(f"  Kp    : {sw.get('kp')}  [{sw.get('kp_source')}]"
+              f"{'  STALE' if sw.get('kp_stale') else ''}")
+        print(f"  Ap    : {sw.get('ap')}  [{sw.get('ap_source')}]")
+        ix = report.get('ionex', {})
+        print(f"  IONEX : {ix.get('newest', ix.get('status', ix.get('error', '?')))}"
+              + (f"  ({ix['age_hours']}h old, {ix['count']} files)" if 'age_hours' in ix else ""))
+        ii = report.get('iri_indices', {})
+        print(f"  IRI   : apf107 last {ii.get('apf107_last', ii.get('status', ii.get('error', '?')))}"
+              + (f"  ({ii['age_days']}d old)" if 'age_days' in ii else ""))
+        rt = report.get('raytrace', {})
+        if rt.get('available'):
+            rt_txt = "available (pyLAP + PHaRLAP)"
+        elif rt.get('pharlap') and not rt.get('pylap'):
+            rt_txt = "PHaRLAP present but pyLAP not built — run scripts/ensure-pylap.sh"
+        elif rt.get('pylap') and not rt.get('pharlap'):
+            rt_txt = "pyLAP built but PHaRLAP not staged"
+        elif 'error' in rt:
+            rt_txt = rt['error']
+        else:
+            rt_txt = "geometric fallback (PHaRLAP not staged — optional)"
+        print(f"  Raytrace: {rt_txt}")
+        if problems:
+            print("\n  PROBLEMS: " + "; ".join(problems))
+        else:
+            print("\n  All sources OK.")
+
+    return 1 if problems else 0
+
+
 def main():
     """Main entry point for hf-timestd command"""
     # Quiet stderr for sigmond client-contract subcommands so they emit
@@ -809,7 +939,21 @@ Exit codes:
     summary_parser.add_argument('--config', '-c', default='/etc/signal-recorder/config.toml',
                                help='Configuration file path')
     summary_parser.add_argument('--dev', action='store_true', help='Use development paths')
-    
+
+    # External data-source status (space weather, IONEX, IRI indices)
+    sources_parser = data_subparsers.add_parser(
+        'sources', help='Show external data-source health (space weather, IONEX, IRI)')
+    sources_parser.add_argument('--json', action='store_true',
+                                help='Emit machine-readable JSON')
+    sources_parser.add_argument('--refresh', action='store_true',
+                                help='Do a live space-weather fetch instead of reading cache only')
+    sources_parser.add_argument('--ionex-dir', default='/var/lib/timestd/ionex',
+                                help='IONEX directory')
+    sources_parser.add_argument('--cache-dir', default='/var/lib/timestd/iono_cache',
+                                help='Iono cache directory')
+    sources_parser.add_argument('--apf107', default='/opt/pharlap_4.7.4/dat/iri2020/apf107.dat',
+                                help='PHaRLAP/IRI apf107.dat path')
+
     # Clean data
     clean_data_parser = data_subparsers.add_parser('clean-data', help='Delete RTP recordings')
     clean_data_parser.add_argument('--config', '-c', default='/etc/signal-recorder/config.toml',
@@ -1224,6 +1368,8 @@ Per-service overrides in [services] take precedence over the profile.
         else:
             print("⚠️ Some channels may have failed to create")
             sys.exit(1)
+    elif args.command == 'data' and getattr(args, 'data_command', None) == 'sources':
+        sys.exit(_cmd_data_sources(args))
     elif args.command == 'data':
         # Data management mode
         from .data_management import DataManager

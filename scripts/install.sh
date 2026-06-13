@@ -78,6 +78,7 @@ while [[ $# -gt 0 ]]; do
         --reconfig)    RECONFIG=true; shift ;;
         --yes|-y)      AUTO_YES=true; shift ;;
         --verbose|-v)  VERBOSE=true; shift ;;
+        --pharlap-zip) PHARLAP_ZIP="$2"; shift 2 ;;  # operator-supplied PHaRLAP archive to stage
         --mode)        shift 2 ;;  # Legacy flag — accepted, ignored
         --help|-h)
             echo "Usage: sudo $0 [--pull] [--no-restart] [--restart-all] [--force-pip] [--reconfig] [--yes|-y]"
@@ -91,6 +92,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --reconfig      Re-run station configuration wizard"
             echo "  --yes|-y        Accept defaults, no interactive prompts"
             echo "  --verbose|-v    Verbose output"
+            echo "  --pharlap-zip PATH  Stage operator-supplied PHaRLAP 4.7.4 archive (enables pyLAP raytracing)"
+            echo "                  (also via PHARLAP_ZIP env; PHaRLAP is licence-restricted, never bundled)"
             exit 0 ;;
         *) log_error "Unknown option: $1"; exit 1 ;;
     esac
@@ -158,6 +161,9 @@ APT_PACKAGES=(
     python3 python3-dev python3-venv python3-pip git
     libhdf5-dev libsndfile1-dev libsystemd-dev pkg-config
     rsync avahi-utils hdf5-tools
+    # Build toolchain for pyLAP (C extension) against PHaRLAP 4.7.4's
+    # gfortran-compiled static libs — see Phase 4b / EXTERNAL_PREREQUISITES.md.
+    build-essential gfortran
 )
 MISSING_APT=()
 for pkg in "${APT_PACKAGES[@]}"; do
@@ -517,60 +523,37 @@ log_info "Python: OK (hf-timestd $INSTALLED_VER)"
 log_step "Phase 4b: pyLAP (optional)"
 
 PHARLAP_HOME="${PHARLAP_HOME:-/opt/pharlap_4.7.4}"
-PYLAP_REPO="https://github.com/mijahauan/PyLap.git"
-# Pin pylap to a known-good commit (never a bare branch/HEAD) per
-# sigmond/docs/native-binaries.md.  Bump when a newer PyLap is validated.
-PYLAP_REF="a61ded200c1aea68ee6f7f553c27520087449adc"   # main @ 2026-06-01
 PYLAP_DIR="/opt/pylap"
+# The pyLAP repo URL + pinned commit live in scripts/ensure-pylap.sh (single
+# source of truth, also used by deploy.toml [build].steps). native-binaries.md
+# points there for the hf-timestd pyLAP pin.
+
+# Stage operator-supplied PHaRLAP if an archive was provided and PHaRLAP is
+# not already installed. PHaRLAP is licence-restricted (DST, Australia) and is
+# NEVER bundled in this repo — the operator supplies the archive via
+# --pharlap-zip / PHARLAP_ZIP (acquire once from DST).
+if [[ ! -d "$PHARLAP_HOME/lib" && -n "${PHARLAP_ZIP:-}" ]]; then
+    log_info "Staging PHaRLAP from $PHARLAP_ZIP"
+    bash "$PROJECT_DIR/scripts/install-pharlap.sh" --zip "$PHARLAP_ZIP" --dest "$PHARLAP_HOME" \
+        || log_warn "PHaRLAP staging failed — raytracing will use geometric fallback"
+fi
 
 if [[ -d "$PHARLAP_HOME/lib" ]]; then
     log_info "PHaRLAP found at $PHARLAP_HOME"
 
-    # Check if gfortran is available (required for pyLAP build)
+    # gfortran is a declared apt prerequisite (Phase 1); ensure it regardless.
     if ! command -v gfortran &>/dev/null; then
         log_warn "gfortran not found — installing..."
         apt-get install -y gfortran
     fi
 
-    # Clone or update pylap fork, then pin to PYLAP_REF (reproducible build)
-    if [[ -d "$PYLAP_DIR/.git" ]]; then
-        log_info "Fetching pylap fork..."
-        git -C "$PYLAP_DIR" fetch --quiet origin 2>/dev/null || \
-            log_warn "pylap git fetch failed (non-critical)"
-    else
-        log_info "Cloning pylap fork..."
-        git clone "$PYLAP_REPO" "$PYLAP_DIR" 2>/dev/null || \
-            { log_warn "pylap clone failed — raytracing will use geometric fallback"; }
-    fi
-    if [[ -d "$PYLAP_DIR/.git" ]]; then
-        git -C "$PYLAP_DIR" checkout --quiet "$PYLAP_REF" 2>/dev/null || \
-            log_warn "pylap checkout $PYLAP_REF failed — using current checkout"
-    fi
+    # --force-pip forces a clean pyLAP rebuild.
+    [[ "$FORCE_PIP" == "true" ]] && "$VENV_DIR/bin/pip" uninstall -y pylap &>/dev/null || true
 
-    # Build pylap into the venv if source is present
-    if [[ -f "$PYLAP_DIR/setup.py" ]]; then
-        PYLAP_INSTALLED=$("$VENV_DIR/bin/python" -c "
-try:
-    import pylap; print('yes')
-except Exception: print('no')" 2>/dev/null)
-
-        if [[ "$PYLAP_INSTALLED" != "yes" ]] || [[ "$FORCE_PIP" == "true" ]]; then
-            log_info "Installing pylap build dependencies..."
-            "$VENV_DIR/bin/pip" install setuptools wheel numpy 2>&1 | tail -5
-
-            # Clean stale build artifacts from previous attempts
-            rm -rf "$PYLAP_DIR/build" "$PYLAP_DIR/pylap.egg-info"
-
-            log_info "Building pylap into venv..."
-            PYLAP_LOG="/tmp/pylap-build.log"
-            PHARLAP_HOME="$PHARLAP_HOME" \
-                "$VENV_DIR/bin/pip" install "$PYLAP_DIR" --no-build-isolation --no-cache-dir 2>&1 | tee "$PYLAP_LOG" | tail -15 || \
-                { log_warn "pylap build failed — full log: $PYLAP_LOG"; \
-                  grep -iE '(error:|fatal|cannot find|undefined reference|No such file)' "$PYLAP_LOG" | head -10; }
-        else
-            log_info "pylap already installed"
-        fi
-    fi
+    # Build pyLAP into the venv via the shared, idempotent helper (the same
+    # script deploy.toml [build].steps runs, so install and bring-up agree).
+    PHARLAP_HOME="$PHARLAP_HOME" TIMESTD_VENV="$VENV_DIR" PYLAP_DIR="$PYLAP_DIR" \
+        bash "$PROJECT_DIR/scripts/ensure-pylap.sh" || log_warn "ensure-pylap.sh reported an issue"
 
     # Ensure PHARLAP env vars are in the environment file
     if ! grep -q '^PHARLAP_HOME=' "$ENV_FILE" 2>/dev/null; then
@@ -579,8 +562,11 @@ except Exception: print('no')" 2>/dev/null)
         log_info "Added PHARLAP_HOME and DIR_MODELS_REF_DAT to $ENV_FILE"
     fi
 else
-    log_info "PHaRLAP not found at $PHARLAP_HOME — raytracing disabled"
-    log_info "  See docs/EXTERNAL_PREREQUISITES.md for acquisition instructions"
+    log_info "PHaRLAP not found at $PHARLAP_HOME — raytracing disabled (geometric fallback)"
+    log_info "  Acquire PHaRLAP 4.7.4 from DST, then re-run with:"
+    log_info "    sudo bash $PROJECT_DIR/scripts/install.sh --pharlap-zip /path/to/pharlap_4.7.4.zip"
+    log_info "  (or stage directly: sudo bash $PROJECT_DIR/scripts/install-pharlap.sh --zip ...)"
+    log_info "  See docs/EXTERNAL_PREREQUISITES.md §3 for details."
 fi
 
 
@@ -651,6 +637,7 @@ for tf in \
     timestd-iono-reanalysis.service timestd-iono-reanalysis.timer \
     timestd-iri-healthcheck.service timestd-iri-healthcheck.timer \
     timestd-iri-update.service timestd-iri-update.timer \
+    timestd-spaceweather-healthcheck.service timestd-spaceweather-healthcheck.timer \
     timestd-pipeline-watchdog.service timestd-pipeline-watchdog.timer \
     timestd-prune.service timestd-prune.timer \
     timestd-vtec.service \
@@ -968,6 +955,9 @@ if [[ "$DO_RESTART" == "true" ]]; then
             systemctl start "${timer}.timer" 2>/dev/null || true
         done
         [[ -f "$SYSTEMD_DIR/timestd-iono-reanalysis.timer" ]] && systemctl start timestd-iono-reanalysis.timer 2>/dev/null || true
+        if [[ -f "$SYSTEMD_DIR/timestd-spaceweather-healthcheck.timer" ]]; then
+            systemctl enable --now timestd-spaceweather-healthcheck.timer 2>/dev/null || true
+        fi
         [[ -f "$SYSTEMD_DIR/grape-daily.timer" ]] && systemctl start grape-daily.timer 2>/dev/null || true
     fi
 else

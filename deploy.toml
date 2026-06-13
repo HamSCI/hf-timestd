@@ -33,6 +33,13 @@ steps = [
     "python3 -m venv /opt/git/sigmond/hf-timestd/venv",
     "/opt/git/sigmond/hf-timestd/venv/bin/pip install --upgrade pip setuptools wheel",
     "/opt/git/sigmond/hf-timestd/venv/bin/pip install -e .",
+    # pyLAP is intentionally NOT a pyproject dependency (its setup.py needs
+    # PHARLAP_HOME at build time, which breaks lockfile resolution on hosts
+    # without PHaRLAP). This step rebuilds it into the freshly-created venv when
+    # PHaRLAP is present, so a clone whose venv was rebuilt self-heals
+    # raytracing instead of silently dropping to the geometric fallback. It
+    # exits 0 when PHaRLAP/gfortran are absent — raytracing is optional.
+    "/opt/git/sigmond/hf-timestd/scripts/ensure-pylap.sh",
 ]
 produces = [
     "/opt/git/sigmond/hf-timestd/venv/bin/hf-timestd",

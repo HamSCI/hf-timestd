@@ -1,0 +1,32 @@
+[Unit]
+Description=HF-TimeStd Space-Weather Health Check
+Documentation=https://github.com/mijahauan/hf-timestd
+After=network-online.target
+Wants=network-online.target
+OnFailure=timestd-alert@%n.service
+
+[Service]
+Type=oneshot
+User=timestd
+Group=timestd
+
+# Operator identity (callsign, grid) from sigmond — CLIENT-CONTRACT §14.2
+EnvironmentFile=-/etc/sigmond/coordination.env
+EnvironmentFile=-/etc/hf-timestd/environment
+
+ExecStart=/opt/git/sigmond/hf-timestd/scripts/spaceweather-healthcheck.sh
+
+TimeoutStartSec=60
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=timestd-spaceweather-healthcheck
+
+# Hardening: read-only; the script only reads the iono cache and curls SWPC.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
