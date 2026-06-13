@@ -171,6 +171,37 @@ auto_or_prompt() {
     prompt "$varname" "$prompt_text" "" "$help_text" "$required"
 }
 
+# =============================================================================
+# Best-effort auto-detection (empty output = not found; never fatal). These
+# only supply *defaults* — the operator still confirms each value, and an
+# install with neither GPS nor mDNS behaves exactly as before.
+# =============================================================================
+
+# Station location from a GPS fix via gpsd. On a timing station the GPSDO
+# (e.g. a Leo Bodnar) feeds gpsd, so this captures the Bodnar's position
+# transparently — grid square is then derived from lat/lon by the generator.
+_detect_gps_latlon() {
+    command -v gpspipe >/dev/null 2>&1 || return 0
+    local tpv lat lon
+    tpv="$(timeout 10 gpspipe -w -n 30 2>/dev/null | grep '"class":"TPV"' \
+            | grep '"lat":' | tail -1)"
+    [[ -n "$tpv" ]] || return 0
+    lat="$(printf '%s' "$tpv" | grep -oE '"lat":-?[0-9.]+' | head -1 | cut -d: -f2)"
+    lon="$(printf '%s' "$tpv" | grep -oE '"lon":-?[0-9.]+' | head -1 | cut -d: -f2)"
+    [[ -n "$lat" && -n "$lon" ]] && printf '%s %s' "$lat" "$lon"
+}
+
+# ka9q-radio status mDNS name advertised by THIS host's radiod, matched on the
+# source=<hostname> txt record. Names carry a hardware suffix (e.g.
+# sigma-rx888mk2-status.local), so discovery beats guessing <hostname>-status.local.
+_detect_radiod_status() {
+    command -v avahi-browse >/dev/null 2>&1 || return 0
+    local host; host="$(hostname -s 2>/dev/null || true)"
+    [[ -n "$host" ]] || return 0
+    timeout 6 avahi-browse -rtp _ka9q-ctl._udp 2>/dev/null \
+      | awk -F';' -v h="$host" '$1=="=" && index($0,"source=" h "\"")>0 {print $7; exit}'
+}
+
 prompt_yn() {
     local varname="$1"
     local prompt_text="$2"
@@ -285,29 +316,49 @@ auto_or_prompt CALLSIGN "Callsign" STATION_CALL "Your amateur radio callsign —
 GRID_SQUARE=""
 LATITUDE=""
 LONGITUDE=""
+_DET_LAT=""
+_DET_LON=""
 
 # Pick the location-mode from whatever sigmond gave us.  If neither
-# coordinate form is published, ask the operator which they prefer.
+# coordinate form is published, try a GPS fix (gpsd, fed by the GPSDO/Bodnar)
+# before asking the operator which entry method they prefer.
 if [[ -n "${STATION_GRID:-}" ]]; then
     LOCATION_MODE="grid"
 elif [[ -n "${STATION_LAT:-}" && -n "${STATION_LON:-}" ]]; then
     LOCATION_MODE="latlon"
 else
-    echo ""
-    echo -e "  ${DIM}Location entry method:${NC}"
-    prompt_choice LOCATION_MODE "Select location input" \
-        "grid — Enter Maidenhead grid square (6 or 10 chars)" \
-        "latlon — Enter latitude/longitude (decimal degrees)"
+    _GPS="$(_detect_gps_latlon)"
+    if [[ -n "$_GPS" ]]; then
+        _DET_LAT="${_GPS% *}"
+        _DET_LON="${_GPS#* }"
+        echo ""
+        echo -e "  ${GREEN}✓${NC} GPS fix detected via gpsd: ${BOLD}${_DET_LAT}, ${_DET_LON}${NC}"
+        echo -e "  ${DIM}(grid square is derived from this; press Enter to accept the detected values)${NC}"
+        LOCATION_MODE="latlon"
+    else
+        echo ""
+        echo -e "  ${DIM}Location entry method:${NC}"
+        prompt_choice LOCATION_MODE "Select location input" \
+            "grid — Enter Maidenhead grid square (6 or 10 chars)" \
+            "latlon — Enter latitude/longitude (decimal degrees)"
+    fi
 fi
 
 if [[ "$LOCATION_MODE" == "grid" ]]; then
     auto_or_prompt GRID_SQUARE "Grid square" STATION_GRID \
         "Maidenhead locator, 6 or 10 chars (e.g. FN42ab12cd). More precision is better." true
     # Lat/Lon will be derived from grid in the config generator.
-else
+elif [[ -n "${STATION_LAT:-}" ]]; then
+    # sigmond published coordinates — silent auto-fill.
     auto_or_prompt LATITUDE  "Latitude"  STATION_LAT \
         "Decimal degrees, positive = North. More precision is better." true
     auto_or_prompt LONGITUDE "Longitude" STATION_LON \
+        "Decimal degrees, positive = East, negative = West. More precision is better." true
+else
+    # Operator confirms; GPS-detected values (if any) are offered as defaults.
+    prompt LATITUDE  "Latitude"  "$_DET_LAT" \
+        "Decimal degrees, positive = North. More precision is better." true
+    prompt LONGITUDE "Longitude" "$_DET_LON" \
         "Decimal degrees, positive = East, negative = West. More precision is better." true
     # Grid will be derived from lat/lon in the config generator.
 fi
@@ -344,8 +395,18 @@ echo ""
 echo -e "${BOLD}${BLUE}━━━ Section 3: Radio Source (ka9q-radio) ━━━${NC}"
 echo ""
 
-auto_or_prompt KA9Q_STATUS "ka9q-radio status address" SIGMOND_RADIOD_STATUS \
-    "Multicast address or mDNS name (e.g. hf-status.local or 239.x.x.x)" true
+if [[ -n "${SIGMOND_RADIOD_STATUS:-}" ]]; then
+    auto_or_prompt KA9Q_STATUS "ka9q-radio status address" SIGMOND_RADIOD_STATUS \
+        "Multicast address or mDNS name (e.g. hf-status.local or 239.x.x.x)" true
+else
+    # No sigmond-published value — mDNS-discover this host's own radiod and
+    # offer it as the default (operator can override).
+    KA9Q_DETECTED="$(_detect_radiod_status)"
+    [[ -n "$KA9Q_DETECTED" ]] && \
+        echo -e "  ${GREEN}✓${NC} Discovered local radiod via mDNS: ${BOLD}${KA9Q_DETECTED}${NC}"
+    prompt KA9Q_STATUS "ka9q-radio status address" "$KA9Q_DETECTED" \
+        "Multicast address or mDNS name (e.g. hf-status.local or 239.x.x.x)" true
+fi
 
 echo ""
 echo -e "  ${DIM}Data source mode:${NC}"
