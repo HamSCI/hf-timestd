@@ -311,7 +311,13 @@ The authority manager selects the **highest available** T-level per decision per
 - **T3 probe**: hf-timestd reports ≥ 2 stations with tick detections in the last minute and Kalman innovation within bounds. Zero detections → T3 unavailable (the Saturday failure's missing alarm).
 - **T1 probe**: A1 present AND last RTP_TIMESNAP within freshness window.
 
-When multiple levels are simultaneously healthy, the higher wins as **active** and the lower remain **witnesses** for cross-check. Disagreement between active and witness beyond threshold raises `TIMING_DISAGREEMENT` and forces a downgrade to the closest agreeing pair. Initial proposed thresholds (subject to empirical tuning on live data):
+When multiple levels are simultaneously healthy, the higher wins as **active** and the lower remain **witnesses** for cross-check. Disagreement between active and a witness beyond threshold raises `TIMING_DISAGREEMENT`. The response is graded — a single noisy lower witness must **not** demote a higher-precision tier on its own say-so:
+
+- **Single witness disagrees** → raise `TIMING_DISAGREEMENT`, keep the active tier, but **widen the published `sigma_ns`** to cover the discrepancy. The offset is still served (the higher tier is the more likely-correct one), but at honestly-reduced confidence so no consumer trusts a contested value at full precision.
+- **Majority (≥ 2 witnesses) agree with each other and disagree with active** → active is the outlier; **downgrade** to the highest-ranked agreeing witness.
+- **Asymmetric T3 ↔ T2 gross delta** (> 1 s) → Fusion being wildly wrong vs WAN NTP is a hardware/detection bug; force T3 down regardless of the normal cross-check math.
+
+A resolved downgrade needs no uncertainty widening — the adjudicated tier is trusted. Thresholds are per-pair floors on the `3·√(σ_a² + σ_b²)` combined CI (subject to empirical tuning on live data):
 
 | Pair | Threshold | Rationale |
 |---|---|---|

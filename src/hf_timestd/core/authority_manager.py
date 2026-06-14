@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import subprocess
 import tempfile
@@ -69,7 +70,12 @@ CHRONY_HEALTHY_STATES = "*+"
 # per-pair values so a noisy witness can't mask a real disagreement by
 # inflating the combined sigma.
 DEFAULT_PAIR_THRESHOLDS_MS: Dict[frozenset, float] = {
-    frozenset({"T6", "T5"}): 0.050,  # 50 μs
+    # T6 is ns-class; T5 is USB-bus-jitter floored at µs-to-ms (METROLOGY.md
+    # §4.5). The floor must be sized to T5's combined uncertainty so we alarm
+    # only on disagreement beyond what USB transport explains — 5 ms per the
+    # §4.5 table. (Was 50 µs, ~100× too tight: it alarmed on T5's normal
+    # jitter, manufacturing spurious TIMING_DISAGREEMENT flags.)
+    frozenset({"T6", "T5"}): 5.0,    # 5 ms
     frozenset({"T3", "T4"}): 2.0,    # 2 ms
     frozenset({"T3", "T2"}): 5.0,    # 5 ms
 }
@@ -85,7 +91,14 @@ ASYMMETRIC_T3_T2_FORCE_DOWN_MS = 1000.0
 # levels do not measure RTP→UTC directly, so we publish offset=0 with
 # a sigma representative of the tier.
 TRUST_SIGMA_MS: Dict[str, float] = {
-    "T5": 0.010,   # ~10 μs — on-host GPS+PPS
+    # T5 is GPS+PPS *delivered over USB* (LBE-1421 USB-NMEA); its accuracy is
+    # USB-bus-jitter floored at µs-to-ms (METROLOGY.md §4.5), not the ~10 µs a
+    # kernel-PPS path would give. 10 µs here was overconfident by ~100× — it
+    # understated published T5 uncertainty and (via the cross-check) over-
+    # tightened the T6↔T5 floor. 1 ms is a defensible USB-NMEA typical; the
+    # LbeT5DirectProbe reports its own measured sigma when available and
+    # overrides this fallback.
+    "T5": 1.0,     # ~1 ms — USB-delivered GPS+PPS (bus-jitter floored)
     "T4": 2.0,     # ~2 ms — LAN GPS+PPS via NTP
     "T2": 20.0,    # ~20 ms — WAN NTP
     "T1": 1.0,     # GPSDO coast — rate perfect, phase frozen at last snapshot
@@ -218,6 +231,7 @@ class AuthorityManager:
         # which is the default.  Flag accumulates here so the cross-
         # check downstream sees the post-demotion active.
         active, demote_flag = self._maybe_demote_breached_t6(active, results)
+        active_pre_xcheck = active
         active, witnesses, flags = self._cross_check(active, results)
         if demote_flag is not None:
             flags = list(flags) + [demote_flag]
@@ -227,8 +241,25 @@ class AuthorityManager:
         feedback_flag = self._check_chrony_self_feedback(active)
         if feedback_flag is not None:
             flags = list(flags) + [feedback_flag]
+
+        # METROLOGY.md §4.5: a single-witness disagreement raises a flag but
+        # does NOT downgrade (deliberate — one noisy lower witness must not
+        # demote a higher-precision tier; majority / asymmetric rules handle
+        # genuine outliers). To keep that conservatism from silently shipping
+        # an overconfident offset, when the active tier is *kept* despite an
+        # unresolved disagreement we (a) widen the published uncertainty to
+        # cover the discrepancy and (b) emit the canonical TIMING_DISAGREEMENT
+        # alarm so consumers/watchdogs can react. A resolved downgrade
+        # (active changed) needs neither — the adjudicated tier is trusted.
+        inflate_ns = 0
+        if active is not None and active == active_pre_xcheck:
+            dis_ms = self._active_disagreement_ms(active, results, witnesses)
+            if dis_ms > 0.0:
+                inflate_ns = int(math.ceil(dis_ms * 1_000_000))
+                flags = list(flags) + ["TIMING_DISAGREEMENT"]
+
         self._note_transition(active)
-        state = self._build_state(results, active, witnesses, flags)
+        state = self._build_state(results, active, witnesses, flags, inflate_ns)
         self._write_state(state)
         self._write_snapshot(state, results)
         self._apply_chrony_gate(state.t_level_active)
@@ -538,6 +569,25 @@ class AuthorityManager:
                 return lvl
         return None
 
+    def _active_disagreement_ms(
+        self, active: str, results: Dict[str, ProbeResult], witnesses: List[str],
+    ) -> float:
+        """Largest |Δ| (ms) between the active tier and any witness that
+        disagrees with it past the cross-check threshold. 0.0 when the active
+        tier has no measured offset or no witness disagrees. Used to widen the
+        published uncertainty on a kept-but-contested offset (§4.5)."""
+        a_res = results[active]
+        if a_res.offset_ms is None:
+            return 0.0
+        worst = 0.0
+        for w in witnesses:
+            r = results[w]
+            if r.offset_ms is None:
+                continue
+            if self._check_pair(active, a_res, w, r) is not None:
+                worst = max(worst, abs(a_res.offset_ms - r.offset_ms))
+        return worst
+
     def _note_transition(self, active: Optional[str]) -> None:
         if active != self._t_active:
             self._last_transition_utc = _iso_z(self.now_fn())
@@ -549,6 +599,7 @@ class AuthorityManager:
         active: Optional[str],
         witnesses: List[str],
         disagreement_flags: List[str],
+        inflate_ns: int = 0,
     ) -> AuthorityState:
         available = [lvl for lvl in T_LEVELS_RANKED if results[lvl].available]
 
@@ -606,6 +657,14 @@ class AuthorityManager:
             else:
                 sigma_ns = int(round(TRUST_SIGMA_MS[active] * 1_000_000))
         # active == "T0" or None → offset_ns / sigma_ns remain None
+
+        # §4.5 hardening: when the active tier was kept despite an unresolved
+        # cross-check disagreement, widen the published uncertainty to cover
+        # the discrepancy so consumers don't trust a contested offset at full
+        # precision. Only widens (never narrows) and never touches the offset
+        # itself or the tier selection.
+        if offset_ns is not None and inflate_ns > (sigma_ns or 0):
+            sigma_ns = inflate_ns
 
         return AuthorityState(
             a_level=self.a_level_provider(),

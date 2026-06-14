@@ -202,6 +202,62 @@ class TestAuthorityManager(unittest.TestCase):
             f"expected asymmetric rule, got {s.disagreement_flags}",
         )
 
+    # ----- F1: T6↔T5 cross-check floor is 5 ms, not 50 µs -----
+
+    def test_t6_t5_within_5ms_is_silent(self) -> None:
+        # T6 active (ns-class), T5 witness 2 ms off — within the 5 ms floor
+        # (T5 is USB-jitter µs-to-ms). Must NOT flag.
+        t6 = FakeProbe("T6", _measure("T6", 0.0, 0.001))
+        t5 = FakeProbe("T5", _measure("T5", 2.0, 0.5))
+        mgr = self._mgr([t6, t5], upgrade_hysteresis=1)
+        s = mgr.tick()
+        self.assertEqual(s.t_level_active, "T6")
+        # No cross-check disagreement (a chrony-self-feedback flag may appear
+        # in environments with chronyc but no HPPS SHM refclock — ignore it).
+        self.assertFalse(
+            any("T6<->T5" in f for f in s.disagreement_flags),
+            f"expected no T6<->T5 disagreement, got {s.disagreement_flags}",
+        )
+        self.assertNotIn("TIMING_DISAGREEMENT", s.disagreement_flags)
+
+    def test_t6_t5_beyond_5ms_flags(self) -> None:
+        # 6 ms exceeds the 5 ms floor → disagreement.
+        t6 = FakeProbe("T6", _measure("T6", 0.0, 0.001))
+        t5 = FakeProbe("T5", _measure("T5", 6.0, 0.5))
+        mgr = self._mgr([t6, t5], upgrade_hysteresis=1)
+        s = mgr.tick()
+        self.assertEqual(s.t_level_active, "T6")
+        self.assertTrue(
+            any("T6<->T5" in f for f in s.disagreement_flags),
+            f"expected T6<->T5 disagreement, got {s.disagreement_flags}",
+        )
+
+    # ----- F3b: kept-but-contested offset widens sigma + raises alarm -----
+
+    def test_kept_disagreement_inflates_sigma_and_raises_alarm(self) -> None:
+        # T4 active (trust, offset 0), T3 witness 20 ms off — single witness,
+        # no downgrade. The kept offset must be published with sigma widened to
+        # cover the 20 ms discrepancy, plus the canonical TIMING_DISAGREEMENT.
+        t4 = FakeProbe("T4", _trust("T4"))
+        t3 = FakeProbe("T3", _measure("T3", 20.0, 0.5))
+        mgr = self._mgr([t4, t3], upgrade_hysteresis=1)
+        s = mgr.tick()
+        self.assertEqual(s.t_level_active, "T4")  # still no downgrade
+        self.assertGreaterEqual(s.sigma_ns, 20_000_000)  # ≥ 20 ms
+        self.assertIn("TIMING_DISAGREEMENT", s.disagreement_flags)
+
+    def test_resolved_downgrade_does_not_inflate(self) -> None:
+        # Majority downgrade T3→T2: the disagreement is adjudicated, so the new
+        # active (T2) keeps its own tier sigma and emits no TIMING_DISAGREEMENT.
+        t3 = FakeProbe("T3", _measure("T3", 100.0, 1.0))
+        t2 = FakeProbe("T2", _trust("T2"))
+        t1 = FakeProbe("T1", _trust("T1"))
+        mgr = self._mgr([t3, t2, t1], upgrade_hysteresis=1)
+        s = mgr.tick()
+        self.assertEqual(s.t_level_active, "T2")
+        self.assertEqual(s.sigma_ns, int(round(TRUST_SIGMA_MS["T2"] * 1_000_000)))
+        self.assertNotIn("TIMING_DISAGREEMENT", s.disagreement_flags)
+
     # ----- output contract -----
 
     def test_published_schema_is_v1_and_fields_present(self) -> None:
