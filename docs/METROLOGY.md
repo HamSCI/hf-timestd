@@ -307,7 +307,7 @@ Clients that subscribe to the governor radiod apply the offset directly. Clients
 The authority manager selects the **highest available** T-level per decision period. "Available" means the level's health probe has passed within the probe window:
 
 - **T6 probe**: hf-timestd reports ≥ N BPSK-PPS detections in the last minute with q95 < threshold.
-- **T5/T4/T2 probe**: `chronyc -n tracking` shows the relevant peer reachable (`reach` ≠ 0), offset stable, RMS within tier limit.
+- **T5/T4/T2 probe**: `chronyc -n -c sources` shows the relevant source healthy (state `*`/`+`) **and** with `reach` ≠ 0 (a healthy state on a zero reach register is a transient/bug and is rejected). An optional per-tier `max_error_ms` ceiling rejects a source whose last-sample error margin exceeds the tier limit ("RMS within tier limit"); it is **off by default**, because the cross-check layer (the σ-widening / `TIMING_DISAGREEMENT` path above) already catches a witness whose offset has drifted — so "offset stable" is adjudicated there rather than in this single-sample probe, and an unconditional ceiling would only risk dropping noisy-but-usable witnesses and shrinking cross-check coverage.
 - **T3 probe**: hf-timestd reports ≥ 2 stations with tick detections in the last minute and Kalman innovation within bounds. Zero detections → T3 unavailable (the Saturday failure's missing alarm).
 - **T1 probe**: A1 present AND last RTP_TIMESNAP within freshness window.
 

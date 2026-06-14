@@ -156,6 +156,71 @@ class TestChronyTrackingProbe(unittest.TestCase):
         self.assertFalse(r.available)
         self.assertIn("unhealthy", r.reason or "")
 
+    # ----- poll: reach + error-margin gating (§4.5) -----
+
+    def test_healthy_state_but_reach_zero_is_unavailable(self) -> None:
+        # State '*' (selected) but reach 0 — a transient/bug the §4.5
+        # probe must reject even though the state char looks healthy.
+        crafted = (
+            "^,*,192.168.1.80,1,6,0,23,0.000123000,0.000210000,0.000450000\n"
+        )
+        probe = ChronyTrackingProbe(
+            t_level="T4",
+            source_matcher=match_by_names(["192.168.1.80"]),
+            runner=_fake_runner(stdout=crafted),
+        )
+        r = probe.poll()
+        self.assertFalse(r.available)
+        self.assertIn("unreachable", r.reason or "")
+
+    def test_reach_nonzero_passes(self) -> None:
+        # Sanity: the standard sample (reach 377) is reachable.
+        probe = ChronyTrackingProbe(
+            t_level="T4",
+            source_matcher=match_by_names(["192.168.1.80"]),
+            runner=_fake_runner(stdout=SAMPLE_SOURCES),
+        )
+        self.assertTrue(probe.poll().available)
+
+    def test_error_margin_within_ceiling_is_available(self) -> None:
+        # 192.168.1.80 measErr = 0.210 ms; ceiling 1.0 ms → available.
+        probe = ChronyTrackingProbe(
+            t_level="T4",
+            source_matcher=match_by_names(["192.168.1.80"]),
+            max_error_ms=1.0,
+            runner=_fake_runner(stdout=SAMPLE_SOURCES),
+        )
+        r = probe.poll()
+        self.assertTrue(r.available)
+        self.assertAlmostEqual(r.detail["error_ms"], 0.210, places=3)
+
+    def test_error_margin_above_ceiling_is_unavailable(self) -> None:
+        # 192.168.1.80 measErr = 0.210 ms; ceiling 0.1 ms → rejected.
+        probe = ChronyTrackingProbe(
+            t_level="T4",
+            source_matcher=match_by_names(["192.168.1.80"]),
+            max_error_ms=0.1,
+            runner=_fake_runner(stdout=SAMPLE_SOURCES),
+        )
+        r = probe.poll()
+        self.assertFalse(r.available)
+        self.assertIn("error margin", r.reason or "")
+
+    def test_no_ceiling_keeps_high_error_source(self) -> None:
+        # Default (max_error_ms=None): a large error margin is still
+        # served — the cross-check layer handles a drifted witness.
+        crafted = (
+            "^,*,192.168.1.80,1,6,377,23,0.000123000,0.090000000,0.090000000\n"
+        )
+        probe = ChronyTrackingProbe(
+            t_level="T4",
+            source_matcher=match_by_names(["192.168.1.80"]),
+            runner=_fake_runner(stdout=crafted),
+        )
+        r = probe.poll()
+        self.assertTrue(r.available)
+        self.assertAlmostEqual(r.detail["error_ms"], 90.0, places=1)
+
     def test_short_rows_are_skipped_not_crashed(self) -> None:
         probe = ChronyTrackingProbe(
             t_level="T4",

@@ -13,11 +13,27 @@ a nominally trust-based level into a cross-checkable witness against
 measured levels (T3/T6) without requiring an independent RTP→UTC
 observation.
 
+Availability gating (METROLOGY.md §4.5 "T5/T4/T2 probe"):
+  - the matching source must be in a healthy state (`*`/`+`), AND
+  - its `reach` must be non-zero (a healthy state with reach 0 is a
+    transient/bug — a source cannot be genuinely selected or combined
+    on zero successful polls), AND
+  - when ``max_error_ms`` is configured for the tier, the last-sample
+    error margin must be within it ("RMS within tier limit").  Left
+    unset by default: the AuthorityManager cross-check (the σ-widening
+    / TIMING_DISAGREEMENT path) already catches a witness whose offset
+    has drifted, so an unconditional error ceiling here would only risk
+    dropping noisy-but-usable witnesses and reducing cross-check
+    coverage.  "Offset stable" over time is likewise assessed by that
+    cross-check layer, not by this single-sample probe.
+
 Failure modes (reported via ProbeResult.reason):
   - chronyc missing or non-executable
   - subprocess timeout or non-zero exit
   - no source matches the configured matcher
   - matching source present but state not in healthy_state_chars
+  - matching healthy source but reach == 0 (unreachable)
+  - matching source error margin exceeds max_error_ms (when configured)
   - matching source offset field unparseable
 """
 from __future__ import annotations
@@ -55,6 +71,7 @@ class ChronyTrackingProbe:
         healthy_state_chars: str = "*+",
         chronyc_bin: Optional[str] = None,
         timeout_sec: float = 5.0,
+        max_error_ms: Optional[float] = None,
         runner: Optional[Callable[..., subprocess.CompletedProcess]] = None,
     ):
         """
@@ -66,6 +83,10 @@ class ChronyTrackingProbe:
             chronyc_bin: path to the chronyc binary; defaults to
                 `shutil.which("chronyc")`.
             timeout_sec: subprocess timeout.
+            max_error_ms: optional last-sample error-margin ceiling
+                ("RMS within tier limit", METROLOGY.md §4.5).  None (the
+                default) disables the check — see the module docstring
+                for why this is opt-in rather than tier-derived.
             runner: optional subprocess.run-compatible callable for tests.
         """
         self.t_level = t_level
@@ -73,6 +94,7 @@ class ChronyTrackingProbe:
         self.healthy_state_chars = healthy_state_chars
         self.chronyc_bin = chronyc_bin or shutil.which("chronyc") or "chronyc"
         self.timeout_sec = float(timeout_sec)
+        self.max_error_ms = float(max_error_ms) if max_error_ms is not None else None
         self._run = runner or subprocess.run
 
     def poll(self) -> ProbeResult:
@@ -109,13 +131,42 @@ class ChronyTrackingProbe:
                 reason=f"matching sources unhealthy: states={states}",
             )
 
-        chosen = healthy[0]
+        # §4.5: a healthy state with reach 0 is a transient/bug — drop it.
+        reachable = [r for r in healthy if _reach_nonzero(r.get("reach"))]
+        if not reachable:
+            reaches = ",".join(str(r.get("reach")) for r in healthy)
+            return ProbeResult(
+                self.t_level, available=False,
+                reason=f"matching sources unreachable: reach={reaches}",
+            )
+
+        chosen = reachable[0]
         try:
             offset_s = float(chosen["offset_s"])
         except (KeyError, TypeError, ValueError) as e:
             return ProbeResult(
                 self.t_level, available=False,
                 reason=f"offset parse error: {e}",
+            )
+
+        # §4.5: optional last-sample error-margin ceiling.
+        error_ms: Optional[float]
+        try:
+            err_raw = chosen.get("error_s")
+            error_ms = abs(float(err_raw)) * 1000.0 if err_raw is not None else None
+        except (TypeError, ValueError):
+            error_ms = None
+        if (
+            self.max_error_ms is not None
+            and error_ms is not None
+            and error_ms > self.max_error_ms
+        ):
+            return ProbeResult(
+                self.t_level, available=False,
+                reason=(
+                    f"error margin {error_ms:.3f}ms > "
+                    f"{self.max_error_ms:.3f}ms"
+                ),
             )
 
         return ProbeResult(
@@ -128,6 +179,7 @@ class ChronyTrackingProbe:
                 "stratum": chosen.get("stratum"),
                 "state": chosen.get("state"),
                 "reach": chosen.get("reach"),
+                "error_ms": error_ms,
             },
         )
 
@@ -154,8 +206,24 @@ class ChronyTrackingProbe:
                 "stratum": parts[self._IDX_STRATUM],
                 "reach": parts[self._IDX_REACH],
                 "offset_s": parts[self._IDX_OFFSET],
+                "error_s": parts[self._IDX_ERROR],
             })
         return rows
+
+
+def _reach_nonzero(reach: object) -> bool:
+    """True if chrony's reach register is non-zero.
+
+    `chronyc -c sources` prints reach as an octal register (e.g. "377"
+    = last 8 polls all succeeded, "0" = no recent success).  We only
+    need zero-vs-nonzero, and that distinction is base-independent, so a
+    plain int() parse suffices.  Be lenient on a parse failure (treat as
+    reachable): reach is reliably formatted, and a format quirk should
+    not silently drop an otherwise-healthy witness."""
+    try:
+        return int(str(reach).strip() or "0") != 0
+    except (TypeError, ValueError):
+        return True
 
 
 # ----- convenience matchers -----

@@ -39,6 +39,20 @@ from hf_timestd.io.authority_snapshot_store import AuthoritySnapshotStore
 log = logging.getLogger(__name__)
 
 
+def _opt_float(value: object) -> Optional[float]:
+    """Coerce an optional config scalar to float, or None if absent/blank.
+
+    Used for the per-tier ``max_error_ms`` chrony knobs, which are absent
+    in the common case and must stay None (check disabled) rather than
+    defaulting to a numeric ceiling."""
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
 class AuthorityRunner:
     """Thread wrapper around AuthorityManager.tick()."""
 
@@ -120,10 +134,12 @@ def build_authority_runner_from_config(
         enabled = true           # opt-in — only sites with a BPSK PPS injector
         # status_path = "/var/lib/timestd/status/core-recorder-status.json"
         # freshness_sec = 60.0   # max age of core-recorder-status.json
-        # min_consecutive = 1    # require this many clean PPS edges
+        # min_consecutive = 1    # require this many clean PPS edges (DEFAULT 1)
         #                          # 1 = follow calibrator's own "locked" boolean,
         #                          # let AuthorityManager hysteresis (3 ticks) smooth
         #                          # 10 matches calibrator's consecutive_required
+        #                          # (the most this can be without opening a band
+        #                          # where locked=true but the probe still drops T6)
         #                          # 30 (former default) was too strict given typical
         #                          # 10-15% noise rate causing brief consec resets
         # sigma_ms = 0.050       # published T6 uncertainty (50 µs default)
@@ -138,12 +154,20 @@ def build_authority_runner_from_config(
 
         [timing.authority_manager.t5]
         refid = "GPS"            # optional — default: any refclock
+        # max_error_ms = 5.0     # optional error-margin ceiling, applies only
+        #                          # to the chrony-refclock fallback path (§4.5)
 
         [timing.authority_manager.t4]
         peers = ["timeserver.lan", "192.168.1.80"]
+        # max_error_ms = 5.0     # optional: drop the T4 witness when chrony's
+        #                          # last-sample error margin exceeds this
+        #                          # ("RMS within tier limit", §4.5).  Off by
+        #                          # default — the cross-check layer already
+        #                          # catches a drifted witness.
 
         [timing.authority_manager.t2]
         enabled = true           # if true, match any non-T4 server
+        # max_error_ms = 50.0    # optional error-margin ceiling (see t4)
 
         [timing.authority_manager.t3]
         min_stations = 2
@@ -256,7 +280,7 @@ def build_authority_runner_from_config(
                 "status_path", "/var/lib/timestd/status/core-recorder-status.json",
             )),
             freshness_sec=float(t6_cfg.get("freshness_sec", 60.0)),
-            min_consecutive=int(t6_cfg.get("min_consecutive", 30)),
+            min_consecutive=int(t6_cfg.get("min_consecutive", 1)),
             sigma_floor_ms=sigma_floor_ms,
         ))
 
@@ -282,12 +306,14 @@ def build_authority_runner_from_config(
         probes.append(ChronyTrackingProbe(
             t_level="T5",
             source_matcher=match_refclock(t5_cfg.get("refid")),
+            max_error_ms=_opt_float(t5_cfg.get("max_error_ms")),
         ))
 
     if t4_peers:
         probes.append(ChronyTrackingProbe(
             t_level="T4",
             source_matcher=match_by_names(t4_peers),
+            max_error_ms=_opt_float(t4_cfg.get("max_error_ms")),
         ))
 
     if t2_cfg.get("enabled"):
@@ -295,6 +321,7 @@ def build_authority_runner_from_config(
         probes.append(ChronyTrackingProbe(
             t_level="T2",
             source_matcher=match_any_server_not_in(t4_peers),
+            max_error_ms=_opt_float(t2_cfg.get("max_error_ms")),
         ))
 
     bootstrap_coordinator = None

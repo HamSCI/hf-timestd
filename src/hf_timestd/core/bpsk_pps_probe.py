@@ -14,8 +14,17 @@ as a high-authority source:
   - status timestamp stale beyond ``freshness_sec`` → unavailable
   - ``t6_pps.enabled == false`` → unavailable
   - ``t6_pps.locked == false`` → unavailable
-  - ``pps_consecutive < min_consecutive`` → unavailable (rides over
-    a single bursty noise edge but drops T6 during sustained noise)
+  - ``pps_consecutive < min_consecutive`` → unavailable.  Note the
+    calibrator's ``locked`` is itself ``pps_consecutive >=
+    consecutive_required`` (default 10), so for any ``min_consecutive
+    <= 10`` this gate is subsumed by the ``locked`` check and the probe
+    simply follows ``locked``.  The default is **1** (follow ``locked``,
+    let the AuthorityManager's 3-tick upgrade hysteresis smooth
+    flapping).  Values above ``consecutive_required`` create a band
+    (``consecutive_required <= consecutive < min_consecutive``) where
+    the calibrator reports locked but the probe drops T6 — the former
+    default of 30 did exactly this and flapped under the typical
+    10-15% noise rate that briefly resets ``pps_consecutive``.
 
 offset_ms is forwarded from core-recorder's ``local_minus_source_ns``
 field (the residual Δ that the TSL3 SHM math computes at every push,
@@ -85,7 +94,7 @@ class BpskPpsProbe:
         self,
         status_path: Path = Path("/var/lib/timestd/status/core-recorder-status.json"),
         freshness_sec: float = 60.0,
-        min_consecutive: int = 30,
+        min_consecutive: int = 1,
         sigma_floor_ms: float = 0.001,
         now_fn: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ):
