@@ -566,16 +566,17 @@ class AuthorityManager:
         measured offset on both sides.
 
         Frame note: the offsets being differenced are not all in one
-        reference frame. T6 (BpskPpsProbe) and T5-direct (LbeT5DirectProbe)
-        publish anchor-vs-truth residuals, so the T6↔T5 pair — the
-        highest-rank, most load-bearing comparison — is like-for-like.
-        Chrony witnesses (T4/T2) and Fusion (T3) report system-clock- /
-        fusion-relative offsets; against an anchor-relative active tier
-        those pairs mix frames and are only ~commensurate while the SHM
-        feed keeps the system clock disciplined to the anchor. They are
-        retained as coarse, lower-rank witnesses (the majority rule needs
-        ≥2 agreeing before any downgrade), not primary arbiters. See the
-        BpskPpsProbe docstring and METROLOGY.md §4.5."""
+        reference frame (see ProbeResult.frame). T6, T5-direct and T3
+        (Fusion) are rtp-frame — anchor-vs-truth residuals measured in the
+        RTP stream, system-clock-independent. Chrony T5/T4/T2 are
+        sysclock-frame (local_clock − source). _check_pair just computes
+        the raw |Δ| and threshold for ALL pairs (so disagreements are
+        always surfaced); whether a given pair's disagreement is allowed
+        to widen sigma / drive a downgrade is decided separately by
+        _witness_drives_consequences (P7): a sysclock witness against a
+        GPS-disciplined rtp-active tier (T6/T5) is advisory-only, because
+        the difference then reflects system-clock drift, not an error in
+        the published anchor offset. See METROLOGY.md §4.5."""
         if a_res.offset_ms is None or b_res.offset_ms is None:
             return None
         diff = abs(a_res.offset_ms - b_res.offset_ms)
