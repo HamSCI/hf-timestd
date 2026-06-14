@@ -104,18 +104,43 @@ TRUST_SIGMA_MS: Dict[str, float] = {
     "T1": 1.0,     # GPSDO coast — rate perfect, phase frozen at last snapshot
 }
 
+# Tiers whose offset is GPS/PPS-disciplined AND derived from the RTP
+# stream (system-clock-INDEPENDENT): T6 (BPSK-PPS) and T5 (GPS+PPS).
+# When one of these is the active tier and is publishing an rtp-frame
+# offset, a sysclock-frame witness (chrony T4/T2) that disagrees almost
+# always means the *system clock* drifted (e.g. SHM discipline lost),
+# NOT that the GPS-disciplined offset is wrong — so such a witness is
+# advisory only (it raises a clearly-labelled flag but does not widen
+# the published sigma or contribute to a downgrade). Same-frame (rtp)
+# witnesses still fully cross-check these tiers. Lower-trust rtp tiers
+# like T3 (Fusion, ms-class, fallible, ranks below T4) are deliberately
+# NOT protected — a sysclock sanity-check on Fusion is wanted.
+GPS_DISCIPLINED_RTP_TIERS = frozenset({"T6", "T5"})
+
 
 @dataclass
 class ProbeResult:
     """One tick of probe output. Fields other than `t_level`/`available`
     are optional; probes that don't measure RTP→UTC (chrony-based,
-    trust-based) leave `offset_ms`/`sigma_ms` as None."""
+    trust-based) leave `offset_ms`/`sigma_ms` as None.
+
+    ``frame`` names the reference clock the offset is measured against:
+      - ``"rtp"``: the active anchor's UTC error judged against a signal
+        in the RTP stream (BPSK-PPS / GPS-NMEA / HF ticks) —
+        system-clock-INDEPENDENT. Set by BpskPpsProbe (T6),
+        LbeT5DirectProbe (T5), FusionStatusProbe (T3).
+      - ``"sysclock"``: chrony's ``local_clock − source`` — depends on
+        the host clock's discipline. Set by ChronyTrackingProbe
+        (T5-via-refclock / T4 / T2). Default.
+    Cross-checking two offsets in different frames compares different
+    clocks' errors; see _witness_drives_consequences (METROLOGY §4.5)."""
     t_level: str
     available: bool
     offset_ms: Optional[float] = None
     sigma_ms: Optional[float] = None
     detail: Dict[str, object] = field(default_factory=dict)
     reason: Optional[str] = None
+    frame: str = "sysclock"
 
 
 class Probe(Protocol):
@@ -445,6 +470,16 @@ class AuthorityManager:
                 witnesses.append(lvl)
                 flag = self._check_pair(active, active_result, lvl, r)
                 if flag:
+                    # Cross-frame disagreement against a GPS-disciplined
+                    # rtp-active tier is advisory: surfaced for operators
+                    # but it does not widen sigma or drive a downgrade
+                    # (it reflects system-clock drift, not an error in the
+                    # published anchor offset). See
+                    # _witness_drives_consequences / METROLOGY §4.5.
+                    if not self._witness_drives_consequences(
+                        active, active_result, r
+                    ):
+                        flag = flag + ":advisory"
                     disagreement_flags.append(flag)
 
         # Majority-witness downgrade: ≥ 2 witnesses agreeing with each
@@ -565,6 +600,7 @@ class AuthorityManager:
         disagreeing = [
             w for w in witnesses
             if self._check_pair(active, a_res, w, results[w]) is not None
+            and self._witness_drives_consequences(active, a_res, results[w])
         ]
         if len(disagreeing) < 2:
             return None
@@ -581,13 +617,35 @@ class AuthorityManager:
                 return lvl
         return None
 
+    def _witness_drives_consequences(
+        self, active: str, active_res: ProbeResult, w_res: ProbeResult,
+    ) -> bool:
+        """Whether witness ``w`` may widen the published sigma or drive a
+        downgrade of ``active`` (vs. being advisory-only).
+
+        A GPS-disciplined, rtp-frame active tier (T6/T5) is shielded from
+        sysclock-frame witnesses: when the system clock drifts away from
+        the GPS-disciplined anchor (e.g. SHM discipline lost), a chrony
+        witness disagrees by the drift amount even though the published
+        anchor offset is fine — that must not inflate its sigma or demote
+        it. Same-frame (rtp) witnesses still fully cross-check it, and
+        every other active tier keeps full cross-check force (so e.g.
+        Fusion is still sanity-checked by chrony). See METROLOGY §4.5."""
+        if (active in GPS_DISCIPLINED_RTP_TIERS
+                and getattr(active_res, "frame", "sysclock") == "rtp"
+                and getattr(w_res, "frame", "sysclock") != "rtp"):
+            return False
+        return True
+
     def _active_disagreement_ms(
         self, active: str, results: Dict[str, ProbeResult], witnesses: List[str],
     ) -> float:
         """Largest |Δ| (ms) between the active tier and any witness that
-        disagrees with it past the cross-check threshold. 0.0 when the active
-        tier has no measured offset or no witness disagrees. Used to widen the
-        published uncertainty on a kept-but-contested offset (§4.5)."""
+        disagrees with it past the cross-check threshold AND is allowed to
+        drive consequences (same-frame, or active not GPS-disciplined-rtp).
+        0.0 when the active tier has no measured offset or no qualifying
+        witness disagrees. Used to widen the published uncertainty on a
+        kept-but-contested offset (§4.5)."""
         a_res = results[active]
         if a_res.offset_ms is None:
             return 0.0
@@ -596,8 +654,11 @@ class AuthorityManager:
             r = results[w]
             if r.offset_ms is None:
                 continue
-            if self._check_pair(active, a_res, w, r) is not None:
-                worst = max(worst, abs(a_res.offset_ms - r.offset_ms))
+            if self._check_pair(active, a_res, w, r) is None:
+                continue
+            if not self._witness_drives_consequences(active, a_res, r):
+                continue
+            worst = max(worst, abs(a_res.offset_ms - r.offset_ms))
         return worst
 
     def _note_transition(self, active: Optional[str]) -> None:

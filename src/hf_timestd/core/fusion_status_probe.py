@@ -114,6 +114,7 @@ class FusionStatusProbe:
                 "kalman_state": kalman_state,
                 "age_sec": round(age_sec, 3),
             },
+            frame="rtp",  # HF tick arrival vs expected, measured in RTP domain
         )
 
 

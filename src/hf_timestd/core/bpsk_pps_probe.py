@@ -305,6 +305,7 @@ class BpskPpsProbe:
             offset_ms=residual_ns / 1_000_000.0,
             sigma_ms=sigma_ms,
             detail=detail,
+            frame="rtp",  # anchor-vs-PPS-truth residual (system-clock-independent)
         )
 
 

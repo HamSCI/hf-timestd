@@ -205,6 +205,7 @@ class LbeT5DirectProbe:
             offset_ms=offset_ms,
             sigma_ms=sigma_ms,
             detail=detail,
+            frame="rtp",  # anchor-vs-GPS-NMEA-truth (system-clock-independent)
         )
 
 

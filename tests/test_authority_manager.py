@@ -44,15 +44,21 @@ class FakeProbe:
         return self._result
 
 
-def _measure(t: str, offset_ms: float, sigma_ms: float, stations=None) -> ProbeResult:
+def _measure(t: str, offset_ms: float, sigma_ms: float, stations=None,
+             frame: str = "rtp") -> ProbeResult:
+    # Simulates an RTP-stream-measuring probe (BpskPps / LbeT5Direct /
+    # FusionStatus): rtp-frame by default.
     detail = {}
     if stations is not None:
         detail["stations_used"] = stations
-    return ProbeResult(t, True, offset_ms=offset_ms, sigma_ms=sigma_ms, detail=detail)
+    return ProbeResult(t, True, offset_ms=offset_ms, sigma_ms=sigma_ms,
+                       detail=detail, frame=frame)
 
 
 def _trust(t: str, offset_ms: float = 0.0) -> ProbeResult:
-    return ProbeResult(t, True, offset_ms=offset_ms, sigma_ms=TRUST_SIGMA_MS[t])
+    # Simulates a chrony-tracked tier (ChronyTrackingProbe): sysclock-frame.
+    return ProbeResult(t, True, offset_ms=offset_ms, sigma_ms=TRUST_SIGMA_MS[t],
+                       frame="sysclock")
 
 
 def _unavail(t: str, reason: str = "down") -> ProbeResult:
@@ -295,6 +301,69 @@ class TestAuthorityManager(unittest.TestCase):
         self.assertEqual(s.t_level_active, "T2")
         self.assertEqual(s.sigma_ns, int(round(TRUST_SIGMA_MS["T2"] * 1_000_000)))
         self.assertNotIn("TIMING_DISAGREEMENT", s.disagreement_flags)
+
+    # ----- P7: cross-check frame nuance -----
+
+    def test_t6_not_inflated_or_flagged_hard_by_sysclock_witness(self) -> None:
+        # T6 active (rtp, GPS-disciplined). A chrony (sysclock) T4 witness
+        # disagrees by 50 ms — the system-clock-drift case. It must be
+        # advisory only: no sigma inflation, no TIMING_DISAGREEMENT, T6 kept.
+        t6 = FakeProbe("T6", _measure("T6", 0.0, 0.001))      # rtp
+        t4 = FakeProbe("T4", _trust("T4", offset_ms=50.0))    # sysclock
+        mgr = self._mgr([t6, t4], upgrade_hysteresis=1)
+        s = mgr.tick()
+        self.assertEqual(s.t_level_active, "T6")
+        self.assertEqual(s.sigma_ns, 1_000)  # NOT inflated to 50 ms
+        self.assertNotIn("TIMING_DISAGREEMENT", s.disagreement_flags)
+        # The disagreement is still surfaced, but marked advisory.
+        self.assertTrue(
+            any("T6<->T4" in f and f.endswith(":advisory")
+                for f in s.disagreement_flags),
+            f"expected advisory T6<->T4 flag, got {s.disagreement_flags}",
+        )
+
+    def test_t6_not_downgraded_by_majority_sysclock_witnesses(self) -> None:
+        # T6 active; T4 and T2 (both sysclock) agree at 50 ms (system clock
+        # drifted). A sysclock majority must NOT demote the GPS-disciplined
+        # rtp tier.
+        t6 = FakeProbe("T6", _measure("T6", 0.0, 0.001))
+        t4 = FakeProbe("T4", _trust("T4", offset_ms=50.0))
+        t2 = FakeProbe("T2", _trust("T2", offset_ms=50.0))
+        mgr = self._mgr([t6, t4, t2], upgrade_hysteresis=1)
+        s = mgr.tick()
+        self.assertEqual(s.t_level_active, "T6")
+        self.assertNotIn("TIMING_DISAGREEMENT", s.disagreement_flags)
+        self.assertFalse(
+            any("majority-downgrade" in f for f in s.disagreement_flags),
+            f"sysclock majority must not downgrade T6, got {s.disagreement_flags}",
+        )
+
+    def test_t6_still_inflated_by_same_frame_rtp_witness(self) -> None:
+        # Same-frame (rtp) witness disagreement IS a real anchor problem:
+        # T5-direct (rtp) 6 ms off (beyond the 5 ms floor) still inflates +
+        # raises TIMING_DISAGREEMENT.
+        t6 = FakeProbe("T6", _measure("T6", 0.0, 0.001))           # rtp
+        t5 = FakeProbe("T5", _measure("T5", 6.0, 0.5, frame="rtp"))  # rtp (LbeT5Direct)
+        mgr = self._mgr([t6, t5], upgrade_hysteresis=1)
+        s = mgr.tick()
+        self.assertEqual(s.t_level_active, "T6")
+        self.assertGreaterEqual(s.sigma_ns, 6_000_000)  # ≥ 6 ms
+        self.assertIn("TIMING_DISAGREEMENT", s.disagreement_flags)
+
+    def test_fusion_still_sanity_checked_by_sysclock_majority(self) -> None:
+        # T3 (Fusion, rtp but fallible, NOT in the protected set) at 100 ms
+        # is still downgraded by an agreeing sysclock majority — the wanted
+        # safety net is preserved.
+        t3 = FakeProbe("T3", _measure("T3", 100.0, 1.0))   # rtp, fallible
+        t2 = FakeProbe("T2", _trust("T2"))                 # sysclock
+        t1 = FakeProbe("T1", _trust("T1"))                 # sysclock
+        mgr = self._mgr([t3, t2, t1], upgrade_hysteresis=1)
+        s = mgr.tick()
+        self.assertEqual(s.t_level_active, "T2")
+        self.assertTrue(
+            any("majority-downgrade:T3->T2" in f for f in s.disagreement_flags),
+            f"expected Fusion downgrade, got {s.disagreement_flags}",
+        )
 
     # ----- output contract -----
 
