@@ -123,11 +123,12 @@ broadcast time stations (WWV, WWVH, CHU, BPM) are receivable.
 hf-timestd ships in two deployment models; PHaRLAP/pyLAP is handled differently
 in each.
 
-**A. Golden image (DASI2 sites).** A reference host — PHaRLAP staged, pyLAP
-built into the venv — is imaged and cloned to the grant's own sites. Because
-every site is operated by the **single licensee** (the DASI2 grant), PHaRLAP
-travels inside the **private** image as internal deployment, not redistribution
-to a third party. Image-bake checklist:
+**A. Golden image (DASI2 sites).** **Decided 2026-06-14: PHaRLAP is baked into
+the controlled DASI2 image.** A reference host — PHaRLAP staged, pyLAP built into
+the venv — is imaged and cloned to the grant's own sites. Because every site is
+operated by the **single licensee** (the DASI2 grant), PHaRLAP travels inside the
+**private** image as internal deployment, not redistribution to a third party.
+Image-bake checklist:
 
 - [ ] PHaRLAP staged at `/opt/pharlap_4.7.4` (via `install-pharlap.sh`); `/opt/pharlap_4.7.4/.provenance` present
 - [ ] pyLAP built into the venv — `venv/bin/python -c "import pylap.raytrace_2d"` succeeds
