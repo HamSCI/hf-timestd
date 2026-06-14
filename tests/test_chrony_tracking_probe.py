@@ -221,6 +221,39 @@ class TestChronyTrackingProbe(unittest.TestCase):
         self.assertTrue(r.available)
         self.assertAlmostEqual(r.detail["error_ms"], 90.0, places=1)
 
+    def test_prefers_synced_star_over_combined_plus(self) -> None:
+        # Two healthy matches, '+' listed before '*'. The probe must pick
+        # the selected/synced '*' source (chrony's actual steering peer),
+        # not the first row (P4).
+        crafted = (
+            "^,+,backup.ntp,2,10,377,10,0.005000000,0.006000000,0.009000000\n"
+            "^,*,primary.ntp,1,6,377,5,0.001000000,0.002000000,0.004000000\n"
+        )
+        probe = ChronyTrackingProbe(
+            t_level="T2",
+            source_matcher=match_any_server_not_in([]),
+            runner=_fake_runner(stdout=crafted),
+        )
+        r = probe.poll()
+        self.assertTrue(r.available)
+        self.assertEqual(r.detail["name"], "primary.ntp")
+        self.assertAlmostEqual(r.offset_ms, 1.0, places=3)
+
+    def test_falls_back_to_first_when_no_star(self) -> None:
+        # Only '+' candidates → first reachable healthy source is used.
+        crafted = (
+            "^,+,a.ntp,2,10,377,10,0.005000000,0.006000000,0.009000000\n"
+            "^,+,b.ntp,2,10,377,10,0.007000000,0.008000000,0.009000000\n"
+        )
+        probe = ChronyTrackingProbe(
+            t_level="T2",
+            source_matcher=match_any_server_not_in([]),
+            runner=_fake_runner(stdout=crafted),
+        )
+        r = probe.poll()
+        self.assertTrue(r.available)
+        self.assertEqual(r.detail["name"], "a.ntp")
+
     def test_short_rows_are_skipped_not_crashed(self) -> None:
         probe = ChronyTrackingProbe(
             t_level="T4",

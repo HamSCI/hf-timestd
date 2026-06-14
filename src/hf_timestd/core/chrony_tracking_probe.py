@@ -140,7 +140,14 @@ class ChronyTrackingProbe:
                 reason=f"matching sources unreachable: reach={reaches}",
             )
 
-        chosen = reachable[0]
+        # Prefer chrony's selected/synced source (state '*') over a merely
+        # combined candidate ('+'): '*' is the peer chrony is actually
+        # steering the clock to, so its last-sample offset is the
+        # authoritative witness value. Falls back to the first reachable
+        # healthy source when no '*' is among the matches.
+        chosen = next(
+            (r for r in reachable if r.get("state") == "*"), reachable[0],
+        )
         try:
             offset_s = float(chosen["offset_s"])
         except (KeyError, TypeError, ValueError) as e:

@@ -228,8 +228,8 @@ radiod's `GPS_TIME` and `RTP_TIMESNAP` are both derived from `input_sample_index
 > | T5 (USB-delivered GPS+PPS) | ✅ | LBE-1421 USB-NMEA is consumed by hf-timestd for second-of-day disambiguation (alongside T6) and as the standalone source when T6 is unavailable. Precision is USB-bus-jitter floored at µs-to-ms class. **Upgrade path:** wire the TS-1 PPS OUT jack to a host GPIO / RS232 input with kernel PPS-API support — that adds a *second* ns-class path alongside T6 (for continuous §8 chain-delay cross-validation), but does not promote T5 itself, since the T5 definition is the USB transport. |
 > | **T6 BPSK-PPS injection / detection** | ✅ | TS-1 HF-injected BPSK PPS coupled into the RX path, decoded sample-precise from the IQ stream (HPPS matched-filter + HFPS diff calibrator). Live on bee1. The chrony-facade calibration has known weaknesses (one-shot disambig is sensitive to host-clock state at calibration moment — see [TIMING-PIPELINE-WIRING.md](TIMING-PIPELINE-WIRING.md) and the chrony-tuning notes); the **annotation product** (per-sample tier + offset + uncertainty) is operational and is the deployed best tier. |
 > | Authority manager + `/run/hf-timestd/authority.json` v1 | ✅ | `AuthoritySnapshotStore` + `AuthorityManager` live; per-cycle records persisted to `/var/lib/timestd/authority_history.db`. |
-> | `chronyc selectopts` runtime gating | ⚠️ | `ChronyRefclockGate` exists; gating policy wired but not exercised in production rotation yet. |
-> | mDNS TXT-record extension | ❌ | Not advertised by any service today. |
+> | `chronyc selectopts` runtime gating | ✅ | `ChronyRefclockGate` is wired into the AuthorityRunner and invoked every tick (`AuthorityManager._apply_chrony_gate`); enabled per `[timing.authority_manager.chrony_gate]` (`dry_run` available for staged rollout). |
+> | mDNS TXT-record extension | ✅ | `MdnsFusionAdvertiser` is wired into the AuthorityRunner and applied every tick (`AuthorityManager._apply_mdns_advertiser`); enabled per `[timing.authority_manager.mdns]` (`dry_run` logs the TXT without forking avahi). |
 >
 > Treat the rest of §4.5 / §4.6 as the **contract** an authority
 > manager must satisfy when it's built, not as a description of
@@ -343,6 +343,21 @@ Transitions are logged and stamped in sidecars:
 **Upgrade hysteresis:** a level must pass its probe for N consecutive windows (default N=3, ~3 min for one-minute windows) before it can become active, to prevent flapping.
 
 **Downgrade is immediate:** a failed probe disables the level at the next authority decision. No hysteresis on failure — the whole point is to stop trusting a broken source as soon as we notice.
+
+**Demote-on-breach (T6→T5), opt-in.** Distinct from the cross-check above: when T6's own drift monitor reports a *sustained breach* (the RTP anchor has drifted far enough that T6's SHM feed would mislead chrony) for `demote_on_breach_min_cycles` consecutive ticks (default 3) **and** T5 is available past hysteresis, the manager can hand the active cycle to T5 and stamp a `demote-on-breach:T6->T5` flag. This is **off by default** (`[timing.authority_manager.t6] demote_on_breach = false`) as a deliberate phased rollout (byte-compatible legacy behaviour); the breach counter is maintained regardless for telemetry. Enabling it is a per-deployment production decision (the Phase 2C cutover), gated on field confidence that the drift monitor does not false-positive. The cross-check σ-widening (below) already degrades a *contested* T6 offset's confidence even while demote-on-breach is off.
+
+**Disagreement-flag vocabulary.** `disagreement_flags` in `authority.json` is a list of strings drawn from a fixed set; consumers should match by prefix:
+
+| Flag | Meaning |
+|---|---|
+| `TIMING_DISAGREEMENT` | The active tier was kept despite an unresolved cross-check disagreement; the published `sigma_ns` has been widened to cover it (the canonical "trust this offset less" alarm). |
+| `<A><->​<B>:<Δ>ms><thr>ms` | A pairwise cross-check between tiers A and B exceeded the threshold (e.g. `T6<->T5:6.0ms>5.0ms`). |
+| `…:advisory` (suffix) | The disagreement is cross-frame against a GPS-disciplined rtp tier (T6/T5) — surfaced for operators but it did **not** widen sigma or drive a downgrade (system-clock drift, not an anchor error). See the frame note above. |
+| `majority-downgrade:<from>-><to>` | ≥ 2 mutually-agreeing witnesses outvoted the active tier; it was demoted to the highest-ranked agreeing witness. |
+| `asymmetric-T3-T2:<Δ>ms><thr>ms` | Fusion (T3) disagreed with WAN NTP (T2) by > 1 s — a gross detection bug; T3 was forced down. |
+| `demote-on-breach:T6->T5` | T6's drift monitor reported a sustained breach and demote-on-breach is enabled (see above). |
+| `chrony-rejected-<refid>:state=<s>` | chrony has rejected (falseticker/unselectable) the SHM segment hf-timestd feeds for the active tier (V7 self-feedback check). |
+| `chrony-missing-<refid>` | the SHM refid hf-timestd feeds isn't present in chrony's source list (chrony not configured to consume it, or no first sample yet). Informational on hosts without the SHM refclock wired. |
 
 #### Published Authority State (schema v1)
 

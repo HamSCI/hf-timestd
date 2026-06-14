@@ -14,6 +14,18 @@ The probe is deliberately strict:
   - n_stations < min_stations → unavailable (single-station Fusion has
     no cross-validation leg).
   - kalman_state not in {"ACQUIRING","LOCKED"} → unavailable.
+
+ACQUIRING (not-yet-converged) is accepted as available — verified safe
+(2026-06-14) because the forwarded ``uncertainty_ms`` is the producer's
+honest statistical+systematic+propagation budget
+(``multi_broadcast_fusion`` ~L4374), NOT a fixed value, and the
+statistical leg is naturally larger during early acquisition (fewer
+measurements). It is published as the tier sigma, so consumers see the
+honest (wider) uncertainty rather than a false-precise lock. The
+AuthorityManager's 3-tick upgrade hysteresis is the second guard: T3
+must pass its probe for ~3 consecutive minutes before becoming active,
+by which point ACQUIRING (≥10 Kalman updates) has typically converged to
+LOCKED. REACQUIRING (< 10 updates, post-restart) is still rejected.
 """
 from __future__ import annotations
 

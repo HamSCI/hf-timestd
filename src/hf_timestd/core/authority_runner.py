@@ -142,7 +142,12 @@ def build_authority_runner_from_config(
         #                          # where locked=true but the probe still drops T6)
         #                          # 30 (former default) was too strict given typical
         #                          # 10-15% noise rate causing brief consec resets
-        # sigma_ms = 0.050       # published T6 uncertainty (50 µs default)
+        # sigma_floor_ms = 0.001 # T6 published-sigma FLOOR (default 1 µs);
+        #                          # legacy key `sigma_ms` still accepted. The
+        #                          # published sigma is max(MF jitter, |residual|,
+        #                          # this floor) — see BpskPpsProbe — so this only
+        #                          # sets the irreducible-calibration floor, not a
+        #                          # fixed uncertainty.
         # Phase 2B — demote T6 → T5 when the drift monitor reports a
         # sustained breach for ``demote_on_breach_min_cycles`` consecutive
         # ticks AND T5 is available past hysteresis.  Default off to keep
