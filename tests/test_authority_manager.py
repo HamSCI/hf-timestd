@@ -146,6 +146,44 @@ class TestAuthorityManager(unittest.TestCase):
         self.assertIsNone(s.rtp_to_utc_offset_ns)
         self.assertIsNone(s.sigma_ns)
 
+    def test_t6_publishes_anchor_offset_and_crosschecks_on_residual(self) -> None:
+        # F4/P6: T6's offset_ms is the anchor-vs-PPS-truth residual (the
+        # cross-check witness quantity), distinct from the anchor-vs-host
+        # bridge it publishes (detail["rtp_to_utc_offset_ns"]). Here the
+        # two are deliberately far apart: residual 0.002 ms, but a 50 ms
+        # published anchor offset.
+        t6 = FakeProbe("T6", ProbeResult(
+            "T6", True, offset_ms=0.002, sigma_ms=0.001,
+            detail={"rtp_to_utc_offset_ns": 50_000_000},
+        ))
+        # T5 witness residual is also tiny (0.003 ms) — agrees with T6 in
+        # the residual frame, well within the 5 ms T6↔T5 floor.
+        t5 = FakeProbe("T5", _measure("T5", 0.003, 0.5))
+        mgr = self._mgr([t6, t5], upgrade_hysteresis=1)
+        s = mgr.tick()
+        self.assertEqual(s.t_level_active, "T6")
+        # Publishes the anchor-derived detail value, NOT round(offset_ms).
+        self.assertEqual(s.rtp_to_utc_offset_ns, 50_000_000)
+        self.assertNotEqual(s.rtp_to_utc_offset_ns, 2_000)
+        self.assertEqual(s.sigma_ns, 1_000)
+        # Cross-check ran on the residuals (0.002 vs 0.003 ms), so the
+        # large published anchor offset does NOT trip a disagreement.
+        self.assertIn("T5", s.t_level_witnesses)
+        self.assertFalse(any("T6<->T5" in f for f in s.disagreement_flags))
+        self.assertNotIn("TIMING_DISAGREEMENT", s.disagreement_flags)
+
+    def test_t6_without_anchor_detail_falls_back_to_offset_ms(self) -> None:
+        # Cold start: no native anchor captured yet → no
+        # detail["rtp_to_utc_offset_ns"]. Publication falls back to the
+        # offset_ms (residual) path so a value is still served.
+        t6 = FakeProbe("T6", ProbeResult(
+            "T6", True, offset_ms=0.5, sigma_ms=0.001, detail={},
+        ))
+        mgr = self._mgr([t6], upgrade_hysteresis=1)
+        s = mgr.tick()
+        self.assertEqual(s.t_level_active, "T6")
+        self.assertEqual(s.rtp_to_utc_offset_ns, 500_000)
+
     # ----- cross-check & witnesses -----
 
     def test_witness_agreement_within_combined_ci_is_silent(self) -> None:

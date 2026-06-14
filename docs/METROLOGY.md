@@ -325,6 +325,13 @@ A resolved downgrade needs no uncertainty widening — the adjudicated tier is t
 | T3 ↔ T4 | 2 ms | T3 worst-case meets T4 typical |
 | T3 ↔ T2 | 5 ms | T2 NTP-level tolerance |
 
+**Two T6 quantities — what is cross-checked vs what is published.** T6 (and T5-direct) carry *two distinct, both anchor-relative* numbers, and the manager uses each for a different purpose:
+
+- The **cross-check witness quantity** is the anchor's absolute UTC error vs an independent truth — for T6 the sub-second residual of the anchor-predicted PPS firing against the integer second a real BPSK-PPS fires on (`core_recorder`'s `local_minus_source_ns`, despite the legacy name a purely anchor-derived value, *not* a system-clock reading); for T5-direct the anchor-vs-NMEA-GPS disagreement (`anchor_offset_ns`). Because both are anchor-vs-truth residuals, the **T6 ↔ T5 comparison is like-for-like** — that is why this pair is the load-bearing cross-check.
+- The **published** offset (`rtp_to_utc_offset_ns`) is a *different* anchor-relative number: the anchor-vs-host-clock bridge consumers apply to convert RTP → UTC (`anchor_utc_ns − rtp_to_wallclock(anchor_rtp)`). It can be large (the host clock is far from the anchor) while the cross-check residual is sub-µs (the anchor is dead-on PPS truth). The published `sigma_ns` (`max(MF jitter, |residual|, floor)`) bounds the anchor's absolute UTC error, which is precisely the residual label error left after applying the published offset — so the σ is honest for the published value even though it is derived from the cross-check residual.
+
+Consequence for the witness math: the chrony witnesses (T4/T2) and Fusion (T3) report *system-clock-/fusion-relative* offsets, which are commensurate with T6's anchor-relative residual only while the SHM feed keeps the system clock disciplined to the anchor. They are therefore treated as coarse, lower-rank witnesses (a downgrade needs ≥ 2 mutually-agreeing witnesses); the anchor-frame T6 ↔ T5 pair is the primary arbiter.
+
 Transitions are logged and stamped in sidecars:
 
 ```json

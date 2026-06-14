@@ -527,8 +527,20 @@ class AuthorityManager:
     ) -> Optional[str]:
         """Return a disagreement flag string if |Δ| exceeds the combined
         CI (floored at the per-pair threshold), else None. If either side
-        lacks a measured offset, returns None — cross-check is only
-        meaningful when both sides measure RTP→UTC."""
+        lacks a measured offset, returns None — cross-check needs a
+        measured offset on both sides.
+
+        Frame note: the offsets being differenced are not all in one
+        reference frame. T6 (BpskPpsProbe) and T5-direct (LbeT5DirectProbe)
+        publish anchor-vs-truth residuals, so the T6↔T5 pair — the
+        highest-rank, most load-bearing comparison — is like-for-like.
+        Chrony witnesses (T4/T2) and Fusion (T3) report system-clock- /
+        fusion-relative offsets; against an anchor-relative active tier
+        those pairs mix frames and are only ~commensurate while the SHM
+        feed keeps the system clock disciplined to the anchor. They are
+        retained as coarse, lower-rank witnesses (the majority rule needs
+        ≥2 agreeing before any downgrade), not primary arbiters. See the
+        BpskPpsProbe docstring and METROLOGY.md §4.5."""
         if a_res.offset_ms is None or b_res.offset_ms is None:
             return None
         diff = abs(a_res.offset_ms - b_res.offset_ms)

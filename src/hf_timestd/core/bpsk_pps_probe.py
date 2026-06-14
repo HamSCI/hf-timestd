@@ -27,16 +27,37 @@ as a high-authority source:
     10-15% noise rate that briefly resets ``pps_consecutive``.
 
 offset_ms is forwarded from core-recorder's ``local_minus_source_ns``
-field (the residual Δ that the TSL3 SHM math computes at every push,
-i.e. the value chrony observes as the TSL3 source offset).  This is
-the Pattern B publication channel — see
-``docs/TIMING-PIPELINE-WIRING.md`` §4.1 + §9 step 1.
+field.  Despite the legacy name, this is **not** a system-clock
+quantity: core-recorder computes it purely from the native anchor
+(``core_recorder_v2`` ~L2870) as the sub-integer-second residual of the
+anchor-predicted PPS firing time —
 
-Sign convention is ``local_clock − source_UTC`` (positive when the
-local clock reads after the source's view of UTC), consistent with
-ChronyTrackingProbe.  When the system is well-disciplined Δ is
-sub-µs; when the anchor is stale (V1) Δ inflates to whatever
-accumulated error the anchor inherited.
+    pps_firing_utc_ns   = utc_ns_at_rtp(edge_rtp, native_anchor)
+                          − native_anchor.chain_delay_ns
+    local_minus_source  = pps_firing_utc_ns
+                          − round(pps_firing_utc_ns to nearest second)
+
+Because a real TS-1 BPSK-injected PPS fires exactly on the integer
+second, this residual is the **anchor's own absolute UTC error** judged
+against PPS-integer-second truth (plus per-edge MF jitter): sub-µs when
+the anchor is fresh, inflating to the accumulated anchor error in the
+V1 anchor-staleness regime.  It never reads the system clock — the only
+place ``time.time()`` enters the T6 path is the chrony SHM facade, a
+separate push that never feeds back into the anchor.  (The name
+"local_minus_source" predates the native anchor; read "local" as the
+anchor's prediction, "source" as PPS-integer-second truth — not the
+system clock.)
+
+This is the **cross-check witness quantity**.  It is commensurate with
+``LbeT5DirectProbe.anchor_offset_ns`` (also an anchor-vs-GPS-truth
+residual), so the T6↔T5 pair compares like for like.  It is distinct
+from the **published** offset ``rtp_to_utc_offset_ns`` (forwarded in
+``detail`` below), which is the anchor-vs-host-clock bridge that
+consumers apply to convert RTP→UTC.  Both are anchor-relative but
+answer different questions — this one validates the anchor against PPS
+truth; the published one converts RTP to UTC.  See
+``CoreRecorderV2._compute_rtp_to_utc_offset_ns`` and
+``docs/TIMING-PIPELINE-WIRING.md`` §4.1 + §9 step 1.
 
 sigma_ms is the honest annotation uncertainty for the T6 label —
 the larger of three components:
