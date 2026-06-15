@@ -83,6 +83,10 @@ class BinaryArchiveConfig:
     storage_quota_percent: float = 80.0  # Max disk usage percentage (from config storage_quota)
     use_tiered_storage: bool = False  # Use /dev/shm hot buffer with disk cold storage
     radiod_snr_db: Optional[float] = None  # SNR from radiod (updated periodically)
+    # |old-mapping vs new-snapshot| beyond this (s) ⇒ radiod stepped its
+    # RTP↔GPS offset: flush + adopt the new mapping (re-anchor).  Matches
+    # the fleet-wide trigger in ka9q-python ChannelInfo (sigmond, 2026-06-07).
+    anchor_step_threshold_sec: float = 0.25
 
     # File duration: how many seconds of IQ data per file.
     # 600s (10 minutes) reduces filesystem overhead 10x vs 60s (1 minute),
@@ -221,6 +225,17 @@ class BinaryArchiveWriter:
         self._gps_time_ns_raw: Optional[int] = None   # GPS_TIME in original ns (for metadata)
         self._rtp_timesnap: Optional[int] = None     # RTP timestamp at GPS_TIME
         self._timing_locked: bool = False
+
+        # RTP↔GPS offset-step threshold (re-anchor trigger).  Lowered
+        # from the historical 1.0 s to 0.25 s to match the fleet-wide
+        # re-anchor trigger in ka9q-python's ChannelInfo.  Overridable
+        # via config.anchor_step_threshold_sec or TIMESTD_ANCHOR_STEP_SEC.
+        self._anchor_step_threshold_sec: float = float(
+            os.environ.get(
+                "TIMESTD_ANCHOR_STEP_SEC",
+                getattr(config, "anchor_step_threshold_sec", 0.25),
+            )
+        )
         
         self.last_rtp_timestamp: Optional[int] = None
         self.cumulative_samples: int = 0  # Total samples processed
@@ -334,7 +349,7 @@ class BinaryArchiveWriter:
                     old_delta -= 0x100000000
                 old_utc = self._gps_time_unix + old_delta / self.config.sample_rate
                 utc_diff = old_utc - gps_unix_sec
-                if abs(utc_diff) > 1.0:
+                if abs(utc_diff) > self._anchor_step_threshold_sec:
                     is_wraparound = abs(abs(utc_diff) - WRAP_PERIOD) < 60  # within 1 min of wrap period
                     if is_wraparound:
                         logger.info(
