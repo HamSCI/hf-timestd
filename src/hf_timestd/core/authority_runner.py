@@ -148,13 +148,12 @@ def build_authority_runner_from_config(
         #                          # this floor) — see BpskPpsProbe — so this only
         #                          # sets the irreducible-calibration floor, not a
         #                          # fixed uncertainty.
-        # Phase 2B — demote T6 → T5 when the drift monitor reports a
-        # sustained breach for ``demote_on_breach_min_cycles`` consecutive
-        # ticks AND T5 is available past hysteresis.  Default off to keep
-        # legacy behaviour byte-compat; flip to true (Phase 2C cutover) to
-        # let T5 take over when the RTP anchor is drifted enough that T6's
-        # SHM feed is misleading chrony.
-        # demote_on_breach = false
+        # Phase 2C (default ON) — demote T6 → T5 when the drift monitor
+        # reports a sustained breach for ``demote_on_breach_min_cycles``
+        # consecutive ticks AND T5 is available past hysteresis, i.e. the
+        # RTP anchor has drifted enough that T6's SHM feed would mislead
+        # chrony.  Opt out with ``demote_on_breach = false``.
+        # demote_on_breach = true
         # demote_on_breach_min_cycles = 3
 
         [timing.authority_manager.t5]
@@ -376,9 +375,12 @@ def build_authority_runner_from_config(
             )
             snapshot_store = None
 
-    # Phase 2B — demote-on-breach knobs, default off so existing
-    # deployments stay byte-compat.  See AuthorityManager docstring.
-    demote_t6_on_breach = bool(t6_cfg.get("demote_on_breach", False))
+    # Phase 2C — demote-on-breach ON by default: when T6's drift monitor
+    # reports a sustained anchor breach (its SHM feed would mislead
+    # chrony), hand the active cycle to T5. Opt out with
+    # `[timing.authority_manager.t6] demote_on_breach = false`. See
+    # AuthorityManager docstring + METROLOGY §4.5.
+    demote_t6_on_breach = bool(t6_cfg.get("demote_on_breach", True))
     demote_t6_on_breach_min_cycles = int(
         t6_cfg.get("demote_on_breach_min_cycles", 3)
     )

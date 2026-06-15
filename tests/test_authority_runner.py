@@ -333,9 +333,9 @@ class TestBuildAuthorityRunnerFromConfig(unittest.TestCase):
 
 
 class TestBuildAuthorityRunnerPhase2BConfig(unittest.TestCase):
-    """Phase 2B — demote-on-breach knobs flow from [t6] into the
-    AuthorityManager constructor.  Default off keeps Phase 2A byte-
-    compat; explicit-true is the operator opt-in for Phase 2C."""
+    """Phase 2C — demote-on-breach knobs flow from [t6] into the
+    AuthorityManager constructor.  ON by default (Phase 2C cutover);
+    operators opt out with an explicit ``demote_on_breach = false``."""
 
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp())
@@ -343,14 +343,29 @@ class TestBuildAuthorityRunnerPhase2BConfig(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_defaults_to_off(self) -> None:
+    def test_defaults_to_on(self) -> None:
         runner = build_authority_runner_from_config(
             config={},
             fusion_status_path=self.tmp / "fusion_status.json",
             authority_output_path=self.tmp / "authority.json",
         )
-        self.assertFalse(runner.manager.demote_t6_on_breach)
+        self.assertTrue(runner.manager.demote_t6_on_breach)
         self.assertEqual(runner.manager.demote_t6_on_breach_min_cycles, 3)
+
+    def test_explicit_false_opts_out(self) -> None:
+        cfg = {
+            "timing": {
+                "authority_manager": {
+                    "t6": {"demote_on_breach": False},
+                },
+            },
+        }
+        runner = build_authority_runner_from_config(
+            config=cfg,
+            fusion_status_path=self.tmp / "fusion_status.json",
+            authority_output_path=self.tmp / "authority.json",
+        )
+        self.assertFalse(runner.manager.demote_t6_on_breach)
 
     def test_t6_demote_on_breach_flag_wires_through(self) -> None:
         cfg = {

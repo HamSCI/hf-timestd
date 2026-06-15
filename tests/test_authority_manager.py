@@ -890,10 +890,11 @@ class TestAuthorityManagerPhase2BDemoteOnBreach(unittest.TestCase):
             demote_t6_on_breach_min_cycles=min_cycles,
         )
 
-    def test_default_off_no_demotion_even_after_many_breach_ticks(self):
-        """The Phase 2A invariant: with demote_t6_on_breach=False (the
-        default), T6 stays active through any number of breach ticks.
-        Byte-compat is the entire point of the default-off ship plan."""
+    def test_opt_out_no_demotion_even_after_many_breach_ticks(self):
+        """The opt-out path: with demote_t6_on_breach=False (now an
+        explicit operator opt-out; Phase 2C made True the default), T6
+        stays active through any number of breach ticks and only the
+        telemetry counter advances."""
         t6 = FakeProbe("T6", _t6_breached())
         t5 = FakeProbe("T5", _t5_anchor_grounded(offset_ms=150.0, sigma_ms=150.0))
         mgr = self._mgr(demote=False, probes=[t6, t5])
