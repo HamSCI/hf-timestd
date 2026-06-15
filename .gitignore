@@ -117,3 +117,8 @@ MagicMock/
 
 # Compiled binaries
 check_shm_layout
+
+# Per-site live config: create from config/timestd-config.toml.template and
+# install to /etc/hf-timestd/timestd-config.toml (the production path). Never
+# commit a station-specific config here.
+config/timestd-config.toml
