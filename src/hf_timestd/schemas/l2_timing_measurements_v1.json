@@ -38,7 +38,8 @@
                 "WWV",
                 "WWVH",
                 "CHU",
-                "BPM"
+                "BPM",
+                "WWVB"
             ],
             "description": "Broadcast station assignment"
         },

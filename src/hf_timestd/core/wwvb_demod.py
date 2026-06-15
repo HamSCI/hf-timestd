@@ -353,6 +353,15 @@ class DetectedFrame:
     frame: WwvbTimeFrame
     """Parsed protocol-layer result."""
 
+    boundary_sample: float = float("nan")
+    """Sample index, into the decoded IQ array, of this frame's minute-
+    boundary on-time mark (the falling edge of second 0).  This is what the
+    Layer-4 Fusion writer needs: combined with the RTP timestamp of the IQ
+    array's first sample it yields the on-time mark's RTP timestamp, hence its
+    receiver UTC.  Sample resolution at 24 kHz is ~42 us (already sub-ms); a
+    future sub-sample interpolation of the envelope crossing can tighten it
+    without changing this field's meaning.  NaN if not recorded."""
+
 
 @dataclass(frozen=True)
 class DemodResult:
@@ -421,6 +430,11 @@ def decode_iq(
             inverted_polarity=inverted,
             sync_errors=err,
             frame=parsed,
+            # boundaries[start] is the on-time-mark sample of the second where
+            # this frame's sync_T begins — i.e. the minute boundary.  bits has
+            # length boundaries.size - 1, and framing guarantees
+            # start < bits.size, so this index is always valid.
+            boundary_sample=float(boundaries[start]),
         ))
 
     return DemodResult(

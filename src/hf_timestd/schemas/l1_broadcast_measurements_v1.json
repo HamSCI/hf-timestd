@@ -23,7 +23,7 @@
             "name": "station",
             "type": "string",
             "required": true,
-            "enum": ["WWV", "WWVH", "CHU", "BPM", "UNKNOWN"],
+            "enum": ["WWV", "WWVH", "CHU", "BPM", "WWVB", "UNKNOWN"],
             "description": "Station identifier"
         },
         {

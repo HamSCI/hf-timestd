@@ -124,6 +124,34 @@ description = "CHU_14670"
 # hf-timestd now derives the 12kHz audio internally from the archived IQ buffers.
 # Therefore, [recorder.chu_fsk] has been removed to conserve network and SDR DSP resources.
 
+# =============================================================================
+# WWVB (60 kHz LF) — NIST Fort Collins, added to offset the loss of CHU.
+# See docs/WWVB-INTEGRATION.md.  A dedicated in-process consumer in the
+# core-recorder provisions the 60 kHz channel, decodes the phase-modulated
+# time code, and (optionally) feeds the Fusion source pool.  No archive.
+# =============================================================================
+[wwvb]
+enabled = false                 # master switch for the WWVB consumer + decode loop
+frequency_hz = 60000
+sample_rate = 24000
+window_s = 90.0                 # rolling decode-buffer length (s)
+decode_interval_s = 30.0        # how often the decode worker runs (s)
+min_buffer_s = 65.0             # don't decode until the buffer holds >= this (s)
+# ledger_dir = "/var/lib/timestd/wwvb"   # default: <data_root>/wwvb
+
+# --- Layer 4: Fusion source-pool feed (reaches the chrony-disciplining path) ---
+# Leave OFF until a nighttime live-tap run validates the decode chain on real
+# signal at this site.  When true, each accepted minute is written as an L1
+# metrology row under <data_root>/phase2/WWVB_60 and the timestd-fusion service
+# pools it with WWV/WWVH/CHU/BPM.  Requires [station] latitude/longitude (or
+# grid_square) so the propagation delay can be computed.
+feed_fusion = false
+# Optional GPS-learned propagation-delay override (ms) + 1-sigma (ms).  Until a
+# calibration pass supplies these, the nominal LF model is used and WWVB is
+# graded MARGINAL (appropriately down-weighted in the combiner).
+# learned_delay_ms = 4.6
+# learned_sigma_ms = 0.8
+
 [uploader]
 enabled = true
 protocol = "sftp"

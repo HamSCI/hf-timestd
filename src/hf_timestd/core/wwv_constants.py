@@ -288,17 +288,27 @@ CHU_LON = -75.7544
 BPM_LAT = 34.9489
 BPM_LON = 109.5430
 
+# WWVB - NIST 60 kHz LF, Fort Collins, Colorado, USA
+# Co-located with WWV at the NIST radio station site (the two WWVB phased-array
+# antennas straddle the WWV site; a single representative point is used here, as
+# the ~km-scale separation is negligible against the >1000 km receive paths and
+# the propagation-delay model uncertainty).
+WWVB_LAT = 40.6776
+WWVB_LON = -105.0470
+
 # Convenience dictionary for programmatic access
 WWV_COORDINATES = (WWV_LAT, WWV_LON)
 WWVH_COORDINATES = (WWVH_LAT, WWVH_LON)
 CHU_COORDINATES = (CHU_LAT, CHU_LON)
 BPM_COORDINATES = (BPM_LAT, BPM_LON)
+WWVB_COORDINATES = (WWVB_LAT, WWVB_LON)
 
 STATION_LOCATIONS = {
     'WWV': {'lat': WWV_LAT, 'lon': WWV_LON, 'name': 'Fort Collins, CO, USA'},
     'WWVH': {'lat': WWVH_LAT, 'lon': WWVH_LON, 'name': 'Kekaha, Kauai, HI, USA'},
     'CHU': {'lat': CHU_LAT, 'lon': CHU_LON, 'name': 'Ottawa, ON, Canada'},
     'BPM': {'lat': BPM_LAT, 'lon': BPM_LON, 'name': 'Pucheng, Shaanxi, China'},
+    'WWVB': {'lat': WWVB_LAT, 'lon': WWVB_LON, 'name': 'Fort Collins, CO, USA (NIST 60 kHz LF)'},
 }
 
 # =============================================================================

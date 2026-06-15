@@ -1,10 +1,14 @@
 # WWVB integration: closing the daytime/nighttime coverage gap
 
-**Status (2026-05-27):** Layers 1–3 landed.  Layer 3 validated on
-synthesized signals (82 tests pass).  Live signal validation pending
-a nighttime run of `scripts/wwvb_live_tap.py` from AC0G's RX-888 +
-existing HF antenna chain.  Layer 4 (Fusion ingestion writer) not
-started.
+**Status (2026-06-15):** Layers 1–5 plus the reception ledger landed.
+Layer 4 (Fusion ingestion) is now **implemented but gated OFF** behind
+`[wwvb] feed_fusion`, pending a nighttime live-signal validation run of
+`scripts/wwvb_live_tap.py` from AC0G's RX-888 + existing HF antenna chain
+and a propagation-delay calibration pass.  Until both are done WWVB stays
+out of the chrony-disciplining path; an uncalibrated source is graded
+MARGINAL even when enabled, so the combiner down-weights it.  The
+as-built Layer-4 design is documented in §11.  Unit coverage: **95 WWVB
+tests** (protocol 72, demod 10, fusion 13).
 
 **Companion documents:**
 - `METROLOGY.md` §4.5–§4.6 — timing-authority hierarchy and why
@@ -548,22 +552,26 @@ In rough dependency order:
    doesn't hold up on sky-wave wander.  This is the most likely
    place the live test fails first.
 
-3. **Propagation-delay calibration.**  A learning pass that uses
-   GPS-disciplined wallclock as ground truth to estimate the
-   per-decoded-minute sky-wave delay.  Slowly-varying (diurnal),
-   needs a temporal model not a fixed constant.
+3. **Propagation-delay calibration.**  ⏳ **PARTIAL.**  The nominal LF
+   delay model (`wwvb_propagation.py`) and a GPS-learned override hook
+   (`learned_delay_ms` / `learned_sigma_ms`) landed with §11; what's
+   still TODO is the *learning pass* itself — using GPS-disciplined
+   wallclock as ground truth to estimate the per-decoded-minute sky-wave
+   delay (slowly-varying / diurnal, a temporal model not a fixed
+   constant).  Until it runs, WWVB is graded MARGINAL.
 
-4. **Layer 4: Fusion ingestion writer.**  Wire decoded
-   `WwvbTimeFrame` outputs into the L2 `broadcast_measurements`
-   schema that the multi-broadcast Kalman + WLS combiner consumes.
-   Schema-match the existing WWV/WWVH/CHU/BPM metrology workers
-   (see `metrology_engine.py`).
+4. **Layer 4: Fusion ingestion writer.**  ✅ **DONE (2026-06-15,
+   gated off) — see §11.**  The decoded frame is turned into an L1
+   `metrology_measurements` row (not L2 `broadcast_measurements`: the
+   central `timestd-fusion` service reads per-channel **L1** rows, where
+   `raw_toa_ms` actually carries `timing_error_ms`; see §11).  Gated on
+   `[wwvb] feed_fusion`.
 
-5. **In-process consumer in core-recorder.**  Translate the tap's
-   architecture into a `_start_wwvb_stream()` + `_wwvb_on_samples()`
-   pair in `core_recorder_v2.py`, mirroring `_start_t6_stream()`.
-   This replaces the standalone tap once we're confident in the
-   decode chain.
+5. **In-process consumer in core-recorder.**  ✅ **DONE.**
+   `_start_wwvb_stream()` / `_wwvb_on_samples()` / `_wwvb_decode_loop()`
+   live in `core_recorder_v2.py`, mirroring the T6 stream, and write the
+   reception ledger (`wwvb_ledger.py`).  Layer 4 adds the RTP-anchored
+   buffer and the optional L1 writer on top of this consumer.
 
 6. **NIST §7 extended (6-minute) symbols** for low-SNR reception.
    124 PRBS sequences at half-hour boundaries, 10× link-budget
@@ -605,8 +613,218 @@ In rough dependency order:
 
 ### Authoritative implementation source files
 - `src/hf_timestd/core/wwvb_protocol.py` (Layer 2)
-- `src/hf_timestd/core/wwvb_demod.py` (Layer 3)
+- `src/hf_timestd/core/wwvb_demod.py` (Layer 3; now also exposes
+  `DetectedFrame.boundary_sample`)
+- `src/hf_timestd/core/wwvb_ledger.py` (Layer 8 reception ledger)
+- `src/hf_timestd/core/wwvb_propagation.py` (Layer 4 LF delay model)
+- `src/hf_timestd/core/wwvb_fusion.py` (Layer 4 timing arithmetic + L1 row)
+- `src/hf_timestd/core/core_recorder_v2.py`
+  (`_start_wwvb_stream` / `_wwvb_on_samples` / `_wwvb_decode_loop` /
+  `_setup_wwvb_fusion_feed`)
 - `scripts/wwvb_live_tap.py` (validation / reception monitoring)
 - `tests/test_wwvb_protocol.py` (72 protocol tests)
 - `tests/test_wwvb_demod.py` (10 DSP tests, all synthesized)
-- `/etc/hf-timestd/timestd-config.toml` (Layer 1 channel entry)
+- `tests/test_wwvb_fusion.py` (13 Layer-4 tests, all synthesized)
+- `config/timestd-config.toml.template` (`[wwvb]` section)
+- `/etc/hf-timestd/timestd-config.toml` (Layer 1 channel entry + `[wwvb]`)
+
+---
+
+## 11. Layer 4 — Fusion ingestion, as built (2026-06-15)
+
+Layer 4 turns each accepted WWVB minute into a measurement the central
+Fusion combiner pools with WWV / WWVH / CHU / BPM.  It is **implemented
+and unit-tested but gated OFF** behind `[wwvb] feed_fusion`; nothing
+reaches chrony until a live-validation run (and ideally a calibration
+pass) clears it.
+
+### 11.1 The correction to the original §2 plan
+
+The original design (§2) said WWVB would write "L2 `broadcast_measurements`
+rows."  Tracing the real combiner showed otherwise:
+
+- `timestd-fusion.service` runs `multi_broadcast_fusion.py` as **one
+  central process**.  It discovers channels by scanning
+  `<data_root>/phase2/<channel>` and reads each channel's **L1
+  `metrology_measurements`** rows (`_discover_channels`,
+  `_read_l1_metrology`).
+- In those L1 rows, `raw_toa_ms` is **mislabelled**: per the load-bearing
+  comment at `multi_broadcast_fusion.py:2024`, it actually stores
+  `timing_error_ms (= arrival − expected_delay)` — i.e. the **D_clock**,
+  consumed verbatim.
+- `FusionTimingState` is per-worker and in-process; it is *not* the
+  cross-process pool.  WWVB therefore cannot call `add_detection` — it
+  must **write L1 rows** to the substrate the central service reads.
+
+So Layer 4 writes an **L1 `metrology_measurements` row per accepted
+minute** into `<data_root>/phase2/WWVB_60/`, and fusion auto-discovers it.
+
+### 11.2 The timing convention (must match the HF workers)
+
+```
+timing_error_ms = (T_arrival_utc − decoded_minute_utc) × 1000
+                  − expected_delay_ms
+```
+
+- `T_arrival_utc` — receiver UTC of the on-time mark, from the boundary
+  sample's RTP timestamp via radiod's **GPSDO snapshot**
+  (`GPS_TIME` / `RTP_TIMESNAP`, applied by `resolve_buffer_timing`) — the
+  same authoritative basis as `buffer_timing.sample0_utc` and the HF
+  workers, **not** the host wall clock (see §11.6).
+- `decoded_minute_utc` — transmitter UTC of that minute boundary (exact
+  `:00`), from the protocol decode.
+- `expected_delay_ms` — modelled WWVB propagation delay.
+
+This equals `(true_prop − expected_prop) + clock_error`, carries the
+**same sign** as `metrology_engine.py:1151`
+(`timing_error_ms = raw_arrival − expected_delay`), and is written to the
+L1 `raw_toa_ms` field exactly as the HF workers do.  Because `T_arrival`
+rides the radiod GPSDO snapshot, the residual is already referenced to GPS
+truth; the propagation-model error (and any residual constant offset — e.g.
+the WWVB antenna-array geometry of §11.5) is what the GPS-learned
+calibration absorbs — which is why an **uncalibrated** WWVB source is graded
+**MARGINAL** (and thus down-weighted), never GOOD.
+
+### 11.3 Components built
+
+1. **Station identity.**  `WWVB` added to `StationID`
+   (`models/measurement.py`) and to the L1/L2/L1-broadcast schema enums;
+   `WWVB_*` coordinates (Fort Collins, co-located with WWV) added to
+   `wwv_constants.py`.
+2. **Propagation model** (`wwvb_propagation.py`).  Great-circle
+   light-travel time + a small groundwave secondary-phase excess, with an
+   honest 2 ms nominal 1σ covering the groundwave/skywave divergence and
+   diurnal reflection-height change.  The HF `40.3/f²` iono term is
+   deliberately *not* used (it diverges at 60 kHz).  A
+   `learned_delay_ms` / `learned_sigma_ms` override takes precedence once
+   a GPS-learned value exists.
+3. **RTP-anchored buffer** (`_wwvb_on_samples`).  The rolling IQ buffer
+   now tracks `_wwvb_anchor_rtp`, the RTP timestamp of its first sample
+   (`last_rtp_timestamp` is the RTP of `samples[0]`, the same convention
+   as the T6 calibrator).  An RTP discontinuity (packet loss / SSRC
+   reset) **drops the accumulation and re-anchors** so no measurement
+   ever spans a gap.
+4. **Decoder boundary exposure** (`wwvb_demod.py`).
+   `DetectedFrame.boundary_sample` is the on-time-mark sample of the
+   frame's minute boundary (`boundaries[start]`).  Sample resolution at
+   24 kHz is ~42 µs — already sub-ms; sub-sample interpolation is a future
+   tightening that won't change the field's meaning.
+5. **Timing arithmetic + row builder** (`wwvb_fusion.py`, pure /
+   unit-tested).  `compute_timing_error_ms`, `estimate_snr_db` (a
+   documented coherent-SNR proxy), and `build_l1_row`, which returns
+   `None` (caller skips) when there's no RTP anchor, no boundary sample,
+   no rtp→utc mapping, or the implied clock error exceeds ±500 ms (the
+   same sanity gate the HF path uses).
+6. **Gated writer** (`core_recorder_v2.py`).  `_setup_wwvb_fusion_feed`
+   resolves the receiver location (`[station] latitude/longitude`, else
+   `grid_square`), wires the WWVB channel into radiod's STATUS listener
+   (keeping `gps_time`/`rtp_timesnap` fresh and restart-aware), builds the
+   GPSDO-snapshot rtp→utc closure (§11.6) and the L1
+   `make_data_product_writer`, and the decode loop writes one row per
+   accepted minute.  All behind `[wwvb] feed_fusion` (default false);
+   any setup failure leaves WWVB ledger-only.
+
+### 11.4 Enabling it (the validation gate)
+
+1. Set `[station] latitude/longitude` (or `grid_square`).
+2. Run a nighttime `scripts/wwvb_live_tap.py` session; confirm `frames≥1`
+   with `par_err=0` on real signal.
+3. While GPS+PPS (T6) is healthy, set `feed_fusion = true` and compare the
+   WWVB L1 `raw_toa_ms` against the GPS-disciplined reference — the median
+   residual *is* the propagation-delay calibration.  Feed it back as
+   `learned_delay_ms` / `learned_sigma_ms`.
+4. Only then trust WWVB to back up the chrony feed when GPS+PPS fail.
+
+### 11.5 Receiver-position accuracy and the path-length budget
+
+Receiver position enters timing **only** through the great-circle distance
+to Fort Collins → `expected_delay_ms`.  A position error becomes a
+path-length error becomes a delay bias.  Worst case (the error points along
+the bearing to WWVB) path error maps 1:1 to position error; a perpendicular
+offset is second-order (`δ²/2L`).  The conversion is:
+
+> **1 km of path error = 1 / c = 3.34 µs of delay bias.**
+
+| Position source | Worst-case offset | Timing bias |
+|---|---|---|
+| 4-char grid (`EM38`) — 2°×1° cell | ±~100 km | **±~340 µs** |
+| 6-char grid (`EM38ww`) — 5′×2.5′ cell | ±~4 km | **±~14 µs** |
+| lat/lon to 0.01° | ±~1 km | ±~3 µs |
+| lat/lon to 0.001° | ±~0.1 km | ±~0.4 µs |
+
+(`grid_to_latlon` returns the cell **centre** and ignores chars 7–8, so a
+grid can't beat ~4 km — use explicit lat/lon for sub-km.)
+
+**How accurate it needs to be — two regimes:**
+
+- **Uncalibrated** (nominal model, σ = 2 ms): position is nearly
+  irrelevant.  Even a coarse 4-char grid's ~340 µs is ~1/6 of σ; a 6-char
+  grid (~14 µs) is negligible.
+- **Calibrated** (`learned_delay_ms` set): the GPS-learned delay is a
+  *measured* total path delay against GPS truth, so it **absorbs the
+  constant position-induced bias entirely**.  With a learned value
+  `build_l1_row` uses it verbatim and the configured lat/lon no longer
+  affects `timing_error_ms` at all — it only feeds the
+  `distance_km`/`light_travel_time_ms` reporting fields.  Position re-enters
+  only if you relocate (or re-grid) without re-calibrating, or clear the
+  learned value.
+
+**Recommendation:** set a **6-character grid, or lat/lon to ~3 decimals**
+(≤~14 µs) — out of the budget under any realistic target, including a future
+sub-100 µs calibrated source.  Don't keep a bare 4-char grid as the
+permanent config: its ~340 µs would become the *dominant* error term once
+the calibrated source is pushed toward sub-100 µs.
+
+**Sibling caveat — the transmitter end.**  WWVB is configured as a single
+point, but its two antenna arrays are **~13 km apart** (~43 µs of
+transmitter-side ambiguity) — larger than a 6-char receiver-grid error.  So
+below ~100 µs the WWVB array geometry matters as much as receiver position.
+Both are *constant* offsets, so **both are absorbed by the GPS-learned
+calibration** — which is the real reason that calibration pass, not raw
+position precision, is what unlocks sub-ms WWVB.
+
+### 11.6 Timing-authority accordance (vs ARCHITECTURE-FIRST-PRINCIPLES)
+
+Layer 4 is built to honour the first-principles invariant — *"RTP is the
+ruler; wall clock is a derived product, never a source"* (FIRST-PRINCIPLES
+§1–2; ARCHITECTURE.md §2).  Concretely:
+
+- **RTP is the substrate.**  Every WWVB measurement is anchored to the RTP
+  sample counter: the rolling buffer keeps `_wwvb_anchor_rtp` (RTP of
+  sample 0), and the decoder exposes the boundary's sample offset, so the
+  on-time mark maps to an exact RTP timestamp.
+- **UTC comes from radiod's GPSDO snapshot, not the host clock.**  radiod's
+  clock is **independent of this host** (radiod may run on a different
+  machine), but its RTP timeline is GPSDO-disciplined.  `T_arrival_utc` is
+  computed as `GPS_TIME_unix + (rtp − RTP_TIMESNAP) / sample_rate` via
+  `resolve_buffer_timing` — byte-for-byte the same authoritative mapping
+  `buffer_timing.sample0_utc` and the HF metrology workers use.  An earlier
+  draft of this layer used the host-clock-derived `rtp_to_wallclock`; that
+  was a first-principles violation and has been corrected.
+- **WWVB joins T3; it is not a new tier or substrate.**  It is one more
+  *producer of annotation* into the L1 `metrology_measurements` stream
+  (FIRST-PRINCIPLES §3); the central `timestd-fusion` service is the
+  *consumer* that fuses it into the T3 product.
+
+**The radiod-discontinuity threat.**  Because radiod owns the clock
+independently, a radiod restart, network drop, or SSRC reset is a *timing
+threat*: the RTP counter can jump and `RTP_TIMESNAP` can move to a new
+counter space.  A measurement that spanned such a discontinuity — or that
+paired a post-restart `boundary_rtp` with a pre-restart snapshot — would be
+silently wrong.  Three layers defend against it:
+
+1. **Buffer RTP-gap reset** — `_wwvb_on_samples` detects a sample-count
+   discontinuity (`expected ≠ observed` next RTP) and drops the
+   accumulation, re-anchoring; no decode ever spans the gap.
+2. **STATUS-listener re-snap** — the WWVB channel is wired into radiod's
+   continuous STATUS listener, so `gps_time`/`rtp_timesnap` are refreshed
+   into the new counter space after a restart (the same mechanism T6 uses).
+3. **Plausibility backstop** — `build_l1_row` rejects any row whose implied
+   clock error exceeds ±500 ms, which a residual counter-space mismatch
+   would trivially trip.
+
+This is consistent with how the rest of the pipeline treats radiod
+restarts: `buffer_timing` explicitly notes `start_system_time` (host clock)
+"can be wrong by seconds or more after a radiod restart" and uses only the
+RTP/GPS mapping — and the T6 path keeps Layer-3 recapture as its
+restart-recovery net.

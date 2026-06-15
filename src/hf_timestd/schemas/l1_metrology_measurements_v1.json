@@ -40,6 +40,7 @@
                 "WWVH",
                 "CHU",
                 "BPM",
+                "WWVB",
                 "UNKNOWN"
             ],
             "description": "Identified station"

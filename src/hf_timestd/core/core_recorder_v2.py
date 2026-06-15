@@ -620,6 +620,21 @@ class CoreRecorderV2:
         self._wwvb_buf: deque = deque()
         self._wwvb_buf_samples: int = 0
         self._wwvb_buf_lock = threading.Lock()
+        # RTP timestamp of the buffer's first (oldest) sample, kept in
+        # lock-step with the deque so any sample offset maps to an RTP
+        # timestamp, hence (via rtp_to_wallclock) to receiver UTC.  None until
+        # the first packet, or after an RTP discontinuity clears the buffer.
+        self._wwvb_anchor_rtp: Optional[int] = None
+        # Layer 4 (Fusion source-pool feed) — populated by
+        # _setup_wwvb_fusion_feed only when [wwvb] feed_fusion is enabled;
+        # None / defaults keep WWVB ledger-only and out of the chrony path.
+        self._wwvb_l1_writer = None
+        self._wwvb_rtp_to_utc_s = None
+        self._wwvb_rx_lat: Optional[float] = None
+        self._wwvb_rx_lon: Optional[float] = None
+        self._wwvb_processing_version = "wwvb-layer4"
+        self._wwvb_learned_delay_ms = None
+        self._wwvb_learned_sigma_ms = None
         self._wwvb_decode_thread: Optional[threading.Thread] = None
         self._wwvb_decode_stop = threading.Event()
         self._wwvb_first_sample_logged = False
@@ -1340,6 +1355,18 @@ class CoreRecorderV2:
 
             self._wwvb_ledger = WwvbLedger(ledger_dir)
 
+            # Layer 4: optional Fusion source-pool feed (default off — gated
+            # on [wwvb] feed_fusion because it reaches the chrony-disciplining
+            # path).  Best-effort; failure leaves WWVB ledger-only.
+            if cfg.get('feed_fusion', False):
+                try:
+                    self._setup_wwvb_fusion_feed(channel_info, desc)
+                except Exception as exc:
+                    logger.warning(
+                        f"WWVB feed_fusion setup failed; staying ledger-only: "
+                        f"{exc}"
+                    )
+
             self._wwvb_stream = RadiodStream(
                 channel=channel_info,
                 on_samples=self._wwvb_on_samples,
@@ -1370,6 +1397,122 @@ class CoreRecorderV2:
                 self._wwvb_ledger.close()
                 self._wwvb_ledger = None
 
+    def _setup_wwvb_fusion_feed(self, channel_info, channel_name):
+        """Wire the L1 metrology writer + RTP->UTC closure so accepted WWVB
+        minutes can join the Fusion source pool (Layer 4).
+
+        Writes ``L1_metrology_measurements`` rows into the phase2 channel
+        directory (``<data_root>/phase2/<channel_name>``) so the central
+        ``timestd-fusion`` service discovers WWVB_60 as a source alongside the
+        HF channels.  ``raw_toa_ms`` carries the WWVB ``timing_error_ms``
+        (D_clock); see ``wwvb_fusion.build_l1_row`` for the timing convention.
+
+        Raises on misconfiguration; the caller treats any failure as
+        "stay ledger-only".
+        """
+        from hf_timestd import __version__ as hf_version
+        from hf_timestd.io import make_data_product_writer
+        from .data_product_registry import DataProductRegistry
+        from .solar_zenith_calculator import grid_to_latlon
+
+        # Receiver location: explicit lat/lon wins, else Maidenhead grid.
+        lat = self.station_config.get('latitude')
+        lon = self.station_config.get('longitude')
+        if not lat or not lon:  # None or 0.0 placeholder
+            grid = (self.station_config.get('grid_square') or '').strip()
+            if len(grid) >= 4:
+                lat, lon = grid_to_latlon(grid)
+        if not lat or not lon:
+            logger.warning(
+                "WWVB feed_fusion enabled but receiver location unknown "
+                "(set [station] latitude/longitude or grid_square); staying "
+                "ledger-only"
+            )
+            return
+        self._wwvb_rx_lat = float(lat)
+        self._wwvb_rx_lon = float(lon)
+
+        # radiod's clock is independent of this host (radiod may run on another
+        # machine) but its RTP timeline is GPSDO-disciplined.  Keep the
+        # channel's GPS_TIME / RTP_TIMESNAP snapshot fresh — and restart-aware —
+        # by wiring it into the continuous STATUS listener, exactly as T6 does.
+        # The listener picks up a new snapshot whenever radiod restarts or
+        # re-snaps, which is what keeps the RTP->UTC mapping in the correct
+        # counter space across a discontinuity.
+        control = getattr(self, 'control', None)
+        start_fn = getattr(control, 'start_status_listener', None) if control else None
+        if start_fn is not None and getattr(channel_info, 'ssrc', 0):
+            try:
+                start_fn().register_channel(channel_info)
+                logger.info(
+                    f"WWVB channel SSRC {channel_info.ssrc:08x} wired to radiod "
+                    f"STATUS listener — gps_time/rtp_timesnap refresh per broadcast"
+                )
+            except Exception as exc:
+                logger.warning(f"WWVB STATUS-listener wiring failed: {exc}")
+
+        # RTP -> receiver UTC seconds via radiod's GPSDO snapshot, NOT the host
+        # wall clock.  Per ARCHITECTURE.md §2 / ARCHITECTURE-FIRST-PRINCIPLES
+        # §1–2 the authoritative mapping is
+        #     utc = GPS_TIME_unix + (rtp − RTP_TIMESNAP) / sample_rate
+        # — the same formula buffer_timing.sample0_utc and the HF metrology
+        # workers ride.  resolve_buffer_timing applies it with leap-second
+        # correctness and radiod-restart counter-space handling.  Returns None
+        # when the snapshot is missing so build_l1_row skips the row.  A
+        # radiod-side sample-count discontinuity is a timing THREAT, defended at
+        # three layers: (1) the buffer's RTP-gap reset drops any accumulation
+        # spanning the jump; (2) the STATUS listener re-snaps gps_time/
+        # rtp_timesnap into the new counter space; (3) the ±500 ms plausibility
+        # gate in build_l1_row rejects any residual counter-space mismatch.
+        from .buffer_timing import resolve_buffer_timing
+
+        sr = int(self._wwvb_config.get('sample_rate', 24_000))
+
+        def _rtp_to_utc_s(rtp, _ci=channel_info, _sr=sr):
+            gps_time = getattr(_ci, 'gps_time', None)
+            rtp_snap = getattr(_ci, 'rtp_timesnap', None)
+            if gps_time is None or rtp_snap is None:
+                return None
+            bt = resolve_buffer_timing(
+                {
+                    'start_rtp_timestamp': int(rtp) & 0xFFFFFFFF,
+                    'gps_time_ns': int(gps_time),
+                    'rtp_timesnap': int(rtp_snap),
+                },
+                sample_rate=_sr,
+            )
+            if bt.source == 'no_timing':
+                return None
+            return bt.sample0_utc
+
+        self._wwvb_rtp_to_utc_s = _rtp_to_utc_s
+
+        channel_dir = self.output_dir / 'phase2' / channel_name
+        writer_output_dir = DataProductRegistry.get_data_dir(
+            channel_dir=channel_dir,
+            product_level="L1",
+            product_name="metrology_measurements",
+            create=True,
+        )
+        self._wwvb_processing_version = f"wwvb-layer4/{hf_version}"
+        self._wwvb_l1_writer = make_data_product_writer(
+            output_dir=writer_output_dir,
+            product_level="L1",
+            product_name="metrology_measurements",
+            channel=channel_name,
+            version="v1",
+            processing_version=self._wwvb_processing_version,
+            station_metadata=self.station_config,
+            storage_config=self.config.get('storage', {}) or {},
+        )
+        self._wwvb_learned_delay_ms = self._wwvb_config.get('learned_delay_ms')
+        self._wwvb_learned_sigma_ms = self._wwvb_config.get('learned_sigma_ms')
+        logger.info(
+            f"WWVB feed_fusion ENABLED: writer={writer_output_dir} "
+            f"rx=({self._wwvb_rx_lat:.4f},{self._wwvb_rx_lon:.4f}) "
+            f"learned_delay_ms={self._wwvb_learned_delay_ms}"
+        )
+
     def _wwvb_on_samples(self, samples, quality):
         """RTP sample callback — append to rolling IQ buffer.
 
@@ -1391,13 +1534,46 @@ class CoreRecorderV2:
             )
             self._wwvb_first_sample_logged = True
 
+        rtp0 = getattr(quality, 'last_rtp_timestamp', None)
         with self._wwvb_buf_lock:
+            # Maintain the RTP anchor (RTP of buffer sample 0).
+            # last_rtp_timestamp is the RTP of samples[0] for this batch — the
+            # same convention the T6 calibrator relies on
+            # (bpsk_pps_calibrator_mf.py:415, rtp_batch = arange + rtp).
+            if rtp0 is None:
+                # No RTP provenance this batch -> can't anchor; invalidate so
+                # the decode loop falls back to ledger-only (no Fusion timing).
+                self._wwvb_anchor_rtp = None
+            else:
+                rtp0 = int(rtp0) & 0xFFFFFFFF
+                if self._wwvb_buf_samples == 0 or self._wwvb_anchor_rtp is None:
+                    self._wwvb_anchor_rtp = rtp0
+                else:
+                    expected = (self._wwvb_anchor_rtp
+                                + self._wwvb_buf_samples) & 0xFFFFFFFF
+                    if rtp0 != expected:
+                        # RTP discontinuity (packet loss / SSRC reset): drop the
+                        # accumulation so no timing measurement spans the gap —
+                        # a spanned gap would silently corrupt the boundary->UTC
+                        # mapping.  The DSP already assumes a contiguous buffer.
+                        logger.warning(
+                            f"WWVB RTP discontinuity: expected {expected}, got "
+                            f"{rtp0}; dropping {self._wwvb_buf_samples} buffered "
+                            f"samples and re-anchoring"
+                        )
+                        self._wwvb_buf.clear()
+                        self._wwvb_buf_samples = 0
+                        self._wwvb_anchor_rtp = rtp0
             self._wwvb_buf.append(samples)
             self._wwvb_buf_samples += len(samples)
             while (self._wwvb_buf_samples > window_samples
                    and len(self._wwvb_buf) > 1):
-                self._wwvb_buf_samples -= len(self._wwvb_buf[0])
+                dropped = len(self._wwvb_buf[0])
+                self._wwvb_buf_samples -= dropped
                 self._wwvb_buf.popleft()
+                if self._wwvb_anchor_rtp is not None:
+                    self._wwvb_anchor_rtp = (self._wwvb_anchor_rtp
+                                             + dropped) & 0xFFFFFFFF
 
     def _wwvb_decode_loop(self):
         """Periodic decode worker — snapshots the buffer and calls
@@ -1408,6 +1584,7 @@ class CoreRecorderV2:
         samples (a minute frame plus a few seconds of headroom).
         """
         from .wwvb_demod import decode_iq
+        from .wwvb_fusion import build_l1_row, estimate_snr_db
 
         cfg = self._wwvb_config
         sample_rate = float(cfg.get('sample_rate', 24_000))
@@ -1433,6 +1610,10 @@ class CoreRecorderV2:
                     )
                     continue
                 iq = np.concatenate(list(self._wwvb_buf))
+                # RTP timestamp of iq[0]; None if the buffer isn't anchored
+                # (no RTP provenance / post-discontinuity).  Captured under the
+                # lock so it stays consistent with the concatenated samples.
+                anchor_rtp = self._wwvb_anchor_rtp
 
             mean_amp = float(np.abs(iq).mean())
             try:
@@ -1477,6 +1658,52 @@ class CoreRecorderV2:
                         inverted_polarity=f.inverted_polarity,
                         mean_amp=mean_amp,
                     )
+
+            # --- Layer 4: feed accepted minutes into the Fusion source pool ---
+            # Each accepted frame becomes an L1 metrology row whose raw_toa_ms
+            # carries timing_error_ms (D_clock).  Gated: writer is None unless
+            # [wwvb] feed_fusion is enabled and the feed wired up successfully.
+            if self._wwvb_l1_writer is not None and accepted:
+                for f in accepted:
+                    # A WWVB minute frame spans 60 one-second symbols starting
+                    # at f.second_index; use them for the coherent-SNR proxy.
+                    snr_db = estimate_snr_db(
+                        result.per_second_iq[f.second_index:f.second_index + 60]
+                    )
+                    confidence = 1.0 if f.sync_errors == 0 else 0.9
+                    try:
+                        row = build_l1_row(
+                            detected_frame=f,
+                            anchor_rtp=anchor_rtp,
+                            rtp_to_utc_s=self._wwvb_rtp_to_utc_s,
+                            rx_lat=self._wwvb_rx_lat,
+                            rx_lon=self._wwvb_rx_lon,
+                            snr_db=snr_db,
+                            confidence=confidence,
+                            processing_version=self._wwvb_processing_version,
+                            learned_delay_ms=self._wwvb_learned_delay_ms,
+                            learned_sigma_ms=self._wwvb_learned_sigma_ms,
+                        )
+                    except Exception as exc:
+                        logger.warning(f"WWVB L1 row build failed: {exc}")
+                        continue
+                    if row is None:
+                        logger.debug(
+                            "WWVB L1 row skipped (no RTP anchor / implausible "
+                            f"timing) minute="
+                            f"{f.frame.minute_of_frame.isoformat()}"
+                        )
+                        continue
+                    try:
+                        self._wwvb_l1_writer.write_measurement(row)
+                        logger.info(
+                            f"WWVB->Fusion minute="
+                            f"{f.frame.minute_of_frame.isoformat()} "
+                            f"timing_error={row['raw_toa_ms']:+.3f}ms "
+                            f"snr~{snr_db:.1f}dB grade={row['quality_flag']}"
+                        )
+                    except Exception as exc:
+                        logger.warning(f"WWVB L1 write failed: {exc}")
 
             for f in rejected:
                 logger.info(
@@ -3701,6 +3928,12 @@ class CoreRecorderV2:
                 self._wwvb_ledger.close()
             except Exception as e:
                 logger.debug(f"WWVB ledger close: {e}")
+        if self._wwvb_l1_writer is not None:
+            try:
+                self._wwvb_l1_writer.close()
+                logger.info("WWVB Fusion L1 writer closed")
+            except Exception as e:
+                logger.debug(f"WWVB L1 writer close: {e}")
 
         # Remove T6 BPSK channel from radiod.  Unlike archived channels
         # (whose SSRC is deterministic from a stable description), the
