@@ -23,7 +23,7 @@ def parse_receiver_channels(
 
     Status address is under [ka9q].status (note: ``status``, not
     ``status_address`` — the ka9q-radio fragment convention used by
-    hf-timestd predates the newer naming hf-gps-tec uses).
+    hf-timestd predates the newer naming hf-tec uses).
     Frequencies are flattened from every channel inside every
     [recorder.channel_group.*].  Encoding may be set per-group; we
     take the first group's encoding and fall back to

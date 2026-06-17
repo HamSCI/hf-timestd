@@ -32,7 +32,7 @@ required       = true
 title          = "PSWS station ID (Grape)"
 help           = """The PSWS-assigned station ID for Grape uploads
 (format: S followed by six digits).  Co-resident clients
-(mag-recorder, hf-gps-tec) have their OWN PSWS station IDs --
+(mag-recorder, hf-tec) have their OWN PSWS station IDs --
 PSWS treats each measurement as its own station."""
 example        = "S000171"
 validator_hint = "S followed by 6 digits"
