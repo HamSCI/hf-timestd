@@ -217,11 +217,3 @@ singleton_label = "(singleton)"
 config_path     = "/etc/hf-timestd/timestd-config.toml"
 parser_file     = "src/hf_timestd/sigmond_tui.py"
 parser_attr     = "parse_receiver_channels"
-
-# --- Upload-readiness declaration (CONTRACT §20) --------------------------
-[[contract.upload]]
-destination    = "PSWS (GRAPE, pswsnetwork.eng.ua.edu)"
-scope          = "host"
-self_validated = true
-preflight      = "hf-timestd grape test-upload"
-register_url   = "pswsnetwork.eng.ua.edu (PSWS station_id + SSH public key enrolled on the portal)"
