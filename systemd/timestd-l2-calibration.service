@@ -1,7 +1,7 @@
 [Unit]
 # Alert (journal breadcrumb via service-alert.sh; email if mailutils present)
 # when this always-restart service finally gives up (StartLimit exhausted).
-OnFailure=timestd-alert@%n.service
+OnFailure=timestd-alert@%N.service
 Description=HF Time Standard L2 Calibration Service - Converts L1 to L2 Timing
 Documentation=https://github.com/mijahauan/grape-recorder
 After=timestd-metrology.service

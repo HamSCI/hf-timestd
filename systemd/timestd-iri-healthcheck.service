@@ -2,7 +2,7 @@
 Description=HF-TimeStd IRI Indices Health Check
 Documentation=https://github.com/mijahauan/hf-timestd
 After=timestd-iri-update.service
-OnFailure=timestd-alert@%n.service
+OnFailure=timestd-alert@%N.service
 
 [Service]
 Type=oneshot

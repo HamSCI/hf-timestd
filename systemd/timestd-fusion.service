@@ -5,7 +5,7 @@ After=timestd-l2-calibration.service
 Requires=timestd-l2-calibration.service
 StartLimitIntervalSec=300
 StartLimitBurst=5
-OnFailure=timestd-alert@%n.service
+OnFailure=timestd-alert@%N.service
 
 [Service]
 Type=notify

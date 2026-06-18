@@ -5,7 +5,7 @@ After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=3600
 StartLimitBurst=3
-OnFailure=timestd-alert@%n.service
+OnFailure=timestd-alert@%N.service
 
 [Service]
 Type=oneshot

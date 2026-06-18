@@ -6,7 +6,7 @@ After=timestd-l2-calibration.service
 # pipeline and must never be torn down or gated by a metrology service.
 # See docs/design/METROLOGY_PHYSICS_SPLIT.md.
 Wants=timestd-l2-calibration.service
-OnFailure=timestd-alert@%n.service
+OnFailure=timestd-alert@%N.service
 
 [Service]
 # Type=simple (not notify): physics startup must neither gate, nor be gated

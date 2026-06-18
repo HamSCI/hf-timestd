@@ -3,7 +3,7 @@ Description=HF-TimeStd Space-Weather Health Check
 Documentation=https://github.com/mijahauan/hf-timestd
 After=network-online.target
 Wants=network-online.target
-OnFailure=timestd-alert@%n.service
+OnFailure=timestd-alert@%N.service
 
 [Service]
 Type=oneshot

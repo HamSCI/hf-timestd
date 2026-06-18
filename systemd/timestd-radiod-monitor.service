@@ -1,7 +1,7 @@
 [Unit]
 # Alert (journal breadcrumb via service-alert.sh; email if mailutils present)
 # when this always-restart service finally gives up (StartLimit exhausted).
-OnFailure=timestd-alert@%n.service
+OnFailure=timestd-alert@%N.service
 Description=HF Time Standard Radiod Health Monitor
 Documentation=https://github.com/mijahauan/hf-timestd
 After=network.target
