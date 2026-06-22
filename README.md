@@ -287,6 +287,7 @@ The system has an eight-service core pipeline plus a set of housekeeping units (
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — system design and data flow.
 - **[docs/METROLOGY.md](docs/METROLOGY.md)** — RTP-to-UTC calibration, timing bootstrap, error budget.
 - **[docs/PHYSICS.md](docs/PHYSICS.md)** — ionospheric capabilities with ✅/⚠️/❌ honesty markers per feature (the canonical capability inventory; supersedes the legacy `SCIENTIFIC_CAPABILITIES.md`).
+- **[Station-network capabilities](../sigmond/docs/STATION-NETWORK-CAPABILITIES.md)** (sigmond docs) — what a *mesh* of these stations delivers beyond a single node (TID imaging, common-illuminator gradient sensing, tomography) and why the network is resilient to the loss of any one transmitter, CHU included.
 - **[docs/PHARLAP_RAYTRACING.md](docs/PHARLAP_RAYTRACING.md)** — PHaRLAP/pyLAP ray tracing: how we refine propagation-path and timing expectations, 2-D/3-D capabilities, worked Alaska→EM38ww examples (`hf-timestd raytrace`).
 - **[docs/TECHNICAL_REFERENCE.md](docs/TECHNICAL_REFERENCE.md)** — algorithms, data formats, physics models.
 - **[docs/PIPELINE_VERIFICATION.md](docs/PIPELINE_VERIFICATION.md)** — end-to-end health gates.
