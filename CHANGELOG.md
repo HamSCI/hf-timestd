@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### 2026-06-22 — PHaRLAP ray-tracing doc + `raytrace` CLI
+
+- **New doc `docs/PHARLAP_RAYTRACING.md`** — describes how PHaRLAP/pyLAP
+  refines propagation-path and timing expectations, its 2-D (operational)
+  and 3-D (roadmap) capabilities, and worked examples on the `hf-tec`
+  Alaska→EM38ww beacon paths. Ships three illustrative figures
+  (`docs/images/pharlap/`) with a reproducible generator
+  (`make_figures.py`). Linked from `README.md` and `CLAUDE.md`.
+- **New CLI `hf-timestd raytrace <station> <freq_mhz>`** — operator handle
+  on the advisory ray-trace overlay (`cli.py:_cmd_raytrace`). Resolves
+  receiver coordinates from `--rx-lat/--rx-lon`, then config
+  `[station]` latitude/longitude or `grid_square`; prints the propagation
+  modes (hop count, group delay, launch elevation, ground range, apogee)
+  with `--json`. Uses the existing `RaytraceEngine`; falls back to
+  spherical-hop geometry (source=geometric) when PHaRLAP/pyLAP is not
+  staged. Never touches the timing feed.
+
 ### 2026-05-17 metrology/physics review — full remediation arc complete (2026-05-20)
 
 The 2026-05-17 code review (`docs/CODE_REVIEW_2026-05-17_METROLOGY_PHYSICS.md`)

@@ -39,6 +39,7 @@ hf-timestd grape {decimate,spectrogram,package,upload,test-upload,status}
 hf-timestd calibrate                 # BPSK-PPS calibration utilities
 hf-timestd discover                  # available radiod channels
 hf-timestd create-channels           # provision channels in radiod
+hf-timestd raytrace WWV 10.0         # PHaRLAP 2-D ray trace → propagation modes
 ```
 
 ### Tests
@@ -149,3 +150,6 @@ optionally subscribe to via §18.
 - `docs/TIMING-PIPELINE-WIRING.md` — RTP / chrony / fusion wiring.
 - `docs/PHASE_ENGINE_ARCHITECTURE.md` / `PHYSICS.md` — DSP internals.
 - `docs/GRAPE_DAILY_PROCESSING.md` — daily PSWS upload pipeline.
+- `docs/PHARLAP_RAYTRACING.md` — PHaRLAP/pyLAP ray tracing (advisory physics
+  overlay): 2-D/3-D capabilities, the `raytrace` CLI, worked
+  Alaska→EM38ww examples. Engine: `core/raytrace_engine.py`.

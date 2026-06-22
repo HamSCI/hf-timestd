@@ -796,6 +796,118 @@ def _cmd_data_sources(args) -> int:
     return 1 if problems else 0
 
 
+def _cmd_raytrace(args) -> int:
+    """`hf-timestd raytrace <station> <freq_mhz>` — advisory 2-D ray trace.
+
+    Drives the PHaRLAP/pyLAP engine (or the spherical-hop geometric fallback
+    when PHaRLAP is not staged) and prints the propagation modes that close on
+    this receiver. This is the operator-facing handle on the physics overlay
+    documented in docs/PHARLAP_RAYTRACING.md — it never touches the timing
+    feed, it only reports what the ionosphere should be doing.
+    """
+    import json as _json
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    station = args.station.upper()
+
+    # --- resolve UTC time ---
+    if args.time:
+        try:
+            utc = datetime.fromisoformat(args.time)
+            if utc.tzinfo is None:
+                utc = utc.replace(tzinfo=timezone.utc)
+            utc = utc.astimezone(timezone.utc)
+        except ValueError as e:
+            print(f"Bad --time '{args.time}': {e}", file=sys.stderr)
+            return 2
+    else:
+        utc = datetime.now(timezone.utc)
+
+    # --- resolve receiver coordinates: CLI overrides, then config ---
+    rx_lat, rx_lon = args.rx_lat, args.rx_lon
+    if rx_lat is None or rx_lon is None:
+        cfg_path = Path(args.config)
+        if cfg_path.exists():
+            try:
+                import toml
+                cfg = toml.load(cfg_path).get('station', {})
+                if rx_lat is None:
+                    rx_lat = cfg.get('latitude')
+                if rx_lon is None:
+                    rx_lon = cfg.get('longitude')
+                # fall back to grid square if lat/lon absent or zero
+                if (not rx_lat or not rx_lon) and cfg.get('grid_square'):
+                    from .core.transmission_time_solver import grid_to_latlon
+                    glat, glon = grid_to_latlon(cfg['grid_square'])
+                    rx_lat = rx_lat or glat
+                    rx_lon = rx_lon or glon
+            except Exception as e:
+                print(f"Could not read receiver coords from {cfg_path}: {e}",
+                      file=sys.stderr)
+    if not rx_lat or not rx_lon:
+        print("No receiver coordinates — pass --rx-lat/--rx-lon or set "
+              "[station] latitude/longitude (or grid_square) in the config.",
+              file=sys.stderr)
+        return 2
+
+    from .core.raytrace_engine import RaytraceEngine
+    engine = RaytraceEngine.build(receiver_lat=float(rx_lat),
+                                  receiver_lon=float(rx_lon))
+    result = engine.compute_modes(station, float(args.frequency), utc,
+                                  max_hops=args.max_hops)
+
+    out = {
+        'station': result.station,
+        'frequency_mhz': result.frequency_mhz,
+        'utc': result.utc_time.isoformat(),
+        'receiver': {'lat': float(rx_lat), 'lon': float(rx_lon)},
+        'source': result.source,
+        'iri_foF2_mhz': round(result.iri_foF2_mhz, 3),
+        'iri_hmF2_km': round(result.iri_hmF2_km, 1),
+        'available': engine.is_available(),
+        'modes': [
+            {
+                'mode': m.mode_label,
+                'n_hops': m.n_hops,
+                'group_delay_ms': round(m.group_delay_ms, 3),
+                'launch_elev_deg': round(m.launch_elev_deg, 2),
+                'ground_range_km': round(m.ground_range_km, 1),
+                'apogee_km': round(m.apogee_km, 1),
+                'confidence': m.confidence,
+            }
+            for m in result.modes
+        ],
+    }
+
+    if args.json:
+        print(_json.dumps(out, indent=2))
+        return 0
+
+    print(f"Ray trace: {station} → RX ({rx_lat:.3f}, {rx_lon:.3f})  "
+          f"{result.frequency_mhz:.3f} MHz  {out['utc']}")
+    src = "PHaRLAP (pyLAP + IRI-2020)" if result.source == 'pharlap' \
+        else "geometric fallback (PHaRLAP not staged)"
+    print(f"Source: {src}")
+    if result.source == 'pharlap':
+        print(f"IRI: foF2 {result.iri_foF2_mhz:.2f} MHz, "
+              f"hmF2 {result.iri_hmF2_km:.0f} km")
+    print("─" * 72)
+    if not result.modes:
+        print("  No modes closed on the receiver (likely above MUF / absorbed).")
+        return 0
+    print(f"  {'mode':5s} {'hops':>4s} {'grp delay':>11s} {'elev':>7s} "
+          f"{'gnd range':>11s} {'apogee':>8s}")
+    for m in result.modes:
+        print(f"  {m.mode_label:5s} {m.n_hops:>4d} "
+              f"{m.group_delay_ms:>9.2f}ms {m.launch_elev_deg:>6.1f}° "
+              f"{m.ground_range_km:>9.0f}km {m.apogee_km:>6.0f}km")
+    if result.source == 'geometric':
+        print("\n  (confidence 0 — install PHaRLAP/pyLAP for refined modes; "
+              "see docs/PHARLAP_RAYTRACING.md)")
+    return 0
+
+
 def main():
     """Main entry point for hf-timestd command"""
     # Quiet stderr for sigmond client-contract subcommands so they emit
@@ -929,7 +1041,46 @@ Exit codes:
     create_parser = subparsers.add_parser('create-channels', help='Create channels in radiod')
     create_parser.add_argument('--config', '-c', help='Configuration file path')
     create_parser.add_argument('--debug', '-d', action='store_true', help='Enable DEBUG logging')
-    
+
+    # Raytrace command — PHaRLAP/pyLAP 2-D ray trace for one station/frequency.
+    # Advisory physics overlay (see docs/PHARLAP_RAYTRACING.md). Falls back to
+    # spherical-hop geometry when PHaRLAP/pyLAP is not staged on the host.
+    raytrace_parser = subparsers.add_parser(
+        'raytrace',
+        help='PHaRLAP 2-D ray trace: predict propagation modes for a station/frequency',
+        description='''\
+Run a PHaRLAP (pyLAP) 2-D ray trace from a time-standard transmitter to this
+receiver and print the propagation modes that close on the receiver, with
+their hop count, launch elevation, apogee, ground range and group delay.
+
+Requires PHaRLAP + pyLAP staged on the host (check `hf-timestd data sources`).
+Without them, prints the spherical-hop geometric fallback (source=geometric).
+See docs/PHARLAP_RAYTRACING.md for the model and worked examples.
+
+Examples:
+  hf-timestd raytrace WWV 10.0
+  hf-timestd raytrace CHU 7.85 --time 2026-06-22T07:30 --json
+  hf-timestd raytrace BPM 10.0 --rx-lat 38.94 --rx-lon -92.12
+''',
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    raytrace_parser.add_argument('station',
+        help='Transmitter: WWV, WWVH, CHU, or BPM')
+    raytrace_parser.add_argument('frequency', type=float,
+        help='Carrier frequency in MHz (e.g. 10.0)')
+    raytrace_parser.add_argument('--config', '-c',
+        default='/etc/hf-timestd/timestd-config.toml',
+        help='Config file for receiver coordinates (TOML)')
+    raytrace_parser.add_argument('--rx-lat', type=float, default=None,
+        help='Receiver latitude (deg); overrides config')
+    raytrace_parser.add_argument('--rx-lon', type=float, default=None,
+        help='Receiver longitude (deg); overrides config')
+    raytrace_parser.add_argument('--time', default=None,
+        help='UTC time ISO8601 (e.g. 2026-06-22T07:30); default now')
+    raytrace_parser.add_argument('--max-hops', type=int, default=3,
+        help='Maximum hop count to search (default 3)')
+    raytrace_parser.add_argument('--json', action='store_true',
+        help='Emit JSON instead of a table')
+
     # Data management command
     data_parser = subparsers.add_parser('data', help='Manage recorded data')
     data_subparsers = data_parser.add_subparsers(dest='data_command', help='Data management command')
@@ -1368,6 +1519,8 @@ Per-service overrides in [services] take precedence over the profile.
         else:
             print("⚠️ Some channels may have failed to create")
             sys.exit(1)
+    elif args.command == 'raytrace':
+        sys.exit(_cmd_raytrace(args))
     elif args.command == 'data' and getattr(args, 'data_command', None) == 'sources':
         sys.exit(_cmd_data_sources(args))
     elif args.command == 'data':

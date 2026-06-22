@@ -62,7 +62,7 @@ HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/CHU/BPM time standard
 - **HFPropagationModel** — Multi-mode delay prediction with Ne(h) integration
 - **IonoDataService** — WAM-IPE (NOAA S3) + GIRO ionosonde real-time data
 - **IRI-2020 / IONEX / parametric** — Tiered fallback chain for ionospheric parameters
-- **PHaRLAP ray tracing** — 2D numerical ray tracing via pyLAP with spatially varying IRI-2020 Ne(h) grid (auto-scaled, 1 sample per 500 km)
+- **PHaRLAP ray tracing** — 2D numerical ray tracing via pyLAP with spatially varying IRI-2020 Ne(h) grid (auto-scaled, 1 sample per 500 km); advisory physics overlay with a `hf-timestd raytrace` CLI. See [docs/PHARLAP_RAYTRACING.md](docs/PHARLAP_RAYTRACING.md).
 
 **WWV/WWVH Test Signal Analysis:**
 - **Minutes :08/:44** — Multi-tone power (2, 3, 4, 5 kHz), Frequency Selectivity Score, chirp delay spread, transient detection
@@ -287,6 +287,7 @@ The system has an eight-service core pipeline plus a set of housekeeping units (
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — system design and data flow.
 - **[docs/METROLOGY.md](docs/METROLOGY.md)** — RTP-to-UTC calibration, timing bootstrap, error budget.
 - **[docs/PHYSICS.md](docs/PHYSICS.md)** — ionospheric capabilities with ✅/⚠️/❌ honesty markers per feature (the canonical capability inventory; supersedes the legacy `SCIENTIFIC_CAPABILITIES.md`).
+- **[docs/PHARLAP_RAYTRACING.md](docs/PHARLAP_RAYTRACING.md)** — PHaRLAP/pyLAP ray tracing: how we refine propagation-path and timing expectations, 2-D/3-D capabilities, worked Alaska→EM38ww examples (`hf-timestd raytrace`).
 - **[docs/TECHNICAL_REFERENCE.md](docs/TECHNICAL_REFERENCE.md)** — algorithms, data formats, physics models.
 - **[docs/PIPELINE_VERIFICATION.md](docs/PIPELINE_VERIFICATION.md)** — end-to-end health gates.
 
