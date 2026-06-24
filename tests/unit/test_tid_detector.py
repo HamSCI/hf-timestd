@@ -137,12 +137,17 @@ class TestGeometryHelpers:
         assert d == pytest.approx(0.0)
 
     def test_haversine_pole_to_pole(self):
+        # _haversine_km now delegates to the geodesic (WGS-84) implementation in
+        # hamsci_dsp.geometry, so pole-to-pole is the meridian half-length
+        # (2× the quarter-meridian 10001.965729 km), not the spherical π·R.
         d = TIDDetector._haversine_km(90.0, 0.0, -90.0, 0.0)
-        assert d == pytest.approx(math.pi * EARTH_RADIUS_KM, rel=1e-6)
+        assert d == pytest.approx(2 * 10001.965729, rel=1e-6)
 
     def test_haversine_quarter_circle_along_equator(self):
+        # Geodesic: the equator is a circle of radius = semi-major axis
+        # a = 6378.137 km, so the quarter arc is π/2·a (not π/2·R_mean).
         d = TIDDetector._haversine_km(0.0, 0.0, 0.0, 90.0)
-        assert d == pytest.approx(math.pi * EARTH_RADIUS_KM / 2, rel=1e-6)
+        assert d == pytest.approx(math.pi * 6378.137 / 2, rel=1e-6)
 
     @pytest.mark.parametrize("lat2,lon2,expected_az", [
         (1.0, 0.0, 0.0),    # north

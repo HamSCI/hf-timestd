@@ -73,9 +73,13 @@ class TestCalculateMidpoint:
         assert lat == pytest.approx(40.0, abs=1e-9)
         assert lon == pytest.approx(-100.0, abs=1e-9)
 
-    def test_same_meridian_arithmetic_mean(self):
+    def test_same_meridian_near_arithmetic_mean(self):
+        # Same longitude → midpoint stays on the meridian, latitude near the
+        # arithmetic mean. The geodesic (WGS-84) distance-halfway point
+        # deviates ~0.03° from the exact mean (meridian arc-per-degree grows
+        # with latitude), so this is approximate, not exact as on a sphere.
         lat, lon = calculate_midpoint(20.0, -100.0, 60.0, -100.0)
-        assert lat == pytest.approx(40.0, abs=1e-3)
+        assert lat == pytest.approx(40.0, abs=0.05)
         assert lon == pytest.approx(-100.0, abs=1e-3)
 
     def test_equator_long_only(self):

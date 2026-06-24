@@ -109,6 +109,8 @@ from typing import Dict, List, Optional, Tuple, NamedTuple
 from dataclasses import dataclass, field
 from enum import Enum
 
+from hamsci_dsp.geometry import great_circle_km
+
 from .hop_geometry import hop_geometry
 
 logger = logging.getLogger(__name__)
@@ -543,19 +545,8 @@ class ArrivalPatternMatrix:
     
     @staticmethod
     def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-        """Calculate great circle distance using Haversine formula."""
-        lat1_rad = math.radians(lat1)
-        lat2_rad = math.radians(lat2)
-        delta_lat = math.radians(lat2 - lat1)
-        delta_lon = math.radians(lon2 - lon1)
-        
-        a = (math.sin(delta_lat / 2) ** 2 +
-             math.cos(lat1_rad) * math.cos(lat2_rad) *
-             math.sin(delta_lon / 2) ** 2)
-        c = 2 * math.asin(math.sqrt(a))
-        
-        earth_radius_km = 6371.0
-        return earth_radius_km * c
+        """Delegates to hamsci_dsp.geometry.great_circle_km (geodesic WGS-84)."""
+        return great_circle_km(lat1, lon1, lat2, lon2)
     
     def _init_broadcast_windows(self):
         """Initialize per-broadcast window states with wide bootstrap windows."""

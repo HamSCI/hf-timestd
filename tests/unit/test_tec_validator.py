@@ -118,13 +118,15 @@ class TestStationLookup:
 
 class TestIPPLocation:
     def test_midpoint_of_collinear_points(self, validator):
-        # Two points on the same meridian: the meridian is a great circle, so
-        # the great-circle midpoint is the plain latitude average.
+        # Two points on the same meridian: the midpoint stays on the meridian,
+        # latitude near the plain average. On the WGS-84 ellipsoid (geodesic
+        # midpoint) it deviates ~0.008° from the exact mean — meridian arc per
+        # degree grows with latitude — so this is approximate, not exact.
         ipp_lat, ipp_lon = validator.calculate_ipp_location(
             tx_lat=40.0, tx_lon=-100.0,
             rx_lat=20.0, rx_lon=-100.0,
         )
-        assert ipp_lat == pytest.approx(30.0)
+        assert ipp_lat == pytest.approx(30.0, abs=0.02)
         assert ipp_lon == pytest.approx(-100.0)
 
     def test_midpoint_matches_great_circle_helper(self, validator):

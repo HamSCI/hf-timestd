@@ -20,6 +20,9 @@ import argparse
 from datetime import datetime, timedelta
 from typing import Tuple, List, Dict
 
+from hamsci_dsp.geometry import grid_to_latlon as _grid_to_latlon, midpoint as _midpoint
+from hamsci_dsp.ionosphere.solar import solar_position as _solar_position
+
 # Import transmitter coordinates from single source of truth
 # Handle both module import and standalone script execution
 try:
@@ -35,63 +38,28 @@ BPM_LOCATION = (BPM_LAT, BPM_LON)     # Pucheng, Shaanxi, China - NTSC
 
 
 def grid_to_latlon(grid: str) -> Tuple[float, float]:
-    """Convert Maidenhead grid square to latitude/longitude"""
-    grid = grid.upper()
-    
-    if len(grid) < 4:
+    """Convert Maidenhead grid square to latitude/longitude.
+
+    Delegates the parsing to :func:`hamsci_dsp.geometry.grid_to_latlon`
+    (math-identical: square-centre for 4-char, subsquare-centre for 6-char).
+    The explicit length check is kept so the historical "too short" error
+    message is preserved for callers/tests.
+    """
+    if len(grid.strip()) < 4:
         raise ValueError(f"Grid square too short: {grid}")
-    
-    # Field (first 2 chars): 20° longitude x 10° latitude
-    lon = (ord(grid[0]) - ord('A')) * 20 - 180
-    lat = (ord(grid[1]) - ord('A')) * 10 - 90
-    
-    # Square (next 2 chars): 2° longitude x 1° latitude
-    lon += int(grid[2]) * 2
-    lat += int(grid[3]) * 1
-    
-    # Subsquare (optional next 2 chars): 5' longitude x 2.5' latitude
-    if len(grid) >= 6:
-        lon += (ord(grid[4]) - ord('A')) * (2/24)
-        lat += (ord(grid[5]) - ord('A')) * (1/24)
-        # Center of subsquare
-        lon += 1/24
-        lat += 1/48
-    else:
-        # Center of square
-        lon += 1
-        lat += 0.5
-    
-    return lat, lon
+    return _grid_to_latlon(grid)
 
 
 def calculate_midpoint(lat1: float, lon1: float, lat2: float, lon2: float) -> Tuple[float, float]:
-    """Calculate geographic midpoint between two points"""
-    # Convert to radians
-    lat1_r = math.radians(lat1)
-    lon1_r = math.radians(lon1)
-    lat2_r = math.radians(lat2)
-    lon2_r = math.radians(lon2)
-    
-    # Convert to Cartesian
-    x1 = math.cos(lat1_r) * math.cos(lon1_r)
-    y1 = math.cos(lat1_r) * math.sin(lon1_r)
-    z1 = math.sin(lat1_r)
-    
-    x2 = math.cos(lat2_r) * math.cos(lon2_r)
-    y2 = math.cos(lat2_r) * math.sin(lon2_r)
-    z2 = math.sin(lat2_r)
-    
-    # Average
-    x = (x1 + x2) / 2
-    y = (y1 + y2) / 2
-    z = (z1 + z2) / 2
-    
-    # Convert back to lat/lon
-    lon = math.atan2(y, x)
-    hyp = math.sqrt(x*x + y*y)
-    lat = math.atan2(z, hyp)
-    
-    return math.degrees(lat), math.degrees(lon)
+    """Calculate geographic midpoint between two points.
+
+    Delegates to :func:`hamsci_dsp.geometry.midpoint` (geodesic WGS-84
+    distance-halfway point). This replaces the former Cartesian-average
+    (chord-midpoint) approximation; for HF path lengths the two agree to a
+    few hundredths of a degree, and the geodesic point is the more accurate
+    ionospheric pierce point.
+    """
+    return _midpoint(lat1, lon1, lat2, lon2)
 
 
 def solar_position(dt: datetime, lat: float, lon: float) -> Tuple[float, float]:
@@ -108,95 +76,11 @@ def solar_position(dt: datetime, lat: float, lon: float) -> Tuple[float, float]:
     Returns:
         Tuple of (azimuth, elevation) in degrees
     """
-    # Julian date
-    a = (14 - dt.month) // 12
-    y = dt.year + 4800 - a
-    m = dt.month + 12 * a - 3
-    jd = dt.day + (153 * m + 2) // 5 + 365 * y + y // 4 - y // 100 + y // 400 - 32045
-    jd = jd + (dt.hour - 12) / 24 + dt.minute / 1440 + dt.second / 86400
-    
-    # Julian century
-    t = (jd - 2451545.0) / 36525.0
-    
-    # Geometric mean longitude of sun (degrees)
-    L0 = (280.46646 + t * (36000.76983 + t * 0.0003032)) % 360
-    
-    # Geometric mean anomaly of sun (degrees)
-    M = 357.52911 + t * (35999.05029 - 0.0001537 * t)
-    M_rad = math.radians(M)
-    
-    # Eccentricity of Earth's orbit
-    e = 0.016708634 - t * (0.000042037 + 0.0000001267 * t)
-    
-    # Sun's equation of center
-    C = (math.sin(M_rad) * (1.914602 - t * (0.004817 + 0.000014 * t)) +
-         math.sin(2 * M_rad) * (0.019993 - 0.000101 * t) +
-         math.sin(3 * M_rad) * 0.000289)
-    
-    # Sun's true longitude
-    sun_lon = L0 + C
-    
-    # Sun's apparent longitude
-    omega = 125.04 - 1934.136 * t
-    apparent_lon = sun_lon - 0.00569 - 0.00478 * math.sin(math.radians(omega))
-    
-    # Mean obliquity of ecliptic
-    obliq_mean = 23 + (26 + (21.448 - t * (46.815 + t * (0.00059 - t * 0.001813))) / 60) / 60
-    
-    # Corrected obliquity
-    obliq_corr = obliq_mean + 0.00256 * math.cos(math.radians(omega))
-    obliq_corr_rad = math.radians(obliq_corr)
-    
-    # Sun's declination
-    sin_decl = math.sin(obliq_corr_rad) * math.sin(math.radians(apparent_lon))
-    decl = math.degrees(math.asin(sin_decl))
-    decl_rad = math.radians(decl)
-    
-    # Equation of time (minutes)
-    var_y = math.tan(obliq_corr_rad / 2) ** 2
-    L0_rad = math.radians(L0)
-    eq_time = 4 * math.degrees(
-        var_y * math.sin(2 * L0_rad) -
-        2 * e * math.sin(M_rad) +
-        4 * e * var_y * math.sin(M_rad) * math.cos(2 * L0_rad) -
-        0.5 * var_y * var_y * math.sin(4 * L0_rad) -
-        1.25 * e * e * math.sin(2 * M_rad)
-    )
-    
-    # True solar time (minutes)
-    time_offset = eq_time + 4 * lon
-    true_solar_time = (dt.hour * 60 + dt.minute + dt.second / 60 + time_offset) % 1440
-    
-    # Hour angle (degrees)
-    if true_solar_time < 0:
-        hour_angle = true_solar_time / 4 + 180
-    else:
-        hour_angle = true_solar_time / 4 - 180
-    hour_angle_rad = math.radians(hour_angle)
-    
-    # Solar zenith angle
-    lat_rad = math.radians(lat)
-    cos_zenith = (math.sin(lat_rad) * math.sin(decl_rad) +
-                  math.cos(lat_rad) * math.cos(decl_rad) * math.cos(hour_angle_rad))
-    
-    # Clamp to valid range
-    cos_zenith = max(-1, min(1, cos_zenith))
-    zenith = math.degrees(math.acos(cos_zenith))
-    elevation = 90 - zenith
-    
-    # Solar azimuth
-    if hour_angle > 0:
-        azimuth = (math.degrees(math.acos(
-            ((math.sin(lat_rad) * cos_zenith) - math.sin(decl_rad)) /
-            (math.cos(lat_rad) * math.sin(math.radians(zenith)))
-        )) + 180) % 360
-    else:
-        azimuth = (540 - math.degrees(math.acos(
-            ((math.sin(lat_rad) * cos_zenith) - math.sin(decl_rad)) /
-            (math.cos(lat_rad) * math.sin(math.radians(zenith)))
-        ))) % 360
-    
-    return azimuth, elevation
+    # Delegates to hamsci_dsp.ionosphere.solar, the canonical home for this
+    # NOAA solar-calculator algorithm (extracted math-identical from here;
+    # hamsci additionally clamps the azimuth acos argument and guards the
+    # sin(zenith)≈0 singularity, so it is strictly more robust at the poles).
+    return _solar_position(dt, lat, lon)
 
 
 def calculate_solar_zenith_for_day(

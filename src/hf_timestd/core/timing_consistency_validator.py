@@ -77,6 +77,8 @@ from datetime import datetime, timezone
 from typing import Callable
 import logging
 
+from hamsci_dsp.geometry import great_circle_km
+
 logger = logging.getLogger(__name__)
 
 # Physical constants
@@ -214,13 +216,8 @@ class TimingConsistencyValidator:
     def _great_circle_distance(
         self, lat1: float, lon1: float, lat2: float, lon2: float
     ) -> float:
-        """Calculate great circle distance in km using Haversine formula."""
-        lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
-        dlat = lat2 - lat1
-        dlon = lon2 - lon1
-        a = np.sin(dlat/2)**2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon/2)**2
-        c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
-        return 6371.0 * c  # Earth radius in km
+        """Delegates to hamsci_dsp.geometry.great_circle_km (geodesic WGS-84)."""
+        return great_circle_km(lat1, lon1, lat2, lon2)
     
     def validate_minute(
         self,

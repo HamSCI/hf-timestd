@@ -49,6 +49,8 @@ except ImportError:
     except ImportError:
         tomllib = None
 
+from hamsci_dsp.geometry import great_circle_km
+
 from hf_timestd.core.tec_estimator import TECEstimator, TECResult
 from hf_timestd.core.carrier_tec import CarrierTECEstimator
 from hf_timestd.core.iono_tomography import IonoTomography, RayPath
@@ -1813,13 +1815,8 @@ class PhysicsFusionService:
     def _great_circle_km(
         lat1: float, lon1: float, lat2: float, lon2: float
     ) -> float:
-        """Haversine great-circle distance in km."""
-        R = 6371.0
-        phi1, phi2 = math.radians(lat1), math.radians(lat2)
-        dphi = math.radians(lat2 - lat1)
-        dlam = math.radians(lon2 - lon1)
-        a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2
-        return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+        """Delegates to hamsci_dsp.geometry.great_circle_km (geodesic WGS-84)."""
+        return great_circle_km(lat1, lon1, lat2, lon2)
 
 
 def _load_receiver_coords(config_path: str) -> tuple:

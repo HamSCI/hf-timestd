@@ -142,6 +142,12 @@ import numpy as np
 from scipy import signal as scipy_signal
 from scipy.fft import fft, ifft, fftfreq
 
+from hamsci_dsp.propagation import (
+    HF_OBLIQUE,
+    ScintillationConvention,
+    compute_scintillation as _compute_scintillation,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -214,6 +220,11 @@ class ScintillationResult:
     # Event flagging
     scintillation_event: bool  # True if S4 > 0.3 or σ_φ > 0.2
     event_severity: str  # 'none', 'moderate', 'strong'
+
+    # Convention that produced the severity labels (so they are never naked).
+    # Severity is only interpretable relative to its (threshold, detrend order,
+    # analysis window) triple — see hamsci_dsp.propagation.ScintillationConvention.
+    convention_name: str = HF_OBLIQUE.name
 
 
 @dataclass
@@ -873,146 +884,113 @@ class AdvancedSignalAnalyzer:
         amplitudes: np.ndarray,
         phases: np.ndarray,
         times: Optional[np.ndarray] = None,
-        min_samples: int = 10
+        min_samples: int = 10,
+        convention: ScintillationConvention = HF_OBLIQUE,
     ) -> ScintillationResult:
         """
         Calculate ionospheric scintillation indices S4 and σ_φ.
-        
-        This implements the standard scintillation metrics used in ionospheric
-        physics (ITU-R P.531, GNSS scintillation monitoring).
-        
+
+        The S4 / σ_φ kernel (intensity coefficient-of-variation, polynomial
+        phase detrend, MAD outlier rejection) is delegated to the canonical
+        shared implementation in ``hamsci_dsp.propagation.compute_scintillation``;
+        this method adapts amplitude/phase inputs into it and maps the result
+        back onto hf-timestd's :class:`ScintillationResult`.
+
+        Severity is classified under ``convention`` (default
+        :data:`~hamsci_dsp.propagation.HF_OBLIQUE`, the physically correct
+        default for hf-timestd's HF WWV/WWVH/CHU/BPM data). The legacy ITU-R
+        P.531 L-band thresholds are available as
+        :data:`~hamsci_dsp.propagation.ITU_R_LBAND` — but those thresholds are
+        only meaningful with their own (linear) detrend and window, so they are
+        selected as a whole convention, not as bare numbers. The convention is
+        recorded on the result as ``convention_name``.
+
         Physics:
         --------
-        S4 (amplitude scintillation index):
-            S4 = sqrt(var(I) / mean(I)²)
-            where I is signal intensity (amplitude²)
-            
-        σ_φ (phase scintillation index):
-            σ_φ = std(φ_detrended)
-            where φ_detrended has the Doppler trend removed via high-pass filter
-        
+        S4 = sqrt(var(I) / mean(I)²) (I = amplitude²); σ_φ = std(φ_detrended),
+        with the detrend order taken from ``convention``.
+
         Args:
             amplitudes: Array of signal amplitudes (linear, not dB)
-            phases: Array of unwrapped phases (radians)
-            times: Optional array of sample times (seconds). If None, assumes 1s spacing.
+            phases: Array of phases (radians); unwrapped internally
+            times: Optional sample times (seconds). If None, assumes 1 s spacing.
+                Non-uniform times are reduced to an effective uniform rate via
+                the median sample interval.
             min_samples: Minimum samples required for valid calculation
-            
+            convention: scintillation methodology (threshold+detrend+window)
+
         Returns:
             ScintillationResult with S4, σ_φ, and quality metrics
         """
         n_samples = min(len(amplitudes), len(phases))
-        
-        if n_samples < min_samples:
+        amplitudes = np.asarray(amplitudes[:n_samples], dtype=np.float64)
+        phases = np.asarray(phases[:n_samples], dtype=np.float64)
+
+        # The shared kernel uses a single slow-time rate. With explicit
+        # (possibly non-uniform) times, reduce to the median sample interval.
+        if times is None or n_samples < 2:
+            sample_rate_hz = 1.0
+        else:
+            dt = float(np.median(np.diff(np.asarray(times[:n_samples], dtype=np.float64))))
+            sample_rate_hz = (1.0 / dt) if dt > 0 else 1.0
+
+        # Rebuild the complex slow-time vector the kernel expects, and delegate
+        # the S4 / σ_φ computation (MAD outlier rejection, polynomial detrend,
+        # severity binning) to hamsci_dsp.propagation.compute_scintillation.
+        slow_time = amplitudes * np.exp(1j * phases)
+        core = _compute_scintillation(
+            slow_time,
+            sample_rate_hz=sample_rate_hz,
+            convention=convention,
+            min_samples=min_samples,
+        )
+
+        if core.s4_severity == 'unknown':
             return ScintillationResult(
                 s4_index=0.0,
                 s4_severity='unknown',
                 sigma_phi_rad=0.0,
                 sigma_phi_severity='unknown',
-                mean_intensity=0.0,
-                intensity_variance=0.0,
+                mean_intensity=float(core.mean_intensity),
+                intensity_variance=float(core.intensity_variance),
                 phase_variance_rad=0.0,
                 doppler_removed_hz=0.0,
-                valid_samples=n_samples,
+                valid_samples=core.n_samples,
                 confidence=0.0,
                 scintillation_event=False,
-                event_severity='none'
+                event_severity='none',
+                convention_name=convention.name,
             )
-        
-        amplitudes = np.asarray(amplitudes[:n_samples])
-        phases = np.asarray(phases[:n_samples])
-        
-        if times is None:
-            times = np.arange(n_samples, dtype=float)
-        else:
-            times = np.asarray(times[:n_samples])
-        
-        # === S4 Calculation ===
-        # Convert amplitude to intensity (power)
-        intensity = amplitudes ** 2
-        
-        mean_intensity = np.mean(intensity)
-        intensity_variance = np.var(intensity)
-        
-        if mean_intensity > 1e-10:
-            s4_index = float(np.sqrt(intensity_variance) / mean_intensity)
-        else:
-            s4_index = 0.0
-        
-        # Classify S4 severity
-        if s4_index < 0.3:
-            s4_severity = 'weak'
-        elif s4_index < 0.6:
-            s4_severity = 'moderate'
-        else:
-            s4_severity = 'strong'
-        
-        # === σ_φ Calculation ===
-        # First, unwrap phases if not already done
-        phases_unwrapped = np.unwrap(phases)
-        
-        # Remove Doppler trend via linear fit (high-pass filter)
-        # φ(t) = 2π·f_D·t + φ₀ + fluctuations
-        try:
-            coeffs = np.polyfit(times, phases_unwrapped, deg=1)
-            doppler_hz = coeffs[0] / (2 * np.pi)  # Slope is rad/s
-            phase_trend = np.polyval(coeffs, times)
-            phase_detrended = phases_unwrapped - phase_trend
-        except (np.linalg.LinAlgError, ValueError):
-            doppler_hz = 0.0
-            phase_detrended = phases_unwrapped - np.mean(phases_unwrapped)
-        
-        # Phase scintillation index
-        sigma_phi_rad = float(np.std(phase_detrended))
-        phase_variance_rad = float(np.var(phase_detrended))
-        
-        # Classify σ_φ severity
-        if sigma_phi_rad < 0.2:
-            sigma_phi_severity = 'weak'
-        elif sigma_phi_rad < 0.5:
-            sigma_phi_severity = 'moderate'
-        else:
-            sigma_phi_severity = 'strong'
-        
-        # === Event Detection ===
-        scintillation_event = (s4_index >= 0.3 or sigma_phi_rad >= 0.2)
-        
-        if s4_severity == 'strong' or sigma_phi_severity == 'strong':
+
+        # event_severity: hf-timestd's coarse roll-up of the two per-index
+        # severities (kept for back-compat with existing consumers).
+        if core.s4_severity == 'strong' or core.sigma_phi_severity == 'strong':
             event_severity = 'strong'
-        elif s4_severity == 'moderate' or sigma_phi_severity == 'moderate':
+        elif core.s4_severity == 'moderate' or core.sigma_phi_severity == 'moderate':
             event_severity = 'moderate'
         else:
             event_severity = 'none'
-        
-        # === Confidence ===
-        # Higher confidence with more samples and consistent measurements
-        sample_factor = min(1.0, n_samples / 30.0)  # Full confidence at 30+ samples
-        
-        # Check for outliers that might indicate bad data
-        if mean_intensity > 0:
-            cv = np.sqrt(intensity_variance) / mean_intensity
-            outlier_factor = max(0.5, 1.0 - cv / 2.0)  # Reduce confidence if very high CV
-        else:
-            outlier_factor = 0.5
-        
-        confidence = float(sample_factor * outlier_factor)
-        
-        logger.debug(f"Scintillation: S4={s4_index:.3f} ({s4_severity}), "
-                    f"σ_φ={sigma_phi_rad:.3f} rad ({sigma_phi_severity}), "
-                    f"Doppler={doppler_hz:.3f} Hz, samples={n_samples}")
-        
+
+        logger.debug(
+            f"Scintillation [{convention.name}]: S4={core.s4_index:.3f} "
+            f"({core.s4_severity}), σ_φ={core.sigma_phi_rad:.3f} rad "
+            f"({core.sigma_phi_severity}), Doppler={core.mode_doppler_hz:.3f} Hz, "
+            f"samples={core.n_samples}")
+
         return ScintillationResult(
-            s4_index=s4_index,
-            s4_severity=s4_severity,
-            sigma_phi_rad=sigma_phi_rad,
-            sigma_phi_severity=sigma_phi_severity,
-            mean_intensity=float(mean_intensity),
-            intensity_variance=float(intensity_variance),
-            phase_variance_rad=phase_variance_rad,
-            doppler_removed_hz=float(doppler_hz),
-            valid_samples=n_samples,
-            confidence=confidence,
-            scintillation_event=scintillation_event,
-            event_severity=event_severity
+            s4_index=core.s4_index,
+            s4_severity=core.s4_severity,
+            sigma_phi_rad=core.sigma_phi_rad,
+            sigma_phi_severity=core.sigma_phi_severity,
+            mean_intensity=float(core.mean_intensity),
+            intensity_variance=float(core.intensity_variance),
+            phase_variance_rad=float(core.sigma_phi_rad ** 2),
+            doppler_removed_hz=float(core.mode_doppler_hz),
+            valid_samples=core.n_samples,
+            confidence=core.confidence,
+            scintillation_event=core.scintillation_event,
+            event_severity=event_severity,
+            convention_name=convention.name,
         )
     
     def calculate_scintillation_from_ticks(

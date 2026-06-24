@@ -40,6 +40,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from hamsci_dsp.geometry import great_circle_km
+
 from hf_timestd.core.solar_zenith_calculator import (
     solar_position, calculate_midpoint, grid_to_latlon,
     WWV_LOCATION, WWVH_LOCATION, CHU_LOCATION, BPM_LOCATION
@@ -290,13 +292,8 @@ def compute_oblique_muf(fof2_mhz: float, elevation_angle_deg: float) -> float:
 
 def great_circle_distance(lat1: float, lon1: float,
                           lat2: float, lon2: float) -> float:
-    """Haversine great-circle distance in km."""
-    lat1_r, lon1_r = math.radians(lat1), math.radians(lon1)
-    lat2_r, lon2_r = math.radians(lat2), math.radians(lon2)
-    dlat = lat2_r - lat1_r
-    dlon = lon2_r - lon1_r
-    a = math.sin(dlat / 2) ** 2 + math.cos(lat1_r) * math.cos(lat2_r) * math.sin(dlon / 2) ** 2
-    return EARTH_RADIUS_KM * 2 * math.asin(math.sqrt(a))
+    """Delegates to hamsci_dsp.geometry.great_circle_km (geodesic WGS-84)."""
+    return great_circle_km(lat1, lon1, lat2, lon2)
 
 
 class IonosphericReanalysis:

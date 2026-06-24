@@ -1,261 +1,171 @@
 #!/usr/bin/env python3
 """
-Unit tests for scintillation indices (S4, σ_φ) calculation.
+Unit tests for scintillation indices (S4, σ_φ) in advanced_signal_analysis.
 
-Tests the physics calculations in advanced_signal_analysis.py for:
-- S4 amplitude scintillation index
-- σ_φ phase scintillation index
-- Severity classification
-- Event detection
+The S4/σ_φ kernel is delegated to hamsci_dsp.propagation.compute_scintillation;
+these tests verify (a) the *math* against synthetic injection with known ground
+truth, and (b) that severity is *convention-relative* — a label is meaningful
+only with its (threshold, detrend order, window) triple, and hf-timestd's HF
+data defaults to the HF-oblique convention.
 
-Physics Reference:
-- S4 = sqrt(var(I) / mean(I)²) where I is intensity
-- σ_φ = std(φ_detrended) where Doppler trend is removed
+They deliberately do NOT freeze absolute severity numbers to one convention
+(the old ITU-R-pinned tests did, which is what blocked the HF recalibration).
 """
 
 import numpy as np
 import pytest
-import sys
-from pathlib import Path
-
-# Add src to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from hf_timestd.core.advanced_signal_analysis import (
     AdvancedSignalAnalyzer,
-    ScintillationResult
+    ScintillationResult,
 )
+from hamsci_dsp.propagation import HF_OBLIQUE, ITU_R_LBAND
 
 
-class TestScintillationIndices:
-    """Test scintillation index calculations."""
-    
+def _two_level_amplitudes(s4: float, n: int = 60) -> np.ndarray:
+    """Amplitudes whose intensity has an EXACT coefficient of variation = s4.
+
+    Intensity alternates {1-s4, 1+s4}: mean 1, std s4, so S4 = std(I)/mean(I) =
+    s4 exactly. Symmetric and bounded, so the kernel's MAD outlier filter never
+    trims it — recovery is exact and deterministic (valid for s4 < 1)."""
+    intensity = np.array([1.0 - s4, 1.0 + s4] * (n // 2))
+    return np.sqrt(intensity)
+
+
+class TestScintillationMath:
+    """Kernel math, verified by injection — convention-independent."""
+
     @pytest.fixture
     def analyzer(self):
-        """Create analyzer instance."""
         return AdvancedSignalAnalyzer(sample_rate=20000)
-    
-    def test_s4_weak_scintillation(self, analyzer):
-        """Test S4 calculation for weak scintillation (stable signal)."""
-        # Stable amplitude with small variations (S4 < 0.3)
-        np.random.seed(42)
-        n_samples = 60
-        mean_amp = 1.0
-        # Small variance: std = 0.1 * mean → S4 ≈ 0.1
-        amplitudes = mean_amp + 0.1 * mean_amp * np.random.randn(n_samples)
-        amplitudes = np.abs(amplitudes)  # Ensure positive
-        
-        # Stable phase with small fluctuations
-        phases = np.linspace(0, 2*np.pi, n_samples) + 0.05 * np.random.randn(n_samples)
-        
-        result = analyzer.calculate_scintillation_indices(amplitudes, phases)
-        
-        assert isinstance(result, ScintillationResult)
-        assert result.s4_index < 0.3, f"Expected weak S4 < 0.3, got {result.s4_index}"
-        assert result.s4_severity == 'weak'
-        assert result.scintillation_event == False
-        assert result.valid_samples == n_samples
-    
-    def test_s4_moderate_scintillation(self, analyzer):
-        """Test S4 calculation for moderate scintillation."""
-        # Moderate amplitude variations (0.3 ≤ S4 < 0.6).
-        # S4 = sqrt(var(I)) / mean(I) where I = A². For A ~ N(1, σ),
-        # E[I] = 1 + σ², Var(I) ≈ 4σ² + 2σ⁴ (Isserlis), so S4 ≈ 2σ for small σ.
-        # Targeting S4 ≈ 0.4 → σ ≈ 0.2 in the amplitude domain.
-        np.random.seed(42)
-        n_samples = 60
-        mean_amp = 1.0
-        amplitudes = mean_amp + 0.2 * mean_amp * np.random.randn(n_samples)
-        amplitudes = np.abs(amplitudes)
 
-        phases = np.linspace(0, 2*np.pi, n_samples)
+    @pytest.mark.parametrize("s4_true", [0.2, 0.4, 0.7])
+    def test_s4_recovers_injected_coefficient_of_variation(self, analyzer, s4_true):
+        amplitudes = _two_level_amplitudes(s4_true)
+        phases = np.zeros(len(amplitudes))
+        r = analyzer.calculate_scintillation_indices(amplitudes, phases)
+        assert isinstance(r, ScintillationResult)
+        assert r.s4_index == pytest.approx(s4_true, rel=1e-6)
 
-        result = analyzer.calculate_scintillation_indices(amplitudes, phases)
-
-        assert 0.3 <= result.s4_index < 0.6, f"Expected moderate S4, got {result.s4_index}"
-        assert result.s4_severity == 'moderate'
-        assert result.scintillation_event == True
-        assert result.event_severity in ['moderate', 'strong']
-    
-    def test_s4_strong_scintillation(self, analyzer):
-        """Test S4 calculation for strong scintillation."""
-        # Strong amplitude variations (S4 ≥ 0.6)
-        np.random.seed(42)
-        n_samples = 60
-        mean_amp = 1.0
-        # High variance: std = 0.8 * mean → S4 ≈ 0.8
-        amplitudes = mean_amp + 0.8 * mean_amp * np.random.randn(n_samples)
-        amplitudes = np.abs(amplitudes)
-        
-        phases = np.linspace(0, 2*np.pi, n_samples)
-        
-        result = analyzer.calculate_scintillation_indices(amplitudes, phases)
-        
-        assert result.s4_index >= 0.6, f"Expected strong S4 >= 0.6, got {result.s4_index}"
-        assert result.s4_severity == 'strong'
-        assert result.scintillation_event == True
-        assert result.event_severity == 'strong'
-    
-    def test_sigma_phi_weak(self, analyzer):
-        """Test σ_φ calculation for weak phase scintillation."""
-        np.random.seed(42)
-        n_samples = 60
-        amplitudes = np.ones(n_samples)
-
-        # Linear phase (Doppler) with small fluctuations. doppler_hz must be
-        # well below the np.unwrap Nyquist (per-sample Δφ < π) so the linear
-        # detrend does not race with the unwrap heuristic.
-        doppler_hz = 0.05
-        times = np.arange(n_samples, dtype=float)
-        phases = 2 * np.pi * doppler_hz * times + 0.05 * np.random.randn(n_samples)
-
-        result = analyzer.calculate_scintillation_indices(amplitudes, phases, times)
-
-        assert result.sigma_phi_rad < 0.2, f"Expected weak σ_φ < 0.2, got {result.sigma_phi_rad}"
-        assert result.sigma_phi_severity == 'weak'
-        # Doppler should be approximately recovered
-        assert abs(result.doppler_removed_hz - doppler_hz) < 0.05
-    
-    def test_sigma_phi_moderate(self, analyzer):
-        """Test σ_φ calculation for moderate phase scintillation."""
-        n_samples = 60
-        amplitudes = np.ones(n_samples)
-        
-        # Phase with moderate fluctuations (0.2 ≤ σ_φ < 0.5)
-        times = np.arange(n_samples)
-        phases = 0.3 * np.random.randn(n_samples)  # ~0.3 rad std
-        
-        result = analyzer.calculate_scintillation_indices(amplitudes, phases, times)
-        
-        assert 0.2 <= result.sigma_phi_rad < 0.5, f"Expected moderate σ_φ, got {result.sigma_phi_rad}"
-        assert result.sigma_phi_severity == 'moderate'
-    
-    def test_sigma_phi_strong(self, analyzer):
-        """Test σ_φ calculation for strong phase scintillation."""
-        n_samples = 60
-        amplitudes = np.ones(n_samples)
-        
-        # Phase with large fluctuations (σ_φ ≥ 0.5)
-        times = np.arange(n_samples)
-        phases = 0.7 * np.random.randn(n_samples)  # ~0.7 rad std
-        
-        result = analyzer.calculate_scintillation_indices(amplitudes, phases, times)
-        
-        assert result.sigma_phi_rad >= 0.5, f"Expected strong σ_φ >= 0.5, got {result.sigma_phi_rad}"
-        assert result.sigma_phi_severity == 'strong'
-    
-    def test_insufficient_samples(self, analyzer):
-        """Test handling of insufficient samples."""
-        amplitudes = np.array([1.0, 1.1, 1.0])  # Only 3 samples
-        phases = np.array([0.0, 0.1, 0.2])
-        
-        result = analyzer.calculate_scintillation_indices(amplitudes, phases, min_samples=10)
-        
-        assert result.confidence == 0.0
-        assert result.s4_severity == 'unknown'
-        assert result.sigma_phi_severity == 'unknown'
-        assert result.valid_samples == 3
-    
-    def test_doppler_removal(self, analyzer):
-        """Test that Doppler trend is properly removed from phase."""
-        n_samples = 60
-        amplitudes = np.ones(n_samples)
-        times = np.arange(n_samples, dtype=float)
-
-        # Pure Doppler (linear phase) with known rate. Keep doppler_hz below
-        # the np.unwrap Nyquist (per-sample Δφ < π) — see test_sigma_phi_weak.
-        doppler_hz = 0.1
-        phases = 2 * np.pi * doppler_hz * times
-
-        result = analyzer.calculate_scintillation_indices(amplitudes, phases, times)
-
-        # After removing Doppler, phase variance should be near zero
-        assert result.sigma_phi_rad < 0.01, "Doppler should be fully removed"
-        assert abs(result.doppler_removed_hz - doppler_hz) < 0.01
-    
-    def test_s4_formula_correctness(self, analyzer):
-        """Verify S4 formula: S4 = sqrt(var(I) / mean(I)²)."""
-        # Known values for verification
+    def test_s4_formula_matches_definition(self, analyzer):
         amplitudes = np.array([1.0, 2.0, 1.5, 0.5, 1.0])
         phases = np.zeros(5)
-        
-        # Manual calculation
         intensity = amplitudes ** 2
-        mean_I = np.mean(intensity)
-        var_I = np.var(intensity)
-        expected_s4 = np.sqrt(var_I) / mean_I
-        
-        result = analyzer.calculate_scintillation_indices(amplitudes, phases, min_samples=5)
-        
-        assert abs(result.s4_index - expected_s4) < 0.001, \
-            f"S4 formula mismatch: expected {expected_s4}, got {result.s4_index}"
-    
-    def test_from_ticks_convenience(self, analyzer):
-        """Test calculate_scintillation_from_ticks convenience method."""
-        # Simulate tick data: (second, phase, snr, amplitude)
-        tick_data = [
-            (i, 0.1 * i, 15.0, 1.0 + 0.1 * np.sin(i * 0.5))
-            for i in range(30)
-        ]
-        
-        result = analyzer.calculate_scintillation_from_ticks(tick_data, min_snr_db=10.0)
-        
-        assert result is not None
-        assert result.valid_samples == 30
-        assert result.s4_severity in ['weak', 'moderate', 'strong']
-    
-    def test_from_ticks_snr_filtering(self, analyzer):
-        """Test that low-SNR ticks are filtered out."""
-        # Mix of high and low SNR ticks
-        tick_data = [
-            (i, 0.1 * i, 20.0 if i % 2 == 0 else 3.0, 1.0)
-            for i in range(30)
-        ]
-        
-        result = analyzer.calculate_scintillation_from_ticks(tick_data, min_snr_db=10.0)
-        
-        assert result is not None
-        assert result.valid_samples == 15  # Only even indices pass SNR filter
+        expected = np.sqrt(np.var(intensity)) / np.mean(intensity)
+        r = analyzer.calculate_scintillation_indices(amplitudes, phases, min_samples=5)
+        assert r.s4_index == pytest.approx(expected, abs=1e-3)
+
+    def test_periodic_fading_known_s4(self, analyzer):
+        n = 100
+        t = np.arange(n, dtype=float)
+        d = 0.25  # 25% modulation depth
+        amplitudes = 1.0 * (1 + d * np.sin(2 * np.pi * t / 20))
+        phases = np.zeros(n)
+        r = analyzer.calculate_scintillation_indices(amplitudes, phases, t)
+        # S4 for A = 1 + d·sin: sqrt(2d^2 + d^4/8) / (1 + d^2/2)
+        expected = np.sqrt(2 * d**2 + d**4 / 8) / (1 + d**2 / 2)
+        assert r.s4_index == pytest.approx(expected, abs=0.05)
+
+    def test_sigma_phi_recovers_injected_fluctuation_under_curvature(self, analyzer):
+        # constant amplitude; phase = Doppler + quadratic TEC curvature + white
+        # fluctuation. HF default uses a quadratic detrend, which removes the
+        # curvature and recovers the injected fluctuation std.
+        n = 60
+        t = np.arange(n, dtype=float)
+        rng = np.random.default_rng(7)
+        sigma_inject = 0.30
+        phases = 0.05 * t + 0.002 * t**2 + rng.normal(0.0, sigma_inject, n)
+        r = analyzer.calculate_scintillation_indices(np.ones(n), phases, t)
+        assert r.sigma_phi_rad == pytest.approx(sigma_inject, rel=0.30)
+
+    def test_pure_doppler_is_removed(self, analyzer):
+        n = 60
+        t = np.arange(n, dtype=float)
+        doppler_hz = 0.1
+        phases = 2 * np.pi * doppler_hz * t
+        r = analyzer.calculate_scintillation_indices(np.ones(n), phases, t)
+        assert r.sigma_phi_rad < 0.01           # linear trend fully removed
+        assert abs(r.doppler_removed_hz - doppler_hz) < 0.01
+
+    def test_constant_signal_zero_scintillation(self, analyzer):
+        n = 60
+        r = analyzer.calculate_scintillation_indices(np.ones(n), np.zeros(n))
+        assert r.s4_index < 1e-3
+        assert r.sigma_phi_rad < 1e-3
 
 
-class TestScintillationPhysics:
-    """Test physical correctness of scintillation calculations."""
-    
+class TestConventionRelativeSeverity:
+    """Severity is meaningful only relative to its convention.
+
+    Same raw data, two conventions → different label; the raw index is
+    identical. hf-timestd defaults to the HF-oblique convention, where the HF
+    Rayleigh-fading baseline (quiet-day S4 ~0.7-1.0) is correctly 'weak', not
+    the 'strong' that the L-band ITU-R thresholds would (mis)report.
+    """
+
     @pytest.fixture
     def analyzer(self):
         return AdvancedSignalAnalyzer(sample_rate=20000)
-    
-    def test_constant_signal_zero_scintillation(self, analyzer):
-        """A perfectly constant signal should have zero scintillation."""
-        n_samples = 60
-        amplitudes = np.ones(n_samples)
-        phases = np.zeros(n_samples)
-        
-        result = analyzer.calculate_scintillation_indices(amplitudes, phases)
-        
-        assert result.s4_index < 0.001, "Constant amplitude should give S4 ≈ 0"
-        assert result.sigma_phi_rad < 0.001, "Constant phase should give σ_φ ≈ 0"
-    
-    def test_periodic_fading(self, analyzer):
-        """Periodic fading should produce predictable S4."""
-        n_samples = 100
-        times = np.arange(n_samples, dtype=float)
 
-        # Sinusoidal amplitude variation (Rayleigh-like fading)
-        mean_amp = 1.0
-        fade_depth = 0.25  # 25% modulation depth (small-fade regime)
-        amplitudes = mean_amp * (1 + fade_depth * np.sin(2 * np.pi * times / 20))
-        phases = np.zeros(n_samples)
+    def test_default_convention_is_hf_oblique(self, analyzer):
+        r = analyzer.calculate_scintillation_indices(np.ones(30), np.zeros(30))
+        assert r.convention_name == HF_OBLIQUE.name
 
-        result = analyzer.calculate_scintillation_indices(amplitudes, phases, times)
+    def test_moderate_s4_is_weak_under_hf_but_moderate_under_itur(self, analyzer):
+        amplitudes = _two_level_amplitudes(0.45)      # S4 = 0.45
+        phases = np.zeros(len(amplitudes))
+        hf = analyzer.calculate_scintillation_indices(amplitudes, phases,
+                                                      convention=HF_OBLIQUE)
+        itu = analyzer.calculate_scintillation_indices(amplitudes, phases,
+                                                       convention=ITU_R_LBAND)
+        assert hf.s4_index == pytest.approx(itu.s4_index)   # same raw observable
+        assert hf.s4_severity == 'weak'                     # 0.45 < 1.0 (HF)
+        assert itu.s4_severity == 'moderate'                # 0.3 <= 0.45 < 0.6 (ITU-R)
+        assert hf.convention_name != itu.convention_name
 
-        # S4 = sqrt(Var(I)) / mean(I) where I = A². For A = 1 + d·sin(ωt),
-        #   mean(I) = 1 + d²/2,  Var(I) = 2d² + d⁴/8
-        # → S4 = sqrt(2d² + d⁴/8) / (1 + d²/2). At d=0.25 this is ≈ 0.343.
-        d = fade_depth
-        expected_s4 = np.sqrt(2 * d**2 + d**4 / 8) / (1 + d**2 / 2)
-        assert abs(result.s4_index - expected_s4) < 0.05, \
-            f"Periodic fading S4 mismatch: expected ~{expected_s4:.3f}, got {result.s4_index:.3f}"
+    def test_hf_fading_baseline_is_not_an_event_under_hf(self, analyzer):
+        amplitudes = _two_level_amplitudes(0.8)       # quiet-day HF baseline
+        phases = np.zeros(len(amplitudes))
+        hf = analyzer.calculate_scintillation_indices(amplitudes, phases,
+                                                      convention=HF_OBLIQUE)
+        itu = analyzer.calculate_scintillation_indices(amplitudes, phases,
+                                                       convention=ITU_R_LBAND)
+        assert hf.s4_severity == 'weak' and hf.scintillation_event is False
+        assert itu.s4_severity == 'strong' and itu.scintillation_event is True
+
+
+class TestQualityGatingAndPlumbing:
+
+    @pytest.fixture
+    def analyzer(self):
+        return AdvancedSignalAnalyzer(sample_rate=20000)
+
+    def test_insufficient_samples_is_unknown(self, analyzer):
+        r = analyzer.calculate_scintillation_indices(
+            np.array([1.0, 1.1, 1.0]), np.array([0.0, 0.1, 0.2]), min_samples=10)
+        assert r.confidence == 0.0
+        assert r.s4_severity == 'unknown'
+        assert r.sigma_phi_severity == 'unknown'
+        assert r.valid_samples == 3
+        assert r.convention_name == HF_OBLIQUE.name
+
+    def test_from_ticks_convenience(self, analyzer):
+        # mild amplitude variation → clean MAD scale, nothing trimmed
+        tick_data = [(i, 0.1 * i, 15.0, 1.0 + 0.1 * np.sin(i * 0.5))
+                     for i in range(30)]
+        r = analyzer.calculate_scintillation_from_ticks(tick_data, min_snr_db=10.0)
+        assert r is not None
+        assert r.valid_samples == 30
+        assert r.s4_severity in ('weak', 'moderate', 'strong')
+
+    def test_from_ticks_snr_filtering(self, analyzer):
+        # even ticks pass the SNR gate (15 of 30); mild amplitude variation so
+        # the kernel's MAD filter keeps all of them.
+        tick_data = [(i, 0.1 * i, 20.0 if i % 2 == 0 else 3.0, 1.0 + 0.02 * i)
+                     for i in range(30)]
+        r = analyzer.calculate_scintillation_from_ticks(tick_data, min_snr_db=10.0)
+        assert r is not None
+        assert r.valid_samples == 15
 
 
 if __name__ == '__main__':

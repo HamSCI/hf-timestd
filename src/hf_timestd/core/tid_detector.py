@@ -64,6 +64,8 @@ from collections import defaultdict
 from datetime import datetime, timezone
 import logging
 
+from hamsci_dsp.geometry import great_circle_km
+
 logger = logging.getLogger(__name__)
 
 # Physical constants
@@ -277,19 +279,8 @@ class TIDDetector:
 
     @staticmethod
     def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-        """Calculate great circle distance using Haversine formula."""
-
-        lat1_rad = math.radians(lat1)
-        lat2_rad = math.radians(lat2)
-        delta_lat = math.radians(lat2 - lat1)
-        delta_lon = math.radians(lon2 - lon1)
-
-        a = (math.sin(delta_lat / 2) ** 2 +
-             math.cos(lat1_rad) * math.cos(lat2_rad) *
-             math.sin(delta_lon / 2) ** 2)
-        c = 2 * math.asin(math.sqrt(a))
-
-        return EARTH_RADIUS_KM * c
+        """Delegates to hamsci_dsp.geometry.great_circle_km (geodesic WGS-84)."""
+        return great_circle_km(lat1, lon1, lat2, lon2)
 
     @staticmethod
     def _compute_azimuth(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -818,13 +809,8 @@ class TIDDetector:
     @staticmethod
     def _great_circle_km(lat1: float, lon1: float,
                          lat2: float, lon2: float) -> float:
-        """Haversine great-circle distance in km."""
-        lat1r, lat2r = math.radians(lat1), math.radians(lat2)
-        dlat = math.radians(lat2 - lat1)
-        dlon = math.radians(lon2 - lon1)
-        a = (math.sin(dlat / 2) ** 2
-             + math.cos(lat1r) * math.cos(lat2r) * math.sin(dlon / 2) ** 2)
-        return EARTH_RADIUS_KM * 2 * math.asin(math.sqrt(a))
+        """Delegates to hamsci_dsp.geometry.great_circle_km (geodesic WGS-84)."""
+        return great_circle_km(lat1, lon1, lat2, lon2)
 
     @staticmethod
     def _bearing_deg(lat1: float, lon1: float,

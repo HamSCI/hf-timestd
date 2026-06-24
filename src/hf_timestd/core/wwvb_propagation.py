@@ -32,6 +32,8 @@ from __future__ import annotations
 import math
 from typing import NamedTuple, Optional
 
+from hamsci_dsp.geometry import great_circle_km
+
 from .wwv_constants import (
     EARTH_RADIUS_KM,
     SPEED_OF_LIGHT_KM_S,
@@ -72,22 +74,8 @@ class WwvbDelay(NamedTuple):
 def _great_circle_km(
     lat1_deg: float, lon1_deg: float, lat2_deg: float, lon2_deg: float
 ) -> float:
-    """Spherical-Earth great-circle distance (km).
-
-    A local copy of the haversine used elsewhere in the pipeline (e.g.
-    ``metrology_engine._great_circle_km``); duplicated rather than imported to
-    keep this LF helper free of the heavy metrology-engine import.
-    """
-    dlat = math.radians(lat2_deg - lat1_deg)
-    dlon = math.radians(lon2_deg - lon1_deg)
-    a = (
-        math.sin(dlat / 2) ** 2
-        + math.cos(math.radians(lat1_deg))
-        * math.cos(math.radians(lat2_deg))
-        * math.sin(dlon / 2) ** 2
-    )
-    c = 2 * math.asin(math.sqrt(a))
-    return EARTH_RADIUS_KM * c
+    """Delegates to hamsci_dsp.geometry.great_circle_km (geodesic WGS-84)."""
+    return great_circle_km(lat1_deg, lon1_deg, lat2_deg, lon2_deg)
 
 
 def wwvb_expected_delay(

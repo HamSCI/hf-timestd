@@ -62,6 +62,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 
+from hamsci_dsp.geometry import great_circle_km
+
 logger = logging.getLogger(__name__)
 
 # Import constants
@@ -274,16 +276,8 @@ class MultiStationDetector:
     
     @staticmethod
     def _haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-        """Calculate great circle distance in km."""
-        lat1_rad = np.radians(lat1)
-        lat2_rad = np.radians(lat2)
-        dlat = np.radians(lat2 - lat1)
-        dlon = np.radians(lon2 - lon1)
-        
-        a = np.sin(dlat/2)**2 + np.cos(lat1_rad) * np.cos(lat2_rad) * np.sin(dlon/2)**2
-        c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
-        
-        return EARTH_RADIUS_KM * c
+        """Delegates to hamsci_dsp.geometry.great_circle_km (geodesic WGS-84)."""
+        return great_circle_km(lat1, lon1, lat2, lon2)
     
     def _estimate_base_delay(self, distance_km: float) -> float:
         """

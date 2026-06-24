@@ -58,6 +58,8 @@ from typing import Optional, Dict, List, Set, Tuple
 from enum import Enum
 from scipy import signal as scipy_signal
 
+from hamsci_dsp.geometry import great_circle_km
+
 from .wwv_constants import (
     WWV_LAT, WWV_LON,
     WWVH_LAT, WWVH_LON,
@@ -383,16 +385,8 @@ class StationModelFactory:
     
     @staticmethod
     def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-        """Calculate great circle distance in km."""
-        lat1_rad = np.radians(lat1)
-        lat2_rad = np.radians(lat2)
-        dlat = np.radians(lat2 - lat1)
-        dlon = np.radians(lon2 - lon1)
-        
-        a = np.sin(dlat/2)**2 + np.cos(lat1_rad) * np.cos(lat2_rad) * np.sin(dlon/2)**2
-        c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
-        
-        return EARTH_RADIUS_KM * c
+        """Delegates to hamsci_dsp.geometry.great_circle_km (geodesic WGS-84)."""
+        return great_circle_km(lat1, lon1, lat2, lon2)
     
     
     def _estimate_propagation_delay(self, station: StationID) -> float:

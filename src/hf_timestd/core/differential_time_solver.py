@@ -74,6 +74,8 @@ from typing import Optional, List, Dict, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 
+from hamsci_dsp.geometry import great_circle_km
+
 # Issue 4.1 Fix (2025-12-07): Import coordinates from single source of truth
 from .wwv_constants import STATION_LOCATIONS
 
@@ -211,17 +213,8 @@ class DifferentialTimeSolver:
     def _great_circle_distance(
         self, lat1: float, lon1: float, lat2: float, lon2: float
     ) -> float:
-        """Calculate great circle distance in km."""
-        lat1_rad, lat2_rad = math.radians(lat1), math.radians(lat2)
-        delta_lat = math.radians(lat2 - lat1)
-        delta_lon = math.radians(lon2 - lon1)
-        
-        a = (math.sin(delta_lat / 2) ** 2 +
-             math.cos(lat1_rad) * math.cos(lat2_rad) *
-             math.sin(delta_lon / 2) ** 2)
-        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-        
-        return EARTH_RADIUS_KM * c
+        """Delegates to hamsci_dsp.geometry.great_circle_km (geodesic WGS-84)."""
+        return great_circle_km(lat1, lon1, lat2, lon2)
     
     def _calculate_mode_delay(
         self,
@@ -1018,17 +1011,8 @@ class GlobalDifferentialSolver:
             logger.info(f"  {station}: {dist:.0f} km, modes: {[m.value for m in modes]}")
     
     def _great_circle_distance(self, lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-        """Calculate great circle distance in km."""
-        lat1_rad, lat2_rad = math.radians(lat1), math.radians(lat2)
-        delta_lat = math.radians(lat2 - lat1)
-        delta_lon = math.radians(lon2 - lon1)
-        
-        a = (math.sin(delta_lat / 2) ** 2 +
-             math.cos(lat1_rad) * math.cos(lat2_rad) *
-             math.sin(delta_lon / 2) ** 2)
-        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-        
-        return EARTH_RADIUS_KM * c
+        """Delegates to hamsci_dsp.geometry.great_circle_km (geodesic WGS-84)."""
+        return great_circle_km(lat1, lon1, lat2, lon2)
     
     def _compute_modes(self, station: str) -> Dict[PropagationMode, Dict]:
         """Compute plausible modes for a station based on distance."""

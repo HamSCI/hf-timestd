@@ -152,6 +152,8 @@ from collections import deque
 import json
 from pathlib import Path
 
+from hamsci_dsp.geometry import great_circle_km
+
 # Issue 4.1 Fix (2025-12-07): Import coordinates from single source of truth
 from .wwv_constants import WWV_LAT, WWV_LON, WWVH_LAT, WWVH_LON, BPM_LAT, BPM_LON
 
@@ -258,31 +260,16 @@ class WWVGeographicPredictor:
     @staticmethod
     def _haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
         """
-        Calculate great circle distance between two points using Haversine formula
-        
+        Delegates to hamsci_dsp.geometry.great_circle_km (geodesic WGS-84).
+
         Args:
             lat1, lon1: First point (decimal degrees)
             lat2, lon2: Second point (decimal degrees)
-            
+
         Returns:
             Distance in kilometers
         """
-        # Convert to radians
-        lat1_rad = math.radians(lat1)
-        lat2_rad = math.radians(lat2)
-        delta_lat = math.radians(lat2 - lat1)
-        delta_lon = math.radians(lon2 - lon1)
-        
-        # Haversine formula
-        a = (math.sin(delta_lat / 2) ** 2 +
-             math.cos(lat1_rad) * math.cos(lat2_rad) *
-             math.sin(delta_lon / 2) ** 2)
-        c = 2 * math.asin(math.sqrt(a))
-        
-        # Earth radius in km
-        earth_radius_km = 6371.0
-        
-        return earth_radius_km * c
+        return great_circle_km(lat1, lon1, lat2, lon2)
     
     def _estimate_propagation_delay(
         self,

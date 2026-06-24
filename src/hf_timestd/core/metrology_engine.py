@@ -28,6 +28,8 @@ import threading
 import json
 import math
 
+from hamsci_dsp.geometry import great_circle_km
+
 # Imports
 from hf_timestd.models import (
     L1MetrologyMeasurement,
@@ -80,17 +82,11 @@ _IONO_DELAY_CONSTANT_MS = 40.3 / SPEED_OF_LIGHT_KM_S * 1e16 / 1e12
 
 def _great_circle_km(lat1_deg: float, lon1_deg: float,
                      lat2_deg: float, lon2_deg: float) -> float:
-    """Spherical-Earth great-circle distance (km).  Pulled out so the
-    vacuum-fallback helper below stays a pure function of its inputs."""
-    from .wwv_constants import EARTH_RADIUS_KM
-    dlat = math.radians(lat2_deg - lat1_deg)
-    dlon = math.radians(lon2_deg - lon1_deg)
-    a = (math.sin(dlat / 2) ** 2
-         + math.cos(math.radians(lat1_deg))
-         * math.cos(math.radians(lat2_deg))
-         * math.sin(dlon / 2) ** 2)
-    c = 2 * math.asin(math.sqrt(a))
-    return EARTH_RADIUS_KM * c
+    """Delegates to hamsci_dsp.geometry.great_circle_km (geodesic WGS-84).
+
+    Pulled out so the vacuum-fallback helper below stays a pure function of
+    its inputs."""
+    return great_circle_km(lat1_deg, lon1_deg, lat2_deg, lon2_deg)
 
 
 def _vacuum_hop_fallback_delay(dist_km: float, frequency_hz: float) -> Tuple[float, float]:

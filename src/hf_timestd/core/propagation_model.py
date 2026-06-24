@@ -85,6 +85,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from hamsci_dsp.geometry import great_circle_km
+
 from .hop_geometry import hop_geometry, max_single_hop_distance_km
 
 logger = logging.getLogger(__name__)
@@ -1100,18 +1102,8 @@ class HFPropagationModel:
     
     @staticmethod
     def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-        """Calculate great circle distance using Haversine formula."""
-        lat1_rad = math.radians(lat1)
-        lat2_rad = math.radians(lat2)
-        delta_lat = math.radians(lat2 - lat1)
-        delta_lon = math.radians(lon2 - lon1)
-        
-        a = (math.sin(delta_lat / 2) ** 2 +
-             math.cos(lat1_rad) * math.cos(lat2_rad) *
-             math.sin(delta_lon / 2) ** 2)
-        c = 2 * math.asin(math.sqrt(a))
-        
-        return EARTH_RADIUS_KM * c
+        """Delegates to hamsci_dsp.geometry.great_circle_km (geodesic WGS-84)."""
+        return great_circle_km(lat1, lon1, lat2, lon2)
 
     @staticmethod
     def _intermediate_point(

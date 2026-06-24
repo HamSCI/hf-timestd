@@ -19,6 +19,8 @@ from enum import Enum
 import math
 import logging
 
+from hamsci_dsp.geometry import great_circle_km
+
 logger = logging.getLogger(__name__)
 
 # Physical constants
@@ -177,26 +179,16 @@ DEFAULT_STATIONS = [
 
 def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """
-    Calculate great-circle distance between two points using Haversine formula.
-    
+    Delegates to hamsci_dsp.geometry.great_circle_km (geodesic WGS-84).
+
     Args:
         lat1, lon1: First point (degrees)
         lat2, lon2: Second point (degrees)
-        
+
     Returns:
         Distance in kilometers
     """
-    R = 6371.0  # Earth radius in km
-    
-    lat1_rad = math.radians(lat1)
-    lat2_rad = math.radians(lat2)
-    dlat = math.radians(lat2 - lat1)
-    dlon = math.radians(lon2 - lon1)
-    
-    a = math.sin(dlat/2)**2 + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(dlon/2)**2
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
-    
-    return R * c
+    return great_circle_km(lat1, lon1, lat2, lon2)
 
 
 def bearing(lat1: float, lon1: float, lat2: float, lon2: float) -> float:

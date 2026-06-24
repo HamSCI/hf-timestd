@@ -63,16 +63,23 @@ class TestGreatCircleDistance:
         assert d1 == pytest.approx(d2)
 
     def test_quarter_great_circle_along_equator(self):
-        # 90° of longitude on the equator → quarter circumference
+        # 90° of longitude on the equator → quarter of the equatorial circle.
+        # Geodesic (WGS-84) now backs great_circle_distance: the equator is a
+        # circle of radius = semi-major axis a = 6378.137 km, so the quarter
+        # arc is exactly π/2·a (not π/2·R_mean, as the old spherical copy gave).
         d = great_circle_distance(0.0, 0.0, 0.0, 90.0)
-        expected = math.pi * EARTH_RADIUS_KM / 2  # quarter circumference
+        WGS84_A_KM = 6378.137
+        expected = math.pi * WGS84_A_KM / 2
         assert d == pytest.approx(expected, rel=1e-6)
 
     def test_pole_to_pole(self):
-        # North pole to south pole → half the circumference
+        # North pole to south pole → half the meridian. On the WGS-84 ellipsoid
+        # this is the meridian half-length (2× the quarter-meridian
+        # 10001.965729 km), shorter than the spherical π·R_mean because the
+        # Earth is flattened. Geodesic value via geographiclib.
         d = great_circle_distance(90.0, 0.0, -90.0, 0.0)
-        expected = math.pi * EARTH_RADIUS_KM
-        assert d == pytest.approx(expected, rel=1e-6)
+        WGS84_MERIDIAN_HALF_KM = 2 * 10001.965729  # = 20003.931458 km
+        assert d == pytest.approx(WGS84_MERIDIAN_HALF_KM, rel=1e-6)
 
     def test_known_distance_wwv_to_wwvh(self):
         # WWV (Fort Collins) to WWVH (Kauai): ~5400 km
@@ -100,10 +107,13 @@ class TestCalculateMidpoint:
         assert lat == pytest.approx(0.0, abs=1e-9)
         assert lon == pytest.approx(45.0, abs=1e-9)
 
-    def test_along_meridian_is_arithmetic_mean(self):
-        # Same longitude → midpoint latitude is the arithmetic mean
+    def test_along_meridian_near_arithmetic_mean(self):
+        # Same longitude → midpoint stays on the meridian, latitude near the
+        # arithmetic mean. On the WGS-84 ellipsoid the distance-halfway point
+        # deviates ~0.01° from the exact mean (meridian arc-per-degree grows
+        # with latitude), so this is approximate, not exact as on a sphere.
         lat, lon = calculate_midpoint(30.0, -100.0, 50.0, -100.0)
-        assert lat == pytest.approx(40.0, abs=1e-6)
+        assert lat == pytest.approx(40.0, abs=0.02)
         assert lon == pytest.approx(-100.0, abs=1e-6)
 
     def test_midpoint_is_equidistant(self):
@@ -196,9 +206,13 @@ class TestConvertSlantToVertical:
         assert vtec == pytest.approx(30.0 / m, rel=1e-6)
 
     def test_explicit_formula_matches(self):
-        # Spot-check the formula at 45° with h=350 km
+        # Spot-check the thin-shell formula at 45° with h=350 km. The obliquity
+        # model now lives in hamsci_dsp.propagation.oblique, which uses the
+        # WGS-84 mean radius R_EARTH_KM=6371.0088 (vs the local 6371.0), so the
+        # expected value is computed with that radius.
+        R = 6371.0088
         theta = math.radians(45.0)
-        sin_term = (EARTH_RADIUS_KM * math.cos(theta)) / (EARTH_RADIUS_KM + 350.0)
+        sin_term = (R * math.cos(theta)) / (R + 350.0)
         expected_M = 1.0 / math.cos(math.asin(sin_term))
 
         _, m = convert_slant_to_vertical(20.0, 45.0, h_iono=350.0)

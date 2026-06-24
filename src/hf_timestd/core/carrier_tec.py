@@ -47,20 +47,20 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from hamsci_dsp.propagation import dtec_from_phase as _dtec_from_phase
+
 # §4.4 Low: previously imported `math`, `datetime`, `timezone`, and
 # `Tuple` — none of which were referenced.  Removed.
 
 logger = logging.getLogger(__name__)
 
-# Physical constants
-C_LIGHT = 299792458.0       # m/s
-K_GROUP_DELAY = 40.3        # m³/s² (ionospheric constant)
-TECU_SCALE = 1e16           # 1 TECU = 10^16 el/m²
-
-# A dropout longer than this makes the unwrapped phase across it ambiguous
-# (the carrier may have wound through many cycles unobserved). dTEC coasts
-# flat across such a gap, and the gap is counted onto the result.
-GAP_THRESHOLD_S = 120.0
+# The phase→dTEC kernel (unwrap → coast across cycle slips / gaps → direct
+# ΔsTEC = -(c·f)/(2π·K)·(φ-φ₀)), and its constants (c, K=40.3, TECU=1e16,
+# GAP_THRESHOLD_S=120, the >5 Hz/s cycle-slip gate) now live in
+# hamsci_dsp.propagation.carrier — the canonical shared home (extracted
+# math-identical from here, P-M3). This class wraps that kernel with
+# hf-timestd's sorting/dedup, anchoring to absolute TEC, the noise-floor
+# estimate, and the richer per-channel result below.
 
 
 @dataclass
@@ -177,78 +177,36 @@ class CarrierTECEstimator:
         if len(epochs) < 3:
             return None
 
-        # Unwrap phase for continuity
-        phase_unwrapped = np.unwrap(carrier_phase_rad)
+        # Delegate the phase→dTEC kernel to the shared hamsci_dsp
+        # implementation (P-M3: unwrap → coast across cycle slips / long gaps →
+        # direct ΔsTEC = -(c·f)/(2π·K)·(φ-φ₀), with the >5 Hz/s slip gate and
+        # the 120 s gap threshold). It returns the dTEC series, its derivative,
+        # the cycle-slip / gap counts, and the unwrap-RISK score + raw jump
+        # count (P-H3 — a marginal-cadence risk indicator, NOT proof of correct
+        # unwrapping). hf-timestd layers sorting/dedup (above) and anchoring +
+        # noise-floor (below) around this kernel.
+        core = _dtec_from_phase(epochs, carrier_phase_rad, frequency_mhz)
+        if core is None:
+            return None
 
-        # P3-A: Phase-unwrap RISK indicator (P-H3).
-        # This does NOT detect wrong-branch unwrapping — that is impossible
-        # from an already-sampled phase series: a true inter-tick step >π
-        # aliases to a small wrapped diff, so the failure is invisible here.
-        # What it measures is RISK — post-unwrap steps whose magnitude
-        # approaches the π Nyquist boundary. A high count means the cadence is
-        # marginal for the observed Doppler and the integrated dTEC may be
-        # aliased. Genuine detection would need an independent IQ frequency
-        # estimate. Callers gate on unwrap_quality as a risk score, not proof.
-        dphi_raw = np.diff(carrier_phase_rad)
-        # Wrap raw differences to (-π, π] to measure the true step size
-        dphi_raw_wrapped = (dphi_raw + np.pi) % (2 * np.pi) - np.pi
-        n_jumps = int(np.sum(np.abs(dphi_raw_wrapped) > (np.pi / 2)))
-        unwrap_quality = max(0.0, 1.0 - n_jumps / max(len(dphi_raw_wrapped), 1))
+        dtec_tecu = np.asarray(core.dtec_tecu, dtype=float)
+        dtec_rate_tecu_per_s = np.asarray(core.dtec_rate_tecu_per_s, dtype=float)
+        unwrap_quality = core.unwrap_quality
+        n_jumps = core.n_phase_jumps
+        n_cycle_slips = core.n_cycle_slips
+        n_gaps = core.n_gaps
+
         if n_jumps > 0:
             logger.debug(
                 f"Phase unwrap quality: {station}/{channel} "
-                f"{frequency_mhz:.2f} MHz — {n_jumps}/{len(dphi_raw_wrapped)} "
-                f"steps |Δφ|>π/2, quality={unwrap_quality:.2f}"
+                f"{frequency_mhz:.2f} MHz — {n_jumps} steps |Δφ|>π/2, "
+                f"quality={unwrap_quality:.2f}"
             )
-
-        dt = np.diff(epochs)
-        dphi = np.diff(phase_unwrapped)
-
-        # Phase rate (Doppler) — used only to DETECT cycle slips. The dTEC
-        # series itself is derived directly from phase below, not by
-        # re-integrating this rate (P-M3).
-        doppler_hz = -(1.0 / (2.0 * np.pi)) * dphi / dt
-
-        # Cycle-slip detection: a lost-lock re-acquisition appears as a brief,
-        # large spike in phase acceleration (the time-derivative of Doppler).
-        # > 5 Hz/s is far beyond any real ionospheric rate at HF.
-        d2phi = np.zeros_like(doppler_hz)
-        d2phi[1:] = np.diff(doppler_hz)
-        slip_mask = np.abs(d2phi) > 5.0
-        n_cycle_slips = int(np.sum(slip_mask))
-
-        # Gap intervals — long enough that the unwrapped phase across them is
-        # ambiguous.
-        gap_mask = dt > GAP_THRESHOLD_S
-        n_gaps = int(np.sum(gap_mask))
-
-        # P-M3: relative TEC DIRECTLY from the unwrapped phase. Carrier phase
-        # is proportional to TEC (φ_iono = -(2π/c)·(K/f)·sTEC), so
-        #   ΔsTEC(t) = -(c·f)/(2π·K) · (φ(t) − φ(t₀)).
-        # Earlier code differentiated phase to Doppler and re-integrated; that
-        # round-trip amplified noise and added a half-sample lag.
-        # The inter-sample phase step across a cycle slip or a long gap is not
-        # a real ionospheric change, so it is removed — the series coasts
-        # (flat) across it, the direct-from-phase analogue of the old
-        # "hold the Doppler at zero". n_gaps is surfaced on the result so a
-        # gap-spanned series is no longer silently presented as continuous.
-        bad_step = slip_mask | gap_mask
-        phase_corrected = phase_unwrapped.copy()
-        phase_corrected[1:] -= np.cumsum(np.where(bad_step, dphi, 0.0))
         if n_cycle_slips > 0:
             logger.debug(
                 f"Coasted {n_cycle_slips} cycle slip(s) for "
                 f"{station}/{channel} at {frequency_mhz}MHz"
             )
-
-        freq_hz = frequency_mhz * 1e6
-        phase_to_tecu = -(C_LIGHT * freq_hz) / (
-            2.0 * np.pi * K_GROUP_DELAY * TECU_SCALE)
-        dtec_tecu = (phase_corrected - phase_corrected[0]) * phase_to_tecu
-
-        # Reported rate is the honest derivative of the dTEC actually
-        # produced — same sample grid, no half-sample offset.
-        dtec_rate_tecu_per_s = np.gradient(dtec_tecu, epochs)
 
         # Anchor the relative dTEC to an absolute reference (P-M5). The anchor
         # is applied only if a sample lies within anchor_max_age_seconds of

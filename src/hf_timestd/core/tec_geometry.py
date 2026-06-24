@@ -9,9 +9,20 @@ and calculating ionospheric pierce points (midpoints).
 import math
 from typing import Tuple, Dict
 
+from hamsci_dsp.geometry import (
+    great_circle_km as _great_circle_km,
+    midpoint as _midpoint,
+    elevation_angle_deg as _elevation_angle_deg,
+)
+from hamsci_dsp.propagation.oblique import slant_to_vertical_tec as _slant_to_vertical_tec
+
 from hf_timestd.core.wwv_constants import STATION_LOCATIONS as STATIONS
 
 # Physical constants
+# NOTE: the great-circle/midpoint/elevation helpers below now delegate to
+# hamsci_dsp.geometry, which uses geodesic (WGS-84 ellipsoid) distance — more
+# accurate than the previous spherical haversine. EARTH_RADIUS_KM is retained
+# for the spherical thin-shell obliquity model in convert_slant_to_vertical.
 EARTH_RADIUS_KM = 6371.0
 DEFAULT_IONO_HEIGHT_KM = 350.0
 
@@ -52,23 +63,8 @@ def calculate_midpoint(lat1: float, lon1: float, lat2: float, lon2: float) -> Tu
     _validate_latlon(lat1, lon1, "calculate_midpoint p1")
     _validate_latlon(lat2, lon2, "calculate_midpoint p2")
 
-    # Convert to radians
-    lat1_rad = math.radians(lat1)
-    lon1_rad = math.radians(lon1)
-    lat2_rad = math.radians(lat2)
-    lon2_rad = math.radians(lon2)
-    
-    # Midpoint calculation
-    Bx = math.cos(lat2_rad) * math.cos(lon2_rad - lon1_rad)
-    By = math.cos(lat2_rad) * math.sin(lon2_rad - lon1_rad)
-    
-    lat_mid = math.atan2(
-        math.sin(lat1_rad) + math.sin(lat2_rad),
-        math.sqrt((math.cos(lat1_rad) + Bx)**2 + By**2)
-    )
-    lon_mid = lon1_rad + math.atan2(By, math.cos(lat1_rad) + Bx)
-    
-    return math.degrees(lat_mid), math.degrees(lon_mid)
+    # Geodesic midpoint (WGS-84) — the distance-halfway sub-point of the path.
+    return _midpoint(lat1, lon1, lat2, lon2)
 
 
 def calculate_elevation_angle(
@@ -106,44 +102,29 @@ def calculate_elevation_angle(
         Elevation angle (degrees)
     """
     # Great circle distance; a single hop reflects above the ground midpoint.
+    # Delegates the spherical-Earth elevation formula to hamsci_dsp.geometry
+    # (identical math: atan2(cos(gamma) - Re/(Re+h), sin(gamma))).
     distance_km = great_circle_distance(rx_lat, rx_lon, tx_lat, tx_lon)
-    half_distance = distance_km / 2.0
-
-    # Central angle (receiver -> sub-reflection point) and reflection radius.
-    gamma = half_distance / EARTH_RADIUS_KM
-    r_p = EARTH_RADIUS_KM + h_iono
-
-    # Spherical-Earth elevation; -> atan2(h_iono, half_distance) as gamma -> 0.
-    elevation_rad = math.atan2(
-        r_p * math.cos(gamma) - EARTH_RADIUS_KM,
-        r_p * math.sin(gamma),
-    )
-
-    return math.degrees(elevation_rad)
+    return _elevation_angle_deg(distance_km, h_iono)
 
 
 def great_circle_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """
-    Calculate great circle distance between two points.
-    
+    Geodesic (WGS-84 ellipsoidal) distance between two points, in kilometers.
+
+    Delegates to :func:`hamsci_dsp.geometry.great_circle_km` (geographiclib,
+    Karney geodesics). This replaces the former spherical haversine
+    (``R·c`` with ``R=6371.0``); results differ by up to ~0.5% on long HF
+    paths, which is the more accurate value.
+
     Args:
         lat1, lon1: First point (degrees)
         lat2, lon2: Second point (degrees)
-    
+
     Returns:
         Distance in kilometers
     """
-    lat1_rad = math.radians(lat1)
-    lat2_rad = math.radians(lat2)
-    delta_lat = math.radians(lat2 - lat1)
-    delta_lon = math.radians(lon2 - lon1)
-    
-    a = (math.sin(delta_lat / 2) ** 2 +
-         math.cos(lat1_rad) * math.cos(lat2_rad) *
-         math.sin(delta_lon / 2) ** 2)
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    
-    return EARTH_RADIUS_KM * c
+    return _great_circle_km(lat1, lon1, lat2, lon2)
 
 
 #: Maximum obliquity factor (§4.4 Low).  Matches the sibling cap in
@@ -183,23 +164,10 @@ def convert_slant_to_vertical(
     Returns:
         (vtec, obliquity_factor) tuple
     """
-    theta_rad = math.radians(elevation_angle_deg)
-
-    # Obliquity factor calculation
-    sin_term = (EARTH_RADIUS_KM * math.cos(theta_rad)) / (EARTH_RADIUS_KM + h_iono)
-
-    # Clamp to valid range to avoid math domain errors
-    sin_term = max(-1.0, min(1.0, sin_term))
-
-    M = 1.0 / math.cos(math.asin(sin_term))
-    # §4.4 Low: cap M so a near-horizon elevation doesn't produce an
-    # unphysically large slant→vertical denominator.
-    M = min(M, MAX_OBLIQUITY_FACTOR)
-
-    # Convert to vertical
-    vtec = tec_slant / M
-
-    return vtec, M
+    # Delegates the thin-shell obliquity model and the M≤10 cap to
+    # hamsci_dsp.propagation.oblique (math-identical; it uses the WGS-84 mean
+    # radius R_EARTH_KM=6371.0088 rather than the local 6371.0, a ~1e-6 shift).
+    return _slant_to_vertical_tec(tec_slant, elevation_angle_deg, h_iono_km=h_iono)
 
 
 def calculate_geometry_for_station(

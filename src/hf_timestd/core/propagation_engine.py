@@ -25,6 +25,8 @@ import math
 from dataclasses import dataclass
 from typing import Optional
 
+from hamsci_dsp.geometry import great_circle_km
+
 from .hop_geometry import hop_geometry
 
 logger = logging.getLogger(__name__)
@@ -222,11 +224,5 @@ class PropagationEngine:
         )
 
     def _haversine_distance(self, lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-        """Calculate great-circle distance in km."""
-        dlat = math.radians(lat2 - lat1)
-        dlon = math.radians(lon2 - lon1)
-        a = (math.sin(dlat / 2) * math.sin(dlat / 2) +
-             math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) *
-             math.sin(dlon / 2) * math.sin(dlon / 2))
-        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-        return EARTH_RADIUS_KM * c
+        """Delegates to hamsci_dsp.geometry.great_circle_km (geodesic WGS-84)."""
+        return great_circle_km(lat1, lon1, lat2, lon2)
