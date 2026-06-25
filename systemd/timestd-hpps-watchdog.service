@@ -1,7 +1,7 @@
 # /etc/systemd/system/timestd-hpps-watchdog.service
 [Unit]
 Description=HF-Timestd HPPS (T6 BPSK SHM) Watchdog
-Documentation=https://github.com/mijahauan/hf-timestd
+Documentation=https://github.com/HamSCI/hf-timestd
 After=chrony.service
 Wants=chrony.service
 

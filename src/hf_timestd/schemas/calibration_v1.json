@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/mijahauan/hf-timestd/schemas/calibration_v1.json",
+  "$id": "https://github.com/HamSCI/hf-timestd/schemas/calibration_v1.json",
   "title": "hf-timestd Calibration File",
   "description": "Machine-readable timing calibration output for wsprdaemon integration. Written atomically by CalibrationFileWriter after each fusion cycle. Consumed by wd-ka9q-record to align wav start times to sub-millisecond accuracy.",
   "type": "object",

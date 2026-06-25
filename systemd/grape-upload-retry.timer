@@ -1,6 +1,6 @@
 [Unit]
 Description=GRAPE Upload Retry Timer — drain stuck PSWS uploads
-Documentation=https://github.com/mijahauan/hf-timestd
+Documentation=https://github.com/HamSCI/hf-timestd
 Requires=grape-upload-retry.service
 
 [Timer]

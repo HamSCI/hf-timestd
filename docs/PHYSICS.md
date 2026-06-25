@@ -1212,6 +1212,6 @@ B_c ≈ 1 / τ_D  [Hz, seconds]
 
 ---
 
-**Source Code:** <https://github.com/mijahauan/hf-timestd>  
+**Source Code:** <https://github.com/HamSCI/hf-timestd>  
 **License:** MIT  
 **Author:** Michael James Hauan (AC0G)

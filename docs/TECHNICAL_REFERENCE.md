@@ -826,7 +826,7 @@ The current package is `hf_timestd` under `src/hf_timestd/`.
 **Python 3.11+** (installed via `install.sh` or `pip install -e .`):
 
 **Core:**
-- `ka9q-python` - Interface to ka9q-radio (from github.com/mijahauan/ka9q-python)
+- `ka9q-python` - Interface to ka9q-radio (from github.com/HamSCI/ka9q-python)
 - `numpy>=1.24.0` - Array operations
 - `scipy>=1.10.0` - Signal processing, matched filtering
 - `h5py>=3.8.0` - HDF5 read/write (all inter-service data exchange)
@@ -1074,7 +1074,7 @@ sudo sysctl -w net.core.rmem_max=26214400
 ### External
 
 - ka9q-radio: <https://github.com/ka9q/ka9q-radio>
-- ka9q-python: <https://github.com/mijahauan/ka9q-python>
+- ka9q-python: <https://github.com/HamSCI/ka9q-python>
 - Digital RF: MIT Haystack Observatory
 
 ---

@@ -1,6 +1,6 @@
 [Unit]
 Description=HF-TimeStd Metrology — All Channels
-Documentation=https://github.com/mijahauan/hf-timestd
+Documentation=https://github.com/HamSCI/hf-timestd
 After=timestd-core-recorder.service
 Wants=timestd-core-recorder.service
 

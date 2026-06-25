@@ -119,7 +119,7 @@ The ionosphere is the dominant error in all cases. Oscillator quality affects ti
 ```bash
 # Clone canonical repo (must be reachable by the timestd service user;
 # typical layout is /opt/git/sigmond/hf-timestd, owned by timestd:timestd)
-sudo git clone https://github.com/mijahauan/hf-timestd.git /opt/git/sigmond/hf-timestd
+sudo git clone https://github.com/HamSCI/hf-timestd.git /opt/git/sigmond/hf-timestd
 sudo chown -R timestd:timestd /opt/git/sigmond/hf-timestd
 cd /opt/git/sigmond/hf-timestd
 
@@ -292,7 +292,7 @@ The system has an eight-service core pipeline plus a set of housekeeping units (
 - **[docs/TECHNICAL_REFERENCE.md](docs/TECHNICAL_REFERENCE.md)** — algorithms, data formats, physics models.
 - **[docs/PIPELINE_VERIFICATION.md](docs/PIPELINE_VERIFICATION.md)** — end-to-end health gates.
 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/mijahauan/hf-timestd)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/HamSCI/hf-timestd)
 
 ---
 

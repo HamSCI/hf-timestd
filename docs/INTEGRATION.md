@@ -263,7 +263,7 @@ service suite.  The install script handles this:
 
 ```bash
 # Clone and install
-git clone https://github.com/mijahauan/hf-timestd.git
+git clone https://github.com/HamSCI/hf-timestd.git
 cd hf-timestd
 sudo scripts/install.sh
 

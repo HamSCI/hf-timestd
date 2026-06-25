@@ -1742,6 +1742,6 @@ u_combined = √(u_statistical² + u_systematic² + u_propagation²)
 
 ---
 
-**Source Code:** <https://github.com/mijahauan/hf-timestd>  
+**Source Code:** <https://github.com/HamSCI/hf-timestd>  
 **License:** MIT  
 **Author:** Michael James Hauan (AC0G)

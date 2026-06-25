@@ -1,6 +1,6 @@
 [Unit]
 Description=HF-TimeStd Pipeline Health Watchdog
-Documentation=https://github.com/mijahauan/hf-timestd
+Documentation=https://github.com/HamSCI/hf-timestd
 
 [Service]
 Type=oneshot

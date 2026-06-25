@@ -1,6 +1,6 @@
 [Unit]
 Description=GRAPE Upload Retry — drain stuck PSWS uploads
-Documentation=https://github.com/mijahauan/hf-timestd
+Documentation=https://github.com/HamSCI/hf-timestd
 # We expect this to run alongside / between grape-daily runs.  Fail
 # fast and let the timer fire us again later if the queue is big.
 After=network-online.target

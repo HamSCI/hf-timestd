@@ -3,7 +3,7 @@
 # when this always-restart service finally gives up (StartLimit exhausted).
 OnFailure=timestd-alert@%N.service
 Description=HF-TimeStd GNSS VTEC Monitor
-Documentation=https://github.com/mijahauan/hf-timestd
+Documentation=https://github.com/HamSCI/hf-timestd
 After=network.target
 Wants=network.target
 StartLimitIntervalSec=300

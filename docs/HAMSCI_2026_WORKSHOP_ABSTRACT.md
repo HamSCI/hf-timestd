@@ -199,6 +199,6 @@ The system produces per-minute IONEX VTEC maps from slant TEC measurements at 17
 
 ---
 
-**Source Code:** <https://github.com/mijahauan/hf-timestd>  
+**Source Code:** <https://github.com/HamSCI/hf-timestd>  
 **License:** MIT  
 **Author:** Michael James Hauan (AC0G)

@@ -478,7 +478,7 @@ tar -C /tmp -czf "${bundle}.tgz" "$(basename "$bundle")"
 echo "Bundle: ${bundle}.tgz"
 ```
 
-File an issue at <https://github.com/mijahauan/hf-timestd/issues> and
+File an issue at <https://github.com/HamSCI/hf-timestd/issues> and
 attach the tarball.
 
 ---

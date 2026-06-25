@@ -486,7 +486,7 @@ The hardware cost for this system is under $300 (2026 USD):
 The software is entirely open source:
 
 - ka9q-radio: https://github.com/ka9q/ka9q-radio
-- hf-timestd: https://github.com/mijahauan/hf-timestd
+- hf-timestd: https://github.com/HamSCI/hf-timestd
 - PHaRLAP (for mode ID): available from IPS Australia
 - pyLAP Python wrapper: https://github.com/mijahauan/PyLap
 
@@ -583,7 +583,7 @@ both, this is a practically accessible entry point.
 
 [5] ITU-R Recommendation TF.460-6, "Standard-frequency and time-signal emissions," 2002.
 
-[6] Hauan, M.J. (AC0G), hf-timestd, https://github.com/mijahauan/hf-timestd
+[6] Hauan, M.J. (AC0G), hf-timestd, https://github.com/HamSCI/hf-timestd
 
 [7] NIST, "NIST Radio Broadcasts Frequently Asked Questions," Time and Frequency
     Division, https://www.nist.gov/pml/time-and-frequency-division/time-distribution/

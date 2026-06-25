@@ -22,7 +22,7 @@
 set -euo pipefail
 
 DAT_DIR="/opt/pharlap_4.7.4/dat/iri2020"
-UA="hf-timestd/update-iri-indices (https://github.com/mijahauan/hf-timestd)"
+UA="hf-timestd/update-iri-indices (https://github.com/HamSCI/hf-timestd)"
 
 PRIMARY="https://chain-new.chain-project.net/echaim_downloads"
 FALLBACK="https://irimodel.org/indices"

@@ -700,7 +700,7 @@ With an RX888 (~$180) and a GPSDO (~$162), you can:
 
 **Daily output:** 24K timing records, 1.15M phase records, 20K dTEC records, 29K consistency checks.
 
-**Open source:** github.com/mijahauan/hf-timestd (MIT license)
+**Open source:** github.com/HamSCI/hf-timestd (MIT license)
 
 Speaker notes: "So: with about 340 dollars of hardware — an RX888 and a Leo Bodnar GPSDO — open-source software, and the time standard stations that are already on the air, you can build a 17-path ionospheric sounder that runs 24/7. The data products are scientifically meaningful, self-consistent, and validated against GPS ground truth. The code is on GitHub under MIT license. I'd love to see a network of these stations."
 

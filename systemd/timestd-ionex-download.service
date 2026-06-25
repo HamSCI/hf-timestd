@@ -1,6 +1,6 @@
 [Unit]
 Description=HF-TimeStd IONEX Download Service
-Documentation=https://github.com/mijahauan/hf-timestd
+Documentation=https://github.com/HamSCI/hf-timestd
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=3600

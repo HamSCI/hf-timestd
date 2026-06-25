@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 # fetchers (update-iri-indices.sh) so server logs attribute all
 # hf-timestd traffic consistently.
 DEFAULT_USER_AGENT = (
-    "hf-timestd (https://github.com/mijahauan/hf-timestd)"
+    "hf-timestd (https://github.com/HamSCI/hf-timestd)"
 )
 
 # (connect, read) seconds. Read is generous: GIRO/CDDIS can be slow.

@@ -575,7 +575,7 @@ def build_presentation():
                 font_size=16, color=(0x44, 0x44, 0x44))
 
     add_textbox(slide, 0.6, 4.8, 11.5, 0.5,
-                "Open source: github.com/mijahauan/hf-timestd  (MIT license)",
+                "Open source: github.com/HamSCI/hf-timestd  (MIT license)",
                 font_size=18, bold=True, color=(0x21, 0x76, 0xFF))
 
     add_textbox(slide, 0.6, 5.8, 11.5, 1.0,

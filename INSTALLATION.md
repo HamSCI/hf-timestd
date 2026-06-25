@@ -117,7 +117,7 @@ wheel snapshot, no `/opt` source copy, and no drift.
 
 ```bash
 # 1. Clone canonical repo to a path the timestd service user can read
-sudo git clone https://github.com/mijahauan/hf-timestd.git /opt/git/sigmond/hf-timestd
+sudo git clone https://github.com/HamSCI/hf-timestd.git /opt/git/sigmond/hf-timestd
 sudo chown -R timestd:timestd /opt/git/sigmond/hf-timestd
 cd /opt/git/sigmond/hf-timestd
 

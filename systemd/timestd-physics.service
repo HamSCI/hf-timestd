@@ -1,6 +1,6 @@
 [Unit]
 Description=HF-Timestd Physics Service (L2 Interpretation)
-Documentation=https://github.com/mijahauan/hf-timestd
+Documentation=https://github.com/HamSCI/hf-timestd
 After=timestd-l2-calibration.service
 # Soft dependency only (was Requires=): physics is an asynchronous/batch
 # pipeline and must never be torn down or gated by a metrology service.

@@ -1,7 +1,7 @@
 # /etc/systemd/system/timestd-hfps-watchdog.timer
 [Unit]
 Description=HF-Timestd HFPS Watchdog Timer
-Documentation=https://github.com/mijahauan/hf-timestd
+Documentation=https://github.com/HamSCI/hf-timestd
 
 [Timer]
 # First check 2 minutes after boot — past the HFPS settle window so

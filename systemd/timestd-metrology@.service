@@ -3,7 +3,7 @@
 # when this always-restart service finally gives up (StartLimit exhausted).
 OnFailure=timestd-alert@%N.service
 Description=HF-TimeStd Metrology — %i
-Documentation=https://github.com/mijahauan/hf-timestd
+Documentation=https://github.com/HamSCI/hf-timestd
 # Phase 2: metrology reads from the core-recorder's ring buffer.
 # Requires (not just Wants) the producer so workers don't loop attaching.
 After=timestd-core-recorder.service
