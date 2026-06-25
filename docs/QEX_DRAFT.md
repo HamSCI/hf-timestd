@@ -488,7 +488,7 @@ The software is entirely open source:
 - ka9q-radio: https://github.com/ka9q/ka9q-radio
 - hf-timestd: https://github.com/HamSCI/hf-timestd
 - PHaRLAP (for mode ID): available from IPS Australia
-- pyLAP Python wrapper: https://github.com/mijahauan/PyLap
+- pyLAP Python wrapper: https://github.com/HamSCI/PyLap
 
 The principal non-obvious requirement is the GPSDO. Its frequency stability (sub-ppb
 sampling clock) is essential for both products. For UTC recovery, hf-timestd's Fusion
@@ -610,7 +610,7 @@ both, this is a practically accessible entry point.
 [13] Frissell, N.A., Piccini, G., Diehl, D., and Calderon, A., "PyLap — Python wrapper
      for PHaRLAP ionospheric ray tracing," Ham Radio Science Citizen Investigation
      (HamSCI), https://github.com/HamSCI/PyLap, 2022; patched fork with PHaRLAP
-     4.7.4 / IRI-2020 / GCC support: https://github.com/mijahauan/PyLap.
+     4.7.4 / IRI-2020 / GCC support: https://github.com/HamSCI/PyLap.
 
 [14] Bust, G.S. and Mitchell, C.N., "History, current state, and future directions of
      ionospheric imaging," *Rev. Geophys.*, 46, RG1003, 2008 (oblique TEC techniques).

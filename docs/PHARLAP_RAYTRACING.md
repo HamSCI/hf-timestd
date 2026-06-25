@@ -28,7 +28,7 @@ Australia's HF ray-tracing engine. We run **PHaRLAP 4.7.4**,
 licence-restricted from DST and never redistributed — it is operator-staged
 at `/opt/pharlap_4.7.4` or baked into the controlled DASI2 golden image as
 single-licensee internal use. We drive it from Python through **pyLAP** (our
-open fork, `mijahauan/PyLap`), built on install by
+open fork, `HamSCI/PyLap`), built on install by
 [`ensure-pylap.sh`](../scripts/ensure-pylap.sh). The full integration lives
 in [`raytrace_engine.py`](../src/hf_timestd/core/raytrace_engine.py).
 

@@ -223,7 +223,7 @@ releases needed Intel Fortran; 4.7.4 does not).
 ### Build pyLAP (Python wrapper)
 
 pyLAP is the Python interface to PHaRLAP.  We maintain a patched fork at
-<https://github.com/mijahauan/PyLap> with cross-platform PHaRLAP 4.7.4
+<https://github.com/HamSCI/PyLap> with cross-platform PHaRLAP 4.7.4
 support (Linux x86_64, macOS arm64, macOS x86_64) and numpy/GCC-14 fixes.
 `scripts/install.sh` Phase 4b clones it pinned to a known-good commit
 (`PYLAP_REF`) and builds it automatically; the manual equivalent is:
@@ -234,7 +234,7 @@ and `gfortran` on Linux (`brew install gcc` on macOS).
 **Build and install into the hf-timestd venv:**
 
 ```bash
-git clone https://github.com/mijahauan/PyLap.git /opt/pylap
+git clone https://github.com/HamSCI/PyLap.git /opt/pylap
 export PHARLAP_HOME=/opt/pharlap_4.7.4
 /opt/git/sigmond/hf-timestd/venv/bin/pip install /opt/pylap --no-build-isolation
 ```

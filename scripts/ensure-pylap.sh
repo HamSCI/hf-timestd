@@ -31,7 +31,7 @@ REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 PHARLAP_HOME="${PHARLAP_HOME:-/opt/pharlap_4.7.4}"
 VENV="${TIMESTD_VENV:-$REPO_ROOT/venv}"
 PYLAP_DIR="${PYLAP_DIR:-/opt/pylap}"
-PYLAP_REPO="https://github.com/mijahauan/PyLap.git"
+PYLAP_REPO="https://github.com/HamSCI/PyLap.git"
 # Canonical pyLAP pin (never a bare branch/HEAD) — bump when a newer PyLap is
 # validated. native-binaries.md points here for the hf-timestd pyLAP pin.
 PYLAP_REF="${PYLAP_REF:-a61ded200c1aea68ee6f7f553c27520087449adc}"

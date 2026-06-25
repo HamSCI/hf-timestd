@@ -554,13 +554,13 @@ realtime_iono    = true   # set false to skip WAM-IPE/GIRO network fetching
 **Feature:** `raytrace_engine.py` — new `RaytraceEngine` class integrates PHaRLAP 4.7.4 numerical 2D ray tracing via a Python wrapper (pyLAP) for HF propagation mode identification (1F/2F/3F, E/F layer). Soft import with geometric fallback ensures no impact on real-time critical path.
 
 - **`src/hf_timestd/core/raytrace_engine.py`**: New module — `RaytraceEngine` class with `compute_modes()`, `_build_iri_grid()` (IRI-2020 via pyLAP), and geometric-delay fallback
-- **`pyproject.toml`**: New `raytrace` optional dependency group — `pylap @ git+https://github.com/mijahauan/PyLap@main`
+- **`pyproject.toml`**: New `raytrace` optional dependency group — `pylap @ git+https://github.com/HamSCI/PyLap@main`
 - **`.windsurf/workflows/setup-raytrace.md`**: Full setup workflow for PHaRLAP + pyLAP on macOS
 
 **Bugs fixed in integration (all in `raytrace_engine.py` and upstream pyLAP fork):**
 - Ne units: IRI-2020 returns m⁻³; `raytrace_2d` expects cm⁻³ — fixed by ×10⁻⁶ conversion in `_build_iri_grid`
 - Ionosphere grid size: extended to 10,000 km range for multi-hop ray coverage
-- Multi-hop stride bug in `raytrace_2d.c`: `ray_data` C-array hop stride corrected from `num_rays×9` to `num_rays×19` (upstream fix in `mijahauan/PyLap`)
+- Multi-hop stride bug in `raytrace_2d.c`: `ray_data` C-array hop stride corrected from `num_rays×9` to `num_rays×19` (upstream fix in `HamSCI/PyLap`)
 - Fortran SAVE-variable segfault on repeated `raytrace_2d` calls: fixed by single call with `nhops=max_hops`, iterating hops in Python
 
 **Verified output (WWV→EM38ww, IRI-2020, 2024-03-15 18:00 UTC):**

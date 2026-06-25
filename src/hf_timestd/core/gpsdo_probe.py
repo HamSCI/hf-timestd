@@ -11,7 +11,7 @@ get a fresh answer instead of a static TOML value.
 Note on naming: there is an unrelated `hf_timestd.core.gpsdo_monitor`
 module in this package — it's the sample-counter / anchor watchdog, not
 a GPSDO health probe. This file's source of truth is the separate
-`mijahauan/gpsdo-monitor` daemon, not that module.
+`HamSCI/gpsdo-monitor` daemon, not that module.
 
 The probe treats a file as usable iff:
 

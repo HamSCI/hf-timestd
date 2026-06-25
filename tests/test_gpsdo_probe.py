@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Unit tests for GpsdoProbe — reads /run/gpsdo/<serial>.json produced
-by the mijahauan/gpsdo-monitor daemon and maps it to an A-level string
+by the HamSCI/gpsdo-monitor daemon and maps it to an A-level string
 the authority manager can consume as a_level_provider."""
 
 import json

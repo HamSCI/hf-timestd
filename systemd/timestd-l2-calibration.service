@@ -3,7 +3,7 @@
 # when this always-restart service finally gives up (StartLimit exhausted).
 OnFailure=timestd-alert@%N.service
 Description=HF Time Standard L2 Calibration Service - Converts L1 to L2 Timing
-Documentation=https://github.com/mijahauan/grape-recorder
+Documentation=https://github.com/HamSCI/grape-recorder
 After=timestd-metrology.service
 Wants=timestd-metrology.service
 
