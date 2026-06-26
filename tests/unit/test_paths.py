@@ -223,49 +223,30 @@ class TestDiscoverChannels:
 # =============================================================================
 
 
-def _write_config(tmp_path: Path, mode: str, prod: str = "/var/lib/timestd",
-                  test: str = "/tmp/timestd-test") -> Path:
+def _write_config(tmp_path: Path, prod: str = "/var/lib/timestd") -> Path:
+    # The legacy recorder.mode test/production toggle was removed; a config
+    # now carries a single production_data_root (see load_paths_from_config).
     cfg = tmp_path / "timestd-config.toml"
-    cfg.write_text(
-        f'[recorder]\n'
-        f'mode = "{mode}"\n'
-        f'production_data_root = "{prod}"\n'
-        f'test_data_root = "{test}"\n'
-    )
+    cfg.write_text(f'[recorder]\nproduction_data_root = "{prod}"\n')
     return cfg
 
 
 class TestLoadPathsFromConfig:
-    def test_production_mode_uses_production_root(self, tmp_path):
-        cfg = _write_config(tmp_path, mode="production",
-                            prod="/srv/timestd")
+    def test_uses_production_data_root(self, tmp_path):
+        cfg = _write_config(tmp_path, prod="/srv/timestd")
         paths = load_paths_from_config(cfg)
         assert paths.data_root == Path("/srv/timestd")
-
-    def test_test_mode_uses_test_root(self, tmp_path):
-        cfg = _write_config(tmp_path, mode="test",
-                            test="/var/tmp/test-timestd")
-        paths = load_paths_from_config(cfg)
-        assert paths.data_root == Path("/var/tmp/test-timestd")
-
-    def test_unknown_mode_treated_as_test(self, tmp_path):
-        # The implementation only checks mode == "production"; anything else
-        # falls through to the test root. Document and lock that behavior.
-        cfg = _write_config(tmp_path, mode="staging",
-                            test="/tmp/staging-root")
-        paths = load_paths_from_config(cfg)
-        assert paths.data_root == Path("/tmp/staging-root")
 
     def test_missing_config_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError):
             load_paths_from_config(tmp_path / "does-not-exist.toml")
 
-    def test_missing_recorder_section_falls_back_to_defaults(self, tmp_path):
+    def test_missing_recorder_section_falls_back_to_default(self, tmp_path):
         cfg = tmp_path / "empty.toml"
         cfg.write_text("# empty config\n")
         paths = load_paths_from_config(cfg)
-        # Default mode is "test", default test root is /tmp/timestd-test
-        assert paths.data_root == Path("/tmp/timestd-test")
+        # No recorder.production_data_root -> the single built-in default.
+        assert paths.data_root == Path("/var/lib/timestd")
 
 
 class TestGetPaths:
@@ -275,12 +256,11 @@ class TestGetPaths:
 
     def test_explicit_data_root_overrides_config(self, tmp_path):
         # Config exists pointing somewhere else, but explicit root wins
-        cfg = _write_config(tmp_path, mode="production",
-                            prod="/should-not-be-used")
+        cfg = _write_config(tmp_path, prod="/should-not-be-used")
         paths = get_paths(data_root=tmp_path, config_path=cfg)
         assert paths.data_root == tmp_path
 
     def test_uses_config_when_no_data_root(self, tmp_path):
-        cfg = _write_config(tmp_path, mode="test", test=str(tmp_path / "via-cfg"))
+        cfg = _write_config(tmp_path, prod=str(tmp_path / "via-cfg"))
         paths = get_paths(config_path=cfg)
         assert paths.data_root == tmp_path / "via-cfg"

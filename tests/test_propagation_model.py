@@ -237,7 +237,12 @@ class TestIonoDataService:
         assert point.NmF2_m3 > 0
         assert 1 < point.foF2_MHz < 15
         assert 1 < point.TEC_TECU < 100
-        assert 'fallback' in point.source or 'climatological' in point.source
+        # IRI-2020 is itself a climatological model and is the legitimate
+        # fallback once WAM-IPE/GIRO are disabled (when gfortran is present to
+        # build iri2020); accept it alongside the parametric tiers used when
+        # IRI is unavailable.
+        assert point.source == 'iri' \
+            or 'fallback' in point.source or 'climatological' in point.source
     
     def test_chapman_profile(self):
         from hf_timestd.core.iono_data_service import IonoDataService, IonoGridPoint

@@ -105,7 +105,7 @@ class TestRegisterWith(unittest.TestCase):
         self.assertEqual(kwargs['agc_enable'], 0)
         self.assertEqual(kwargs['gain'], 0.0)
         # Idiomatic ka9q-python calls used by the legacy _create_channel.
-        self.assertEqual(kwargs['timeout'], 10.0)
+        self.assertEqual(kwargs['timeout'], 20.0)
         self.assertEqual(kwargs['frequency_tolerance'], 1.0)
 
     def test_add_channel_wires_handle_samples(self):

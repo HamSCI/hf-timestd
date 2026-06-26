@@ -138,6 +138,14 @@ class TestSharedMultiShutdown(unittest.TestCase):
         # Real __init__ sets this to None; the __new__ fast-path has to
         # too, otherwise _shutdown raises AttributeError.
         cr._t6_channel_info = None
+        # _shutdown also stops the WWVB decode loop/stream; real __init__
+        # sets these unconditionally, so the __new__ fast-path must mirror
+        # them or _shutdown raises AttributeError.
+        cr._wwvb_decode_stop = MagicMock()
+        cr._wwvb_decode_thread = None
+        cr._wwvb_stream = None
+        cr._wwvb_ledger = None
+        cr._wwvb_l1_writer = None
         # _write_status reads several attrs we don't care about; stub it.
         cr._write_status = MagicMock()
         return cr
