@@ -51,13 +51,16 @@ from .decimated_buffer import DecimatedBuffer, SAMPLE_RATE, SAMPLES_PER_DAY
 
 # Standard GRAPE channels (sorted by frequency)
 # Uses new naming convention: SHARED_XXXX for shared WWV/WWVH/BPM frequencies
+# CHU 3330/7850/14670 disabled 2026-06-27 (CHU off-air): dropped from the
+# GRAPE daily set so we don't package/upload empty CHU spectrograms to PSWS.
+# Re-add the three tuples if CHU returns to air.
 STANDARD_CHANNELS = [
     ('SHARED 2500', 2.5e6),
-    ('CHU 3330', 3.33e6),
+    # ('CHU 3330', 3.33e6),
     ('SHARED 5000', 5e6),
-    ('CHU 7850', 7.85e6),
+    # ('CHU 7850', 7.85e6),
     ('SHARED 10000', 10e6),
-    ('CHU 14670', 14.67e6),
+    # ('CHU 14670', 14.67e6),
     ('SHARED 15000', 15e6),
     ('WWV 20000', 20e6),
     ('WWV 25000', 25e6),

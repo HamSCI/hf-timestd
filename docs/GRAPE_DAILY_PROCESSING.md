@@ -248,7 +248,7 @@ The daily job typically takes:
 
 - **Decimation**: ~5-10 minutes per channel
 - **Spectrograms**: ~1-2 minutes per channel
-- **Total**: ~30-60 minutes for the 9 canonical channels
+- **Total**: ~30-60 minutes for the active channels (6; the 3 CHU channels are disabled while CHU is off-air)
 
 Resource usage:
 

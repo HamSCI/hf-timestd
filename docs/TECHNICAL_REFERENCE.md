@@ -16,11 +16,11 @@
 
 ## Current Operational Configuration
 
-**9 channels** monitoring 9 frequencies at 24 kHz IQ (config-driven):
+**9 channels** at 24 kHz IQ (config-driven). The **3 CHU channels are currently disabled — CHU went off-air 2026-06-27** — leaving **6 active**:
 
 - **Shared frequencies (4):** 2.5, 5, 10, 15 MHz - WWV and WWVH both transmit
 - **WWV-only (2):** 20, 25 MHz
-- **CHU (3):** 3.33, 7.85, 14.67 MHz
+- **CHU (3) — disabled, off-air 2026-06-27:** 3.33, 7.85, 14.67 MHz
 
 The 9 RF channels yield up to ~17 broadcast solutions: because WWV and WWVH both transmit on the 4 shared frequencies (2.5, 5, 10, 15 MHz), each shared channel can resolve two independent broadcasts, so 9 channels expand to roughly 17 per-broadcast timing solutions.
 
@@ -76,7 +76,7 @@ Set `[metrology] physics_products = false` to disable the four science-only prod
 
 **Responsibility:** Multi-Broadcast Synthesis (v6.1 Architecture)
 
-- Reads L2 HDF5 measurements from all 9 channels via SWMR (`swmr=True` readers, writer holds file open with `swmr_mode=True`).
+- Reads L2 measurements from all active channels via the SQLite store (WAL mode; concurrent read-only connections).
 - **Per-broadcast Kalman filtering** — tracks ionospheric path dynamics for each of 17 broadcasts.
 - **GNSS VTEC correction** — applies real-time ionospheric correction when local GNSS available.
 - **Weighted Least Squares fusion** — optimal linear combination without temporal smoothing.
@@ -1031,7 +1031,7 @@ sudo sysctl -w net.core.rmem_max=26214400
 ### Fusion
 
 - Cycle interval: 8 seconds (configurable via `--interval`)
-- Reads L2 HDF5 from all 9 channels per cycle
+- Reads L2 measurements from all active channels per cycle (SQLite store)
 - Dual Kalman update + WLS fusion + Chrony SHM write
 
 ---

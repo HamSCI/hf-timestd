@@ -108,21 +108,28 @@ description = "WWV_20000"
 frequency_hz = 25000000
 description = "WWV_25000"
 
-[[recorder.channel_group.timestd.channels]]
-frequency_hz = 3330000
-description = "CHU_3330"
+# CHU (Ottawa) channels — DISABLED 2026-06-27: CHU has gone off-air.
+# Reception, the CHU FSK decode, and the CHU-fed coarse-time producer are
+# all gated on these channels existing, so commenting them out turns the
+# whole CHU path OFF.  The decode routines stay in the code
+# (core/chu_fsk_decoder.py, the CHU tick filters); to restore CHU if it
+# returns to air, uncomment the three blocks below AND re-enable
+# [timing.coarse_time] further down.
+# [[recorder.channel_group.timestd.channels]]
+# frequency_hz = 3330000
+# description = "CHU_3330"
+#
+# [[recorder.channel_group.timestd.channels]]
+# frequency_hz = 7850000
+# description = "CHU_7850"
+#
+# [[recorder.channel_group.timestd.channels]]
+# frequency_hz = 14670000
+# description = "CHU_14670"
 
-[[recorder.channel_group.timestd.channels]]
-frequency_hz = 7850000
-description = "CHU_7850"
-
-[[recorder.channel_group.timestd.channels]]
-frequency_hz = 14670000
-description = "CHU_14670"
-
-# CHU FSK decode channels are NO LONGER requested as separate USB channels.
-# hf-timestd now derives the 12kHz audio internally from the archived IQ buffers.
-# Therefore, [recorder.chu_fsk] has been removed to conserve network and SDR DSP resources.
+# (CHU FSK decode channels were already not requested as separate USB
+# channels — hf-timestd derives the 12 kHz audio internally from the
+# archived IQ buffers — so there is no [recorder.chu_fsk] block.)
 
 # =============================================================================
 # WWVB (60 kHz LF) — NIST Fort Collins, added to offset the loss of CHU.
@@ -215,7 +222,10 @@ rtp_expected_accuracy_ms = 0.001  # L4 accuracy (GPS+PPS via LAN)
 # channel produces a successful FSK decode (minute-precision UTC,
 # max_error_sec=60).  See METROLOGY.md §4.5.
 [timing.coarse_time]
-enabled = true
+# DISABLED 2026-06-27: the only source is a successful CHU FSK decode, and
+# CHU is off-air (its channels are commented out above).  Re-enable together
+# with the CHU channels if CHU returns to air.
+enabled = false
 # path = "/run/hf-timestd/coarse_time.json"  # default; override only for tests
 
 # === Fusion loop metrics (measurement-phase instrumentation) ===
