@@ -407,39 +407,67 @@ def _handle_status(args):
                 'error': 'file not found',
             }
 
-    # 2. Check HDF5 data freshness
+    # 2. Check data freshness from the SQLite store (HDF5 retired at v7.0;
+    # see docs/HDF5-TO-SQLITE-MIGRATION.md). Freshness is measured from the
+    # most recent measurement's `timestamp_utc` (ISO8601), not file mtime.
+    import sqlite3
+    from datetime import datetime, timezone
+
     data_root = Path(getattr(args, 'data_root', '/var/lib/timestd'))
-    phase2_dir = data_root / 'phase2'
-    if phase2_dir.exists():
-        # Check fusion output
-        fusion_dir = phase2_dir / 'fusion'
-        if fusion_dir.exists():
-            h5_files = sorted(fusion_dir.glob('fusion_fusion_timing_*.h5'))
-            if h5_files:
-                latest = h5_files[-1]
-                age = time.time() - latest.stat().st_mtime
-                result['data_freshness']['fusion_hdf5'] = {
-                    'file': latest.name,
-                    'age_seconds': round(age, 1),
-                    'stale': age > 600,
+    db_path = data_root / 'phase2' / 'timestd.db'
+
+    def _iso_age_seconds(ts):
+        """Age in seconds of an ISO8601 timestamp, or None if unparseable."""
+        if ts is None:
+            return None
+        try:
+            dt = datetime.fromisoformat(str(ts).replace('Z', '+00:00'))
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - dt).total_seconds()
+
+    if db_path.exists():
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
+        try:
+            # Fusion output (L3_fusion_timing). MAX() over the ISO8601
+            # timestamp_utc column is a valid lexical max for ISO8601.
+            try:
+                row = conn.execute(
+                    "SELECT MAX(timestamp_utc) FROM L3_fusion_timing"
+                ).fetchone()
+            except sqlite3.Error:
+                row = None
+            fusion_age = _iso_age_seconds(row[0]) if row else None
+            if fusion_age is not None:
+                result['data_freshness']['fusion_store'] = {
+                    'table': 'L3_fusion_timing',
+                    'age_seconds': round(fusion_age, 1),
+                    'stale': fusion_age > 600,
                 }
-                # If no calib file was given, infer status from HDF5 freshness
-                if not calib_path and age < 600:
+                # If no calib file was given, infer status from freshness
+                if not calib_path and fusion_age < 600:
                     result['status'] = 'WARN'
                     result['exit_code'] = 1
 
-        # Check how many metrology channels have recent data
-        channel_dirs = [d for d in phase2_dir.iterdir()
-                        if d.is_dir() and d.name != 'fusion' and d.name != 'science']
-        active_channels = 0
-        for ch_dir in channel_dirs:
-            h5s = sorted(ch_dir.glob('*.h5'))
-            if h5s:
-                age = time.time() - h5s[-1].stat().st_mtime
-                if age < 300:
-                    active_channels += 1
-        result['data_freshness']['active_metrology_channels'] = active_channels
-        result['data_freshness']['total_metrology_channels'] = len(channel_dirs)
+            # How many metrology channels have recent data: one table
+            # (L1_metrology_measurements) keyed by a `channel` column.
+            try:
+                rows = conn.execute(
+                    "SELECT channel, MAX(timestamp_utc) "
+                    "FROM L1_metrology_measurements GROUP BY channel"
+                ).fetchall()
+            except sqlite3.Error:
+                rows = []
+            active_channels = sum(
+                1 for _ch, ts in rows
+                if (a := _iso_age_seconds(ts)) is not None and a < 300
+            )
+            result['data_freshness']['active_metrology_channels'] = active_channels
+            result['data_freshness']['total_metrology_channels'] = len(rows)
+        finally:
+            conn.close()
 
     print(json.dumps(result, indent=2))
     sys.exit(result['exit_code'])
@@ -1018,7 +1046,7 @@ Exit codes:
         help='Path to calibration JSON file to check')
     status_parser.add_argument('--data-root',
         default='/var/lib/timestd',
-        help='Data root directory (checks HDF5 freshness)')
+        help='Data root directory (checks SQLite store freshness)')
     status_parser.add_argument('--json', action='store_true', default=True,
         help='JSON output (default)')
     

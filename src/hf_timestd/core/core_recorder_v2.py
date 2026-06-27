@@ -577,11 +577,13 @@ class CoreRecorderV2:
                     logger.warning(f"T6 HPPS SHM init failed: {e}")
                     self._t6_shm = None
 
-                # Init HFPS SHM feed (unit 3) — operational chrony
-                # feed from the diff detector (Method 5).  Built only
-                # when the sidecar is enabled AND SHM push is wired.
-                # Runs in parallel with TSL3 (unit 2); chrony selects
-                # between them by its usual algorithm.
+                # Init HFPS SHM feed (unit 3) — optional chrony feed
+                # from the diff detector (Method 5).  Disabled by
+                # default; built only when `diff_to_shm_unit` is set in
+                # the [*.t6] config (not in the shipped config, so this
+                # branch is normally skipped).  When enabled it runs in
+                # parallel with HPPS (unit 2); chrony selects between
+                # them by its usual algorithm.
                 if (self._t6_diff_calibrator is not None
                         and self._t6_config.get('diff_to_shm_unit', None)
                         is not None):

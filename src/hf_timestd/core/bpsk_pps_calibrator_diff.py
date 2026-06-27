@@ -33,14 +33,19 @@ filter's rise time of ~1/(2B) = 20 µs ≈ 2 samples at 96 kHz.  The
 Parabolic interpolation on 3 samples around the peak resolves the
 edge to a fraction of a sample.
 
-Sidecar mode
-============
+Sidecar / diagnostic mode (default)
+===================================
 
-This class is intended to run ALONGSIDE the existing matched-filter
+By default this class runs ALONGSIDE the existing matched-filter
 calibrator, dumping its per-PPS edge timestamps to a CSV for offline
-A/B comparison.  It DOES NOT push to chrony, modify SHM, or touch
-any other state in the system.  Use ``BpskPpsCalibratorMF`` (the
-legacy + opt-in magnitude paths) for the operational chain_delay.
+A/B comparison.  The class itself never pushes to chrony or modifies
+SHM.
+
+The recorder can optionally forward these diff edges to chrony SHM
+unit 3 (refid ``HFPS``) when ``[*.t6] diff_to_shm_unit`` is set, but
+that feed is disabled in the shipped configuration (the live chrony
+config consumes only FUSE and HPPS).  Use ``BpskPpsCalibratorMF`` for
+the operational chain_delay.
 """
 
 from __future__ import annotations
@@ -138,7 +143,10 @@ DIFF_REJECT_RECOVERY_THRESHOLD = 30
 class BpskPpsCalibratorDiff:
     """Per-sample magnitude-derivative PPS edge detector.
 
-    Sidecar / offline-analysis use only.  Does NOT push to chrony.
+    Sidecar / diagnostic by default; the class itself never pushes to
+    chrony.  The recorder can optionally feed its edges to chrony SHM
+    unit 3 (refid HFPS) when ``diff_to_shm_unit`` is configured, but
+    that path is disabled in the shipped config.
 
     Parameters
     ----------

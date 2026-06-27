@@ -472,8 +472,9 @@ class RaytraceEngine:
         Ray-trace from *station* to the receiver at *utc_time* for one frequency.
 
         Returns a RaytraceResult with all modes whose ground range closes on
-        the receiver within ±200 km.  Falls back to geometric (vacuum) delay
-        when pyLAP is unavailable.
+        the receiver within the closing tolerance (≥300 km or 10% of path
+        length).  Falls back to geometric (vacuum) delay when pyLAP is
+        unavailable.
         """
         if station not in _STATION_LOCS:
             logger.warning(f"RaytraceEngine: unknown station {station}")
