@@ -58,17 +58,29 @@ solar_elevation = solar_position(midpoint, timestamp)
 The F2-layer critical frequency (foF2) — the highest frequency that can be reflected at vertical incidence — follows the Chapman production function. Under solar illumination, photoionization produces free electrons; in darkness, recombination depletes them. The equilibrium electron density, and hence foF2, depends on cos(χ):
 
 ```
-foF2 = foF2_noon × cos^0.4(χ)     for χ < 80° (daytime)
-foF2 = foF2_night_floor             for χ > 100° (deep night)
-foF2 = interpolated                  for 80° < χ < 100° (twilight)
+foF2 = foF2_noon × cos^0.25(χ)    daytime (solar elevation > 0)
+foF2 = foF2_night_floor            deep night (elevation ≤ −18°)
+foF2 = interpolated                twilight (−18° < elevation ≤ 0°)
 ```
 
 Where:
-- **foF2_noon = 9.0 MHz** (moderate solar activity, F10.7 ≈ 150)
+- **foF2_noon ≈ 10.9 MHz**, derived from the 12-month smoothed sunspot number R12 via `foF2_noon ≈ 6 + 0.07·R12` (R12 = 70, a moderate climatological anchor)
 - **foF2_night_floor = 3.0 MHz** (residual nighttime ionization)
-- The 0.4 exponent comes from the Chapman layer theory for the F2-layer, where the effective recombination rate gives a weaker dependence on χ than the simple cos^0.5 of a Chapman α-layer
+- The 0.25 exponent is the textbook Chapman-α result: peak electron density Ne ∝ cos χ, and foF2 ∝ Ne^0.5 ∝ cos^0.25 χ (Davies, 1990)
+
+These regimes are framed in solar **elevation** (= 90° − χ): deep night ≤ −18° (astronomical twilight ended), twilight −18° → 0° (linear interpolation, with a 0.6×daytime anchor at the horizon, elevation 0), and daytime > 0°.
 
 This is a climatological estimate — it represents typical conditions, not the exact foF2 at this moment. But it is sufficient to reject clearly impossible modes (e.g., 15 MHz F-layer propagation when foF2 ≈ 4 MHz at night).
+
+#### E-Layer Critical Frequency (foE) and Sporadic-E Branch
+
+In parallel with foF2, the reanalysis estimates the E-layer critical frequency foE from the same solar geometry, using the ITU-R P.1239 / Muggleton (1975) empirical formula:
+
+```
+foE = 0.9 × [(180 + 1.44·R12) × cos χ]^0.25     (MHz), with a 0.5 MHz night floor
+```
+
+The E layer is strongly Chapman (foE tracks cos^0.25 χ closely) and nearly vanishes after dusk, hence the small residual-ionization floor below the horizon. foE bounds the E-layer/Es-mode MUF used when validating low-elevation `1E` candidates and reclassifying daytime above-MUF detections as possible sporadic-E.
 
 <!-- LOGS: reanalysis | filter: "solar_physics" -->
 

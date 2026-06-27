@@ -35,6 +35,23 @@ chronyc sources -v | grep SHM
 If all six look healthy, the problem is above the data pipeline (web UI,
 GRAPE upload, science products) — skip to the relevant section below.
 
+### Deploy footgun: stale `site-packages` shadowing `src/`
+
+hf-timestd is editable-installed from `src/`, but a stale
+`site-packages` copy can SHADOW the editable tree — long-running
+services then keep executing old code even after you edit `src/` and
+restart. If a fix you deployed doesn't take effect, verify which copy
+Python actually imports:
+
+```bash
+python -c "import hf_timestd, sys; print(hf_timestd.__file__)"
+```
+
+The path must resolve under `src/` (the editable install), **not**
+under `site-packages`. If it points at `site-packages`, remove the
+stale copy and re-run the editable install (`sudo ./scripts/deploy.sh`)
+before chasing the bug any further.
+
 ---
 
 ## 2. Log access — the canonical method
@@ -307,6 +324,7 @@ journalctl -u timestd-web-api.service --since -15min
 | `timestd-ionex-download.service` + `.timer` | Fetches daily IONEX maps |
 | `timestd-iono-reanalysis.service` + `.timer` | Reprocesses recent days with updated ionospheric inputs |
 | `timestd-radiod-monitor.service` | Continuous radiod hardware health watcher |
+| `timestd-clock-monitor.service` + `.timer` | Clock-health watchdog; runs `scripts/check-clock-health.sh --auto-makestep` every 30 s, auto-corrects a free-running chrony / drifted system clock (see §5.8) |
 | `timestd-alert@.service` | On-failure handler invoked by `OnFailure=` on critical units |
 
 All log to journald; triage is the same shape as above.
@@ -448,6 +466,36 @@ systemctl status 'radiod@*'
 **Fix**: restart `radiod@<instance>.service`; verify IGMP querier on
 the switch; check that `timestd-core-recorder`'s `EnvironmentFile=` has
 the right multicast group.
+
+### 5.8 Chrony free-running / system clock drifted off UTC
+
+**Symptom**: `chronyc tracking` shows `Reference ID : 00000000 ()`
+(no source selected), the system clock is visibly off UTC by seconds,
+and downstream decoders go dark — FT8/FT4 and other slot-aligned modes
+are the first to fail because they are intolerant of multi-second clock
+error (WSPR's longer window can ride through a few seconds).
+
+**Likely cause**: the host's GPS/PPS reference dropped (e.g. a USB-GPS
+fell off the bus) and chrony free-ran on the local oscillator, drifting
+away from UTC. This was observed as a field incident in 2026-06 (host
+USB-GPS dropped off the bus, chrony free-ran ~6 s, FT8/FT4 dark).
+
+**Auto-correction**: the `timestd-clock-monitor` watchdog
+(`scripts/check-clock-health.sh --auto-makestep`) runs every 30 s and
+issues a guarded `chronyc makestep` to pull the system clock back to
+UTC when it detects the drift.
+
+**Manual remedy** (if the watchdog is disabled or you need an immediate
+correction):
+
+```bash
+sudo chronyc makestep            # step the clock back to the selected source
+chronyc tracking                 # confirm Reference ID is no longer 00000000
+```
+
+Then restore the underlying reference — reseat/replug the USB-GPS,
+confirm PPS is present, and verify chrony reacquires a real source so
+it stops free-running.
 
 ---
 

@@ -22,6 +22,8 @@
 - **WWV-only (2):** 20, 25 MHz
 - **CHU (3):** 3.33, 7.85, 14.67 MHz
 
+The 9 RF channels yield up to ~17 broadcast solutions: because WWV and WWVH both transmit on the 4 shared frequencies (2.5, 5, 10, 15 MHz), each shared channel can resolve two independent broadcasts, so 9 channels expand to roughly 17 per-broadcast timing solutions.
+
 **Data products generated**:
 
 1. **24 kHz Binary IQ Archive** - Phase 1 raw recording as `.bin.zst` + JSON sidecars (`raw_buffer/{CHANNEL}/`)
@@ -80,6 +82,8 @@ Set `[metrology] physics_products = false` to disable the four science-only prod
 - **Weighted Least Squares fusion** — optimal linear combination without temporal smoothing.
 - Feeds **Chrony SHM** to discipline the system clock.
 - **Output:** `/var/lib/timestd/phase2/fusion/` (HDF5 L3, Fused CSV)
+
+> **Note:** Fusion (and the L1 path) may be inactive depending on the active service profile and field state. The chrony feed `FUSE` is a single L2-calibrated SHM feed (SHM 1); the former separate L1 feed was retired 2026-05-23.
 
 **v6.1 Hierarchical Architecture:**
 | Layer | Method | Purpose |
@@ -484,11 +488,10 @@ new code should not follow it.
   pyproject.toml comment).
 * **SQLite dual-writer (v7.0+).** L1/L2/L3 products are now
   dual-written via `dual_writer.py` to both HDF5 (SWMR) and SQLite;
-  see `HDF5-TO-SQLITE-MIGRATION.md`.  The two backends are kept in
-  parity, and a future flip switches readers to SQLite-only while
-  HDF5 continues for legacy consumers.
+  see `HDF5-TO-SQLITE-MIGRATION.md`.  SQLite is the sole backend
+  (HDF5 retired at v7.0).
 
-History: review item D-H4 (CODE_REVIEW_2026-05-17_METROLOGY_PHYSICS.md
+History: review item D-H4 (archive/CODE_REVIEW_2026-05-17_METROLOGY_PHYSICS.md
 §5.1) flagged this section as describing the pre-SWMR
 "locking=False + open-write-close" pattern while ARCHITECTURE,
 README, and METROLOGY described the SWMR model in v6.10+.  This
@@ -662,21 +665,18 @@ callsign = "AC0G"
 grid_square = "EM38ww"
 
 [ka9q]
-status_address = "myhost-hf-status.local"  # mDNS name from radiod config
+status = "myhost-hf-status.local"          # mDNS name from radiod config
 
 [recorder]
-mode = "test"                              # "test" or "production"
-test_data_root = "/tmp/timestd-test"
+# The legacy test/production "mode" toggle was removed (it defaulted to
+# /tmp and silently broke real recorders). The data root is set directly:
 production_data_root = "/var/lib/timestd"
 sample_rate = 24000                        # Config-driven (default 24 kHz)
 
-[[recorder.channels]]
-ssrc = 10000000
+# Channels live under a named channel group; no `ssrc`, no `processor` key.
+[[recorder.channel_group.timestd.channels]]
 frequency_hz = 10000000
-preset = "iq"
-description = "WWV 10 MHz"
-enabled = true
-processor = "grape"
+description = "SHARED_10000"
 ```
 
 ---
@@ -710,6 +710,11 @@ sudo systemctl enable --now timestd-web-api
 sudo systemctl enable --now timestd-vtec
 sudo systemctl enable --now timestd-radiod-monitor
 sudo systemctl enable --now grape-daily.timer
+
+# Clock-health watchdog (commit 75b8a45): timestd-clock-monitor.service is
+# driven by timestd-clock-monitor.timer (30 s cadence) and runs
+# scripts/check-clock-health.sh --auto-makestep
+sudo systemctl enable --now timestd-clock-monitor.timer
 
 # View logs
 journalctl -u timestd-core-recorder -f
@@ -786,7 +791,7 @@ The current package is `hf_timestd` under `src/hf_timestd/`.
 
 | Module | Class/Function | Purpose |
 |--------|---------------|--------|
-| `multi_broadcast_fusion.py` | `MultiBroadcastFusion` | Dual Kalman filtering (L1 geometric + L2 physics), WLS fusion, Chrony SHM feed (TSL1/TSL2) |
+| `multi_broadcast_fusion.py` | `MultiBroadcastFusion` | Dual Kalman filtering (L1 geometric + L2 physics), WLS fusion, Chrony SHM feed (SHM 1, refid FUSE) — there is no separate L1 SHM feed (unit 0 retired 2026-05-23) |
 | `physics_fusion_service.py` | `PhysicsFusionService` | TEC estimation from multi-frequency measurements, T_iono archival |
 | `l2_calibration_service.py` | `L2CalibrationService` | Applies geometric + TEC corrections to produce L2 calibrated timing |
 | `timing_validation_service.py` | `TimingValidationService` | GPS ground-truth validation (RTP mode only) |
@@ -1057,6 +1062,30 @@ sudo sysctl -w net.core.rmem_max=26214400
 - **Gaps:** Zero-filled, logged in JSON sidecar metadata
 - **Packet loss:** <1% healthy
 - **Completeness colors:** 🟢 ≥99% | 🟡 95-99% | 🔴 <95%
+
+---
+
+## CLI
+
+The `hf-timestd` command exposes the following subcommands (see `hf-timestd --help`):
+
+| Subcommand | Purpose |
+|------------|---------|
+| `version` | Print version (supports `--json`) |
+| `inventory` | sigmond client-contract resource view (`--json`) |
+| `validate` | Config validation (`--json`) |
+| `quality` | Timing quality report |
+| `config show` / `config apply` | Show effective config / apply config changes |
+| `status` | System/health check |
+| `daemon` | Recorder daemon |
+| `discover` | List available radiod channels |
+| `create-channels` | Provision channels in radiod |
+| `raytrace` | PHaRLAP 2-D ray trace → propagation modes |
+| `data summary` / `data sources` / `data clean-*` | Storage usage, data-source status, cleanup |
+| `grape daily` / `grape decimate` / `grape spectrogram` / `grape package` / `grape upload` / `grape test-upload` / `grape status` | GRAPE daily pipeline and stages |
+| `calibrate` | BPSK-PPS calibration utilities |
+| `profile show` / `profile list` / `profile set` | Operational profile (archive/rtp/fusion/full) |
+| `service status` / `service enable` / `service disable` | Per-service config + systemd state |
 
 ---
 

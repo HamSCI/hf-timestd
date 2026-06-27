@@ -6,6 +6,28 @@
 
 ---
 
+> ## ⚠️ Implementation status: PLANNED, not built
+>
+> **This document describes a PLANNED coherent-array architecture.** The
+> multi-antenna DSP it discusses — beamforming, null steering,
+> angle-of-arrival (MUSIC/ESPRIT), MVDR/LCMV adaptive cancellation,
+> interferometric scintillation, and O/X magnetoionic mode separation —
+> is **NOT implemented in this repository.**
+>
+> **What exists today** is narrow and non-DSP:
+> - the channel-naming / broadcast registry (`BroadcastRegistry`) that
+>   maps frequency-based and broadcast-based channels to the same 17
+>   broadcasts, and
+> - recorder source-selection of an **external** `phase-engine` RTP
+>   multicast (i.e. `core_recorder_v2.py` can subscribe to a
+>   `phase-engine` source when configured), with no coherent combining
+>   performed in this repo.
+>
+> Everything below the registry/source-selection level — all coherent
+> combining and spatial processing — is aspirational design, not code.
+
+---
+
 ## Table of Contents
 
 1. [Overview](#overview)
@@ -619,10 +641,11 @@ assumes appropriate antenna geometry. Specific dependencies:
 
 ---
 
-## Scientific Benefits of a Coherent Array
+## Scientific Benefits of a Coherent Array (planned)
 
 These capabilities are unique to a multi-antenna coherent array. A single antenna
-cannot achieve any of them.
+cannot achieve any of them. (None of the spatial processing below is implemented
+in this repo — see the implementation-status banner at the top.)
 
 ### 1. Spatial Filtering / Null Steering
 
@@ -875,7 +898,7 @@ real-time product.
 
 ---
 
-## Multi-Source Architecture
+## Multi-Source Architecture (planned)
 
 ### Design Principle
 
@@ -1153,10 +1176,10 @@ The refactoring can be incremental:
 ## Related Documentation
 
 - **`docs/ARCHITECTURE.md`** — System architecture (pipeline phases, data flow)
-- **`docs/SCIENTIFIC_CAPABILITIES.md`** — Signal features and measurement validation
 - **`docs/DUAL_CHRONY_FEED_ARCHITECTURE.md`** — TSL1/TSL2 dual Chrony feed design
 - **`docs/METROLOGY.md`** — Metrological description and uncertainty budgets
-- **`docs/PHYSICS.md`** — Ionospheric physics capabilities
+- **`docs/PHYSICS.md`** — Ionospheric physics capabilities; signal features and
+  measurement validation (supersedes the archived `SCIENTIFIC_CAPABILITIES.md`)
 
 ---
 

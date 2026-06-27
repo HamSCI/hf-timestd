@@ -30,9 +30,9 @@ The 5-second window balances SNR gain against Doppler decorrelation (coherence t
 
 | Station | Frequency | Tick Duration | Skip Seconds | Notes |
 |---------|-----------|---------------|--------------|-------|
-| WWV | 1000 Hz | 5 ms | 0, 29, 59 | Minute marker, voice announcements |
-| WWVH | 1200 Hz | 5 ms | 0, 29, 59 | Minute marker, voice announcements |
-| CHU | 1000 Hz | 10 ms / 300 ms | 0 | 300ms for seconds 31-39 (FSK) |
+| WWV | 1000 Hz | 5 ms | 29, 59 | Minute marker, voice announcements (second 0 carries the minute marker and is NOT skipped) |
+| WWVH | 1200 Hz | 5 ms | 29, 59 | Minute marker, voice announcements (second 0 carries the minute marker and is NOT skipped) |
+| CHU | 1000 Hz | 10 ms / 300 ms | 29 | 300ms for seconds 31-39 (FSK) |
 | BPM | 1000 Hz | 10 ms / 100 ms | 0 | Minute-dependent (UTC vs UT1) |
 
 #### Usage

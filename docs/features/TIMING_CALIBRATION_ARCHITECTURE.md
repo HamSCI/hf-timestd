@@ -119,9 +119,9 @@ Inter-station spread: 21.3ms (expected for this receiver location)
 
 ## Implementation Files
 
-- `src/grape_recorder/grape/timing_calibrator.py` - Main calibrator class
-- `src/grape_recorder/grape/pipeline_orchestrator.py` - Integration point
-- `src/grape_recorder/grape/multi_broadcast_fusion.py` - Consistency checks
+- `src/hf_timestd/core/timing_calibrator.py` - Main calibrator class
+- `src/hf_timestd/core/multi_broadcast_fusion.py` - Consistency checks
+- `pipeline_orchestrator.py` - (archived; no longer present in the tree)
 
 ## State Persistence
 

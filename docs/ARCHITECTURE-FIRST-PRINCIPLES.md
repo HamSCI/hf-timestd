@@ -175,8 +175,9 @@ underlying metrology is broken.  It means the chrony-facing facade
 has a calibration mismatch.  The science annotations on the RTP stream
 are still valid.
 
-The chrony feed (HPPS SHM unit 2, HFPS SHM unit 3, FUSE SHM unit 1) is
-a **convenience** for keeping the host clock disciplined.  If chrony
+The chrony feed (FUSE SHM unit 1, HPPS SHM unit 2; plus the
+default-disabled HFPS SHM unit 3) is a **convenience** for keeping the
+host clock disciplined.  If chrony
 likes it, great; if not, that is independent of whether the annotated
 RTP stream is usable for science.
 

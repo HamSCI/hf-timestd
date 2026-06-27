@@ -20,13 +20,17 @@ service and produces data that the next stage consumes:
 ```
 radiod (IQ)
   └─→ [1] timestd-core-recorder      IQ → raw buffers
-        └─→ [2] timestd-metrology@*   tone detection → L1 HDF5  (×9 channels)
-              └─→ [3] timestd-l2-calibration   cross-station cal → L2 HDF5
+        └─→ [2] timestd-metrology@*   tone detection → L1 product tables  (×9 channels)
+              └─→ [3] timestd-l2-calibration   cross-station cal → L2 product tables
                     └─→ [4] timestd-physics     propagation model (optional)
                           └─→ [5] timestd-fusion    Kalman+WLS → calibration JSON
                                                                 → Chrony SHM
-                                                                → HDF5
+                                                                → SQLite store
 ```
+
+All L1/L2/L3 products are written to the SQLite science store at
+`/var/lib/timestd/phase2/timestd.db` (SQLite is the sole storage backend
+post-v7.0; HDF5 was retired).
 
 **The `calibrate` subcommand runs stage 5 only.**  Stages 1–4 must already
 be running for the calibration file to contain meaningful data.
@@ -193,12 +197,15 @@ $ hf-timestd status --calib-file /run/wsprdaemon/KA9Q_0/hftime.json
     "stale": false
   },
   "data_freshness": {
-    "fusion_hdf5": {"file": "fusion_fusion_timing_20260327.h5", "age_seconds": 4.2, "stale": false},
+    "fusion_store": {"db": "/var/lib/timestd/phase2/timestd.db", "table": "fusion_timing", "age_seconds": 4.2, "stale": false},
     "active_metrology_channels": 9,
     "total_metrology_channels": 9
   }
 }
 ```
+
+> Freshness is now keyed on the SQLite store (`fusion_store`). Pre-v7.0 hosts
+> emitted an HDF5 freshness key (`fusion_hdf5`) referencing a `.h5` file instead.
 
 ### Exit codes
 
@@ -276,8 +283,8 @@ hf-timestd status --data-root /var/lib/timestd
 
 1. `radiod` — KA9Q software-defined radio daemon (external)
 2. `timestd-core-recorder` — IQ capture → raw buffers
-3. `timestd-metrology@{channel}` — tone detection → L1 HDF5 (one per channel)
-4. `timestd-l2-calibration` — cross-station calibration → L2 HDF5
+3. `timestd-metrology@{channel}` — tone detection → L1 product tables (one per channel)
+4. `timestd-l2-calibration` — cross-station calibration → L2 product tables
 5. `timestd-fusion` (with `--calib-file`) — Kalman+WLS → calibration JSON
 
 ### Optional services

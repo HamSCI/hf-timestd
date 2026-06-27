@@ -2,7 +2,7 @@
 
 **Version:** 1.0  
 **Date:** 2026-01-29  
-**Status:** Design Complete, Implementation In Progress
+**Status:** Implemented (v6.11) — central to the unified measurement path; classes/methods live in `core/arrival_pattern_matrix.py`
 
 ---
 

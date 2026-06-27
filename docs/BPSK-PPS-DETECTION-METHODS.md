@@ -1,11 +1,14 @@
 # BPSK PPS edge detection: methods, evidence, and the path to the diff detector
 
-**Status:** Living engineering record.  As of 2026-05-22 the production
-path uses **Method 2** (matched filter on Costas-derotated real
-projection); a candidate replacement, **Method 5** (per-sample
-magnitude derivative), is running in sidecar mode and showing
-~22 ns short-term σ vs ~150 ns and frequent multi-hundred-µs walks
-on Method 2.
+**Status:** Living engineering record.  **Method 2** (matched filter on
+Costas-derotated real projection) feeds chrony as **HPPS** on SHM 2.
+**Method 5** (per-sample magnitude derivative) is wired to publish as
+**HFPS** on SHM 3 (gated by `diff_to_shm_unit`), but that feed is
+**disabled in the shipped configuration** — `diff_to_shm_unit` is unset
+and the live chrony config consumes only FUSE and HPPS, so HFPS is not
+currently in use.  Method 5 showed ~22 ns short-term σ vs ~150 ns and
+frequent multi-hundred-µs walks on Method 2, which is why the HFPS path
+was built; it remains an opt-in/diagnostic feed pending long-window proof.
 
 **Companion document:** `HF-PPS-CHRONY-TUNING.md` — parameter tuning
 within Method 2, including the four-pass Costas threshold journey
@@ -23,10 +26,10 @@ second at the 1 PPS edge.  Between edges the carrier is unmodulated
 (no data symbols, per operator confirmation 2026-05-22).  An RX-888
 SDR samples the band at 96 kHz IQ via radiod, and our calibrator
 recovers the precise time-of-arrival of each polarity flip to feed
-chrony as the TSL3 SHM refclock.
+chrony as the HPPS SHM refclock (SHM unit 2).
 
 The end goal is a chrony refclock with nanosecond-class short-term
-jitter and zero long-term drift, capable of holding TSL3 selected
+jitter and zero long-term drift, capable of holding HPPS selected
 through arbitrary RF and CPU transients.
 
 **Inputs the algorithm receives:**
@@ -81,7 +84,12 @@ The textbook approach for low-SNR BPSK timing.
   integration over N=48 000 samples gives ~47 dB of processing gain
   vs single-sample detection.
 - `σ_t ≈ 1 / (2π · B · √SNR)` with the wider ±25 kHz channel filter
-  gives sub-µs predicted timing precision.
+  gives sub-µs predicted timing precision.  This is the Cramér-Rao
+  lower bound for time-of-arrival estimation with a matched filter
+  (B the effective/RMS bandwidth, SNR the post-integration ratio);
+  see Kay, *Fundamentals of Statistical Signal Processing: Estimation
+  Theory* (1993), ch. 3, and Van Trees, *Detection, Estimation, and
+  Modulation Theory, Part I*, for the matched-filter CRLB derivation.
 
 **What we learned the hard way:**
 
@@ -235,9 +243,16 @@ failures live.
 
 ---
 
-## 6. Method 5 — per-sample magnitude derivative (current prototype, 2026-05-22 ~10:28)
+## 6. Method 5 — per-sample magnitude derivative (diff feed, opt-in / disabled by default; first prototyped 2026-05-22 ~10:28)
 
-The retreat from boxcar matched filters entirely.
+The retreat from boxcar matched filters entirely.  Method 5 is wired to
+publish as **HFPS** on SHM 3 (gated by `diff_to_shm_unit`) in
+`core_recorder_v2.py`, but that feed is **disabled by default** —
+`diff_to_shm_unit` is unset in the shipped config and chrony consumes
+only FUSE and HPPS, so HFPS is not currently in use.  When enabled it
+would run alongside HPPS (Method 2, SHM 2),
+with chrony selecting between the two feeds, using T5 / LB-1421 NMEA
+for second-of-arrival disambiguation.
 
 ```
   d[n] = |s[n] − s[n−1]|
@@ -288,9 +303,11 @@ noise floor.
 
 ## 7. Evidence: first 11 minutes of Method 5 sidecar (2026-05-22 10:28–10:40)
 
-The sidecar runs alongside Method 2 (production), dumping per-PPS
-edge timestamps to CSV.  Method 2 still feeds chrony; Method 5 is
-observation-only.
+This evidence was captured during the original sidecar phase, when
+Method 5 ran alongside Method 2 (production) dumping per-PPS edge
+timestamps to CSV — Method 2 fed chrony and Method 5 was
+observation-only.  (Method 5 has since been wired as an opt-in HFPS
+feed on SHM 3, disabled by default; see §6.)
 
 **First-snapshot data:**
 
@@ -366,12 +383,16 @@ parabolic-interp limit, which for a 2-sample-wide derivative at
   * **Long-window stability of Method 5** — the 11-minute first
     snapshot is encouraging but doesn't prove hour- or day-scale
     stability.  Sidecar continues collecting.
-  * **Production migration plan** — once we have a multi-hour
-    sidecar dataset showing Method 5 strictly outperforms Method 2,
-    the migration is: route Method 5's edge timestamps to the TSL3
-    SHM unit instead of Method 2's; retire the Costas threshold
-    tuning, the chain-delay disambiguation logic, and the watchdog
-    backoff (all of which exist to manage Method 2's failure modes).
+  * **Production migration plan (not yet enabled)** — rather than swap
+    Method 5 in for Method 2, the HFPS path was built as an opt-in
+    parallel feed: when `diff_to_shm_unit` is set, Method 5 publishes
+    its edge timestamps as HFPS on SHM 3 in parallel with HPPS (Method 2,
+    unit 2).  That gate is **off in the shipped config**, so HFPS is not
+    currently enabled.  Still open: once
+    HFPS is proven to strictly outperform HPPS over multi-hour /
+    multi-day windows, retire Method 2 along with its Costas threshold
+    tuning, chain-delay disambiguation logic, and watchdog backoff
+    (all of which exist to manage Method 2's failure modes).
   * **Sample-rate decision** — Method 5's precision is limited by
     sample period (10.4 µs at 96 kHz, sub-sample interp pushes
     this to ns).  Going to 192 kHz IQ would double the precision

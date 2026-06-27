@@ -29,7 +29,7 @@ This document explains **WHY** the hf-timestd system is designed the way it is. 
 4. [Three-Phase Architecture](#three-phase-architecture)
 5. [ka9q-python Integration](#ka9q-python-integration)
 6. [Key Design Decisions](#key-design-decisions)
-7. [Data Flow (HDF5-Native)](#data-flow-hdf5-native)
+7. [Data Flow (SQLite-Native)](#data-flow-sqlite-native)
 8. [Timing Architecture](#timing-architecture)
 9. [WWV/WWVH Discrimination](#wwvwwvh-discrimination)
 10. [Directory Structure](#directory-structure)
@@ -63,7 +63,7 @@ The system serves a **dual purpose**:
 1. **D_clock extraction** - System clock offset relative to UTC(NIST)
 2. **WWV/WWVH discrimination** on 4 shared frequencies (2.5, 5, 10, 15 MHz)
 3. **Propagation mode estimation** - Ionospheric hop identification (Physics-Informed)
-4. **Multi-broadcast fusion** - ±0.5 ms accuracy via weighted combination (HDF5)
+4. **Multi-broadcast fusion** - ±0.5 ms accuracy via weighted combination (SQLite)
 5. **Carrier-phase dTEC** - Differential TEC with GNSS VTEC anchoring (~6 mTECU/min sensitivity)
 6. **TID detection** - Cross-path correlation for traveling ionospheric disturbances
 
@@ -133,9 +133,10 @@ reference.
 | **BPM** | Science-only | 0% | EXCLUDED from fusion since 2026-02-07 (long-path systematic error too large); retained as a science observable. See `multi_broadcast_fusion.py` priority dict. |
 
 See `docs/design/METROLOGY_PHYSICS_SPLIT.md` for the canonical
-two-pipeline rationale.  (The legacy `docs/design/DUAL_PURPOSE_ARCHITECTURE.md`
-was renamed/superseded by the split doc; cross-references still
-landing there should be redirected.)
+two-pipeline rationale.  (The legacy
+`docs/archive/design/DUAL_PURPOSE_ARCHITECTURE.md` was
+renamed/superseded by the split doc and moved into the archive;
+cross-references still landing there should be redirected.)
 
 ---
 
@@ -167,9 +168,9 @@ wired in).
 | `CoreRecorderV2` | Raw IQ `.bin.zst` | Source of all downstream data |
 | `MetrologyEngine` tone correlator + tick matched filter + edge detector | — | Produces raw TOA measurements |
 | `MetrologyEngine` WWV/WWVH/BPM discrimination | — | Identifies which station was received |
-| `MetrologyService` → `metrology_measurements` writer (L1 HDF5) | L1 timing | Input to L2CalibrationService |
-| `MetrologyService` → `tick_timing` writer (L2 HDF5) | Ensemble `d_clock_ms` | Highest-precision per-minute timing |
-| `MetrologyService` → `chu_fsk` writer (L2 HDF5) | DUT1, TAI-UTC, leap-second detection | Guards epoch correctness |
+| `MetrologyService` → `metrology_measurements` writer (L1, SQLite table) | L1 timing | Input to L2CalibrationService |
+| `MetrologyService` → `tick_timing` writer (L2, SQLite table) | Ensemble `d_clock_ms` | Highest-precision per-minute timing |
+| `MetrologyService` → `chu_fsk` writer (L2, SQLite table) | DUT1, TAI-UTC, leap-second detection | Guards epoch correctness |
 | `L2CalibrationService` | L2 timing with propagation correction | Required by fusion |
 | `MultiBroadcastFusion` + Kalman filter | — | Produces the Chrony SHM feed |
 
@@ -183,7 +184,7 @@ wired in).
 | `detection_attempts` writer | Threshold-calibration diagnostics | `physics_products` |
 | `all_arrivals` writer | Multi-path propagation paths | `physics_products` |
 | `IonoDataService` | Real-time WAM-IPE + GIRO network data | `realtime_iono` |
-| `PhysicsFusionService` | TEC, tomography, VTEC maps (L3 HDF5) | Separate systemd service |
+| `PhysicsFusionService` | TEC, tomography, VTEC maps (L3, SQLite table) | Separate systemd service |
 | GRAPE pipeline | Decimated IQ / PSWS upload | Separate systemd timer |
 
 ### Configuration
@@ -207,7 +208,7 @@ Both flags default to `true` — existing deployments without this section are u
 
 ### What `physics_products = false` skips
 
-With `physics_products = false`, MetrologyService initialises only the three timing-critical writers. The following are **not created** — no HDF5 files, no disk I/O, no CPU for secondary-peak search:
+With `physics_products = false`, MetrologyService initialises only the three timing-critical writers. The following are **not created** — no extra SQLite tables/rows, no disk I/O, no CPU for secondary-peak search:
 
 - `L2/tick_phase/` — 1 Hz carrier-phase time series for Doppler/scintillation analysis
 - `L2/test_signal/` — ionospheric sounding amplitude/phase at WWV/WWVH test-signal minutes
@@ -236,7 +237,7 @@ On a system with no network access to NOAA/LGDC, set `realtime_iono = false` to 
 Phase 1 (Stable)     →     Phase 2 (Evolving)     →     Phase 3 (Fusion)
   Raw Recording              Timing Analysis              Global Synthesis
   Immutable archive          Derived products             System discipline
-  Code changes <5/yr         Can restart freely           HDF5 consumer
+  Code changes <5/yr         Can restart freely           SQLite consumer
 ```
 
 **Why?**
@@ -268,16 +269,31 @@ Phase 1 (Stable)     →     Phase 2 (Evolving)     →     Phase 3 (Fusion)
 - **Compression:** Optional zstd/lz4 compression (2-3x reduction)
 - **Metadata:** JSON sidecars preserve RTP timestamps and quality metrics
 
-### 4. HDF5 SWMR Pipeline (v5.0 / v6.10)
+### 4. SQLite Storage Backend (post-Phase-4; formerly HDF5 SWMR, retired at v7.0)
 
-**Decision:** Use HDF5 with Single Writer Multiple Reader (SWMR) protocol for all inter-service data exchange (Phase 2 -> Phase 3).
+**Decision:** Use a single SQLite store (`/var/lib/timestd/phase2/timestd.db`,
+WAL mode, one table per data product) as the **sole** storage backend for all
+inter-service data exchange (Phase 2 -> Phase 3).
+
+> **History:** Through v6.x this was an HDF5 SWMR (Single Writer Multiple
+> Reader) pipeline. The HDF5 → SQLite migration retired the HDF5 backend at
+> Phase 4; the HDF5 code path was deleted and the legacy `write_hdf5` /
+> `write_sqlite` knobs are now accepted-but-ignored no-ops. The only writer is
+> `make_data_product_writer` → `SqliteDataProductWriter`. See
+> [`docs/HDF5-TO-SQLITE-MIGRATION.md`](HDF5-TO-SQLITE-MIGRATION.md).
 
 **Why?**
 
-- **Performance:** Binary format is 10x-100x faster than CSV parsing
-- **Concurrency safety:** SWMR allows one writer and many concurrent readers with zero lock contention. Writer keeps the daily file open (`swmr_mode=True`) and calls `flush()` after each append so readers see data immediately.
-- **Crash recovery:** `h5clear -s` is called **unconditionally** on every open of an existing file (not just on error). This automatically clears stale SWMR consistency flags left by unclean shutdowns (SIGKILL, service restart) — no manual intervention required.
-- **Structure:** Hierarchical data storage matches the signal complexity
+- **Performance:** Binary float64 storage is 10x-100x faster than CSV parsing
+- **Concurrency safety:** WAL (write-ahead logging) mode allows one writer and
+  many concurrent readers with zero lock contention; readers see committed rows
+  immediately without blocking the writer.
+- **Crash recovery:** WAL is self-healing — an interrupted writer leaves the
+  last checkpoint intact and SQLite recovers automatically on next open. No
+  manual intervention (formerly the unconditional `h5clear -s` on every open)
+  is ever required.
+- **Structure:** One table per data product keeps the signal complexity
+  organised within a single file.
 - **Low Latency:** Fusion sees new data within seconds of Analytics writing it
 
 ### 5. "Steel Ruler" Metrology (v5.3)
@@ -343,23 +359,23 @@ Phase 1 (Stable)     →     Phase 2 (Evolving)     →     Phase 3 (Fusion)
 │    3. WWV/WWVH Discrimination (cross-freq gate + voting)       │
 │    4. D_clock Computation (propagation mode estimation)        │
 │                                                                 │
-│  Outputs (HDF5):                                                 │
+│  Outputs (SQLite, one table per product):                       │
 │  • L1A: Tone Detections (feature extraction)                   │
 │  • L2:  Timing Measurements (fully solved D_clock)             │
-│  • Metadata: HDF5 attributes (processing version, etc.)        │
+│  • Metadata: per-row schema/version columns                    │
 │                                                                 │
 │  Responsibilities:                                              │
 │  ✅ All derived timing products                                 │
 │  ✅ Can restart/update independently                            │
 │  ✅ Processes backlog automatically                             │
-│  ✅ Crash-safe HDF5 writer for Fusion consumption               │
+│  ✅ Crash-safe WAL writer for Fusion consumption                │
 └─────────────────────────────────────────────────────────────────┘
-                              ↓ (HDF5)
+                              ↓ (SQLite)
 ┌─────────────────────────────────────────────────────────────────┐
 │                    PHASE 3: FUSION SERVICE (v6.1)               │
 │           (Hierarchical Estimation with GNSS TEC Correction)    │
 │                                                                 │
-│  Input:  L2 HDF5 Measurements from Phase 2 (all channels)       │
+│  Input:  L2 SQLite Measurements from Phase 2 (all channels)     │
 │          GNSS VTEC from timestd-vtec service (real-time)        │
 │                                                                 │
 │  Process (Hierarchical Architecture):                           │
@@ -370,7 +386,7 @@ Phase 1 (Stable)     →     Phase 2 (Evolving)     →     Phase 3 (Fusion)
 │                                                                 │
 │  Outputs:                                                       │
 │  • Chrony SHM (System Clock Discipline)                         │
-│  • L3: Fused Timing HDF5 (phase2/fusion/)                       │
+│  • L3: Fused Timing (SQLite table in timestd.db)                │
 │  • broadcast_kalman_state.json (17 per-broadcast states)        │
 │  • broadcast_calibration.json (calibration + trust)             │
 │                                                                 │
@@ -410,20 +426,33 @@ The recording layer uses **ka9q-python** directly for all RTP reception and chan
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+### Shared DSP library (`hamsci-dsp`)
+
+The DSP, geometry, ionosphere, and propagation kernels are no longer
+maintained in-tree. They now live in the sibling **`hamsci-dsp`** package,
+shared across the HamSCI client suite (de-duplicated in commit `e2e76ba`). The
+corresponding in-tree modules under `src/hf_timestd/core/` are thin
+re-export shims that forward to `hamsci-dsp`, preserving existing import paths
+while keeping a single source of truth for the shared kernels.
+
 ---
 
 ## Key Design Decisions
 
-### Decision 1: HDF5 vs CSV (v5.0 Update)
+### Decision 1: SQLite vs CSV (post-Phase-4; formerly "HDF5 vs CSV", v5.0)
 
-**Decision:** Migrate entire Phase 2 → Phase 3 pipeline to HDF5.
+**Decision:** Use a single SQLite store
+(`/var/lib/timestd/phase2/timestd.db`, WAL mode, one table per data product)
+for the entire Phase 2 → Phase 3 pipeline. This is the **sole** storage
+backend; the HDF5 backend it replaced was deleted at Phase 4 (see
+[`docs/HDF5-TO-SQLITE-MIGRATION.md`](HDF5-TO-SQLITE-MIGRATION.md)).
 
 **Advantages:**
 
-- **SWMR concurrency:** Writer keeps file open with `swmr_mode=True`; readers use `swmr=True`. Zero contention. `h5clear -s` on every writer open handles crash recovery automatically.
-- **Precision:** Binary float64 storage eliminates ASCII truncation errors.
-- **Metadata:** Attributes store schema versions, processing flags, and processing time inside the file.
-- **Compression:** HDF5 internal compression reduces disk usage vs CSV.
+- **WAL concurrency:** Write-ahead logging permits one writer and many concurrent readers with zero lock contention; SQLite recovers from an interrupted write automatically (no manual `h5clear`-style step).
+- **Precision:** Binary float64 columns eliminate ASCII truncation errors.
+- **Metadata:** Schema-version and processing-flag columns travel with each row inside the store.
+- **Compactness:** A single database file replaces the per-product daily HDF5 files, simplifying retention and pruning.
 
 ### Decision 2: Why Two Service Phases?
 
@@ -443,7 +472,13 @@ The recording layer uses **ka9q-python** directly for all RTP reception and chan
 
 ---
 
-## Data Flow (HDF5-Native)
+## Data Flow (SQLite-Native)
+
+> **Storage:** Post-Phase-4 all Phase 2/3 products live in a single SQLite
+> store, `/var/lib/timestd/phase2/timestd.db` (WAL mode, one table per data
+> product). The HDF5 backend was retired at v7.0; the `.h5` paths below are
+> now SQLite tables. See
+> [`docs/HDF5-TO-SQLITE-MIGRATION.md`](HDF5-TO-SQLITE-MIGRATION.md).
 
 ### Real-Time Pipeline
 
@@ -456,15 +491,17 @@ raw_buffer/{CHANNEL}/{YYYYMMDD}/{minute}.bin
 raw_buffer/{CHANNEL}/{YYYYMMDD}/{minute}.json
      ↓
 Phase 2: Metrology Service (polls for new files)
-     ↓ (HDF5 crash-safe writes)
-├─→ phase2/{CHANNEL}/metrology/{date}_metrology_measurements.h5 (L1/L2)
-├─→ phase2/{CHANNEL}/tick_timing/{date}_tick_timing.h5
-└─→ phase2/{CHANNEL}/detection_attempts/{date}_detection_attempts.h5
-     ↓ (HDF5 read)
+     ↓ (SQLite WAL crash-safe writes → timestd.db)
+├─→ table: metrology_measurements  (L1/L2, per CHANNEL)
+├─→ table: tick_timing             (per CHANNEL)
+└─→ table: detection_attempts      (per CHANNEL)
+     ↓ (SQLite read)
 Phase 3: Fusion Service
      ↓ (Dual Kalman Filter + Physics Model)
-├─→ Chrony SHM (TSL1=L1 geometric, TSL2=L2 physics-corrected)
-└─→ phase2/fusion/fusion_timing_{date}.h5 (L3)
+├─→ Chrony SHM (unit 1 = FUSE / T3 fusion; unit 2 = HPPS / T6 BPSK PPS;
+│               unit 3 = HFPS / diff detector — gated on diff_to_shm_unit,
+│               disabled by default; unit 0 = TSL1 legacy, disabled)
+└─→ table: fusion_timing           (L3)
 ```
 
 ### Web UI Visualization
@@ -473,10 +510,10 @@ Phase 3: Fusion Service
 Web Browser
      ↓
 FastAPI Monitoring Server (Python, port 8000)
-     ↓ (reads HDF5 + Status JSON)
-├─→ phase2/{CHANNEL}/metrology/*.h5
-├─→ phase2/{CHANNEL}/tick_timing/*.h5
-├─→ phase2/fusion/fusion_timing_*.h5
+     ↓ (reads SQLite timestd.db + Status JSON)
+├─→ table: metrology_measurements
+├─→ table: tick_timing
+├─→ table: fusion_timing
 └─→ phase2/{CHANNEL}/state/*.json
      ↓
 JSON Response → Plotly.js plots
@@ -499,6 +536,10 @@ We don't just "guess" the path; we model it using a tiered hierarchy of physics 
 - **Uncertainty:** ±0.5–1.0 ms (1σ) when WAM-IPE + GIRO available.
 
 #### Tier 1: PHaRLAP 2D Ray Tracing (Implemented)
+
+> **Working path:** the live PHaRLAP integration is `core/raytrace_engine.py`.
+> This is **not** the deprecated `core/physics_propagation.py`, whose own
+> Tier-1 raytrace was never functional (see Deprecated Modules below).
 
 - **Engine:** PHaRLAP 4.7.4 via pyLAP Python interface (`raytrace_engine.py`).
 - **Grid:** Spatially varying IRI-2020 electron density profiles sampled along the great-circle path (auto-scaled: 1 per 500 km, min 5, max 25 samples). Profiles are linearly interpolated across range columns to form a true 2D Ne(h) grid.
@@ -563,14 +604,13 @@ We use a **Weighted Voting** system combining:
 ├── raw_buffer/{CHANNEL}/{YYYYMMDD}/   # Phase 1: Binary IQ + JSON
 │   ├── {minute}.bin.zst
 │   └── {minute}.json
-├── phase2/{CHANNEL}/                   # Phase 2: Metrology HDF5
-│   ├── metrology/                      # L1/L2 HDF5 (primary output)
-│   ├── tick_timing/                    # Per-second tick timing HDF5
-│   ├── detection_attempts/             # Detection attempts HDF5
+├── phase2/timestd.db                   # Phase 2/3: SQLite store (WAL),
+│                                       #   one table per data product:
+│                                       #   metrology_measurements (L1/L2),
+│                                       #   tick_timing, detection_attempts,
+│                                       #   fusion_timing (L3), science/TEC, …
+├── phase2/{CHANNEL}/                   # Phase 2: per-channel service state
 │   └── state/                          # Service state JSON
-├── phase2/fusion/                      # Phase 3: Fusion Output
-│   └── fusion_timing_{date}.h5         # L3 HDF5
-├── phase2/science/tec/                 # TEC estimates (HDF5)
 ├── products/{CHANNEL}/                 # GRAPE products
 │   ├── spectrograms/
 │   └── decimated/
@@ -585,16 +625,41 @@ We use a **Weighted Voting** system combining:
 
 ### Systemd Services
 
+The deployment is an **8-service core pipeline plus timers and housekeeping
+units** (~22–25 systemd units total). The live registry is
+`service_profile.SERVICE_UNIT_MAP`; service profiles (archive/rtp/fusion/full)
+select which of these run. The core pipeline:
+
 | Service | Purpose |
 |---------|---------|
 | `timestd-core-recorder.service` | Phase 1: RTP → raw_buffer |
-| `timestd-metrology.service` | Phase 2: L1 timing analysis |
+| `timestd-metrology@.service` (per-channel template) + `timestd-metrology.target` | Phase 2: L1 timing analysis. The monolithic `timestd-metrology.service` was replaced by a per-channel template; `timestd-metrology.target` groups the instances and is what the profile manager enables. |
 | `timestd-l2-calibration.service` | Phase 2: L2 calibrated timing |
 | `timestd-fusion.service` | Phase 3: Multi-broadcast fusion & Chrony feed |
 | `timestd-physics.service` | Phase 3: Carrier-phase dTEC, group-delay TEC validation, T_iono |
+| `timestd-vtec.service` | GNSS VTEC ingestion (gated by `[gnss_vtec].enabled`) — feeds fusion's ionospheric correction |
 | *(IonoDataService)* | Ionospheric data ingestion (WAM-IPE, GIRO) — runs as a **background thread** within metrology, not a separate service |
 | `timestd-web-api.service` | Web monitoring UI (FastAPI) |
 | `timestd-radiod-monitor.service` | Hardware health monitoring |
+
+**Profile-managed timers (also in `SERVICE_UNIT_MAP`):**
+
+| Unit | Purpose |
+|------|---------|
+| `timestd-chrony-monitor.timer` | Chrony refclock / discipline monitoring |
+| `timestd-pipeline-watchdog.timer` | End-to-end pipeline liveness watchdog |
+| `timestd-ionex-download.timer` | IGS IONEX VTEC map download |
+| `timestd-iono-reanalysis.timer` | Periodic ionospheric reanalysis |
+| `timestd-prune.timer` | Storage retention / pruning of `timestd.db` and raw buffer |
+| `grape-daily.timer` | Daily GRAPE decimation → package → upload → spectrogram |
+
+**Housekeeping units (not profile-selected; enabled directly by the
+installer):** the SHM/PPS health watchdogs `timestd-clock-monitor`,
+`timestd-hpps-watchdog`, `timestd-hfps-watchdog`, plus `timestd-iri-update` /
+`timestd-iri-healthcheck`, `timestd-spaceweather-healthcheck`,
+`grape-upload-retry`, and the `timestd-alert@.service` OnFailure handler. These
+keep the SHM feeds, IRI/space-weather data, and GRAPE uploads healthy
+independent of the active service profile.
 
 ### CPU Affinity
 
@@ -603,8 +668,8 @@ All timestd Python services are pinned to CPUs 0-7 (`CPUAffinity=0-7` in systemd
 ### Resilience
 
 - **Watchdogs:** All Python services integrate `systemd-python` to send heartbeat `WATCHDOG=1` notifications. If a service hangs, systemd restarts it automatically.
-- **Frequent watchdog pinging (v6.8):** The physics service calls `_pet_watchdog()` between every major processing step (TEC estimation, tomography, VTEC mapping, each HDF5 write) — 17+ times per `process_minute()` cycle. This prevents the 2-minute systemd watchdog from firing during heavy I/O.
-- **HDF5 SWMR (v6.10):** All HDF5 I/O uses SWMR protocol — writer holds the file open, readers open with `swmr=True`. This eliminates the write/read lock contention that previously caused the physics service crash-loop and periodic `OSError: file already open for write` errors in the web API and fusion services. `_timed_write()` (30s timeout) is retained as a belt-and-suspenders guard.
+- **Frequent watchdog pinging (v6.8):** The physics service calls `_pet_watchdog()` between every major processing step (TEC estimation, tomography, VTEC mapping, each store write) — 17+ times per `process_minute()` cycle. This prevents the 2-minute systemd watchdog from firing during heavy I/O.
+- **SQLite WAL concurrency (post-Phase-4; formerly HDF5 SWMR, v6.10):** All Phase 2/3 I/O goes through the single `timestd.db` store in WAL mode — one writer, many concurrent readers, zero lock contention. This eliminates the write/read contention that under the retired HDF5 backend previously caused the physics service crash-loop and periodic `OSError: file already open for write` errors in the web API and fusion services. `_timed_write()` (30s timeout) is retained as a belt-and-suspenders guard.
 - **Alerting:** Failures trigger email alerts via `OnFailure` handlers.
 
 ---
@@ -614,11 +679,11 @@ All timestd Python services are pinned to CPUs 0-7 (`CPUAffinity=0-7` in systemd
 ### Disk Usage
 
 - **Raw Buffer:** ~2-3 GB/day/channel
-- **HDF5:** ~50-100 MB/day (significantly larger than CSV, but much richer data)
+- **SQLite store (`timestd.db`):** ~50-100 MB/day (richer than CSV; pruned by `timestd-prune.timer`)
 
 ### Failure Recovery
 
-- **Crash Safety:** Phase 1 uses atomic writes. Phase 2/3 can restart and process backlog. HDF5 SWMR dirty flags are cleared unconditionally on every writer open, so no manual `h5clear` is ever needed after a crash.
+- **Crash Safety:** Phase 1 uses atomic writes. Phase 2/3 can restart and process backlog. SQLite WAL is self-healing — an interrupted writer leaves the last checkpoint intact and SQLite recovers automatically on next open, so no manual recovery step (formerly `h5clear`) is ever needed after a crash.
 - **Backfill:** If Analytics is down for an hour, it will process the raw buffer backlog upon restart until caught up.
 
 ---
@@ -659,7 +724,7 @@ Raw IQ files use a configurable chunk duration (`file_duration_sec`, default **6
 
 ### Design Decision: Separate from Metrology
 
-GRAPE decimation is intentionally decoupled from the timing/metrology pipeline. It operates on the immutable Phase 1 raw buffer after-the-fact, does not interfere with real-time services, and uses Digital RF format (MIT Haystack) only for GRAPE output — the rest of the system uses binary IQ + HDF5.
+GRAPE decimation is intentionally decoupled from the timing/metrology pipeline. It operates on the immutable Phase 1 raw buffer after-the-fact, does not interfere with real-time services, and uses Digital RF format (MIT Haystack) only for GRAPE output — the rest of the system uses binary IQ + the SQLite store (`timestd.db`).
 
 ---
 

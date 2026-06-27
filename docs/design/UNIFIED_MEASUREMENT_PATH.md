@@ -1,7 +1,7 @@
 # Unified Measurement Path
 
 **Date:** March 9, 2026
-**Status:** DESIGN — no code changes yet
+**Status:** Implemented (v6.11) — shipped; symbols and constants live in `core/metrology_engine.py` and `core/arrival_pattern_matrix.py`
 **Author:** Michael James Hauan (AC0G) / Cascade
 
 ---

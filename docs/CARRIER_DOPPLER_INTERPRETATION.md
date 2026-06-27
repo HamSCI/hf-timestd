@@ -260,3 +260,10 @@ Frequency
 **Spectrogram is the primary QA tool** - scientists can visually verify data quality
 
 **Our goal:** Maximum confidence that uploaded data accurately represents ionospheric Doppler shifts
+
+---
+
+## References
+
+1. Davies, K. (1990). "Ionospheric Radio." Peter Peregrinus Ltd. — Doppler shift to path-length / phase-path-rate relation (Δf/f = Δr/c) and the link between phase-path variation and TEC.
+2. Bilitza, D. et al. (2022). "The International Reference Ionosphere model: A review and description of an ionospheric benchmark." *Rev. Geophys.*, 60. (IRI / NeQuick climatology referenced above)

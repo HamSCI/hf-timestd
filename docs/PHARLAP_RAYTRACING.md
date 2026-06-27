@@ -236,7 +236,7 @@ PHaRLAP returns group delay, **phase path**, elevation angle, and arrival
 ```
 
 We do not yet run 3-D in production; it is a documented roadmap item
-([`HAMSCI_2026_WORKSHOP_ABSTRACT.md`](HAMSCI_2026_WORKSHOP_ABSTRACT.md) §2).
+([`HAMSCI_2026_WORKSHOP_ABSTRACT.md`](publications/HAMSCI_2026_WORKSHOP_ABSTRACT.md) §2).
 The motivating case is the **BPM trans-Pacific paths (~10,000 km)**, where
 the 2-D horizontal-homogeneity assumption breaks down (the analytic model
 predicts ~10 ms while we observe 200–450 ms). The plan: feed PHaRLAP a 3-D

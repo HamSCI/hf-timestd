@@ -15,7 +15,7 @@ Collins), **WWVH** (Kauai), **CHU** (Ottawa), and **BPM** (Pucheng) — via
 markers into two things at once:
 
 1. a **GPS-disciplined clock alternative** that feeds [chrony](https://chrony-project.org/) via SysV SHM (sub-millisecond UTC for the host), and
-2. an **ionospheric observatory** — TEC, dTEC, propagation-mode inferences, multi-path arrivals, scintillation indices — recorded continuously to HDF5 + SQLite for off-line science.
+2. an **ionospheric observatory** — TEC, dTEC, propagation-mode inferences, multi-path arrivals, scintillation indices — recorded continuously to SQLite for off-line science.
 
 The two outputs share **one** receiver and **one** measurement pipeline.
 Everything else in the docs is about how that's possible without the two
@@ -33,7 +33,7 @@ purposes corrupting each other.
 | Failure mode | Clock drifts; chronyd marks the refclock unreachable | Stale ionospheric estimate; downstream science papers cite a wider uncertainty |
 | Service unit | `timestd-metrology@.service`, `timestd-fusion.service` | `timestd-physics.service`, `timestd-l2-calibration.service` |
 | Canonical doc | [`METROLOGY.md`](METROLOGY.md) | [`PHYSICS.md`](PHYSICS.md) |
-| Contract | [`METROLOGY_CONTRACT.md`](../.windsurf/METROLOGY_CONTRACT.md) | [`PHYSICS_CONTRACT.md`](../.windsurf/PHYSICS_CONTRACT.md) |
+| Contract | [`METROLOGY_CONTRACT.md`](../.windsurf/contracts/METROLOGY_CONTRACT.md) | [`PHYSICS_CONTRACT.md`](../.windsurf/contracts/PHYSICS_CONTRACT.md) |
 | Design rationale | [`docs/design/METROLOGY_PHYSICS_SPLIT.md`](design/METROLOGY_PHYSICS_SPLIT.md) | (same) |
 
 The pipelines branch at L2 — metrology and physics share L1 (raw ToA)
@@ -104,7 +104,7 @@ design/
 
 Critical / High findings against any of these documents are tracked in
 the rolling code review at
-[`docs/CODE_REVIEW_2026-05-17_METROLOGY_PHYSICS.md`](CODE_REVIEW_2026-05-17_METROLOGY_PHYSICS.md);
+[`docs/CODE_REVIEW_2026-05-17_METROLOGY_PHYSICS.md`](archive/CODE_REVIEW_2026-05-17_METROLOGY_PHYSICS.md);
 the entries flagged **D-**, **P-** or **M-** all point back to specific
 files and lines.
 

@@ -53,6 +53,8 @@ This geometry provides ionospheric sampling across:
 
 ## 3. Currently Implemented Measurements
 
+> **Provenance note:** The DSP, geometry, ionosphere, and propagation **kernels** now live in the shared `hamsci-dsp` package (commit `e2e76ba`); the in-tree `core/` modules referenced below are thin re-export shims over those kernels.
+
 ### 3.1 Ionospheric Electron Content
 
 The system produces two distinct TEC-related products with very different
@@ -61,7 +63,7 @@ their honesty markers are *not* the same — see review item D-H6.
 
 #### 3.1.1 Carrier-Phase Differential TEC (dTEC) — Primary Product ✅
 
-**Sensitivity:** ~6 mTECU/min (carrier-phase precision)
+**Sensitivity:** ~6 mTECU/min (carrier-phase precision; empirical/typical value — no code constant backs this figure)
 **Volume:** ~250,000 records/day across all station-channels
 **Anchoring:** GNSS VTEC (±1 TECU) when available; group-delay TEC fallback
 
@@ -69,7 +71,7 @@ Carrier-phase dTEC measures the *rate of change* of TEC along each HF path by tr
 
 **What "carrier phase" means here (methodology note):** the observable is *not* a continuously PLL-tracked RF carrier. At each detected tick the system mixes the raw IQ at the tick-tone frequency and takes the angle of the mean phasor — i.e. it estimates the phase of the ±tone AM **sideband** (~55 samples/min/channel), referenced to the GPS-locked IQ sample clock (`tick_edge_detector.py`). Because the ±1 kHz sidebands sit a negligible dispersive distance from a multi-MHz carrier, the sideband phasor faithfully carries the carrier's ionospheric phase, and the 1/f² rescaling correctly uses the **RF carrier frequency**. Two consequences follow: (a) the measurement inherits tone SNR and tick-onset jitter — a 1 ms tick-alignment error maps to a full 2π at 1 kHz — which is why the ensemble/weighted-median combination, cycle-slip coasting, and the `unwrap_quality` *risk* indicator exist; and (b) wrong-branch unwrapping is fundamentally undetectable from an already-sampled phase series, so `unwrap_quality` is reported as a risk score, never as proof.
 
-**Common-mode / oscillator caveat (mode-dependent):** each single-channel phase series carries `φ_iono + φ_clock + φ_geometry`. Geometry is static and the broadcasters are cesium/GPSDO-referenced, so in **RTP mode** (GPSDO-disciplined receiver) the TX↔RX oscillator term is sub-milliradian over a minute at 10 MHz and negligible. In **Fusion (GPS-denied) mode** the receiver reference is HF-derived, and any oscillator wander aliases **directly into apparent dTEC on every path simultaneously** — a common-mode bias the *primary* `dtec_mean_tecu` product does not remove. The cross-frequency `compute_differential_dtec` check (`carrier_tec.py`) *does* cancel this common mode and is the right tool when oscillator cleanliness is in question. Treat single-path absolute dTEC levels in Fusion mode accordingly.
+**Common-mode / oscillator caveat (mode-dependent):** each single-channel phase series carries `φ_iono + φ_clock + φ_geometry`. Geometry is static and the broadcasters are cesium/GPSDO-referenced, so in **RTP mode** (GPSDO-disciplined receiver) the TX↔RX oscillator term is sub-milliradian over a minute at 10 MHz and negligible. In **Fusion (GPS-denied) mode** the receiver reference is HF-derived, and any oscillator wander aliases **directly into apparent dTEC on every path simultaneously** — a common-mode bias the *primary* `dtec_mean_tecu` product does not remove. The cross-frequency `compute_differential_dtec` check (`carrier_tec.py`) *suppresses the common-mode contribution and isolates the dispersive (frequency-dependent) component* — a pure oscillator term is not frequency-flat in TECU, so the cancellation is approximate rather than exact — and is the right tool when oscillator cleanliness is in question. Treat single-path absolute dTEC levels in Fusion mode accordingly.
 
 **Anchor source priority (v6.8):**
 
@@ -281,7 +283,7 @@ This enables:
 
 ### 3.3 Ionospheric Layer Heights (hmF2, hmE) ✅
 
-**Status:** Implemented via IRI-2020 integration
+**Status:** Implemented via IRI-2020 integration (Bilitza et al., 2022)
 
 **Physics:** The F2-layer peak height (hmF2) varies with:
 - Time of day (rises at night as ionization decays)
@@ -293,7 +295,7 @@ This enables:
 **Implementation:** `src/hf_timestd/core/ionospheric_model.py`
 
 Three-tier hierarchy:
-1. **IRI-2020**: International Reference Ionosphere (±25-30 km accuracy)
+1. **IRI-2020**: International Reference Ionosphere (±20-30 km accuracy)
 2. **Parametric model**: Diurnal/solar/latitude model (±40-60 km)
 3. **Static fallback**: Fixed heights (±80 km)
 
@@ -657,6 +659,8 @@ The reanalysis applies a chain of physical reasoning, each step grounded in well
 
 The ionosphere is a solar-driven phenomenon. The degree of ionization at any point depends primarily on the solar zenith angle (χ) — the angle between the sun and the local vertical. At the subsolar point χ = 0° and ionization is maximum; at the terminator χ = 90° and ionization drops rapidly.
 
+The code frames these regimes in solar **elevation** (= 90° − χ) rather than in zenith thresholds: **deep night** is elevation ≤ −18° (astronomical twilight ended, night floor), **twilight** spans −18° → 0° (linear interpolation, with a 0.6×daytime anchor at the horizon, elevation 0), and **daytime** is elevation > 0° (Chapman cos^0.25 law).
+
 For each transmitter-receiver path, we compute the geographic midpoint (where the signal reflects off the ionosphere) and calculate the solar elevation at that point for the hour being analyzed:
 
 ```
@@ -672,21 +676,31 @@ solar_elevation = solar_position(midpoint, timestamp)
 The F2-layer critical frequency (foF2) — the highest frequency that can be reflected at vertical incidence — follows the Chapman production function. Under solar illumination, photoionization produces free electrons; in darkness, recombination depletes them. The equilibrium electron density, and hence foF2, depends on cos(χ):
 
 ```
-foF2 = foF2_noon × cos^0.4(χ)     for χ < 80° (daytime)
-foF2 = foF2_night_floor             for χ > 100° (deep night)
-foF2 = interpolated                  for 80° < χ < 100° (twilight)
+foF2 = foF2_noon × cos^0.25(χ)    daytime (solar elevation > 0)
+foF2 = foF2_night_floor            deep night (elevation ≤ −18°)
+foF2 = interpolated                twilight (−18° < elevation ≤ 0°)
 ```
 
 Where:
-- **foF2_noon = 9.0 MHz** (moderate solar activity, F10.7 ≈ 150)
+- **foF2_noon ≈ 10.9 MHz**, derived from the 12-month smoothed sunspot number R12 via `foF2_noon ≈ 6 + 0.07·R12` (R12 = 70, a moderate climatological anchor)
 - **foF2_night_floor = 3.0 MHz** (residual nighttime ionization)
-- The 0.4 exponent comes from the Chapman layer theory for the F2-layer, where the effective recombination rate gives a weaker dependence on χ than the simple cos^0.5 of a Chapman α-layer
+- The 0.25 exponent is the textbook Chapman-α result: peak electron density Ne ∝ cos χ, and foF2 ∝ Ne^0.5 ∝ cos^0.25 χ (Davies, 1990)
 
 This is a climatological estimate — it represents typical conditions, not the exact foF2 at this moment. But it is sufficient to reject clearly impossible modes (e.g., 15 MHz F-layer propagation when foF2 ≈ 4 MHz at night).
 
+#### Step 2b: E-Layer Critical Frequency (foE) and Sporadic-E Branch
+
+In parallel with foF2, the reanalysis estimates the E-layer critical frequency foE from the same solar geometry, using the ITU-R P.1239 / Muggleton (1975) empirical formula:
+
+```
+foE = 0.9 × [(180 + 1.44·R12) × cos χ]^0.25     (MHz), with a 0.5 MHz night floor
+```
+
+The E layer is strongly Chapman (foE tracks cos^0.25 χ closely) and nearly vanishes after dusk, hence the small residual-ionization floor below the horizon. foE bounds the E-layer/Es-mode MUF used when validating low-elevation `1E` candidates and reclassifying daytime above-MUF detections as possible sporadic-E.
+
 #### Step 3: Oblique MUF from Secant Law
 
-A signal propagating obliquely through the ionosphere can be reflected at frequencies higher than foF2, because the effective path through the layer is longer. The relationship is the **secant law**:
+A signal propagating obliquely through the ionosphere can be reflected at frequencies higher than foF2, because the effective path through the layer is longer. The relationship is the **secant law** (Davies, 1990):
 
 ```
 MUF_oblique = foF2 × sec(θ_i)
@@ -801,7 +815,7 @@ The following live data demonstrates the reanalysis in operation on this install
 
 **Implementation:** `src/hf_timestd/core/raytrace_engine.py`
 
-The ray tracing engine uses PHaRLAP 4.7.4 (via the pyLAP Python interface) with a **spatially varying IRI-2020 electron density grid**. Rather than sampling IRI at a single midpoint, the engine:
+The ray tracing engine uses PHaRLAP 4.7.4 (Cervera and Harris, 2014; via the pyLAP Python interface) with a **spatially varying IRI-2020 electron density grid**. Rather than sampling IRI at a single midpoint, the engine:
 
 1. Computes the great-circle bearing from TX to RX
 2. Samples IRI-2020 Ne(h) profiles at multiple points along the path (auto-scaled: 1 per 500 km, minimum 5, maximum 25)
@@ -837,8 +851,8 @@ The WWVH path spans tropical to mid-latitude ionosphere, where the horizontal gr
 **Status:** The ionospheric reanalysis service (Section 5) now estimates foF2 from solar zenith angle using the Chapman layer model. This provides a climatological estimate suitable for mode validation.
 
 **Remaining work:**
-- Calibrate foF2_noon against ionosonde data (currently fixed at 9.0 MHz)
-- Incorporate solar activity index (F10.7) for solar cycle variation
+- Calibrate foF2_noon against ionosonde data (now derived from R12 via `foF2_noon ≈ 6 + 0.07·R12`, ≈10.9 MHz at R12=70; calibration against measured ionosonde data is still outstanding)
+- Solar-cycle dependence is now wired via the R12 sunspot index; a live F10.7/R12 feed (rather than a fixed climatological anchor) is the next step
 - Compare with IRI-2020 foF2 predictions
 - Back-calculate foF2 from observed MUF using secant law (inverse problem)
 
@@ -1021,7 +1035,7 @@ GNSS VTEC gives vertical TEC overhead at one point. For VTEC maps you need spati
 | IONEX maps | 1-2 hours | 2.5° × 5° grid | ±2-5 TECU |
 | **Local GNSS** | **~1 second** | **Point at receiver** | **±1 TECU** |
 | HF group-delay | Real-time | Path-integrated | SNR 0.13 (noise) |
-| HF carrier-phase dTEC | Real-time | Path-integrated | ~6 mTECU/min (rate) |
+| HF carrier-phase dTEC | Real-time | Path-integrated | ~6 mTECU/min (rate, empirical/typical) |
 
 ### 8.5 Configuration
 
@@ -1133,10 +1147,12 @@ At minutes :08/:44:
 ## 11. References
 
 1. **Davies, K. (1990)**. "Ionospheric Radio." Peter Peregrinus Ltd.
-2. **Bilitza, D. et al. (2022)**. "International Reference Ionosphere 2020." Earth, Planets and Space.
-3. **ITU-R P.1239-3**. "ITU-R Reference Ionospheric Characteristics"
-4. **NIST SP 432**. "NIST Time and Frequency Services"
-5. **HamSCI WWV/H Scientific Modulation Working Group**. hamsci.org/wwv
+2. **Bilitza, D. et al. (2022)**. "The International Reference Ionosphere model: A review and description of an ionospheric benchmark." *Rev. Geophys.*, 60. (IRI-2020)
+3. **Cervera, M.A. and Harris, T.J. (2014)**. "Modeling ionospheric disturbance features in quasi-vertically incident ionograms using 3-D magnetoionic ray tracing and atmospheric gravity waves," *Radio Sci.*, 49(10). (PHaRLAP)
+4. **ITU-R P.1239-3**. "ITU-R Reference Ionospheric Characteristics"
+5. **Muggleton, L.M. (1975)**. "A method of predicting foE at any time and place." *Telecommun. J.*, 42. (foE)
+6. **NIST SP 432**. "NIST Time and Frequency Services"
+7. **HamSCI WWV/H Scientific Modulation Working Group**. hamsci.org/wwv
 
 ---
 

@@ -26,6 +26,17 @@ updated when the regime changes again.
 > work cleanly.  They affect chrony's view of the source, not the
 > underlying annotation quality.  Treat this document as a downstream
 > operational guide, not a design center.
+>
+> **HFPS / Method-5 feed:** the parameters documented here are the
+> HPPS / Method-2 (matched-filter) parameters on SHM 2.  The parallel
+> HFPS feed (Method 5, per-sample magnitude derivative, on SHM 3,
+> gated by `diff_to_shm_unit`) is **disabled by default** — it is not in
+> the shipped chrony config, which consumes only FUSE and HPPS.  When
+> enabled it would run alongside HPPS with chrony selecting between the
+> two; its algorithm, evidence, and tuning are
+> documented in
+> [BPSK-PPS-DETECTION-METHODS.md](BPSK-PPS-DETECTION-METHODS.md) (§6–§9),
+> not here.
 
 ---
 
@@ -34,10 +45,11 @@ updated when the regime changes again.
 The "HF-PPS" timing tier is the LB-1421 GPSDO's 1 PPS pulse modulated
 onto a BPSK carrier (Turn Island Systems TS1), broadcast at 45.375 MHz,
 captured by an RX-888 SDR, demodulated in software, and finally
-delivered to chrony via the SysV SHM refclock interface as `TSL3`.
+delivered to chrony via the SysV SHM refclock interface as `HPPS`.
 
 The interesting bit is that we never see the PPS edge directly. The
-RX-888 + radiod give us an IQ stream at 16 kHz. The PPS edge is encoded
+RX-888 + radiod give us an IQ stream at 96 kHz (the production front
+end; the original tuning bench ran at 16 kHz). The PPS edge is encoded
 as a phase flip in the BPSK carrier. We must:
 
 1. demodulate the BPSK,
@@ -53,12 +65,20 @@ chrony's own refclock driver.
 This document focuses on the *parameters* that decide when we accept
 or reject an edge, and what we publish about its quality.
 
+The precision floor for edge localisation is set by the
+Cramér-Rao lower bound for a matched-filter time-of-arrival estimate,
+`σ_t ≈ 1 / (2π · B · √SNR)` (B the effective bandwidth, SNR the
+post-integration signal-to-noise ratio), with the Costas carrier-
+recovery loop's residual phase noise adding to that floor. See
+[BPSK-PPS-DETECTION-METHODS.md](BPSK-PPS-DETECTION-METHODS.md) §2–§3
+for the matched-filter / Costas derivation and the CRLB reference.
+
 ---
 
 ## 2. The pipeline parameters
 
 ```
-  RX-888 IQ samples (16 kHz, ka9q-python RadiodStream)
+  RX-888 IQ samples (96 kHz production; 16 kHz on the original bench, ka9q-python RadiodStream)
         │
         ▼  resequence_buffer_size = 256 packets
   RTPResequencer  ──▶ drop / zero-fill on missing seq
@@ -89,7 +109,7 @@ or reject an edge, and what we publish about its quality.
 
         │   ~ 1 sample/s
         ▼  /etc/chrony/chrony.conf
-  refclock SHM 2 refid TSL3 poll 0 precision 5e-6 offset 0.0 delay 0.0001
+  refclock SHM 2 refid HPPS poll 0 precision 5e-6 offset 0.0 delay 0.0001
 ```
 
 Two more parameters live in the publication path:
@@ -142,7 +162,7 @@ than the worst observed Costas excursion (~10-15 s), so an excursion
 can never be mistaken for a step.
 
 Step adoption *is* expected behaviour, not a fault. When it fires
-TSL3 will briefly stop pushing while the lock re-homes.
+HPPS will briefly stop pushing while the lock re-homes.
 
 ### 3.3 Costas dphase threshold: `COSTAS_DPHASE_MAX_RAD = 0.050`
 
@@ -207,16 +227,17 @@ sanity check: if the new chain_delay differs from the last-accepted
 value by more than 10 ms, reject this edge and keep coasting.
 
 The 10 ms threshold is well above natural sample-quantization wobble
-(62.5 µs at 16 kHz) and well above legitimate multi-sample drift in
+(10.4 µs at the 96 kHz production rate; 62.5 µs on the original 16 kHz
+bench) and well above legitimate multi-sample drift in
 the calibrator's chosen edge position (~2-5 ms typical over hours),
 but well below the half-second wrap value (~322 ms) the algorithm
 produces when a noise edge displaces the reference. So 10 ms cleanly
 separates "normal drift" from "wrap-displaced".
 
-### 3.6 chrony.conf TSL3 line: `precision 5e-6  offset 0.0  delay 0.0001`
+### 3.6 chrony.conf HPPS line: `precision 5e-6  offset 0.0  delay 0.0001`
 
 ```
-refclock SHM 2 refid TSL3 poll 0 precision 5e-6 offset 0.0 delay 0.0001
+refclock SHM 2 refid HPPS poll 0 precision 5e-6 offset 0.0 delay 0.0001
 ```
 
 `precision` is what we *declare* to chrony as the per-sample
@@ -229,29 +250,30 @@ a floor on its confidence interval.
   `+/- 55us` displayed in `chronyc sources`.
 
 We tried tightening this to `precision 1e-6` (1 µs) to make the
-display more honest. **Don't do that.** The runtime jitter of TSL3
+display more honest. **Don't do that.** The runtime jitter of HPPS
 in `chronyc sourcestats` typically sits at ~150-300 ns std-dev — but
 individual samples often exceed 1 µs offset (3-7 µs is normal during
 brief drift periods). If the *declared* precision is tighter than
 the *observed* sample-to-sample spread, chrony marks the source
-unusable. We saw this immediately: TSL3 went `?` reach=255 (chrony
+unusable. We saw this immediately: HPPS went `?` reach=255 (chrony
 was receiving samples fine but rejecting all of them).
 
 The 50 µs declared precision gives chrony plenty of margin to
-accept everything that's within the BPSK quantization band (31 µs
-half-sample at 16 kHz) plus some atmospheric drift, without
+accept everything that's within the BPSK quantization band (~5.2 µs
+half-sample at the 96 kHz production rate; 31 µs on the original
+16 kHz bench) plus some atmospheric drift, without
 under-claiming relative to the true short-term jitter.
 
 **Reverted to original `precision 5e-6 / delay 0.0001`.**
 
 If you want a more honest `±` display, the right way is *not* to
-shrink the precision claim — it's to read `chronyc sourcestats TSL3`
+shrink the precision claim — it's to read `chronyc sourcestats HPPS`
 which is genuinely dynamic and reflects observed quality.
 
 ### 3.7 Authority publication: `BpskPpsProbe(sigma_floor_ms=0.001)`
 
 This is separate from chrony's accounting — it's what timestd's
-Authority Manager publishes about TSL3 to its own cross-source
+Authority Manager publishes about HPPS to its own cross-source
 cascade.
 
 Old behavior: hardcoded `sigma_ms = 0.050` (50 µs) — the same number
@@ -345,7 +367,7 @@ Probable cause: chrony has internal limits (`maxupdateskew`,
 into a "do not poll" backoff state. We haven't fully traced which
 limit fires under what conditions.
 
-**Workaround:** if you see TSL3 in `#?` with `LastRx` growing past
+**Workaround:** if you see HPPS in `#?` with `LastRx` growing past
 ~300 s, restart `chrony.service`. Don't restart core-recorder — that
 makes it worse (resets BPSK lock state too).
 
@@ -377,8 +399,8 @@ the EMA, not against any absolute reference.
 
 Three sentences:
 
-1. **Chrony's `±55us` for TSL3 is a static declared claim**, not a
-   measurement. Read `chronyc sourcestats TSL3` for the dynamic
+1. **Chrony's `±55us` for HPPS is a static declared claim**, not a
+   measurement. Read `chronyc sourcestats HPPS` for the dynamic
    std-dev (typically 150-300 ns); the new authority `t6_sigma_ms`
    in our SQLite history is dynamic too and floored at 1 µs.
 

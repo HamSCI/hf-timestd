@@ -139,17 +139,25 @@ optionally subscribe to via §18.
 
 ## Further reading
 
-`docs/` is extensive (~50 files). The load-bearing ones:
+`docs/` is extensive. **Start at `docs/INDEX.md`** — the reading-order map that
+groups every doc (Start here → Architecture → Metrology/Timing → Physics/Science
+→ Data products → Operations) and marks the canonical (★) reference per domain.
+Historical/superseded material lives under `docs/archive/`; the QEX paper draft
+and HamSCI talks are under `docs/publications/`.
 
-- `docs/METROLOGY.md` — timing hierarchy §4.5–§4.6 (the canonical
+The load-bearing ones:
+
+- `docs/METROLOGY.md` ★ — timing hierarchy §4.5–§4.6 (the canonical
   reference for the timing-authority invariant above).
+- `docs/PHYSICS.md` ★ — canonical science capability inventory (DSP/physics).
 - `docs/ARCHITECTURE-FIRST-PRINCIPLES.md` — producer-side reference
   for the §18 contract surface.
-- `docs/ARCHITECTURE.md` — pipeline + service layering.
-- `docs/DEBUGGING.md` — journald-only logging patterns.
+- `docs/ARCHITECTURE.md` — pipeline + service layering (SQLite backend).
+- `docs/DEBUGGING.md` — journald-only logging patterns + triage recipes.
 - `docs/TIMING-PIPELINE-WIRING.md` — RTP / chrony / fusion wiring.
-- `docs/PHASE_ENGINE_ARCHITECTURE.md` / `PHYSICS.md` — DSP internals.
 - `docs/GRAPE_DAILY_PROCESSING.md` — daily PSWS upload pipeline.
 - `docs/PHARLAP_RAYTRACING.md` — PHaRLAP/pyLAP ray tracing (advisory physics
   overlay): 2-D/3-D capabilities, the `raytrace` CLI, worked
   Alaska→EM38ww examples. Engine: `core/raytrace_engine.py`.
+- `docs/PHASE_ENGINE_ARCHITECTURE.md` — **planned** coherent multi-antenna
+  array design (not yet implemented; reads as a roadmap, not current behavior).

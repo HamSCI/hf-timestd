@@ -315,7 +315,7 @@ uncertainty.
 |---|---|---|
 | L1 metrology stamping (`metrology_service.py`) | `datetime.now(timezone.utc)` | `rtp_to_wallclock(rtp, ch) + rtp_to_utc_offset_ns` |
 | L2 calibration (`l2_calibration_service.py`) | `datetime.now(timezone.utc)` | same |
-| Fusion → SHM L1/L2 (`multi_broadcast_fusion.py:5376`) | `system_time` with no authority offset | `system_time + rtp_to_utc_offset_ns − D_clock_fused_ms/1000` |
+| Fusion → SHM L2 (`multi_broadcast_fusion.py:5376`) | `system_time` with no authority offset | `system_time + rtp_to_utc_offset_ns − D_clock_fused_ms/1000` |
 | Core-recorder → SHM TSL3 (`core_recorder_v2.py:1366-1373`) | `rtp_to_wallclock(...) − chain_delay`, then `round()` | `rtp_to_wallclock(rtp, ch) + rtp_to_utc_offset_ns`, no `round()` |
 
 Each consumer becomes a one-line read of `authority.json` (or a
@@ -328,9 +328,10 @@ shared in-process cache where the producer is local) plus an addition.
 SHM. The actual code has:
 
 - AuthorityManager: writes `authority.json` ✓
-- fusion: writes SHM unit 0 (L1) and unit 1 (L2) — independent of
+- fusion: writes SHM unit 1, refid FUSE (L2 calibrated); the former
+  unit-0 L1 feed was retired 2026-05-23 — independent of
   AuthorityManager
-- core-recorder: writes SHM unit 2 (T6/TSL3) — independent of
+- core-recorder: writes SHM unit 2, refid HPPS (T6) — independent of
   AuthorityManager
 
 This is partly historical (fusion and core-recorder predate the
@@ -471,6 +472,24 @@ on settled-capture before its first `ensure_channel`.
 wspr-recorder, wsprdaemon-client, any future client that uses
 the same `ensure_channel` pattern. Each should be audited and
 gated on chrony settle.
+
+### 6.7 Out-of-band clock-health watchdog (`timestd-clock-monitor`)
+
+Distinct from the SHM discipline path described above, the
+`timestd-clock-monitor.service` / `.timer` pair (commit `75b8a45`)
+runs `scripts/check-clock-health.sh --auto-makestep` on a 30 s
+cadence. It is a guarded, out-of-band `chronyc makestep` path that
+disciplines `CLOCK_REALTIME` as a bootstrap / last-resort measure —
+for example to recover from a large initial offset before chrony can
+slew into range.
+
+It is **explicitly not a timing source**: it does not write any SHM
+segment, does not publish into `authority.json`, and contributes
+nothing to the authority cascade. It only nudges the host wall clock
+back toward chrony's selected reference when it has drifted far enough
+to need a step rather than a slew. Keep it mentally separate from the
+SHM discipline path (fusion SHM 1 / FUSE, core-recorder SHM 2 / HPPS),
+which is the authoritative RTP→UTC annotation channel.
 
 ## 7. V-list — pipeline fragilities and what Pattern B fixes
 

@@ -6,7 +6,7 @@ GRAPE (GRAPE Recorder and Processor Engine) runs as a daily batch job to process
 
 ## Systemd Timer
 
-The GRAPE daily processing is managed by a systemd timer that runs at 1:00 AM each day.
+The GRAPE daily processing is managed by a systemd timer that runs at 01:00 UTC each day.
 
 ### Installation
 
@@ -14,13 +14,21 @@ The GRAPE daily processing is managed by a systemd timer that runs at 1:00 AM ea
 # Copy service and timer files
 sudo cp systemd/grape-daily.service /etc/systemd/system/
 sudo cp systemd/grape-daily.timer /etc/systemd/system/
+sudo cp systemd/grape-upload-retry.service /etc/systemd/system/
+sudo cp systemd/grape-upload-retry.timer /etc/systemd/system/
 
 # Reload systemd
 sudo systemctl daemon-reload
 
-# Enable and start the timer
+# Enable and start the timers
 sudo systemctl enable --now grape-daily.timer
+sudo systemctl enable --now grape-upload-retry.timer
 ```
+
+In addition to the daily run, a second timer `grape-upload-retry.timer`
+(`OnBootSec=5min`, `OnUnitActiveSec=30min`) periodically runs
+`grape upload --resume` to drain any datasets queued for retry by a failed or
+unverified upload.
 
 ### Management
 
@@ -39,6 +47,10 @@ sudo systemctl start grape-daily.service
 
 # Disable the timer
 sudo systemctl disable --now grape-daily.timer
+
+# Inspect the upload-retry timer (runs `grape upload --resume`)
+systemctl status grape-upload-retry.timer
+journalctl -u grape-upload-retry.service -n 100
 ```
 
 ## What It Does
@@ -60,7 +72,7 @@ The daily job processes **yesterday's data** through the following pipeline:
 
 3. **Package** (optional) - Package as Digital RF
    - Creates DRF packages for PSWS upload
-   - Outputs to `/var/lib/timestd/grape/drf/`
+   - Outputs to `upload/{YYYYMMDD}/{CALLSIGN}_{GRID}/{RECEIVER}@{ID}/OBS.../ch0/`
 
 4. **Upload** (optional) - Upload to PSWS repository
    - Uploads packaged data via SFTP
@@ -78,6 +90,17 @@ To skip the upload stage entirely (e.g., while waiting for PSWS key registration
 ```bash
 sudo -u timestd /opt/hf-timestd/venv/bin/hf-timestd grape daily --no-upload
 ```
+
+### Upload verification
+
+Before an upload is marked complete (and cleanup allowed), the uploader walks
+the dataset and requests an sftp `ls -l` of each leaf file, confirming the
+remote byte sizes match and that the trigger directory is present. If
+verification fails, the dataset is re-queued for retry rather than deleted, so
+nothing is lost on a partial or corrupted transfer.
+
+> Background: the `ls -l` parser was hardened in 8f02d48 to tolerate a `?`
+> nlink field returned by the PSWS server.
 
 ## Configuration
 
@@ -131,13 +154,13 @@ To process a specific date manually:
 
 ```bash
 # Decimate specific channel
-hf-timestd grape decimate --channel "WWV 10 MHz" --date 2026-01-02
+hf-timestd grape decimate --channel "SHARED 10000" --date 2026-01-02
 
 # Decimate all channels
 hf-timestd grape decimate --all-channels --date 2026-01-02
 
 # Generate spectrogram
-hf-timestd grape spectrogram --channel "WWV 10 MHz" --date 2026-01-02
+hf-timestd grape spectrogram --channel "SHARED 10000" --date 2026-01-02
 
 # Package for upload
 hf-timestd grape package --date 2026-01-02 --callsign AC0G --grid EM28
@@ -216,7 +239,7 @@ sudo chown timestd:timestd /var/lib/timestd/grape /var/log/timestd/grape
 ls -la /var/lib/timestd/raw_archive/
 
 # Check decimated output
-ls -la /var/lib/timestd/grape/decimated/
+ls -la /var/lib/timestd/products/{CHANNEL}/decimated/
 ```
 
 ## Performance
@@ -225,7 +248,7 @@ The daily job typically takes:
 
 - **Decimation**: ~5-10 minutes per channel
 - **Spectrograms**: ~1-2 minutes per channel
-- **Total**: ~30-60 minutes for 3-4 channels
+- **Total**: ~30-60 minutes for the 9 canonical channels
 
 Resource usage:
 

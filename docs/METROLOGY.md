@@ -21,7 +21,7 @@
 
 **RTP Mode (Physics Pathway):** With GPS+PPS providing authoritative timing (~50 μs accuracy via radiod's RTP timestamps), the system uses the known transmission times and measured arrival times to **study the ionosphere**. The propagation delay residuals reveal carrier-phase differential TEC (dTEC, the primary ionospheric product, anchored by GNSS VTEC), traveling ionospheric disturbances (TIDs), and space weather effects.
 
-**Fusion Mode (Metrology Pathway):** The system attempts to **recover UTC from the HF broadcasts alone**, using multi-broadcast fusion to solve for the local clock offset. This pathway demonstrates how closely tone analysis can reconstruct the timing authority that RTP mode provides directly. Measured accuracy: ±0.5 ms (1σ, conservative claim) with multi-station fusion and GNSS VTEC correction; ±2–5 ms without ionospheric correction. See Section 13 for the full error budget.
+**Fusion Mode (Metrology Pathway):** The system attempts to **recover UTC from the HF broadcasts alone**, using multi-broadcast fusion to solve for the local clock offset. This pathway demonstrates how closely tone analysis can reconstruct the timing authority that RTP mode provides directly. Measured accuracy: ±0.5 ms (1σ, conservative claim) **when multi-station fusion is locked and converged** (with GNSS VTEC correction); ±2–5 ms without ionospheric correction. Fusion is not always available — T3 is gated on a fresh `fusion_status.json`, and fusion can be (and currently is, in the field) unavailable, in which case the host falls back to a higher tier (T5/T6) or coasts. See Section 13 for the full error budget.
 
 These two modes are operational shortcuts over a finer-grained **timing authority hierarchy** (T-levels) described in §4.5, which governs how the system selects, cross-checks, and falls back between UTC sources at runtime.
 
@@ -224,9 +224,9 @@ radiod's `GPS_TIME` and `RTP_TIMESNAP` are both derived from `input_sample_index
 > |---|---|---|
 > | A-level (ADC timebase) ranking | ✅ | Reported by `radiod` / `core_recorder`. |
 > | T0–T2, T4 levels (chrony/NTP-based) | ✅ | Conventional chrony plumbing; behaviour matches the table. |
-> | T3 (Fusion HF-derived UTC) | ✅ | Produced by `multi_broadcast_fusion`. |
+> | T3 (Fusion HF-derived UTC) | ✅ | Produced by `multi_broadcast_fusion`. **Availability is gated on a fresh `fusion_status.json`**; fusion can be (and currently is, in the field) unavailable, in which case T3 is not offered and the manager selects a higher tier (T5/T6) or coasts. The ±0.5 ms (1σ) figure holds only when multi-station fusion is locked and converged. |
 > | T5 (USB-delivered GPS+PPS) | ✅ | LBE-1421 USB-NMEA is consumed by hf-timestd for second-of-day disambiguation (alongside T6) and as the standalone source when T6 is unavailable. Precision is USB-bus-jitter floored at µs-to-ms class. **Upgrade path:** wire the TS-1 PPS OUT jack to a host GPIO / RS232 input with kernel PPS-API support — that adds a *second* ns-class path alongside T6 (for continuous §8 chain-delay cross-validation), but does not promote T5 itself, since the T5 definition is the USB transport. |
-> | **T6 BPSK-PPS injection / detection** | ✅ | TS-1 HF-injected BPSK PPS coupled into the RX path, decoded sample-precise from the IQ stream (HPPS matched-filter + HFPS diff calibrator). Live on bee1. The chrony-facade calibration has known weaknesses (one-shot disambig is sensitive to host-clock state at calibration moment — see [TIMING-PIPELINE-WIRING.md](TIMING-PIPELINE-WIRING.md) and the chrony-tuning notes); the **annotation product** (per-sample tier + offset + uncertainty) is operational and is the deployed best tier. |
+> | **T6 BPSK-PPS injection / detection** | ✅ | TS-1 HF-injected BPSK PPS coupled into the RX path, decoded sample-precise from the IQ stream (HPPS matched-filter; the HFPS diff calibrator is wired but disabled by default). Live on bee1. The chrony-facade calibration has known weaknesses (one-shot disambig is sensitive to host-clock state at calibration moment — see [TIMING-PIPELINE-WIRING.md](TIMING-PIPELINE-WIRING.md) and the chrony-tuning notes); the **annotation product** (per-sample tier + offset + uncertainty) is operational and is the deployed best tier. |
 > | Authority manager + `/run/hf-timestd/authority.json` v1 | ✅ | `AuthoritySnapshotStore` + `AuthorityManager` live; per-cycle records persisted to `/var/lib/timestd/authority_history.db`. |
 > | `chronyc selectopts` runtime gating | ✅ | `ChronyRefclockGate` is wired into the AuthorityRunner and invoked every tick (`AuthorityManager._apply_chrony_gate`); enabled per `[timing.authority_manager.chrony_gate]` (`dry_run` available for staged rollout). |
 > | mDNS TXT-record extension | ✅ | `MdnsFusionAdvertiser` is wired into the AuthorityRunner and applied every tick (`AuthorityManager._apply_mdns_advertiser`); enabled per `[timing.authority_manager.mdns]` (`dry_run` logs the TXT without forking avahi). |
@@ -272,7 +272,7 @@ Data products across the HamSCI suite — hf-timestd's own services, wspr-record
 label_utc = rtp_time + rtp_to_utc_offset_ns
 ```
 
-This is a hard invariant. Clients do **not** consult their own system clock for data labeling. The rationale is multi-host coherence: a single radiod serves RTP to many client hosts, each of which may have its own chrony state and drift independently. Labeling with RTP-time plus a shared offset means all clients agree on labels by construction, regardless of per-host clock state. The 2026-04-20 incident — system clock drift of ~107 s mislabeling WSPR WAV files — is structurally impossible under this invariant, because system-clock drift does not propagate into labels.
+This is a hard invariant for **data-label production** and for the T6 anchor-offset publication: clients do **not** consult their own system clock for data labeling, and chrony is not load-bearing for data labels. Note the scope: the absolute "feed = rtp_time + offset, never the system clock" framing applies to those label/publication paths. The *legacy* Fusion→chrony SHM (`FUSE`) discipline path is different — for clock STEERING it feeds `system_time − D_clock` into chrony's SHM, because that path's job is to correct the host system clock, not to label data. The invariant below governs the data-label path. The rationale is multi-host coherence: a single radiod serves RTP to many client hosts, each of which may have its own chrony state and drift independently. Labeling with RTP-time plus a shared offset means all clients agree on labels by construction, regardless of per-host clock state. The 2026-04-20 incident — system clock drift of ~107 s mislabeling WSPR WAV files — is structurally impossible under this invariant, because system-clock drift does not propagate into labels.
 
 **The offset is always applied, regardless of T-level.** Its magnitude and uncertainty tell the provenance story; the client code path is uniform:
 
@@ -428,7 +428,7 @@ The authority hierarchy in §4.5 **extends** — it does not replace — the est
 
 Chrony retains its classical role of disciplining the host system clock from the best available time sources. It consumes:
 
-- The Fusion-produced RTP→UTC offset via the standard **SHM refclock** driver (segments 2–3 in the dual-feed configuration of §13.4).
+- The Fusion-produced RTP→UTC offset via the standard **SHM refclock** driver (`FUSE` on segment 1, `HPPS` on segment 2 in the dual-feed configuration of §13.4; SHM 0 retired 2026-05-23).
 - Configured NTP peers — WAN NTP, LAN GPS+PPS servers, other LAN hf-timestd hosts serving Fusion — via standard `server`/`peer` directives.
 
 Chrony then:
@@ -439,6 +439,12 @@ Chrony then:
 **Chrony is not load-bearing for data labels.** Under the RTP-reference invariant (§4.5), every data-product timestamp is `rtp_time + rtp_to_utc_offset_ns`. Chrony may drift, fail, lose all sources, or be wildly wrong — data labels remain correct because they travel a different path. Chrony's health becomes an operational concern for the host, not a correctness concern for the science data.
 
 This is the structural fix for the 2026-04-20 failure mode: when chrony lost all usable sources and the system clock drifted ~107 s, the wspr-recorder WAV labels followed. Under the RTP-reference invariant, the same chrony outage would leave data labels untouched — only the operator's wall clock and syslog timestamps would go wrong.
+
+#### Host-clock-vs-UTC watchdog — `timestd-clock-monitor`
+
+`timestd-clock-monitor.service`/`.timer` (commit 75b8a45) runs `scripts/check-clock-health.sh --auto-makestep` every 30 s (timer `OnCalendar` `*:*:00/30`), as root. It detects a free-running chrony (Reference ID `00000000`), a leap status other than Normal, a root dispersion > 0.5 s, or a reachable source disagreeing by > 1.0 s, then — when chrony has a selectable source — issues a cooldown-guarded `chronyc makestep` to step the system clock back onto UTC immediately.
+
+This is the **host-clock-vs-UTC** watchdog, and is DISTINCT from `timestd-chrony-monitor`, which only watches the FUSE/HPPS SHM segments' reach (whether hf-timestd's own refclock feed is alive). `timestd-clock-monitor` was added after a 2026-06 field incident: the host's USB-GPS dropped off the bus and chrony free-ran ~6 s, darkening FT8/FT4 decoding on the co-hosted recorders. It guards the operator wall clock and syslog/journal timestamps — not the data labels, which remain correct via the RTP-reference invariant above.
 
 #### hf-timestd as a LAN NTP server — standard mechanisms only
 
@@ -458,12 +464,12 @@ Chrony exposes runtime control of a source's **select policy** via `chronyc sele
 
 | Expected best T-level on this host | Recommended stratum | refid | Rationale |
 |---|---|---|---|
-| T6 (BPSK-PPS injection available) | 1 | `HFPP` | Tightest payload offset; stratum 1 substantiated |
-| T3 multi-station, A1 host | 1 | `HFSN` | Multi-broadcast Fusion with GPSDO rate; ~ms |
-| T3 only, A0 host | 2 | `HFSN` | Without GPSDO, claim one stratum lower |
-| T1 coast (rare primary) | 3 | `HFST` | Not authoritative; keep discoverable but visibly lower-ranked |
+| T6 (BPSK-PPS injection available) | 1 | `HPPS` | Tightest payload offset (BPSK-PPS, SHM 2); stratum 1 substantiated |
+| T3 multi-station, A1 host | 1 | `FUSE` | Multi-broadcast Fusion (SHM 1) with GPSDO rate; ~ms |
+| T3 only, A0 host | 2 | `FUSE` | Without GPSDO, claim one stratum lower |
+| T1 coast (rare primary) | 3 | `FUSE` | Not authoritative; keep discoverable but visibly lower-ranked |
 
-refids are 4-char ASCII: `HFPP` = HF PPS, `HFSN` = HF station (Fusion), `HFST` = HF stale. These are more informative than the legacy `TMGR` (see §7.3) when diagnosing with `chronyc sources -v`. Existing installs keep `TMGR` until operators migrate; the authority manager is refid-agnostic and reads the configured value.
+The live refids are 4-char ASCII `HPPS` (HF BPSK-PPS, SHM 2) and `FUSE` (HF multi-broadcast Fusion, SHM 1), per `config/chrony-timestd-refclocks.conf`. These are more informative than the legacy `TMGR` (see §7.3) when diagnosing with `chronyc sources -v`. The legacy SHM 0 raw-metrology feed (`TMGR`/`TSL1`) was retired 2026-05-23. The authority manager is refid-agnostic and reads the configured value.
 
 **Per-sample precision** (dynamic, via the SHM segment): Fusion already publishes `precision_l1` / `precision_l2` per cycle based on the current uncertainty (see `multi_broadcast_fusion.py` SHM update logic). This reflects the authority's current quality without needing to restart chrony.
 
@@ -550,7 +556,7 @@ The `TickEdgeDetector` is the single source for all three `tick_timing` observab
 | **CHU** | 1000 Hz | 300 ms | 7200 |
 | **BPM** | 1000 Hz | 10 ms | 240 |
 
-**Detection Method (inspired by ntpd refclock_wwv.c Type 36 driver):**
+**Detection Method (inspired by ntpd refclock_wwv.c Type 36 driver [Mills, "refclock_wwv — NIST Modem Time Services (Type 36)," ntpd reference clock driver]):**
 
 1. **Quadrature Matched Filter:**
    - Generates I/Q template for the exact tick shape (e.g., 5 cycles of 1000 Hz for WWV)
@@ -560,7 +566,7 @@ The `TickEdgeDetector` is the single source for all three `tick_timing` observab
 
 2. **Front-Edge Back-Calculation:**
    - Correlation peak corresponds to the CENTER of the tick pulse
-   - The on-time marker is the LEADING EDGE (NIST SP 432)
+   - The on-time marker is the LEADING EDGE [NIST Special Publication 432, "NIST Time and Frequency Services"]
    - Subtract half the tick duration from peak position to recover front edge
    - Sub-sample parabolic interpolation (~5 μs precision)
 
@@ -629,7 +635,7 @@ HFPropagationModel.predict(station, frequency, utc_time)
     └── _estimate_uncertainty()
 ```
 
-**Ionospheric Group Delay Physics:**
+**Ionospheric Group Delay Physics** (the 40.3 m³/s² group-delay constant [Davies, *Ionospheric Radio*; ITU-R Recommendation TF.460-6]):
 
 ```
 Δτ = (40.3 / c) × ∫ Ne(s) ds / f²  =  40.3 × sTEC / (c × f²)
@@ -674,7 +680,7 @@ If observed differential delay disagrees with predicted by >1 ms RMS, the model 
 
 **Great-Circle Path TEC Sampling (v6.7.1):** TEC is sampled along the great-circle path using spherical trigonometry, ensuring accurate TEC integration for long paths (e.g., BPM at 11,504 km).
 
-**Altitude-Dependent Obliquity Mapping (v6.7.1):** `M(h) = 1 / sqrt(1 - (R·cos(e) / (R + h))²)` replaces the simpler `1/sin(e)` approximation.
+**Altitude-Dependent Obliquity Mapping (v6.7.1):** `M(h) = 1 / sqrt(1 - (R·cos(e) / (R + h))²)` replaces the simpler `1/sin(e)` approximation. This is the standard single-layer obliquity (thin-shell) mapping function [Bust and Mitchell, "History, current state, and future directions of ionospheric imaging," *Rev. Geophys.*, 46, RG1003, 2008].
 
 **Propagation Delay Bounds:**
 
@@ -745,7 +751,7 @@ The `BroadcastWindowState` in `ArrivalPatternMatrix` tracks observed propagation
 calibration_offset = -mean(D_clock_station)
 ```
 
-**Update Method:** Exponential Moving Average (α=0.5)
+**Update Method:** Exponential Moving Average (α = max(0.5, 20/n_samples); 0.5 is the steady-state floor)
 
 **Inverse Variance Weighting:**
 
@@ -757,20 +763,27 @@ d_clock_fused = Σ(w_i × d_clock_i) / Σ(w_i)
 **Why this matters:**
 
 - **Statistically optimal** for combining independent measurements
-- **ISO GUM best practice** (GUM-S1)
+- **ISO GUM best practice** for inverse-variance weighting (GUM-S1) [BIPM/ISO, "Evaluation of measurement data — Guide to the expression of uncertainty in measurement (GUM)," JCGM 100:2008]
 - Measurements with 0.5 ms uncertainty get 4x weight vs 1.0 ms uncertainty
 
-### 6.2 Kalman Filtering
+### 6.2 Kalman Filtering (LEGACY offset-tracking Kalman)
 
-**Steel Ruler Parameters:**
+> **Note:** This table documents the **legacy** single-offset clock tracker,
+> `clock_convergence.KalmanClockTracker` ([tof offset, drift] state). The
+> v6.0 hierarchical architecture (§12.7) removed the single offset-Kalman
+> from the L3 fusion layer. The **live** fusion path uses the per-frequency
+> `BroadcastKalmanFilter` ([tof_ms, doppler] state, §12.3) followed by WLS at
+> L3 (§12.5) — see §12 for the deployed hierarchical filters.
+
+**Steel Ruler Parameters** (`KalmanClockTracker` code defaults):
 
 | Parameter | Value | Description |
 |-----------|-------|-------------|
-| **Initial P (Offset)** | 5.0 ms | Moderate initial trust |
-| **Initial P (Drift)** | 1e-7 ms/min | High trust in factory calibration |
-| **Q (Offset)** | 0.01 ms | Allows tracking real offsets (updated 2026-02-06) |
-| **Q (Drift)** | 1e-12 ms/min | The clock does not wander |
-| **R (Measurement)** | 30.0 ms | High measurement noise (ionospheric) |
+| **Initial P (Offset)** | `initial_uncertainty_ms=5.0` (P = 5.0² = 25 ms²) | Moderate initial trust |
+| **Initial P (Drift)** | (5.0/10)² = 0.25 ms² | High trust in factory calibration |
+| **Q (Offset)** | `process_noise_offset_ms=1e-6` (near-zero stability) | The clock does not wander |
+| **Q (Drift)** | `process_noise_drift_ms_per_min=1e-7` | Drift is negligible |
+| **R (Measurement)** | `measurement_noise_ms=30.0` | High measurement noise (ionospheric) |
 
 **Drift Clamping:** `drift_ms_per_min` is forced to `0.0` after convergence.
 
@@ -848,18 +861,21 @@ Verify the system is actively steering the kernel clock.
 ```bash
 chronyc tracking
 # Look for:
-# Ref ID        : 544D4752 (TMGR)
+# Ref ID        : 46555345 (FUSE)   # or 48505053 (HPPS) when the BPSK-PPS feed is the selected source
 # Stratum       : 1 (if treating HF as primary) or >1
 # Last offset   : +0.000xxxx seconds (sub-millisecond)
 # RMS offset    : 0.000xxxx seconds
 # Frequency     : x.xxx ppm (should be stable)
 ```
 
-**Chrony SHM Configuration:**
+**Chrony SHM Configuration** (live `config/chrony-timestd-refclocks.conf`):
 
 ```
-refclock SHM 0 refid TMGR poll 4 precision 1e-3
+refclock SHM 1 refid FUSE poll 4 precision 1e-4   # T3 multi-broadcast fusion (L2 calibrated)
+refclock SHM 2 refid HPPS poll 0 precision 5e-6   # T6 BPSK-PPS matched filter
 ```
+
+> SHM 0 — the legacy raw-metrology L1 feed (formerly `refid TMGR` / `TSL1`) — was retired 2026-05-23 and is no longer published. The diff-detector calibrator (HFPS) is config-gated on SHM 3.
 
 - Fusion calculates D_clock every **8 seconds**
 - Chrony polls every **16 seconds**
@@ -1007,7 +1023,7 @@ All fields sourced from `TickEdgeDetector`:
 
 ### 11.1 What We Claim
 
-- **±0.5 ms (1σ) to UTC(NIST)** with proper uncertainty
+- **±0.5 ms (1σ) to UTC(NIST)** with proper uncertainty, when multi-station fusion is locked and converged
 - **ISO GUM-compliant** methodology
 - **Physics-validated** measurements
 - **Production-grade** reliability
@@ -1199,7 +1215,7 @@ TEC estimate = 25 TECU (science product)
 
 **Purpose:** Combine per-station D_clock estimates into a single offset_to_UTC.
 
-**Method:** Best Linear Unbiased Estimator (BLUE):
+**Method:** Best Linear Unbiased Estimator (BLUE); inverse-variance weighting is the minimum-variance linear unbiased combination per the Gauss–Markov theorem [Kay, *Fundamentals of Statistical Signal Processing: Estimation Theory*]:
 ```
 offset_to_UTC = Σ(w_i × D_clock_i) / Σ(w_i)
 where w_i = 1/σ_i²
@@ -1304,10 +1320,12 @@ The ionosphere is the dominant error in all cases. Oscillator quality affects **
 
 | Feed | SHM Unit | Source | Purpose |
 |------|----------|--------|---------|
-| **TSL1** | 0 | L1 Kalman (geometric fallback) | Raw metrology fusion — no ionospheric model |
-| **TSL2** | 1 | L2 Kalman (physics model) | Full ionospheric correction via propagation model |
+| **FUSE** | 1 | L2 Kalman (physics model) | T3 multi-broadcast fusion with full ionospheric correction via propagation model |
+| **HPPS** | 2 | BPSK-PPS matched filter (TS-1) | T6 HF-injected PPS — bypasses fusion uncertainty, BPSK quantization-limited floor |
 
-Each feed has its own independent Kalman filter state. TSL2 should show lower jitter and better accuracy as the ionospheric correction model removes systematic propagation biases.
+> The legacy raw-metrology L1 feed (SHM 0, formerly `TSL1`) was retired 2026-05-23; the live config (`config/chrony-timestd-refclocks.conf`) publishes `FUSE` on SHM 1 (refid `FUSE`) and `HPPS` on SHM 2 (refid `HPPS`). Chrony prefers HPPS (sub-µs) over FUSE (sub-ms) when both are available.
+
+Each feed has its own independent state. HPPS shows lower jitter and better accuracy (sees the BPSK quantization floor, ~14 ns std once locked); FUSE carries the ionospheric-corrected multi-broadcast fusion (±0.3–1.0 ms).
 
 ---
 
@@ -1383,18 +1401,20 @@ Each row summarizes the **published Fusion offset's uncertainty** at one T-level
 
 This section describes procedures for validating hf-timestd performance against external references and theoretical predictions.
 
-### 15.1 TSL1 vs TSL2 Comparison
+### 15.1 FUSE vs HPPS Comparison
 
-The dual Chrony feed architecture (TSL1 and TSL2) provides built-in validation of propagation corrections.
+The dual Chrony feed architecture (FUSE and HPPS) provides built-in validation: the multi-broadcast fusion feed cross-checked against the BPSK-PPS feed.
 
 <!-- LIVE: l1-l2-comparison -->
 
-**What TSL1 and TSL2 Represent:**
+> **Historical note:** earlier revisions paired an L1 raw-metrology feed (`TSL1`, SHM 0) against an L2 calibrated feed (`TSL2`, SHM 1). SHM 0 / the L1 raw feed was retired 2026-05-23; the live feeds are now `FUSE` (SHM 1, the L2-calibrated multi-broadcast fusion) and `HPPS` (SHM 2, the TS-1 BPSK-PPS). The L1-vs-L2 comparison discussion below is retained for the propagation-correction-quality reasoning it illustrates.
+
+**What FUSE and HPPS Represent:**
 
 | Feed | SHM | Data Source | Processing | Typical Uncertainty |
 |------|-----|-------------|------------|---------------------|
-| **TSL1** | 0 | L1 metrology (raw ToA) | Multi-broadcast fusion only | ±0.85 ms |
-| **TSL2** | 1 | L2 calibrated (corrected D_clock) | + Geometric delay, TEC, system cal, Kalman | ±0.3-1.0 ms |
+| **FUSE** | 1 | L2 calibrated (corrected D_clock) | Multi-broadcast fusion + geometric delay, TEC, system cal, Kalman | ±0.3-1.0 ms |
+| **HPPS** | 2 | BPSK-PPS matched filter (TS-1) | Sample-precise PPS detection, bypasses fusion uncertainty | ~14 ns (locked) |
 
 **The L1-L2 Difference:**
 
@@ -1475,8 +1495,8 @@ If you have a local GPS-based time server (e.g., at 192.168.0.202), you can comp
 | Source | Stratum | Typical Offset | Uncertainty | Traceability |
 |--------|---------|----------------|-------------|--------------|
 | **Local GPS (PPS)** | 1 | <1 μs | ~10-100 ns | UTC(USNO) via GPS |
-| **hf-timestd TSL2** | 1 | ±0.3-1 ms | ±0.5 ms | UTC(NIST) via WWV/CHU |
-| **hf-timestd TSL1** | 1 | ±0.8-1.5 ms | ±0.85 ms | UTC(NIST) via WWV/CHU |
+| **hf-timestd FUSE** | 1 | ±0.3-1 ms | ±0.5 ms | UTC(NIST) via WWV/CHU |
+| **hf-timestd HPPS** | 1 | ±0.8-1.5 ms | ±0.85 ms | UTC(NIST) via WWV/CHU |
 | **Public NTP (pool)** | 2-3 | ±1-50 ms | ±5-20 ms | Varies |
 
 **Key Insight:** hf-timestd is **not a replacement for GPS** for sub-millisecond timing. Its value is:
@@ -1490,8 +1510,8 @@ If you have a local GPS-based time server (e.g., at 192.168.0.202), you can comp
 # Configure Chrony to use both GPS and hf-timestd
 # In /etc/chrony/chrony.conf:
 server 192.168.0.202 iburst prefer  # GPS time server
-refclock SHM 0 refid TSL1 poll 4 precision 1e-3
-refclock SHM 1 refid TSL2 poll 4 precision 1e-4
+refclock SHM 1 refid FUSE poll 4 precision 1e-4
+refclock SHM 2 refid HPPS poll 0 precision 5e-6
 
 # Compare sources
 chronyc sources -v
@@ -1562,7 +1582,7 @@ curl http://localhost:8000/api/stability/adev
 
 #### 15.4.1 Cramér-Rao Bound
 
-The theoretical minimum timing uncertainty is given by the Cramér-Rao bound:
+The theoretical minimum timing uncertainty is given by the Cramér-Rao bound on time-of-arrival estimation [Kay, *Fundamentals of Statistical Signal Processing: Estimation Theory*]:
 
 ```
 σ_ToA = 1 / (2π × √(2 × SNR × B × T))
