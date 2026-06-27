@@ -258,8 +258,16 @@ def _build_remote_manifest(local_path: Path,
 # listing; the size column is the 5th whitespace-separated field,
 # preceded by the mode, link count, owner, and group.  We don't try
 # to parse the trailing date or filename — only the size.
+#
+# The nlink/owner/group fields are matched as \S+ rather than \d+: the
+# PSWS server (pswsnetwork.eng.ua.edu) returns "?" for the link-count
+# column (it doesn't expose nlink over SFTP), e.g.
+#   -rwxr-xr-x    ? 9032 stations 1283 Jun 27 06:16 gap_summary.json
+# A strict \d+ for nlink matched zero lines there, so verify() always
+# saw "0 ls replies" and reported false "upload truncation" even though
+# every file had landed.  Only the size column is required to be numeric.
 _SFTP_LS_LINE_RE = re.compile(
-    r"^[\-dlpcsb][rwxXstST\-]{9}\S*\s+\d+\s+\S+\s+\S+\s+(\d+)\s+"
+    r"^[\-dlpcsb][rwxXstST\-]{9}\S*\s+\S+\s+\S+\s+\S+\s+(\d+)\s+"
 )
 
 
