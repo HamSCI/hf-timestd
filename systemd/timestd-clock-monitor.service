@@ -1,0 +1,15 @@
+[Unit]
+Description=HF-Timestd System-Clock Health Monitor (UTC sync + auto-makestep)
+Documentation=https://github.com/HamSCI/hf-timestd
+
+[Service]
+Type=oneshot
+# exit 1 = unhealthy-but-handled (alerted/corrected); don't mark unit failed
+SuccessExitStatus=1
+User=root
+Group=root
+EnvironmentFile=-/etc/sigmond/coordination.env
+ExecStart=/opt/git/sigmond/hf-timestd/scripts/check-clock-health.sh --auto-makestep --verbose
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=timestd-clock-monitor
