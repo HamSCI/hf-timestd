@@ -134,6 +134,27 @@ def test_create_recreates_on_shape_mismatch():
         raise
 
 
+def test_open_or_recreate_foreign_owned_raises(monkeypatch):
+    """A size-mismatched segment we don't own can't be reclaimed → ownership error."""
+    from hf_timestd.core.ring_buffer import (
+        RingBufferOwnershipError,
+        ring_key_for_channel,
+    )
+    name = _unique_name("RBFOREIGN")
+    a = RingBuffer.create(name, sample_rate=1000, ring_seconds=2)
+    try:
+        key = ring_key_for_channel(name)
+        # Pretend to be a different user than the segment's owner: removal of a
+        # SysV segment needs the owner uid (or root), so we must NOT silently
+        # recreate — we must raise so the caller can alarm.
+        real_uid = os.getuid()
+        monkeypatch.setattr(rb.os, "getuid", lambda: real_uid + 100000)
+        with pytest.raises(RingBufferOwnershipError):
+            RingBuffer._open_or_recreate(key, a._shm.size + 4096, 0o660)
+    finally:
+        a.destroy()
+
+
 # ─── SPSC roundtrip ─────────────────────────────────────────────────────
 def test_spsc_roundtrip_extract_samples(ring):
     reader = RingBufferReader.attach(ring.channel_name)

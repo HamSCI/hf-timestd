@@ -244,23 +244,35 @@ class StreamRecorderV2:
         # segment keyed by channel name.  Nothing reads from it until
         # Phase 2 wires metrology workers onto the ring.
         self.ring_buffer = None
+        # Ring health: None == OK.  A non-None string is surfaced in the
+        # recorder status file so the guard can alarm instead of the metrology
+        # consumer silently starving — the hot ring IS the metrology feed since
+        # Phase 2, so a ring failure is no longer benign.
+        self.ring_error: Optional[str] = None
         if config.ring_seconds > 0:
             try:
-                from .ring_buffer import RingBuffer
+                from .ring_buffer import RingBuffer, RingBufferOwnershipError
                 self.ring_buffer = RingBuffer.create(
                     channel_name=config.description,
                     sample_rate=config.sample_rate,
                     ring_seconds=config.ring_seconds,
                 )
-            except Exception as exc:
-                # Never let a ring-buffer failure take the recorder down
-                # during Phase 1 rollout — the file-based path is still
-                # authoritative.
-                logger.error(
-                    f"{config.description}: RingBuffer.create failed "
-                    f"({exc}); continuing with file-only path"
-                )
+            except RingBufferOwnershipError as exc:
+                self.ring_error = f"foreign-owned-shm: {exc}"
                 self.ring_buffer = None
+                logger.critical(
+                    f"{config.description}: HOT RING UNAVAILABLE — {exc} "
+                    f"Metrology for this channel will STARVE (stale L1). The "
+                    f"recorder's root ExecStartPre `clean-stale-rings` should "
+                    f"clear this on restart."
+                )
+            except Exception as exc:
+                self.ring_error = f"create-failed: {exc}"
+                self.ring_buffer = None
+                logger.critical(
+                    f"{config.description}: HOT RING create failed ({exc}); "
+                    f"metrology for this channel will starve until resolved."
+                )
 
         # Tap callbacks: additional on_samples consumers (e.g. FSK listener)
         self._tap_callbacks: list = []
@@ -990,6 +1002,9 @@ class StreamRecorderV2:
             'frequency_hz': self.config.frequency_hz,
             'sample_rate': self.config.sample_rate,
             'ssrc': self.config.ssrc,
+            # None when the hot ring is healthy; a string (e.g. foreign-owned
+            # shm) when the metrology feed for this channel is broken.
+            'ring_error': self.ring_error,
             **stats
         }
     

@@ -110,6 +110,18 @@ class RingBufferIncompatibleError(RingBufferError):
     """An existing segment has incompatible magic/version/shape."""
 
 
+class RingBufferOwnershipError(RingBufferError):
+    """A foreign-owned SysV segment blocks our ring key and cannot be reclaimed.
+
+    SysV shm removal requires the owner uid (or root); group membership does
+    NOT grant it.  So a segment created by another user (e.g. a stale ``radio``
+    segment at an hf-timestd ring key) is a permanent landmine: the producer
+    cannot remove it to recreate a correctly-sized ring, and the metrology
+    consumer silently starves.  Raised so the caller alarms instead.  Cleared
+    by ``hf-timestd clean-stale-rings`` run as root (recorder ExecStartPre).
+    """
+
+
 # ─── helpers ────────────────────────────────────────────────────────────────
 def _require_x86() -> None:
     """Refuse to run on platforms whose memory model breaks the seqlock."""
@@ -278,12 +290,31 @@ class RingBuffer:
                 existing = sysv_ipc.SharedMemory(key, flags=0)
                 if existing.size == size:
                     return existing, False
+                # Size mismatch: must recreate.  We can only remove a segment
+                # we own (or as root) — group membership does NOT grant removal.
+                my_uid = os.getuid()
+                can_remove = (my_uid == 0) or (existing.uid == my_uid)
+                if not can_remove:
+                    raise RingBufferOwnershipError(
+                        f"SysV ring key=0x{key:08x} exists with size "
+                        f"{existing.size} != expected {size} and is owned by "
+                        f"uid={existing.uid} (we are uid={my_uid}); cannot "
+                        f"reclaim a foreign-owned segment. Remove it as root "
+                        f"(`hf-timestd clean-stale-rings`) before recreating."
+                    )
                 logger.warning(
                     f"RingBuffer: SysV key=0x{key:08x} exists with size "
                     f"{existing.size} != expected {size}; removing stale segment"
                 )
                 existing.detach()
-                existing.remove()
+                try:
+                    existing.remove()
+                except (sysv_ipc.PermissionsError, OSError) as exc:
+                    raise RingBufferOwnershipError(
+                        f"SysV ring key=0x{key:08x} (owner uid={existing.uid}) "
+                        f"could not be removed: {exc}. Remove it as root "
+                        f"(`hf-timestd clean-stale-rings`) before recreating."
+                    ) from exc
         raise RingBufferError(
             f"RingBuffer: unable to create segment key=0x{key:08x} after retry"
         )

@@ -3541,7 +3541,21 @@ class CoreRecorderV2:
                     status['overall']['channels_active'] += 1
                 status['overall']['total_samples_received'] += ch_stats.get('samples_received', 0)
                 status['overall']['total_samples_written'] += ch_stats.get('samples_written', 0)
-            
+
+            # Ring-health alarm — surface any channel whose hot ring failed
+            # (e.g. a foreign-owned stale SysV segment we cannot reclaim).  A
+            # silent ring failure starves that channel's metrology consumer
+            # and freezes its L1, so make it loud + machine-readable here.
+            ring_failures = {
+                rec.config.description: rec.ring_error
+                for rec in self.recorders.values()
+                if getattr(rec, 'ring_error', None)
+            }
+            status['ring_alarm'] = {
+                'ok': not ring_failures,
+                'failed_channels': ring_failures,
+            }
+
             # T6 BPSK PPS calibrator status
             if self._t6_calibrator is not None:
                 status['t6_pps'] = {

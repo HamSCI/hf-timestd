@@ -936,6 +936,81 @@ def _cmd_raytrace(args) -> int:
     return 0
 
 
+def cmd_clean_stale_rings(args) -> int:
+    """Remove foreign-owned hot-ring SysV segments at this host's ring keys.
+
+    A SysV shm segment can be removed only by its owner uid (or root); group
+    membership does NOT grant removal.  So a ring segment created by another
+    user (e.g. a stale ``radio`` segment left at an hf-timestd ring key) is a
+    permanent landmine: the recorder runs as ``timestd`` and cannot reclaim it
+    to recreate a correctly-sized ring, so the metrology consumer silently
+    starves and L1 freezes.  This command — run as root from the recorder's
+    ExecStartPre — clears such foreign-owned segments so the recorder always
+    creates fresh, self-owned rings.  Segments already owned by the expected
+    user are left alone (the recorder adopts/recreates its own).
+    """
+    import pwd
+    import sysv_ipc
+    from .core.ring_buffer import ring_key_for_channel
+
+    config_path = Path(getattr(args, 'config', '/etc/hf-timestd/timestd-config.toml'))
+    owner = getattr(args, 'owner', 'timestd')
+    dry_run = getattr(args, 'dry_run', False)
+
+    try:
+        expected_uid = pwd.getpwnam(owner).pw_uid
+    except KeyError:
+        print(f"clean-stale-rings: unknown user '{owner}'", file=sys.stderr)
+        return 2
+
+    try:
+        import tomllib
+        with open(config_path, 'rb') as f:
+            cfg = tomllib.load(f)
+    except ModuleNotFoundError:
+        import toml
+        cfg = toml.load(str(config_path))
+    except OSError as exc:
+        # Don't block recorder start on a config read hiccup.
+        print(f"clean-stale-rings: cannot read {config_path}: {exc}", file=sys.stderr)
+        return 0
+
+    recorder = cfg.get('recorder', {}) or {}
+    descriptions = []
+    for group in (recorder.get('channel_group', {}) or {}).values():
+        for ch in (group.get('channels', []) or []):
+            if ch.get('description'):
+                descriptions.append(ch['description'])
+    for ch in (recorder.get('channels', []) or []):       # legacy flat form
+        if ch.get('description'):
+            descriptions.append(ch['description'])
+
+    removed = 0
+    for desc in descriptions:
+        key = ring_key_for_channel(desc)
+        try:
+            seg = sysv_ipc.SharedMemory(key, flags=0)
+        except sysv_ipc.ExistentialError:
+            continue                                      # nothing there
+        if seg.uid == expected_uid:
+            continue                                      # ours — leave it
+        info = (f"{desc} key=0x{key & 0xffffffff:08x} owned by uid={seg.uid} "
+                f"(expected {owner}={expected_uid}), {seg.size} bytes")
+        if dry_run:
+            print(f"[dry-run] would remove {info}")
+            continue
+        try:
+            seg.remove()
+            removed += 1
+            print(f"removed foreign-owned ring segment: {info}")
+        except (sysv_ipc.PermissionsError, OSError) as exc:
+            print(f"FAILED to remove {info}: {exc} (run as root)", file=sys.stderr)
+
+    print(f"clean-stale-rings: {removed} foreign-owned ring segment(s) removed; "
+          f"{len(descriptions)} channel(s) checked")
+    return 0
+
+
 def main():
     """Main entry point for hf-timestd command"""
     # Quiet stderr for sigmond client-contract subcommands so they emit
@@ -1064,7 +1139,19 @@ Exit codes:
     discover_parser.add_argument('--config', '-c', help='Configuration file path')
     discover_parser.add_argument('--radiod', '-r', help='RadioD address for discovery')
     discover_parser.add_argument('--debug', '-d', action='store_true', help='Enable DEBUG logging')
-    
+
+    # Clean foreign-owned hot-ring SysV segments (recorder ExecStartPre, as root)
+    clean_rings_parser = subparsers.add_parser(
+        'clean-stale-rings',
+        help='Remove foreign-owned hot-ring SysV segments so the recorder can '
+             'create fresh, self-owned rings (run as root before the recorder)')
+    clean_rings_parser.add_argument('--config', '-c',
+        default='/etc/hf-timestd/timestd-config.toml', help='Configuration file path')
+    clean_rings_parser.add_argument('--owner', default='timestd',
+        help='Expected ring owner (service user); segments owned by anyone else are removed')
+    clean_rings_parser.add_argument('--dry-run', action='store_true',
+        help='Report what would be removed without removing')
+
     # Create channels command
     create_parser = subparsers.add_parser('create-channels', help='Create channels in radiod')
     create_parser.add_argument('--config', '-c', help='Configuration file path')
@@ -1479,6 +1566,8 @@ Per-service overrides in [services] take precedence over the profile.
             lb1421_probe.start()
             recorder.attach_lb1421_probe(lb1421_probe)
         recorder.run()
+    elif args.command == 'clean-stale-rings':
+        sys.exit(cmd_clean_stale_rings(args))
     elif args.command == 'discover':
         import toml
         from .channel_manager import ChannelManager
