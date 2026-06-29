@@ -364,6 +364,23 @@ class BinaryArchiveWriter:
                             f"old mapping gives UTC={old_utc:.3f} but new GPS_TIME={gps_unix_sec:.3f} "
                             f"(diff={utc_diff:+.1f}s). Flushing current buffer."
                         )
+                        # Feed the host-wide watchdog: it ignores the ordinary
+                        # re-anchor/jitter regime (this branch also trips on
+                        # ~0.45 s status jitter) and, on a GROSS jump, captures a
+                        # gpsd/chrony evidence bundle + GPS-source-vs-radiod
+                        # verdict.  Diagnostic only — never touches timing.
+                        try:
+                            from .radiod_timing_watchdog import get_watchdog
+                            get_watchdog().on_mapping_jump(
+                                channel=self.config.channel_name,
+                                gps_time_ns=gps_time_ns,
+                                rtp_timesnap=rtp_timesnap,
+                                radiod_utc=gps_unix_sec,
+                                old_utc=old_utc,
+                                delta_sec=utc_diff,
+                            )
+                        except Exception:  # noqa: BLE001 — never disturb recording
+                            pass
                     # In both cases: flush and adopt new mapping
                     if self.current_buffer is not None:
                         if self._try_flush(self.current_buffer):
