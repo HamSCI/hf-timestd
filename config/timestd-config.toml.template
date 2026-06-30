@@ -174,7 +174,7 @@ host = "pswsnetwork.eng.ua.edu"
 port = 22
 ssh_key = "/home/timestd/.ssh/id_rsa_psws"
 remote_base_path = "/"
-bandwidth_limit_kbps = 100              # Limit upload bandwidth (KB/s)
+bandwidth_limit_kbps = 0                # 0 = unlimited (default). Set a KB/s cap ONLY if the site has known bandwidth restrictions.
 verify_after_upload = true
 delete_after_upload = false
 create_trigger_directory = true

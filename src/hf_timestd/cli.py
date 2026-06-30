@@ -1699,7 +1699,6 @@ Per-service overrides in [services] take precedence over the profile.
             from .grape.decimation_pipeline import DecimationPipeline
             from .grape.spectrogram import CarrierSpectrogramGenerator
             from .grape.packager import DailyDRFPackager, StationConfig, STANDARD_CHANNELS
-            from .grape.uploader import UploadManager
             import toml
             import os
             import json as _json
@@ -1870,53 +1869,24 @@ Per-service overrides in [services] take precedence over the profile.
             else:
                 print(f"\n━━━ Stage 4: Upload ━━━")
                 upload_attempted = True
-                uploader_config = config.get('uploader', {})
-                sftp_config = uploader_config.get('sftp', {})
-                ssh_key = os.path.expanduser(sftp_config.get('ssh_key', '~/.ssh/psws_key'))
 
-                upload_config = {
-                    'protocol': uploader_config.get('protocol', 'sftp'),
-                    'host': sftp_config.get('host', 'pswsnetwork.eng.ua.edu'),
-                    'user': sftp_config.get('user', station.get('id', '')),
-                    'ssh': {'key_file': ssh_key},
-                    'bandwidth_limit_kbps': sftp_config.get('bandwidth_limit_kbps', 100),
-                    'max_retries': uploader_config.get('max_retries', 5),
-                    'queue_file': data_root / 'upload' / 'queue.json'
-                }
-
-                manager = UploadManager(upload_config)
-
-                for obs_dir in obs_dirs:
-                    metadata = {
-                        'date': f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}",
-                        'callsign': callsign,
-                        'grid_square': grid,
-                        'station_id': station.get('id', 'S000171'),
-                        'instrument_id': station.get('instrument_id', '172')
-                    }
-                    manager.enqueue(obs_dir, metadata)
-
+                # GRAPE → PSWS via hs_uploader's PswsDatasetSftp transport.
+                # Drains every un-shipped GRAPE dataset; the mtime cursor in
+                # /var/lib/hs-uploader/watermarks.db tracks what's shipped and
+                # failures retry via the watermark deliverable queue
+                # (grape-upload-retry drains them).
+                from .grape.hs_upload import run_upload as _hs_run_upload
+                upload_root = data_root / 'upload'
+                print(f"   engine: hs_uploader (drain {upload_root})")
                 try:
-                    manager.process_queue()
-                except Exception as e:
-                    print(f"   ⚠️  Upload error: {e}")
-
-                status = manager.get_status()
-                print(f"   Queue: {status['completed']} completed, {status['pending']} pending, {status['failed']} failed")
-
-                report_file = manager.write_upload_report()
-                print(f"   Report: {report_file}")
-
-                pipeline_status['upload_completed'] = status['completed']
-                pipeline_status['upload_failed'] = status['failed']
-
-                if status['failed'] > 0:
-                    print(f"   ⚠️  Upload had failures — data is queued for retry")
-                    print(f"   Retry with: hf-timestd grape upload --date {date_str}")
-                    pipeline_status['upload_status'] = 'failed'
-                else:
+                    passes = _hs_run_upload(config, upload_root, dry_run=False)
+                    print(f"   hs_uploader drained in {passes} pump pass(es)")
                     upload_ok = True
                     pipeline_status['upload_status'] = 'completed'
+                except Exception as e:
+                    print(f"   ⚠️  hs_uploader upload error: {e}")
+                    print(f"   Retry with: hf-timestd grape upload  (or wait for grape-upload-retry)")
+                    pipeline_status['upload_status'] = 'failed'
 
             # === Stage 5: Post-upload cleanup ===
             if upload_ok:
@@ -2037,137 +2007,48 @@ Per-service overrides in [services] take precedence over the profile.
             packager.package_day(date_str)
             
         elif args.grape_command == 'upload':
-            from .grape.uploader import UploadManager, SFTPUpload
             import toml
+            from .grape.hs_upload import build_uploader, run_upload
 
-            # Load config for station info (shared by --date and --resume).
             config_path = Path('/etc/hf-timestd/timestd-config.toml')
-            if config_path.exists():
-                with open(config_path, 'r') as f:
-                    config = toml.load(f)
-            else:
+            if not config_path.exists():
                 print(f"❌ Config not found: {config_path}")
                 sys.exit(1)
+            with open(config_path, 'r') as f:
+                config = toml.load(f)
 
-            station = config.get('station', {})
-
-            # --resume: scan every undelivered <data-root>/upload/<YYYYMMDD>/
-            # directory and feed everything found into the queue.  Used by
-            # grape-upload-retry.timer to drain stuck failures.
-            if args.resume:
-                upload_root = data_root / 'upload'
-                if not upload_root.exists():
-                    print(f"📤 Resume: nothing to do (no {upload_root})")
-                    sys.exit(0)
-
-                date_dirs = sorted(
-                    p for p in upload_root.iterdir()
-                    if p.is_dir() and len(p.name) == 8 and p.name.isdigit()
-                )
-                if not date_dirs:
-                    print(f"📤 Resume: queue drained — no date directories under {upload_root}")
-                    sys.exit(0)
-
-                obs_dirs = []
-                date_strs = {}
-                for d in date_dirs:
-                    obs_in_d = list(d.rglob('OBS*'))
-                    for o in obs_in_d:
-                        obs_dirs.append(o)
-                        date_strs[o] = d.name
-                if not obs_dirs:
-                    print(f"📤 Resume: no OBS directories under {upload_root}")
-                    sys.exit(0)
-                print(f"📤 Resume: found {len(obs_dirs)} dataset(s) "
-                      f"across {len(date_dirs)} day(s)")
-                date_str = None  # signals downstream that we're in resume mode
-            else:
-                date_str = resolve_date(args.date)
-                upload_dir = data_root / 'upload' / date_str
-                if not upload_dir.exists():
-                    print(f"❌ No packaged data for {date_str} at {upload_dir}")
-                    print(f"   Run 'grape package --date {date_str}' first")
-                    sys.exit(1)
-
-                obs_dirs = list(upload_dir.rglob('OBS*'))
-                if not obs_dirs:
-                    print(f"❌ No OBS directories found in {upload_dir}")
-                    sys.exit(1)
-                date_strs = {o: date_str for o in obs_dirs}
-
-                print(f"📤 Upload for {date_str}")
-                print(f"   Found {len(obs_dirs)} dataset(s)")
-            
-            if args.dry_run:
-                print("   (Dry run - no actual upload)")
-                for obs_dir in obs_dirs:
-                    print(f"   Would upload: {obs_dir}")
+            upload_root = data_root / 'upload'
+            if not upload_root.exists():
+                print(f"📤 GRAPE upload: nothing to do (no {upload_root})")
                 sys.exit(0)
-            
-            # Create uploader from config
-            uploader_config = config.get('uploader', {})
-            sftp_config = uploader_config.get('sftp', {})
-            
-            # Expand ~ in ssh_key path
-            import os
-            ssh_key = os.path.expanduser(sftp_config.get('ssh_key', '~/.ssh/psws_key'))
-            
-            upload_config = {
-                'protocol': uploader_config.get('protocol', 'sftp'),
-                'host': sftp_config.get('host', 'pswsnetwork.eng.ua.edu'),
-                'user': sftp_config.get('user', station.get('id', '')),
-                'ssh': {'key_file': ssh_key},
-                'bandwidth_limit_kbps': sftp_config.get('bandwidth_limit_kbps', 100),
-                'max_retries': uploader_config.get('max_retries', 5),
-                'queue_file': data_root / 'upload' / 'queue.json'
-            }
-            
-            manager = UploadManager(upload_config)
 
-            # In --resume mode, reset any task in the persistent queue
-            # whose status is "failed" but whose dataset_path still
-            # exists on disk back to "pending" with attempts=0.  Without
-            # this, the retry timer is a no-op for everything stuck at
-            # max_retries — defeating its purpose.  Cleanup-deleted
-            # datasets stay "failed" because their disk path is gone.
-            if args.resume:
-                resurrected = 0
-                for task in manager.queue:
-                    if task.status != "failed":
-                        continue
-                    if Path(task.dataset_path).exists():
-                        task.status = "pending"
-                        task.attempts = 0
-                        task.error_message = ""
-                        task.last_attempt = None
-                        resurrected += 1
-                if resurrected:
-                    print(f"   Reset {resurrected} failed task(s) → pending for retry")
-                    manager._save_queue()
+            # GRAPE → PSWS via hs_uploader's PswsDatasetSftp.  The mtime
+            # cursor in /var/lib/hs-uploader/watermarks.db tracks shipped
+            # datasets, so this always drains whatever is un-shipped and
+            # is idempotent.  --date / --resume are accepted for
+            # back-compat but the drain is the same cursor-gated sweep.
+            if args.dry_run:
+                up = build_uploader(config, upload_root, dry_run=True)
+                pipe = up.pipelines[0]
+                cursor = pipe.watermark.get_cursor(
+                    pipe.source_id(), pipe.dest_id(),
+                    pipe.transport.primary_table(),
+                )
+                pending = [
+                    r.payload_path
+                    for b in pipe.source.iter_batches(cursor=cursor, limit=1000)
+                    for r in b.records
+                ]
+                print(f"📤 GRAPE upload (dry run) — {len(pending)} un-shipped dataset(s):")
+                for o in pending:
+                    print(f"   would upload: {o}")
+                sys.exit(0)
 
-            # Enqueue and process.  enqueue() dedupes on dataset_path,
-            # so calling it twice for a task already in the queue
-            # leaves the existing attempt counter intact.
-            for obs_dir in obs_dirs:
-                ds = date_strs[obs_dir]
-                metadata = {
-                    'date': f"{ds[:4]}-{ds[4:6]}-{ds[6:8]}",
-                    'callsign': station.get('callsign', 'AC0G'),
-                    'grid_square': station.get('grid_square', 'EM38ww'),
-                    'station_id': station.get('id', 'S000171'),
-                    'instrument_id': station.get('instrument_id', '172')
-                }
-                manager.enqueue(obs_dir, metadata)
+            print(f"📤 GRAPE upload via hs_uploader (root={upload_root})")
+            passes = run_upload(config, upload_root, dry_run=False)
+            print(f"   drained in {passes} pump pass(es)")
+            sys.exit(0)
 
-            manager.process_queue()
-            
-            status = manager.get_status()
-            print(f"   Queue status: {status['completed']} completed, {status['pending']} pending, {status['failed']} failed")
-            
-            # Write upload report
-            report_file = manager.write_upload_report()
-            print(f"   Report: {report_file}")
-            
         elif args.grape_command == 'test-upload':
             from .grape.uploader import test_psws_connectivity
             import toml
@@ -2183,39 +2064,56 @@ Per-service overrides in [services] take precedence over the profile.
             sys.exit(0 if ok else 1)
 
         elif args.grape_command == 'status':
-            from .grape.uploader import UploadManager
-            
-            # Create minimal config just to read queue
-            upload_config = {
-                'protocol': 'sftp',
-                'host': 'pswsnetwork.eng.ua.edu',
-                'user': 'status_check',
-                'ssh': {'key_file': '/dev/null'},
-                'queue_file': data_root / 'upload' / 'queue.json'
-            }
-            
-            manager = UploadManager(upload_config)
-            
-            # Current queue status
-            status = manager.get_status()
-            print(f"\n📊 GRAPE Upload Status")
-            print(f"   Queue: {status['total']} total")
-            print(f"   ├─ Completed: {status['completed']}")
-            print(f"   ├─ Pending:   {status['pending']}")
-            print(f"   ├─ Uploading: {status['uploading']}")
-            print(f"   └─ Failed:    {status['failed']}")
-            
-            # History
-            history = manager.get_upload_history(days=args.days)
-            if history:
-                print(f"\n📅 Upload History (last {args.days} days):")
-                for day in history:
-                    summary = day.get('summary', {})
-                    print(f"   {day['date']}: "
-                          f"{summary.get('completed', 0)} completed, "
-                          f"{summary.get('failed', 0)} failed")
-            else:
-                print(f"\n   No upload history found")
+            import sqlite3
+            import toml
+            from .grape.hs_upload import build_uploader
+            from hs_uploader.watermark.sqlite import default_path
+
+            config_path = Path('/etc/hf-timestd/timestd-config.toml')
+            config = {}
+            if config_path.exists():
+                with open(config_path, 'r') as f:
+                    config = toml.load(f)
+
+            print(f"\n📊 GRAPE Upload Status (hs_uploader → PSWS)")
+            upload_root = data_root / 'upload'
+            try:
+                up = build_uploader(config, upload_root, dry_run=True)
+                pipe = up.pipelines[0]
+                cursor = pipe.watermark.get_cursor(
+                    pipe.source_id(), pipe.dest_id(),
+                    pipe.transport.primary_table(),
+                )
+                pending = [
+                    r.payload_path
+                    for b in pipe.source.iter_batches(cursor=cursor, limit=1000)
+                    for r in b.records
+                ] if upload_root.exists() else []
+                print(f"   dest:    {pipe.dest_id()}")
+                print(f"   cursor:  {cursor.decode() if cursor else '(none — nothing shipped yet)'}")
+                print(f"   pending: {len(pending)} un-shipped dataset(s)")
+                for o in pending[:10]:
+                    print(f"     • {o}")
+            except Exception as e:
+                print(f"   (could not build pipeline view: {e})")
+
+            # Recent attempt outcomes + dead-letter from the watermark DB.
+            try:
+                c = sqlite3.connect(f"file:{default_path()}?mode=ro", uri=True)
+                rows = list(c.execute(
+                    "select outcome, count(*), max(ts) from attempts "
+                    "where dest_id like '%grape%' group by outcome"
+                ))
+                print(f"\n   attempts: " + (
+                    ", ".join(f"{o}={n} (last {t})" for o, n, t in rows)
+                    if rows else "none"))
+                dl = list(c.execute(
+                    "select count(*) from dead_letter where pipeline like '%grape%'"
+                ))[0][0]
+                print(f"   dead_letter: {dl}")
+                c.close()
+            except Exception as e:
+                print(f"   (could not read watermark attempts: {e})")
         else:
             grape_parser.print_help()
             sys.exit(1)
