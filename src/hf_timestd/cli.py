@@ -1870,23 +1870,34 @@ Per-service overrides in [services] take precedence over the profile.
                 print(f"\n━━━ Stage 4: Upload ━━━")
                 upload_attempted = True
 
-                # GRAPE → PSWS via hs_uploader's PswsDatasetSftp transport.
-                # Drains every un-shipped GRAPE dataset; the mtime cursor in
-                # /var/lib/hs-uploader/watermarks.db tracks what's shipped and
-                # failures retry via the watermark deliverable queue
-                # (grape-upload-retry drains them).
-                from .grape.hs_upload import run_upload as _hs_run_upload
-                upload_root = data_root / 'upload'
-                print(f"   engine: hs_uploader (drain {upload_root})")
-                try:
-                    passes = _hs_run_upload(config, upload_root, dry_run=False)
-                    print(f"   hs_uploader drained in {passes} pump pass(es)")
+                # When the host uploader daemon (hs-uploader.service) owns
+                # GRAPE→PSWS, this in-process upload is disabled to avoid two
+                # uploaders racing the shared watermark.  The daemon ships the
+                # packaged OBS dataset from /var/lib/timestd/upload; we still
+                # mark upload_ok so Stage 5 cleanup (decimated .bin) proceeds.
+                if os.environ.get("GRAPE_UPLOAD_EXTERNAL", "").strip().lower() in (
+                    "1", "true", "yes", "on",
+                ):
+                    print("   engine: external — hs-uploader.service (daemon) ships the dataset")
                     upload_ok = True
-                    pipeline_status['upload_status'] = 'completed'
-                except Exception as e:
-                    print(f"   ⚠️  hs_uploader upload error: {e}")
-                    print(f"   Retry with: hf-timestd grape upload  (or wait for grape-upload-retry)")
-                    pipeline_status['upload_status'] = 'failed'
+                    pipeline_status['upload_status'] = 'external'
+                else:
+                    # GRAPE → PSWS via hs_uploader's PswsDatasetSftp transport.
+                    # Drains every un-shipped GRAPE dataset; the mtime cursor in
+                    # /var/lib/hs-uploader/watermarks.db tracks what's shipped and
+                    # failures retry via the watermark deliverable queue.
+                    from .grape.hs_upload import run_upload as _hs_run_upload
+                    upload_root = data_root / 'upload'
+                    print(f"   engine: hs_uploader (drain {upload_root})")
+                    try:
+                        passes = _hs_run_upload(config, upload_root, dry_run=False)
+                        print(f"   hs_uploader drained in {passes} pump pass(es)")
+                        upload_ok = True
+                        pipeline_status['upload_status'] = 'completed'
+                    except Exception as e:
+                        print(f"   ⚠️  hs_uploader upload error: {e}")
+                        print(f"   Retry with: hf-timestd grape upload  (or wait for grape-upload-retry)")
+                        pipeline_status['upload_status'] = 'failed'
 
             # === Stage 5: Post-upload cleanup ===
             if upload_ok:
