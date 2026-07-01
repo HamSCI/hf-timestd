@@ -221,3 +221,39 @@ singleton_label = "(singleton)"
 config_path     = "/etc/hf-timestd/timestd-config.toml"
 parser_file     = "src/hf_timestd/sigmond_tui.py"
 parser_attr     = "parse_receiver_channels"
+
+# ---------------------------------------------------------------------------
+# Single-host uploader pipeline (Stage 6).  `smd admin uploader manifest`
+# reads this [[hs_uploader.pipeline]] block from every enabled client,
+# substitutes per-site identity ({station_id}/{instrument_id} resolved from
+# this client's own [station] config), and renders /etc/hs-uploader/
+# pipelines.toml for the single-host daemon.  The block shape IS the
+# [[pipeline]] shape hs_uploader.pipeline_factory consumes.
+#
+# The transport `name` and source `source_id` are PINNED verbatim: they are
+# the watermark keys the running daemon uses for the grape cursor.  Changing
+# them would re-scan the KEEP-retention spool and re-ship already-shipped
+# OBS* datasets.
+# ---------------------------------------------------------------------------
+
+# GRAPE Digital RF datasets -> PSWS (daily)
+[[hs_uploader.pipeline]]
+name = "grape-psws"
+max_records_per_pump = 64
+[hs_uploader.pipeline.source]
+type = "filetree"
+root = "/var/lib/timestd/upload"
+patterns = ["OBS*"]
+retention = "keep"
+match_dirs = true
+table = "grape.dataset"
+source_id = "grape-datasets:/var/lib/timestd/upload"
+[hs_uploader.pipeline.transport]
+type = "psws_dataset"
+instrument_id = "{instrument_id}"
+host = "pswsnetwork.eng.ua.edu"
+table = "grape.dataset"
+sftp_user = "{station_id}"
+name = "psws-grape-sftp:pswsnetwork.eng.ua.edu:{station_id}"
+[hs_uploader.pipeline.identity]
+station_id = "{station_id}"
