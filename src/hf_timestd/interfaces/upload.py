@@ -360,9 +360,18 @@ class UploadProtocol(ABC):
             
         Returns:
             True if remote file matches local (size, checksum, etc.)
+
+        NOTE (2026-07-01): this interface's concrete implementers were removed
+        when GRAPE uploads folded onto ``hs_uploader`` (see grape/hs_upload.py
+        and the 2026-06-30 note in grape/uploader.py); the live path does NOT
+        post-verify.  If you re-implement this, do NOT re-``ls`` the GRAPE
+        trigger directory to confirm success — the PSWS server *consumes* that
+        directory on ingest, so that check produced false "Verification failed"
+        negatives.  Confirm via the OBS* dataset dirs or the watermark, which is
+        what ``hf-timestd grape status`` now reads.
         """
         pass
-    
+
     @abstractmethod
     def test_connection(self) -> bool:
         """
