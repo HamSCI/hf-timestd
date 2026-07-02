@@ -953,6 +953,15 @@ wheels = [
 ]
 
 [[package]]
+name = "geographiclib"
+version = "2.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/df/78/4892343230a9d29faa1364564e525307a37e54ad776ea62c12129dbba704/geographiclib-2.1.tar.gz", hash = "sha256:6a6545e6262d0ed3522e13c515713718797e37ed8c672c31ad7b249f372ef108", size = 37004, upload-time = "2025-08-21T21:34:26Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/31/b3/802576f2ea5dcb48501bb162e4c7b7b3ca5654a42b2c968ef98a797a4c79/geographiclib-2.1-py3-none-any.whl", hash = "sha256:e2a873b9b9e7fc38721ad73d5f4e6c9ed140d428a339970f505c07056997d40b", size = 40740, upload-time = "2025-08-21T21:34:24.955Z" },
+]
+
+[[package]]
 name = "h11"
 version = "0.16.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1013,6 +1022,27 @@ wheels = [
 ]
 
 [[package]]
+name = "hamsci-dsp"
+version = "0.3.0"
+source = { editable = "../hamsci-dsp" }
+dependencies = [
+    { name = "geographiclib" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "apexpy", marker = "extra == 'geomag'", specifier = ">=2.0" },
+    { name = "geographiclib", specifier = ">=2.0" },
+    { name = "iri2020", marker = "extra == 'iono'", specifier = ">=1.7" },
+    { name = "numpy", specifier = ">=1.24.0" },
+    { name = "pylap", marker = "extra == 'raytrace'" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
+]
+provides-extras = ["dev", "iono", "raytrace", "geomag"]
+
+[[package]]
 name = "hf-timestd"
 version = "7.0.0"
 source = { editable = "." }
@@ -1020,6 +1050,8 @@ dependencies = [
     { name = "aiofiles" },
     { name = "digital-rf" },
     { name = "fastapi" },
+    { name = "hamsci-dsp" },
+    { name = "hs-uploader" },
     { name = "iri2020" },
     { name = "jinja2" },
     { name = "ka9q-python" },
@@ -1079,6 +1111,8 @@ requires-dist = [
     { name = "digital-rf", specifier = ">=2.6.0" },
     { name = "fastapi", specifier = ">=0.104.0" },
     { name = "flake8", marker = "extra == 'dev'", specifier = ">=6.0.0" },
+    { name = "hamsci-dsp", editable = "../hamsci-dsp" },
+    { name = "hs-uploader", editable = "../hs-uploader" },
     { name = "iri2020", git = "https://github.com/space-physics/iri2020.git?rev=8b6ab9ea3e30fd0c0ed46f556d5d0854c53b20ee" },
     { name = "jinja2", specifier = ">=3.0.0" },
     { name = "ka9q-python", editable = "../ka9q-python" },
@@ -1109,6 +1143,23 @@ requires-dist = [
     { name = "zstandard", specifier = ">=0.22.0" },
 ]
 provides-extras = ["dev", "lz4", "gnss", "iono", "raytrace"]
+
+[[package]]
+name = "hs-uploader"
+version = "0.1.0"
+source = { editable = "../hs-uploader" }
+dependencies = [
+    { name = "tomli", marker = "python_full_version < '3.11'" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", marker = "extra == 'http'", specifier = ">=0.27" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
+    { name = "pytest-httpserver", marker = "extra == 'dev'", specifier = ">=1.0" },
+    { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0" },
+]
+provides-extras = ["psws", "wsprnet", "wsprdaemon", "pskreporter", "http", "dev"]
 
 [[package]]
 name = "httptools"
@@ -1224,7 +1275,7 @@ wheels = [
 
 [[package]]
 name = "ka9q-python"
-version = "3.16.1"
+version = "3.20.0"
 source = { editable = "../ka9q-python" }
 dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
