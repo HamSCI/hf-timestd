@@ -173,7 +173,10 @@ units = [
     "timestd-hpps-watchdog.timer",
     "timestd-prune.timer",
     "grape-daily.timer",
-    "grape-upload-retry.timer",
+    # grape-upload-retry.timer — RETIRED 2026-06-30 (single-host uploader):
+    # hs-uploader.service owns GRAPE upload retries now; the in-process
+    # retry timer is superseded.  Unit files retained (disable-not-delete);
+    # re-add this line only if a host reverts to in-process GRAPE upload.
 ]
 templated_units = [
     "timestd-metrology@.service",

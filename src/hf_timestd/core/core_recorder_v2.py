@@ -4062,7 +4062,23 @@ def main():
     }
     
     logger.info(f"Loaded {len(recorder_config['channels'])} channels from config")
-    
+
+    # Idle-unconfigured guard (EX_CONFIG=78, matches wspr/psk/meteor/mag):
+    # a config still carrying the template placeholder (<YOUR_RADIOD_STATUS>)
+    # was never configured for a site.  Without this we'd fall through to
+    # mDNS auto-discovery and attach to ANY radiod on the LAN — on a shared
+    # network an unconfigured clone would consume a neighbor's radiod.
+    # RestartPreventExitStatus=78 in the unit stops cleanly until an
+    # operator runs `smd config init hf-timestd` / edits the config.
+    status = str(recorder_config.get('status_address') or '')
+    if status.startswith('<') and status.endswith('>'):
+        logger.error(
+            "config still at template placeholder (ka9q.status=%s) — "
+            "configure the radiod status address before starting; "
+            "exiting EX_CONFIG", status,
+        )
+        sys.exit(78)
+
     # Run recorder
     recorder = CoreRecorderV2(recorder_config)
     # Attach the T5 disambiguation reference (LB-1421 GPSDO NMEA), if

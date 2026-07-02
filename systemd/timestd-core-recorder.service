@@ -60,6 +60,10 @@ TimeoutStartSec=300
 
 # AGGRESSIVE restart policy - data loss is unacceptable
 Restart=always
+# EX_CONFIG (78): config still at the template placeholder — stop cleanly
+# until an operator configures the radiod status address (matches the
+# wspr/psk/meteor/mag idle-unconfigured pattern).
+RestartPreventExitStatus=78
 RestartSec=5
 
 # Unified journal sink — see docs/DEBUGGING.md §2 for access patterns.
