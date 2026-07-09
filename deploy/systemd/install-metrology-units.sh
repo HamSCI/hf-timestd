@@ -21,7 +21,12 @@ CONFIG="/etc/hf-timestd/timestd-config.toml"
 ENV_DIR="/etc/hf-timestd/metrology-channels"
 SYSTEMD_DIR="/etc/systemd/system"
 
-# All 9 channels
+# All 6 channels.
+# CHU_3330/7850/14670 removed 2026-07-09: CHU is off-air and its IQ channels
+# are no longer recorded (config/timestd-config.toml.template, commit 298288f).
+# Installing timestd-metrology@CHU_* units against non-existent channels would
+# leave them crash-restarting on missing IQ.  Restore these three entries
+# together with the CHU channels in the config template if CHU returns to air.
 CHANNELS=(
     SHARED_2500
     SHARED_5000
@@ -29,9 +34,6 @@ CHANNELS=(
     SHARED_15000
     WWV_20000
     WWV_25000
-    CHU_3330
-    CHU_7850
-    CHU_14670
 )
 
 # Channel -> frequency_hz mapping
@@ -42,9 +44,6 @@ declare -A FREQ_MAP=(
     [SHARED_15000]=15000000
     [WWV_20000]=20000000
     [WWV_25000]=25000000
-    [CHU_3330]=3330000
-    [CHU_7850]=7850000
-    [CHU_14670]=14670000
 )
 
 echo "=== Installing per-channel metrology systemd units ==="
@@ -127,6 +126,24 @@ systemctl disable timestd-metrology.service 2>/dev/null || true
 # Reload and enable
 systemctl daemon-reload
 
+# Retire channels no longer in CHANNELS (e.g. CHU, off-air 2026-06-27).  A host
+# that ran an earlier version of this script still has these units enabled and
+# running against a channel that no longer produces IQ; converge it to a clean
+# state here so re-running the installer is idempotent.
+RETIRED_CHANNELS=(
+    CHU_3330
+    CHU_7850
+    CHU_14670
+)
+for ch in "${RETIRED_CHANNELS[@]}"; do
+    if systemctl list-unit-files "timestd-metrology@${ch}.service" &>/dev/null \
+       && [ -n "$(systemctl list-units --all "timestd-metrology@${ch}.service" --no-legend 2>/dev/null)" ]; then
+        echo "  Retiring timestd-metrology@${ch} (channel removed)"
+        systemctl disable --now "timestd-metrology@${ch}.service" 2>/dev/null || true
+    fi
+    rm -f "$ENV_DIR/${ch}.env"
+done
+
 # Enable target
 systemctl enable timestd-metrology.target
 
@@ -164,5 +181,5 @@ echo ""
 echo "Useful commands:"
 echo "  systemctl status timestd-metrology@SHARED_15000"
 echo "  journalctl -u timestd-metrology@SHARED_15000 -f"
-echo "  systemctl restart timestd-metrology@CHU_7850"
+echo "  systemctl restart timestd-metrology@WWV_20000"
 echo "  systemctl list-units 'timestd-metrology@*'"
