@@ -869,22 +869,38 @@ class MetrologyEngine:
         bw = 50.0  # ±50 Hz
         low_hz = max(1.0, tone_freq_hz - bw)
         high_hz = min(nyquist - 1.0, tone_freq_hz + bw)
+        # SOS + templates depend only on (freq, duration, sample_rate) —
+        # design/build once and cache (they were being recomputed on every
+        # call: ~30 butter() designs + ~60 template builds per channel per
+        # minute for identical parameters).
+        cache = getattr(self, '_tone_dsp_cache', None)
+        if cache is None:
+            cache = self._tone_dsp_cache = {}
         if high_hz > low_hz and len(measurement_region) > 100:
-            sos = scipy_signal.butter(4, [low_hz, high_hz], btype='band',
-                                      fs=self.sample_rate, output='sos')
+            sos_key = ('sos', round(low_hz, 3), round(high_hz, 3), self.sample_rate)
+            sos = cache.get(sos_key)
+            if sos is None:
+                sos = cache[sos_key] = scipy_signal.butter(
+                    4, [low_hz, high_hz], btype='band',
+                    fs=self.sample_rate, output='sos')
             measurement_region = scipy_signal.sosfiltfilt(sos, measurement_region)
-        
+
         n_template = int(tone_duration_sec * self.sample_rate)
         t = np.arange(n_template) / self.sample_rate
-        
-        # Quadrature templates for phase-invariant detection
-        window = scipy_signal.windows.tukey(n_template, alpha=0.1)
-        template_sin = np.sin(2 * np.pi * tone_freq_hz * t) * window
-        template_cos = np.cos(2 * np.pi * tone_freq_hz * t) * window
-        
-        # Normalize to unit energy
-        template_sin /= np.linalg.norm(template_sin)
-        template_cos /= np.linalg.norm(template_cos)
+
+        # Quadrature templates for phase-invariant detection (cached; the
+        # tukey window is recreated only on a cache miss)
+        tpl_key = ('tpl', round(float(tone_freq_hz), 3), n_template, self.sample_rate)
+        tpl = cache.get(tpl_key)
+        if tpl is None:
+            window = scipy_signal.windows.tukey(n_template, alpha=0.1)
+            template_sin = np.sin(2 * np.pi * tone_freq_hz * t) * window
+            template_cos = np.cos(2 * np.pi * tone_freq_hz * t) * window
+            template_sin /= np.linalg.norm(template_sin)
+            template_cos /= np.linalg.norm(template_cos)
+            tpl = cache[tpl_key] = (template_sin, template_cos,
+                                    scipy_signal.windows.tukey(n_template, alpha=0.1))
+        template_sin, template_cos, window = tpl
         
         # Correlate with full-duration template
         corr_sin = scipy_signal.correlate(measurement_region, template_sin, mode='valid')
@@ -1025,11 +1041,16 @@ class MetrologyEngine:
         CROSS_FREQ_PAIRS = {1000: 1200, 1200: 1000}  # WWV↔WWVH
         cross_freq = CROSS_FREQ_PAIRS.get(int(tone_freq_hz))
         if cross_freq is not None:
-            # Build cross-frequency template (same duration, different freq)
-            cross_sin = np.sin(2 * np.pi * cross_freq * t) * window
-            cross_cos = np.cos(2 * np.pi * cross_freq * t) * window
-            cross_sin /= np.linalg.norm(cross_sin)
-            cross_cos /= np.linalg.norm(cross_cos)
+            # Cross-frequency template (same duration, different freq) — cached
+            xkey = ('tpl', round(float(cross_freq), 3), n_template, self.sample_rate)
+            xtpl = cache.get(xkey)
+            if xtpl is None:
+                cross_sin = np.sin(2 * np.pi * cross_freq * t) * window
+                cross_cos = np.cos(2 * np.pi * cross_freq * t) * window
+                cross_sin /= np.linalg.norm(cross_sin)
+                cross_cos /= np.linalg.norm(cross_cos)
+                xtpl = cache[xkey] = (cross_sin, cross_cos, window)
+            cross_sin, cross_cos, _ = xtpl
             
             # Correlate at the same peak location
             cross_corr_sin = scipy_signal.correlate(measurement_region, cross_sin, mode='valid')
