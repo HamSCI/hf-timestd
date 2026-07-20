@@ -365,6 +365,16 @@ class MetrologyService:
     # via the pipeline watchdog; this is diagnostics only.
     _RING_STALL_WARN_SEC = 120.0
 
+    # Wall-clock sanity gate on the ring head UTC.  head_utc is the newest
+    # buffered sample's timestamp, so it can never legitimately be more than
+    # clock jitter AHEAD of now().  A head in the future means the ring's
+    # RTP->UTC mapping is corrupt (radiod RTP-timing glitch / stepped
+    # timesnap): observed 2026-07-20 when 3 of 6 channels ran ~22 min ahead
+    # and silently emitted future-dated measurements (HamSCI/hf-timestd#5).
+    # 120s is far beyond any real RTP-vs-OS jitter yet well under the
+    # minutes-scale offsets the corruption produces.
+    _RING_FUTURE_HEAD_SEC = 120.0
+
     def run(self):
         """Main service loop — attach to the ring buffer and consume minutes."""
         self.running = True
@@ -430,6 +440,7 @@ class MetrologyService:
         next_minute: Optional[int] = None
         last_head_utc: Optional[float] = None
         last_head_change = time.monotonic()
+        last_future_warn = 0.0
         last_guardian_check = 0.0
 
         while self.running:
@@ -458,6 +469,26 @@ class MetrologyService:
                     continue
                 head_utc = reader.head_utc(cursor)
                 if head_utc is None:
+                    time.sleep(self._RING_POLL_SEC)
+                    continue
+
+                # Wall-clock sanity gate (HamSCI/hf-timestd#5): head_utc is
+                # the newest buffered sample's UTC and can never be materially
+                # ahead of now().  If it is, the ring's RTP->UTC mapping is
+                # corrupt (future-dated); refuse to seed/advance the cursor
+                # from it so we never emit future-timestamped measurements.
+                # Loud but rate-limited; self-heals when the mapping recovers.
+                now_wall = time.time()
+                if head_utc > now_wall + self._RING_FUTURE_HEAD_SEC:
+                    if now_mono - last_future_warn > 60.0:
+                        logger.error(
+                            f"[{self.channel_name}] ring head_utc={head_utc:.1f} "
+                            f"is {head_utc - now_wall:.0f}s in the FUTURE vs "
+                            f"wall-clock {now_wall:.1f} — RTP->UTC mapping "
+                            f"corrupt; NOT processing future-dated minutes "
+                            f"(INVESTIGATE radiod RTP timing / timesnap)"
+                        )
+                        last_future_warn = now_mono
                     time.sleep(self._RING_POLL_SEC)
                     continue
 
