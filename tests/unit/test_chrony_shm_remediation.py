@@ -262,5 +262,115 @@ class TestUpdateFailureDisconnects(unittest.TestCase):
                 fh.close()
 
 
+
+# ---------------------------------------------------------------------
+# ensure_segments(): eager boot-time create/repair (shm-init)
+# ---------------------------------------------------------------------
+
+class _FakeEagerSegment:
+    """Segment stand-in for ensure_segments — uid/gid/mode all IPC_SET-able."""
+
+    def __init__(self, *, key, mode=0o600, uid=0, gid=0, settable=True):
+        self.key = key
+        self._mode, self._uid, self._gid = mode, uid, gid
+        self._settable = settable
+        self.detached = False
+
+    def _set(self, attr, value):
+        if not self._settable:
+            raise PermissionError("simulated: IPC_SET denied")
+        setattr(self, attr, value)
+
+    mode = property(lambda s: s._mode, lambda s, v: s._set('_mode', v))
+    uid = property(lambda s: s._uid, lambda s, v: s._set('_uid', v))
+    gid = property(lambda s: s._gid, lambda s, v: s._set('_gid', v))
+
+    def detach(self):
+        self.detached = True
+
+
+class _FakeEagerModule:
+    IPC_CREAT = 0o1000
+    IPC_EXCL = 0o2000
+
+    class ExistentialError(Exception):
+        pass
+
+    class PermissionsError(PermissionError):
+        pass
+
+    def __init__(self, existing=None):
+        # existing: {key: _FakeEagerSegment} for pre-existing segments
+        self.existing = existing or {}
+        self.created = {}
+
+    def SharedMemory(self, key, *, flags=0, size=None, mode=0o600):
+        if flags & self.IPC_EXCL:
+            if key in self.existing:
+                raise self.ExistentialError("simulated: segment exists")
+            seg = _FakeEagerSegment(key=key, mode=mode, uid=0, gid=0)
+            self.created[key] = seg
+            return seg
+        if key in self.existing:
+            return self.existing[key]
+        if key in self.created:
+            return self.created[key]
+        raise self.ExistentialError("simulated: no segment")
+
+
+class TestEnsureSegments(unittest.TestCase):
+    """shm-init boot-race fix: segments always end up <owner>:0666,
+    repaired via IPC_SET in place — never removed (chronyd may be
+    attached; IPC_RMID would orphan it, the M-M16 lesson)."""
+
+    UID, GID = 4242, 4242
+
+    def _run(self, fake, units):
+        import sys as _sys
+        from hf_timestd.core.chrony_shm import ensure_segments
+        with patch.dict(_sys.modules, {'sysv_ipc': fake}):
+            return ensure_segments(units, self.UID, self.GID)
+
+    def test_creates_missing_segments_with_owner_and_mode(self):
+        fake = _FakeEagerModule()
+        results = self._run(fake, [1, 2])
+        self.assertEqual(results, [(1, 'created'), (2, 'created')])
+        for unit in (1, 2):
+            seg = fake.created[0x4e545030 + unit]
+            self.assertEqual((seg.uid, seg.gid, seg.mode & 0o777),
+                             (self.UID, self.GID, 0o666))
+            self.assertTrue(seg.detached)
+
+    def test_repairs_root_owned_segment_in_place(self):
+        # The B4 first-reboot fault: chronyd won the race and created
+        # the segment root:0600.
+        bad = _FakeEagerSegment(key=0x4e545032, mode=0o600, uid=0, gid=0)
+        fake = _FakeEagerModule(existing={0x4e545032: bad})
+        results = self._run(fake, [2])
+        self.assertEqual(results, [(2, 'repaired')])
+        self.assertEqual((bad.uid, bad.gid, bad.mode & 0o777),
+                         (self.UID, self.GID, 0o666))
+        self.assertTrue(bad.detached)
+
+    def test_correct_segment_left_alone(self):
+        good = _FakeEagerSegment(
+            key=0x4e545031, mode=0o666, uid=self.UID, gid=self.GID,
+            settable=False,  # any IPC_SET attempt would raise
+        )
+        fake = _FakeEagerModule(existing={0x4e545031: good})
+        results = self._run(fake, [1])
+        self.assertEqual(results, [(1, 'ok')])
+        self.assertTrue(good.detached)
+
+    def test_error_on_one_unit_does_not_stop_others(self):
+        stuck = _FakeEagerSegment(
+            key=0x4e545030, mode=0o600, uid=0, gid=0, settable=False,
+        )
+        fake = _FakeEagerModule(existing={0x4e545030: stuck})
+        results = self._run(fake, [0, 1])
+        self.assertTrue(results[0][1].startswith('ERROR'))
+        self.assertEqual(results[1], (1, 'created'))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

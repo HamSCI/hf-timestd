@@ -47,6 +47,12 @@ ExecStartPre=+/usr/bin/chown -R timestd:timestd /dev/shm/timestd
 # timestd recorder cannot reclaim them and would silently starve metrology.
 # Best-effort (+- = run as root, ignore failure); see `hf-timestd clean-stale-rings`.
 ExecStartPre=+-/opt/git/sigmond/hf-timestd/venv/bin/hf-timestd clean-stale-rings
+# Eagerly create/repair the chrony refclock SHM segments as timestd:0666
+# BEFORE the writer starts (root via '+', failure non-fatal via '-': the
+# writer's own connect() path alarms loudly if segments are still bad).
+# Durable fix for the boot race where chronyd creates them root:0600 and
+# the unprivileged writer can never write (B4 first-reboot fault #5).
+ExecStartPre=+-/opt/git/sigmond/hf-timestd/venv/bin/hf-timestd shm-init
 
 # Core recorder V2 uses RadiodStream for RTP handling (no manual multicast)
 ExecStart=/opt/git/sigmond/hf-timestd/venv/bin/python3 -m hf_timestd.core.core_recorder_v2 \

@@ -470,6 +470,65 @@ class ChronySHM:
             logger.warning(f"Error disconnecting ChronySHM: {e}")
 
 
+def ensure_segments(units, uid, gid, mode=0o666):
+    """Eagerly create - or repair in place - the chrony refclock SHM segments.
+
+    Run as root from ExecStartPre (``+`` prefix) of the writer services AND
+    of chronyd itself, so the segments exist as <owner>:0666 no matter which
+    side of the chrony/writer race starts first.  Ordering alone (chrony
+    After= the writers, see systemd/chronyd-timestd-shm.conf) is not durable:
+    a writer that fails its first start releases chrony's After= hold,
+    chronyd then creates the segments root:0600, and the writers - running
+    unprivileged, with neither ownership nor CAP_SYS_ADMIN for
+    shmctl(IPC_SET) - can never write (B4 first-reboot fault, 2026-07-23).
+
+    Repair is IPC_SET in place, never remove-and-recreate: chronyd may
+    already be attached, and shmctl(IPC_RMID) would orphan it on the old
+    shmid forever (the M-M16 lesson - see ChronySHM._connect_sysv).
+
+    Args:
+        units: iterable of SHM unit numbers (key = SHM_KEY_BASE + unit)
+        uid, gid: numeric owner to enforce (the writer service user)
+        mode: permission bits to enforce
+
+    Returns:
+        list of (unit, status) - status is 'created', 'repaired', 'ok',
+        or 'ERROR: <detail>'; errors on one unit do not stop the others.
+    """
+    import sysv_ipc
+
+    results = []
+    for unit in units:
+        key = SHM_KEY_BASE + unit
+        try:
+            try:
+                seg = sysv_ipc.SharedMemory(
+                    key,
+                    flags=sysv_ipc.IPC_CREAT | sysv_ipc.IPC_EXCL,
+                    size=SHM_SIZE,
+                    mode=mode,
+                )
+                seg.uid = uid
+                seg.gid = gid
+                seg.detach()
+                results.append((unit, 'created'))
+                continue
+            except sysv_ipc.ExistentialError:
+                seg = sysv_ipc.SharedMemory(key, flags=0)
+
+            if seg.uid == uid and seg.gid == gid and (seg.mode & 0o777) == mode:
+                results.append((unit, 'ok'))
+            else:
+                seg.uid = uid
+                seg.gid = gid
+                seg.mode = mode
+                results.append((unit, 'repaired'))
+            seg.detach()
+        except Exception as e:
+            results.append((unit, f'ERROR: {e}'))
+    return results
+
+
 def install_chrony_config(unit: int = 0) -> str:
     """
     Generate chrony.conf snippet for HF time transfer.

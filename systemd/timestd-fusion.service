@@ -58,6 +58,12 @@ ExecStart=/opt/git/sigmond/hf-timestd/venv/bin/python -m hf_timestd.core.multi_b
 # Note: + prefix executes with full privileges (root) before dropping to User=timestd
 ExecStartPre=+/bin/mkdir -p /var/lib/timestd/phase2/fusion
 ExecStartPre=+/usr/bin/chown -R timestd:timestd /var/lib/timestd/phase2/fusion
+# Eagerly create/repair the chrony refclock SHM segments as timestd:0666
+# BEFORE the writer starts (root via '+', failure non-fatal via '-': the
+# writer's own connect() path alarms loudly if segments are still bad).
+# Durable fix for the boot race where chronyd creates them root:0600 and
+# the unprivileged writer can never write (B4 first-reboot fault #5).
+ExecStartPre=+-/opt/git/sigmond/hf-timestd/venv/bin/hf-timestd shm-init
 
 # Own-only recovery (sigmond docs/timing-chain-architecture.md): fusion must
 # NEVER stop/restart chrony or ipcrm the shared SHM segments.  chrony and gpsd

@@ -1011,6 +1011,45 @@ def cmd_clean_stale_rings(args) -> int:
     return 0
 
 
+def cmd_shm_init(args) -> int:
+    """Eagerly create/repair the chrony refclock SHM segments (as root).
+
+    Run from ExecStartPre (`+` prefix) of timestd-fusion,
+    timestd-core-recorder AND chronyd, so the segments are always
+    <owner>:0666 regardless of which service wins the boot race.  See
+    hf_timestd.core.chrony_shm.ensure_segments for the full story.
+    """
+    import pwd
+
+    owner = getattr(args, 'owner', 'timestd')
+    try:
+        pw = pwd.getpwnam(owner)
+    except KeyError:
+        print(f"shm-init: unknown user '{owner}'", file=sys.stderr)
+        return 2
+
+    try:
+        units = [int(u) for u in args.units.split(',')]
+    except ValueError:
+        print(f"shm-init: bad --units '{args.units}' (want e.g. 0,1,2,3)",
+              file=sys.stderr)
+        return 2
+
+    try:
+        from .core.chrony_shm import ensure_segments, SHM_KEY_BASE
+    except ImportError as exc:
+        print(f"shm-init: {exc}", file=sys.stderr)
+        return 3
+
+    failed = 0
+    for unit, status in ensure_segments(units, pw.pw_uid, pw.pw_gid):
+        print(f"shm-init: SHM unit {unit} "
+              f"(key=0x{SHM_KEY_BASE + unit:08x}): {status}")
+        if status.startswith('ERROR'):
+            failed += 1
+    return 1 if failed else 0
+
+
 def main():
     """Main entry point for hf-timestd command"""
     # Quiet stderr for sigmond client-contract subcommands so they emit
@@ -1151,6 +1190,17 @@ Exit codes:
         help='Expected ring owner (service user); segments owned by anyone else are removed')
     clean_rings_parser.add_argument('--dry-run', action='store_true',
         help='Report what would be removed without removing')
+
+    # Eager chrony-SHM segment creation/repair (writer+chronyd ExecStartPre, as root)
+    shm_init_parser = subparsers.add_parser(
+        'shm-init',
+        help='Create (or repair in place) the chrony refclock SHM segments '
+             'as <owner>:0666 so writers and chronyd can never race each '
+             'other into root:0600 segments (run as root before either)')
+    shm_init_parser.add_argument('--units', default='0,1,2,3',
+        help='Comma-separated SHM unit numbers to claim (default: 0,1,2,3)')
+    shm_init_parser.add_argument('--owner', default='timestd',
+        help='Owner user for the segments (the writer service user)')
 
     # Create channels command
     create_parser = subparsers.add_parser('create-channels', help='Create channels in radiod')
@@ -1568,6 +1618,8 @@ Per-service overrides in [services] take precedence over the profile.
         recorder.run()
     elif args.command == 'clean-stale-rings':
         sys.exit(cmd_clean_stale_rings(args))
+    elif args.command == 'shm-init':
+        sys.exit(cmd_shm_init(args))
     elif args.command == 'discover':
         import toml
         from .channel_manager import ChannelManager
