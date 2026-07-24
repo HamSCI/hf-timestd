@@ -44,6 +44,30 @@ TARGET_UNIT="timestd-core-recorder.service"
 
 log() { logger -t "$LOG_TAG" -- "$@"; echo "[$LOG_TAG] $*"; }
 
+# Config gate: if the T6 BPSK PPS chain is disabled in config, HPPS can
+# never feed and LastRx is infinite BY DESIGN - restarting the recorder
+# "for" it just bounces the raw-archive chunks every cooldown period
+# forever (observed on B4 2026-07-24: a 30-min core-recorder bounce loop
+# corrupting 10-min archive chunks; same flap that got the HFPS twin
+# retired 2026-06-28).  Accept both the canonical [timing.t6_pps] and
+# the legacy [timing.l6_pps] section names; treat missing config or a
+# missing enabled key as disabled - a host that never configured T6
+# has no HPPS feed to guard.
+CONFIG_FILE="${HPPS_CONFIG_FILE:-/etc/hf-timestd/timestd-config.toml}"
+t6_enabled() {
+    [[ -r "$CONFIG_FILE" ]] || return 1
+    awk '
+        /^\[timing\.(t6|l6)_pps\]/ { in_t6 = 1; next }
+        /^\[/                        { in_t6 = 0 }
+        in_t6 && /^[[:space:]]*enabled[[:space:]]*=[[:space:]]*true/ { found = 1 }
+        END { exit found ? 0 : 1 }
+    ' "$CONFIG_FILE"
+}
+if ! t6_enabled; then
+    log "T6/HPPS disabled in $CONFIG_FILE; nothing to guard - exiting"
+    exit 0
+fi
+
 # Parse `chronyc -n sources` for the HPPS row.  Format (chrony 4.x):
 #   MS Name/IP address    Stratum Poll Reach LastRx Last sample
 #   #* HPPS                  0    0  377     1   -40us[ -14us] +/-   55us
