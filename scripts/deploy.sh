@@ -231,29 +231,17 @@ else
     fi
 fi
 
-# ── Step 4b: install chrony SHM ordering drop-in ────────────────────────────
-# systemd/chronyd-timestd-shm.conf orders chrony.service AFTER the timestd
-# refclock writers (fusion + core-recorder) so they create the SHM segments
-# at timestd:0666 before chrony attaches.  Without this ordering chrony wins
-# the race, creates the segments as root:0600, and the writers (running as
-# User=timestd) are locked out — chrony then sits at reach=0 forever.
-# Idempotent: no-op if the installed file already matches the repo copy.
-log_step "Step 4b: install chrony SHM ordering drop-in"
-
-CHRONY_DROPIN_SRC="$PROJECT_DIR/systemd/chronyd-timestd-shm.conf"
-CHRONY_DROPIN_DST="/etc/systemd/system/chrony.service.d/timestd-shm.conf"
-
-if [[ ! -f "$CHRONY_DROPIN_SRC" ]]; then
-    log_warn "chrony drop-in source not at $CHRONY_DROPIN_SRC; skipping"
-elif [[ -f "$CHRONY_DROPIN_DST" ]] && cmp -s "$CHRONY_DROPIN_SRC" "$CHRONY_DROPIN_DST"; then
-    log_info "chrony drop-in already current"
-elif [[ "$DRY_RUN" == "true" ]]; then
-    log_info "(dry run) would: install $CHRONY_DROPIN_SRC -> $CHRONY_DROPIN_DST + daemon-reload"
-else
-    install -m 0644 -D "$CHRONY_DROPIN_SRC" "$CHRONY_DROPIN_DST"
-    systemctl daemon-reload
-    log_info "chrony drop-in installed; chrony not restarted (After= takes effect on next start)"
-fi
+# ── Step 4b: chrony SHM ordering drop-in — RETIRED ──────────────────────────
+# scripts/install.sh deliberately does NOT install the chronyd-timestd-shm.conf
+# ordering drop-in any more (it made shared-infra chrony depend on hf-timestd);
+# segment ownership is guaranteed instead by sigmond-shm-precreate.service
+# (NTP0-3 root:0666 Before chrony/gpsd/fusion) plus the writers' own
+# `hf-timestd shm-init` ExecStartPre, which also REPAIRS a wrong-mode segment
+# in place (same shmid, so an attached chronyd is never orphaned).  This step
+# used to install the drop-in and was removed 2026-07-24 to stop deploy.sh
+# reintroducing what install.sh retires.  If a stale copy exists at
+# /etc/systemd/system/chrony{,d}.service.d/timestd-shm.conf it is harmless
+# but may be deleted.
 
 # ── Step 5: systemctl restart (units from deploy.toml) ──────────────────────
 read_units_from_deploy_toml() {

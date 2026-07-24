@@ -341,16 +341,30 @@ class TestEnsureSegments(unittest.TestCase):
                              (self.UID, self.GID, 0o666))
             self.assertTrue(seg.detached)
 
-    def test_repairs_root_owned_segment_in_place(self):
+    def test_repairs_root_owned_0600_segment_in_place(self):
         # The B4 first-reboot fault: chronyd won the race and created
-        # the segment root:0600.
+        # the segment root:0600.  Only the mode is widened - owner stays
+        # root (writability is the contract, and flipping the owner would
+        # fight sigmond-shm-precreate's root:0666 every boot).
         bad = _FakeEagerSegment(key=0x4e545032, mode=0o600, uid=0, gid=0)
         fake = _FakeEagerModule(existing={0x4e545032: bad})
         results = self._run(fake, [2])
         self.assertEqual(results, [(2, 'repaired')])
         self.assertEqual((bad.uid, bad.gid, bad.mode & 0o777),
-                         (self.UID, self.GID, 0o666))
+                         (0, 0, 0o666))
         self.assertTrue(bad.detached)
+
+    def test_precreated_root_0666_segment_is_ok(self):
+        # sigmond-shm-precreate creates segments root:0666 - that
+        # satisfies the contract and must NOT be "repaired".
+        pre = _FakeEagerSegment(
+            key=0x4e545031, mode=0o666, uid=0, gid=0,
+            settable=False,  # any IPC_SET attempt would raise
+        )
+        fake = _FakeEagerModule(existing={0x4e545031: pre})
+        results = self._run(fake, [1])
+        self.assertEqual(results, [(1, 'ok')])
+        self.assertTrue(pre.detached)
 
     def test_correct_segment_left_alone(self):
         good = _FakeEagerSegment(

@@ -486,9 +486,18 @@ def ensure_segments(units, uid, gid, mode=0o666):
     already be attached, and shmctl(IPC_RMID) would orphan it on the old
     shmid forever (the M-M16 lesson - see ChronySHM._connect_sysv).
 
+    Ownership is deliberately NOT enforced on existing segments: sigmond's
+    `sigmond-shm-precreate.service` (the designed owner of segment
+    creation, ordered Before chrony/gpsd/fusion) creates them root:0666,
+    and the writable-by-everyone mode is the actual contract - the same
+    `mode & 0o666` test ChronySHM._connect_sysv applies.  Repairing the
+    owner here would just flip root<->timestd against the precreate every
+    boot.  Only segments we create fresh get uid/gid (nice for ipcrm-
+    ability by the service user; irrelevant to writability).
+
     Args:
         units: iterable of SHM unit numbers (key = SHM_KEY_BASE + unit)
-        uid, gid: numeric owner to enforce (the writer service user)
+        uid, gid: numeric owner for freshly-created segments
         mode: permission bits to enforce
 
     Returns:
@@ -516,11 +525,9 @@ def ensure_segments(units, uid, gid, mode=0o666):
             except sysv_ipc.ExistentialError:
                 seg = sysv_ipc.SharedMemory(key, flags=0)
 
-            if seg.uid == uid and seg.gid == gid and (seg.mode & 0o777) == mode:
+            if (seg.mode & mode) == mode:
                 results.append((unit, 'ok'))
             else:
-                seg.uid = uid
-                seg.gid = gid
                 seg.mode = mode
                 results.append((unit, 'repaired'))
             seg.detach()
