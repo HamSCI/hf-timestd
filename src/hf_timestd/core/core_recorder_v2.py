@@ -368,6 +368,12 @@ class CoreRecorderV2:
         # on calibrator restart so the first stable lock is always accepted.
         self._t6_last_chain_delay_ns = None
         self._t6_wrap_rejections = 0
+        # Initial-accept plausibility refusals: consecutive locked cycles
+        # where the disambiguated effective chain_delay exceeded the Layer B
+        # physical-plausibility bound and the lock was refused.  Used only
+        # to rate-limit the refusal warning; reset on every accept.
+        self._t6_initial_accept_rejections = 0
+        self._t6_diff_initial_accept_rejections = 0
         # Step-recovery: track recent rejected raw chain_delays so a
         # genuine permanent step (chain_delay actually moved, not a
         # transient noise wrap) can be detected and re-disambiguated.
@@ -2903,6 +2909,47 @@ class CoreRecorderV2:
                         self._t6_disambiguate_via_external_reference(result)
                 # Apply disambiguation (set above either way) and lock in.
                 effective = result.chain_delay_ns + self._t6_disambiguation_ns
+                # Layer B physical-plausibility guard at initial accept —
+                # the last unguarded entry point into the lock.  When no
+                # usable reference tier is available (T5 unwired, T4
+                # sigma over gate, T3 absent) the disambiguation walk
+                # falls through with shift 0, and the raw MF value —
+                # ambiguous modulo the template period — used to be
+                # accepted AND persisted verbatim.  Observed on B4
+                # 2026-07-24 (boot #1 and again after a clean restart):
+                # boot-race chrony left T4 at sigma 1.8-4.4 ms, and the
+                # MF's deterministic sidelobe at +708.5 ms was locked in
+                # and persisted twice in a row, keeping T6/HPPS out of
+                # the authority cascade with no operator-visible retry.
+                # Refuse instead: leave _t6_last_chain_delay_ns unset so
+                # every subsequent locked cycle re-enters initial-accept
+                # and re-walks the tier hierarchy — references improve
+                # as chrony settles — and nothing implausible is locked,
+                # persisted, pushed to SHM, or written to archive
+                # metadata meanwhile.  Same 250 ms bound and rationale
+                # as the guards in _t6_disambiguate_via_t5_lb1421 /
+                # _t6_disambiguate_via_external_reference; see
+                # docs/TSL3_COSTAS_DRIFT_2026-05-18.md §"Layer B".
+                T6_PHYSICAL_CHAIN_DELAY_MAX_NS = 250_000_000  # 250 ms
+                if abs(effective) > T6_PHYSICAL_CHAIN_DELAY_MAX_NS:
+                    self._t6_initial_accept_rejections += 1
+                    n = self._t6_initial_accept_rejections
+                    if n == 1 or n % 60 == 0:
+                        logger.warning(
+                            f"T6 chain_delay initial accept REFUSED: "
+                            f"effective {effective/1e6:+.1f} ms exceeds "
+                            f"physical-plausibility bound ±"
+                            f"{T6_PHYSICAL_CHAIN_DELAY_MAX_NS/1e6:.0f} ms "
+                            f"(raw={result.chain_delay_ns} ns, "
+                            f"disambig={self._t6_disambiguation_ns} ns, "
+                            f"consecutive refusals={n}).  Sidelobe capture "
+                            f"with no usable disambiguation reference — "
+                            f"not locking, not persisting; will retry "
+                            f"disambiguation on the next locked cycle."
+                        )
+                    self._t6_disambiguation_ns = 0
+                    return
+                self._t6_initial_accept_rejections = 0
                 self._t6_last_chain_delay_ns = effective
                 effective_chain_delay = effective
                 # Persist the just-locked effective value AND the
@@ -3305,6 +3352,34 @@ class CoreRecorderV2:
                                     else:
                                         ref = self._get_disambiguation_reference()
                                         if ref is None:
+                                            # Layer B physical-plausibility
+                                            # guard — same rationale as the
+                                            # MF initial-accept guard above:
+                                            # with no reference the raw value
+                                            # is ambiguous, and an implausible
+                                            # one is a sidelobe.  Refuse (do
+                                            # NOT mark disambiguated, do NOT
+                                            # push this edge); the next
+                                            # accepted edge retries the walk.
+                                            _HFPS_MAX_NS = 250_000_000
+                                            if abs(chain_delay_ns_raw) > _HFPS_MAX_NS:
+                                                self._t6_diff_initial_accept_rejections += 1
+                                                n = self._t6_diff_initial_accept_rejections
+                                                if n == 1 or n % 60 == 0:
+                                                    logger.warning(
+                                                        f"HFPS chain_delay initial "
+                                                        f"accept REFUSED: raw "
+                                                        f"{chain_delay_ns_raw/1e6:+.1f} ms "
+                                                        f"exceeds physical-plausibility "
+                                                        f"bound ±{_HFPS_MAX_NS/1e6:.0f} ms "
+                                                        f"and no usable non-T6 timing "
+                                                        f"authority is available "
+                                                        f"(consecutive refusals={n}); "
+                                                        f"will retry on the next "
+                                                        f"accepted edge."
+                                                    )
+                                                return
+                                            self._t6_diff_initial_accept_rejections = 0
                                             logger.info(
                                                 "HFPS chain_delay initial accept: "
                                                 "no usable non-T6 timing authority "
