@@ -374,6 +374,11 @@ class CoreRecorderV2:
         # to rate-limit the refusal warning; reset on every accept.
         self._t6_initial_accept_rejections = 0
         self._t6_diff_initial_accept_rejections = 0
+        # Wall clock (monotonic) of the last disambiguation walk attempted
+        # while in refusal state — throttles the retry loop to
+        # T6_DISAMBIG_RETRY_INTERVAL_SEC (initial-accept otherwise re-runs
+        # per sample batch, ~25 Hz, each walk shelling out to chronyc).
+        self._t6_last_disambig_walk_wall = None
         # Step-recovery: track recent rejected raw chain_delays so a
         # genuine permanent step (chain_delay actually moved, not a
         # transient noise wrap) can be detected and re-disambiguated.
@@ -1810,6 +1815,11 @@ class CoreRecorderV2:
     # observed (~13 s) so transient cascades don't trigger needless
     # resets.
     T6_STUCK_TIMEOUT_SEC = 60.0
+    # Minimum spacing between disambiguation re-walks while initial accept
+    # is refusing implausible values (see the Layer B guard at initial
+    # accept).  References (chronyc sigma) move on second timescales;
+    # walking per sample batch is pure chronyc-subprocess + log churn.
+    T6_DISAMBIG_RETRY_INTERVAL_SEC = 5.0
     # Cadence for writing the persisted effective chain_delay to disk.
     # At 1 PPS, 60 edges = one save per minute — bounded even if the
     # rate later climbs.  See bpsk_chain_delay_store.py for the
@@ -2764,6 +2774,19 @@ class CoreRecorderV2:
             # drift of 2.5 ms in 30 min triggered constant rejections.
             WRAP_THRESHOLD_NS = 10_000_000
             if self._t6_last_chain_delay_ns is None:
+                # Throttle: while the Layer B guard below is refusing
+                # implausible values, this branch re-runs on every locked
+                # sample batch (~25 Hz at 96 k / 3720-sample batches) and
+                # each walk shells out to chronyc and emits 3 log lines.
+                # One walk per T6_DISAMBIG_RETRY_INTERVAL_SEC is plenty.
+                # The very first walk (rejections == 0) is never delayed.
+                if (self._t6_initial_accept_rejections > 0
+                        and self._t6_last_disambig_walk_wall is not None
+                        and (time.monotonic()
+                             - self._t6_last_disambig_walk_wall)
+                            < self.T6_DISAMBIG_RETRY_INTERVAL_SEC):
+                    return
+                self._t6_last_disambig_walk_wall = time.monotonic()
                 # First stable lock — disambiguate WHICH whole sample is the
                 # real PPS edge.
                 #
