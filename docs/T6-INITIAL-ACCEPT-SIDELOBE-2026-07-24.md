@@ -100,3 +100,42 @@ raw).
   refusals, and the T4 sigma values quoted above.
 - Persistence store: /var/lib/timestd/state/ (chain-delay store held
   effective=708473423 at sr=96000 between the two accepts).
+
+## Update 2026-07-24 ~00:25Z next day: T5 enabled — displacement is NOT an integer second
+
+B4 set `[timing] lb1421_enabled = true` and restarted. Outcome:
+
+- T5 probe attached, and at first MF lock disambiguation **succeeded**:
+  raw 708 473 423 ns → effective chain_delay **41 699 886 ns** (41.7 ms),
+  native anchor captured tier=T5. The initial-accept guard passed it
+  (41.7 ms is plausible), HPPS SHM pushes started, chrony reach went to
+  377 with LastRx 0.
+- **chrony marks HPPS falseticker (`#x`) at a constant +557 ms offset
+  with ±55 µs error bound** — a microsecond-stable, wrong signal.
+
+Interpretation: the MF's captured peak is displaced from the true PPS
+edge by a **non-integer-second** amount (~0.6 s). Integer-second
+disambiguation (T5/T4/T3 — all of it) can therefore never rescue this
+capture: T5 aligned the displaced edge to the nearest GPS second
+correctly, and the sub-second part of the displacement passes straight
+through into the pushed reference times. This reclassifies the defect:
+
+- It is **not** a wrap/disambiguation problem (Q2/Q3 above are still
+  real robustness issues, but fixing them cannot fix this capture).
+- It is an **MF peak-acquisition problem**: the filter deterministically
+  prefers a displaced correlation peak (raw identical to within tens of
+  ns across four independent acquisitions on two processes) at an
+  operating point with healthy SNR (39.6 dB, costas locked,
+  peak_running ≈ 102.8). Pre-reboot sessions on identical hardware
+  measured ≈105.7 ms, so the true peak exists and used to win.
+- Q1 (sidelobe geometry) is now the primary question, and Q4's
+  escalation idea (periodic re-hunt) would not converge here — the
+  same peak wins every hunt. The fix likely needs peak-candidate
+  enumeration with a plausibility prior, or template work.
+
+Operational side effects on B4 as of this update: chrony's falseticker
+exclusion keeps the wrong time from disciplining anything (correct);
+HPPS LastRx is fresh so the hpps-watchdog stops bouncing core-recorder;
+authority remains T3-only. B4 left in this state deliberately — the
+falseticker offset is itself the best live measurement of the peak
+displacement for whoever picks up Q1.
