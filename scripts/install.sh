@@ -702,7 +702,9 @@ if [[ -n "$CFG_ARCHIVE_ROOT" ]]; then
 fi
 
 # Channel definitions: CHANNEL_NAME=FREQUENCY_HZ
-# radiod mode: 4 SHARED + 2 WWV-only + 3 CHU = 9 channels
+# radiod mode: 4 SHARED + 2 WWV-only = 6 channels.  CHU is off the air
+# (transmitter decommissioned) — its 3 channels were removed from the
+# default set 2026-07-30; add them back per-site if it ever returns.
 METROLOGY_CHANNELS=(
     "SHARED_2500=2500000"
     "SHARED_5000=5000000"
@@ -710,9 +712,6 @@ METROLOGY_CHANNELS=(
     "SHARED_15000=15000000"
     "WWV_20000=20000000"
     "WWV_25000=25000000"
-    "CHU_3330=3330000"
-    "CHU_7850=7850000"
-    "CHU_14670=14670000"
 )
 
 for entry in "${METROLOGY_CHANNELS[@]}"; do
