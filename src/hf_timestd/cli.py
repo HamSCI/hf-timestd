@@ -1638,11 +1638,14 @@ Per-service overrides in [services] take precedence over the profile.
         # Discovery mode
         status_address = args.radiod or resolve_ka9q_status(config, default='239.192.152.141')
         manager = ChannelManager(status_address)
-        channels = manager.discover_channels()
-        
+        # ChannelManager has discover_existing_channels() -> Dict[ssrc, ChannelInfo];
+        # the old discover_channels() call never existed (AttributeError in the
+        # field, 2026-07-29)
+        channels = manager.discover_existing_channels()
+
         print(f"\n📡 Discovered {len(channels)} channels from radiod at {status_address}:")
-        for ch in channels:
-            print(f"  • SSRC {ch['ssrc']:08x}: {ch.get('frequency_hz', 0)/1e6:.3f} MHz - {ch.get('description', 'Unknown')}")
+        for ssrc, info in sorted(channels.items()):
+            print(f"  • SSRC {ssrc:08x}: {info.frequency/1e6:.3f} MHz  preset={info.preset}  sr={info.sample_rate}  → {info.multicast_address}:{info.port}")
     elif args.command == 'create-channels':
         import toml
         from .channel_manager import ChannelManager
