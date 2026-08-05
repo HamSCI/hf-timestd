@@ -488,10 +488,19 @@ class CoreRecorderV2:
         # AuthorityRunner path consumes it via the status file.
         try:
             from .t5_rtp_pairing import T5RtpPairing
-            self._t5_pairing = T5RtpPairing()
+            self._t5_pairing = T5RtpPairing(source="t6")
         except Exception as e:
             logger.error(f"T5RtpPairing init failed (T5 stays Phase-2A): {e}")
             self._t5_pairing = None
+        # P5 decoupling (2026-08-05, AC0G-B4: lb1421_enabled=true with
+        # [timing.t6_pps] off left the judge stuck at T4 because the T5
+        # bench only ever grounded on the T6 stream): every archive
+        # stream carries its own per-stream pairing, fed from the
+        # recorder's tap; _t5_bench_state prefers the T6 stream when
+        # present (densest arrival cadence) and falls back to these.
+        # description -> (T5RtpPairing, StreamRecorderV2)
+        self._t5_fallback_pairings = {}
+        self._t5_grounding_source = None    # last grounding, for the log
 
         # ── T6 residual-walk rate estimator (P3) ────────────────────
         # Differentiates the per-edge PPS residual (local_minus_source)
@@ -1266,6 +1275,11 @@ class CoreRecorderV2:
                     status_stream=self.status_address,
                 )
                 self.recorders[description] = recorder
+                # P5: per-stream T5 pairing fallback — this stream can
+                # ground the LB-142x NMEA-vs-RTP pairing when the T6
+                # stream is absent (never raises; wiring failure just
+                # leaves this stream out of the fallback set).
+                self._wire_t5_fallback_arrival(description, recorder)
 
             logger.info(f"✓ Initialized {len(self.recorders)} archive recorders")
 
@@ -2137,27 +2151,125 @@ class CoreRecorderV2:
             return None
         return (anchor, arrival[0], arrival[1])
 
+    def _wire_t5_fallback_arrival(self, description: str, recorder) -> None:
+        """Give an archive stream its own T5 pairing arrival tracker.
+
+        P5 decoupling: the NMEA-vs-RTP pairing behind the judge's T5
+        bench only needs SOME live stream's (gps_time, rtp_timesnap,
+        sample_rate) mapping plus arrival tracking.  Historically only
+        the T6 BPSK stream fed it, so disabling [timing.t6_pps]
+        silently killed the T5 bench (AC0G-B4 2026-08-05:
+        lb1421_enabled=true, judge stuck at T4).  Each archive stream
+        now carries a per-stream pairing fed from the recorder's tap —
+        the same (samples, quality) callback shape the T6 stream's
+        arrival note uses (see ``_t6_on_samples``).  The tap runs after
+        the archive write, so a flush-delayed batch notes a late
+        arrival; the pairing's latency sigma floor and MAD spread carry
+        that honestly.  Never raises.
+        """
+        fallbacks = getattr(self, '_t5_fallback_pairings', None)
+        if fallbacks is None:
+            # __new__-bypassed instance (unit tests) — start the map.
+            self._t5_fallback_pairings = fallbacks = {}
+        try:
+            from .t5_rtp_pairing import T5RtpPairing
+            pairing = T5RtpPairing(source=f"stream:{description}")
+        except Exception as e:  # noqa: BLE001 — bench feed, never fatal
+            logger.debug(
+                f"T5 fallback pairing init failed for {description}: {e}")
+            return
+
+        def _note_arrival_tap(samples, quality, _p=pairing):
+            rtp = getattr(quality, 'last_rtp_timestamp', None)
+            if rtp is not None:
+                _p.note_arrival(rtp)
+
+        try:
+            recorder.add_tap(_note_arrival_tap)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(
+                f"T5 fallback tap wiring failed for {description}: {e}")
+            return
+        fallbacks[description] = (pairing, recorder)
+
     def _t5_bench_state(self):
-        """LbeT5Bench provider: current T5PairingProduct or None."""
-        pairing = getattr(self, '_t5_pairing', None)
+        """LbeT5Bench provider: current T5PairingProduct or None.
+
+        Grounding preference (P5 decoupling): the dedicated T6 BPSK
+        stream when present (densest arrival cadence), else the best
+        archive stream carrying its own per-stream pairing (highest
+        sample rate first).  The product's ``source`` field names the
+        grounding stream so sigma accounting stays honest.  Result:
+        lb1421_enabled=true alone — with the T6 stream disabled — is
+        sufficient to light the T5 bench.
+        """
         probe = getattr(self, '_lb1421_probe', None)
-        ci = getattr(self, '_t6_channel_info', None)
-        if pairing is None or probe is None or ci is None:
+        if probe is None:
             return None
         reading = probe.get_latest()
         if reading is None:
             return None
-        gps_time = getattr(ci, 'gps_time', None)
-        rtp_snap = getattr(ci, 'rtp_timesnap', None)
-        if gps_time is None or rtp_snap is None:
+        # Preferred grounding: the dedicated T6 stream.
+        pairing = getattr(self, '_t5_pairing', None)
+        ci = getattr(self, '_t6_channel_info', None)
+        if pairing is not None and ci is not None:
+            gps_time = getattr(ci, 'gps_time', None)
+            rtp_snap = getattr(ci, 'rtp_timesnap', None)
+            if gps_time is not None and rtp_snap is not None:
+                cal = getattr(self, '_t6_calibrator', None)
+                sr = getattr(cal, 'sample_rate', None) if cal is not None else None
+                if not sr:
+                    sr = getattr(ci, 'sample_rate', None)
+                if sr:
+                    product = pairing.compute(
+                        reading, gps_time, rtp_snap, int(sr))
+                    if product is not None:
+                        self._note_t5_grounding(product.source)
+                        return product
+        return self._t5_bench_state_fallback(reading)
+
+    def _t5_bench_state_fallback(self, reading):
+        """T5 pairing grounded by the best available archive stream.
+
+        Candidate streams need a fresh arrival, a listener-refreshed
+        (gps_time, rtp_timesnap) ChannelInfo and a sample rate; the
+        densest substrate (highest sample rate) is tried first, name
+        order breaking ties for determinism.
+        """
+        fallbacks = getattr(self, '_t5_fallback_pairings', None)
+        if not fallbacks:
             return None
-        cal = getattr(self, '_t6_calibrator', None)
-        sr = getattr(cal, 'sample_rate', None) if cal is not None else None
-        if not sr:
-            sr = getattr(ci, 'sample_rate', None)
-        if not sr:
-            return None
-        return pairing.compute(reading, gps_time, rtp_snap, int(sr))
+        candidates = []
+        for desc, (pairing, recorder) in list(fallbacks.items()):
+            if pairing.latest_arrival is None:
+                continue
+            ci = getattr(recorder, 'channel_info', None)
+            if ci is None:
+                continue
+            gps_time = getattr(ci, 'gps_time', None)
+            rtp_snap = getattr(ci, 'rtp_timesnap', None)
+            if gps_time is None or rtp_snap is None:
+                continue
+            cfg = getattr(recorder, 'config', None)
+            sr = getattr(cfg, 'sample_rate', None) if cfg is not None else None
+            if not sr:
+                sr = getattr(ci, 'sample_rate', None)
+            if not sr:
+                continue
+            candidates.append((int(sr), desc, pairing, gps_time, rtp_snap))
+        candidates.sort(key=lambda c: (-c[0], c[1]))
+        for sr, desc, pairing, gps_time, rtp_snap in candidates:
+            product = pairing.compute(reading, gps_time, rtp_snap, sr)
+            if product is not None:
+                self._note_t5_grounding(product.source)
+                return product
+        return None
+
+    def _note_t5_grounding(self, source: str) -> None:
+        """Log once per grounding-source change (T5 bench pedigree)."""
+        if source != getattr(self, '_t5_grounding_source', None):
+            self._t5_grounding_source = source
+            logger.info(f"T5 bench pairing grounded by {source}")
 
     def _compute_rtp_to_utc_offset_ns(self) -> Optional[int]:
         """Pattern B: the offset that bridges ka9q's host-clock-derived

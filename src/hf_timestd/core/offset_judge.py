@@ -627,6 +627,9 @@ class LbeT5Bench:
                 "pps_utc_sec": int(product.pps_utc_sec),
                 "n_window": int(product.n_window),
                 "arrival_age_s": round(age, 3),
+                # WHICH stream grounded the pairing (P5 decoupling) —
+                # "t6" or "stream:<description>".
+                "source": str(getattr(product, "source", "t6")),
             },
         )
 

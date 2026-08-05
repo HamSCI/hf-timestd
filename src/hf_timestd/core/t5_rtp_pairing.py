@@ -76,6 +76,12 @@ class T5PairingProduct:
     ``arrival_rtp``       the paired RTP counter value (32-bit).
     ``pps_utc_sec``       the NMEA integer second that attested the pairing.
     ``n_window``          raw measurements contributing to the median.
+    ``source``            WHICH stream grounded the pairing — "t6" for the
+                          dedicated BPSK PPS stream, "stream:<description>"
+                          for an archive-stream fallback (P5 decoupling).
+                          Carried so sigma accounting stays honest: the
+                          grounding stream's arrival cadence and latency
+                          are part of the product's pedigree.
     """
 
     anchor_offset_ns: int
@@ -86,14 +92,18 @@ class T5PairingProduct:
     arrival_rtp: int
     pps_utc_sec: int
     n_window: int
+    source: str = "t6"
 
 
 class T5RtpPairing:
-    """Arrival tracker + pairing evaluator (one instance per recorder).
+    """Arrival tracker + pairing evaluator (one instance per GROUNDING
+    STREAM — the T6 BPSK stream when present, else any archive stream
+    the recorder holds ChannelInfo + arrivals for; P5 decoupling).
 
-    ``note_arrival`` is called from the T6 sample callback (hot path —
-    a single tuple assignment, no locking).  ``compute`` is called from
-    the status writer and the OffsetJudge T5 bench (both slow paths).
+    ``note_arrival`` is called from the grounding stream's sample
+    callback (hot path — a single tuple assignment, no locking).
+    ``compute`` is called from the status writer and the OffsetJudge T5
+    bench (both slow paths).
     """
 
     # Latency budget of the stream-arrival pairing: radiod blocktime
@@ -124,9 +134,16 @@ class T5RtpPairing:
         self,
         time_fn: Callable[[], float] = time.time,
         mono_fn: Callable[[], float] = time.monotonic,
+        source: str = "t6",
     ):
         self._time = time_fn
         self._mono = mono_fn
+        # Stream identity stamped on every product (P5 decoupling):
+        # the pairing math only needs SOME live stream's (gps_time,
+        # rtp_timesnap, sample_rate) mapping + arrival tracking, so
+        # one T5RtpPairing instance exists per grounding stream and
+        # names itself here.
+        self.source = str(source)
         # (rtp, mono) of the most recent batch — written by the sample
         # callback, read everywhere.  Single-reference assignment keeps
         # the hot path lock-free (atomic under the GIL).
@@ -231,6 +248,7 @@ class T5RtpPairing:
             arrival_rtp=int(arrival_rtp),
             pps_utc_sec=int(reading.pps_utc_sec),
             n_window=len(raws),
+            source=self.source,
         )
 
     # ── small numeric helpers (stdlib-only; window is tiny) ──────────
