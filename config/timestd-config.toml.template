@@ -240,6 +240,25 @@ enabled = false
 enabled = true
 # path = "/run/hf-timestd/fusion_metrics.json"  # default; override only for tests
 
+# === Offset Judge (radiod epoch cross-check) ===
+# Contract: docs/OFFSET-JUDGE-SPEC-2026-08-05.md.  The judge measures
+# radiod's advertised (GPS_TIME, RTP_TIMESNAP) epoch against hf-timestd's
+# own best UTC bench (P1: T4/T2 chrony, T3 FUSE), applies the measured
+# offset to archive labels, and publishes the per-source offset trend to
+# /run/hf-timestd/offset_judge.json.  With a co-located GPS source the
+# offset reads ~0 — continuous health verification for free.  A wrong
+# radiod epoch produces CORRECT labels plus a loudly-logged offset, not
+# data loss.
+[timing.offset_judge]
+enabled = true
+k = 5.0                  # violation bound: |offset| > k * sigma_tier (empirical sigma, spec §13.1)
+tick_seconds = 10.0      # bench poll + publication cadence
+sustain_window_s = 60.0  # violation must persist this long before the CRITICAL flag (spec §9.1)
+# publish_path = "/run/hf-timestd/offset_judge.json"     # default
+# fusion_status_path = "/run/hf-timestd/fusion_status.json"  # T3 bench input
+# pair_step_threshold_s = 0.75  # radiod pair change beyond this fractures the segment (spec §5)
+# radiod_restart = false   # P4 escalation ladder step 3 (spec §9) — not implemented in P1
+
 # === Service Profiles ===
 # Controls which services run.  Profiles define a baseline set of services;
 # per-service overrides let you add or remove individual services on top.

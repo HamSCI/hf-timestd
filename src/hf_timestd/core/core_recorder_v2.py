@@ -454,6 +454,31 @@ class CoreRecorderV2:
         # warn once on the legacy form so operators can migrate at
         # their own cadence.
         _timing_section = config.get('timing', {})
+
+        # ── Offset Judge (docs/OFFSET-JUDGE-SPEC-2026-08-05.md, P1) ──
+        # One judge per core-recorder process (spec §11: no new daemon).
+        # It measures radiod's advertised epoch against the best bench
+        # (T4/T2 chrony, T3 FUSE), publishes the per-source offset trend
+        # to /run/hf-timestd/offset_judge.json, and supplies the
+        # correction that BinaryArchiveWriter applies to labels.
+        # Failure to construct/start is NON-FATAL: recording continues
+        # with raw radiod mappings (pre-judge behavior).
+        self._offset_judge = None
+        _oj_cfg = _timing_section.get('offset_judge', {}) or {}
+        if _oj_cfg.get('enabled', True):
+            try:
+                from .offset_judge import OffsetJudge
+                self._offset_judge = OffsetJudge(config=_oj_cfg)
+                self._offset_judge.start()
+            except Exception as e:
+                logger.error(
+                    f"OffsetJudge init failed (recording continues with "
+                    f"raw radiod mappings): {e}", exc_info=True,
+                )
+                self._offset_judge = None
+        else:
+            logger.info("OffsetJudge disabled by [timing.offset_judge] config")
+
         _t6_cfg = _timing_section.get('t6_pps')
         _legacy_cfg = _timing_section.get('l6_pps')
         if _t6_cfg is not None:
@@ -1161,6 +1186,8 @@ class CoreRecorderV2:
                 recorder = StreamRecorderV2(
                     config=rec_config,
                     control=self.control,
+                    offset_judge=self._offset_judge,
+                    status_stream=self.status_address,
                 )
                 self.recorders[description] = recorder
 
@@ -4015,6 +4042,14 @@ class CoreRecorderV2:
             except Exception as e:
                 logger.error(f"Error stopping recorder for channel {key}: {e}")
         
+
+        # Stop the Offset Judge publication thread
+        if self._offset_judge is not None:
+            try:
+                self._offset_judge.stop()
+                logger.info("OffsetJudge stopped")
+            except Exception as e:
+                logger.debug(f"OffsetJudge stop: {e}")
 
         # Stop T6 BPSK PPS stream
         if self._t6_stream is not None:

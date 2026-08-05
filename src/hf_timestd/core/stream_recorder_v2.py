@@ -173,10 +173,12 @@ class StreamRecorderV2:
         on_stream_dropped: Optional[Callable[[str], None]] = None,
         on_stream_restored: Optional[Callable[[ChannelInfo], None]] = None,
         bootstrap_service: Optional[Any] = None,  # DEPRECATED: kept for API compat
+        offset_judge: Optional[Any] = None,
+        status_stream: Optional[str] = None,
     ):
         """
         Initialize stream recorder.
-        
+
         Args:
             config: StreamRecorderConfig
             channel_info: Optional ChannelInfo (can be None if control is provided)
@@ -185,6 +187,11 @@ class StreamRecorderV2:
             on_stream_dropped: Optional callback when stream drops
             on_stream_restored: Optional callback when stream restores
             bootstrap_service: DEPRECATED - bootstrap now handled by MetrologyEngine
+            offset_judge: Optional OffsetJudge (docs/OFFSET-JUDGE-SPEC-2026-08-05.md).
+                Wired to the archive writer once the SSRC is known.
+            status_stream: The radiod status stream this channel belongs to
+                (CoreRecorderV2.status_address) — first half of the judge's
+                per-source key (spec §7 scoping; never global).
         """
         self.config = config
         self.channel_info = channel_info
@@ -192,6 +199,9 @@ class StreamRecorderV2:
         self._control = control
         self._on_stream_dropped = on_stream_dropped
         self._on_stream_restored = on_stream_restored
+        self._offset_judge = offset_judge
+        self._judge_status_stream = status_stream
+        self._judge_source_key: Optional[tuple] = None
         # NOTE (2026-02-03): bootstrap_service parameter kept for API compatibility
         # but is no longer used. MetrologyEngine handles timing lock internally.
         
@@ -388,9 +398,12 @@ class StreamRecorderV2:
         
         # Update config with SSRC from ka9q-python
         self.config.ssrc = self.channel_info.ssrc
-        
+
         # Set filter edges if configured (widens passband for FSK etc.)
         self._set_filter_edges(self.channel_info.ssrc)
+
+        # Wire the Offset Judge now that the per-source key exists.
+        self._wire_offset_judge()
         
         logger.info(f"{self.config.description}: Channel ready SSRC {self.channel_info.ssrc:08x} "
                    f"at {self.channel_info.multicast_address}:{getattr(self.channel_info, 'port', 5004)}")
@@ -425,10 +438,25 @@ class StreamRecorderV2:
         rtp_snap = getattr(self.channel_info, 'rtp_timesnap', None)
         if gps_time is not None and rtp_snap is not None:
             if self.archive_writer is not None:
+                # The writer relays the pair to the Offset Judge at this
+                # anchor-adoption point (see BinaryArchiveWriter.add_timing_snapshot).
                 self.archive_writer.add_timing_snapshot(
                     gps_time_ns=gps_time,
                     rtp_timesnap=rtp_snap
                 )
+            elif self._offset_judge is not None and self._judge_source_key:
+                # archive=False channels have no writer to relay the pair;
+                # register directly so the judge still tracks this source.
+                try:
+                    self._offset_judge.register_radiod_pair(
+                        self._judge_source_key, gps_time, rtp_snap,
+                        self.config.sample_rate,
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        f"{self.config.description}: judge pair "
+                        f"registration failed: {exc}"
+                    )
             if self.ring_buffer is not None:
                 try:
                     self.ring_buffer.update_anchor(
@@ -517,6 +545,9 @@ class StreamRecorderV2:
         self.config.ssrc = self.channel_info.ssrc
         self._set_filter_edges(self.channel_info.ssrc)
 
+        # Wire the Offset Judge now that the per-source key exists.
+        self._wire_offset_judge()
+
         logger.info(
             f"{self.config.description}: Channel ready SSRC "
             f"{self.channel_info.ssrc:08x} at "
@@ -572,10 +603,25 @@ class StreamRecorderV2:
         rtp_snap = getattr(self.channel_info, 'rtp_timesnap', None)
         if gps_time is not None and rtp_snap is not None:
             if self.archive_writer is not None:
+                # The writer relays the pair to the Offset Judge at this
+                # anchor-adoption point (see BinaryArchiveWriter.add_timing_snapshot).
                 self.archive_writer.add_timing_snapshot(
                     gps_time_ns=gps_time,
                     rtp_timesnap=rtp_snap
                 )
+            elif self._offset_judge is not None and self._judge_source_key:
+                # archive=False channels have no writer to relay the pair;
+                # register directly so the judge still tracks this source.
+                try:
+                    self._offset_judge.register_radiod_pair(
+                        self._judge_source_key, gps_time, rtp_snap,
+                        self.config.sample_rate,
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        f"{self.config.description}: judge pair "
+                        f"registration failed: {exc}"
+                    )
             if self.ring_buffer is not None:
                 try:
                     self.ring_buffer.update_anchor(
@@ -595,6 +641,32 @@ class StreamRecorderV2:
                 f"{self.config.description}: channel_info missing timing — "
                 f"gps_time={gps_time}, rtp_timesnap={rtp_snap}"
             )
+
+    def _wire_offset_judge(self) -> None:
+        """Bind the Offset Judge to this channel's (status_stream, ssrc).
+
+        Called from _create_channel() / register_with() once
+        ensure_channel() has produced the SSRC — the judge's per-source
+        key (spec §7) cannot exist earlier.  Safe to re-run on channel
+        recreation (radiod restart): the key is stable, and the writer's
+        set_offset_judge re-registers the current pair with the judge.
+        """
+        if self._offset_judge is None or not self.config.ssrc:
+            return
+        self._judge_source_key = (
+            str(self._judge_status_stream or ''),
+            int(self.config.ssrc),
+        )
+        if self.archive_writer is not None:
+            try:
+                self.archive_writer.set_offset_judge(
+                    self._offset_judge, self._judge_source_key
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"{self.config.description}: offset-judge wiring failed "
+                    f"(recording continues uncorrected): {exc}"
+                )
 
     def _set_filter_edges(self, ssrc: int):
         """Send filter edge commands to radiod if configured."""
