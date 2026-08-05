@@ -792,6 +792,16 @@ class OffsetJudge:
         # Hysteresis: N consecutive polls on a higher tier to advance;
         # degrade immediately (spec §2).
         self.upgrade_polls = int(cfg.get("upgrade_polls", 3))
+        # Cross-bench consistency gate (spec §2 as amended by
+        # docs/JUDGE-CROSS-BENCH-GATE-2026-08-05.md): a candidate bench
+        # is adopted only when its UTC agrees with the trusted lower
+        # tier's within cross_bench_k * sqrt(sigma_c^2 + sigma_l^2),
+        # sustained over the whole advance window.  Precision claims
+        # never substitute for cross-validation (the 2026-08-05 T6
+        # displaced-peak incident: a biased-but-stable T6 was adopted
+        # over a healthy T5 because its honest wide sigma kept k*sigma
+        # quiet).
+        self.cross_bench_k = float(cfg.get("cross_bench_k", 5.0))
 
         self.publish_path = Path(
             publish_path
@@ -822,6 +832,14 @@ class OffsetJudge:
         self._candidate_tier: Optional[str] = None      # upgrade hysteresis
         self._candidate_count: int = 0
         self._publish_error_logged = False
+        # Cross-bench gate state (gate doc): the currently-blocking
+        # conflict {upper, lower, delta_ns, since_utc} (None when no
+        # candidate is being refused), the shadow-mode residuals of
+        # every non-adopted bench vs the adopted one (refreshed each
+        # tick), and the CRITICAL rate limiter.
+        self._cross_conflict: Optional[Dict] = None
+        self._shadow_residuals: Dict[str, Dict] = {}
+        self._last_cross_critical_log: float = 0.0
 
         # P4 ladder step 2 (alert) shared state.  The cooldown is
         # channel-global (one alert per cooldown across sources),
@@ -1109,6 +1127,9 @@ class OffsetJudge:
                 self._best = best
                 for st in self._sources.values():
                     self._measure_source_locked(st, best, mono_now)
+            # Shadow-mode residuals: every non-adopted bench vs the
+            # adopted one, refreshed each tick (gate doc).
+            self._update_shadow_locked(readings, self._best, mono_now)
             # Violation + rate evaluation run every tick even in
             # holdover so sustained windows keep counting / clearing.
             for st in self._sources.values():
@@ -1132,55 +1153,203 @@ class OffsetJudge:
             logger.debug(f"OffsetJudge gpsdo discipline poll failed: {e}")
             return "absent", []
 
+    def _tier_rank(self, tier: Optional[str]) -> int:
+        """TIER_ORDER index (lower = better); unknown tiers rank last."""
+        return (
+            self.TIER_ORDER.index(tier)
+            if tier in self.TIER_ORDER else len(self.TIER_ORDER)
+        )
+
     def _select_bench_locked(
         self, readings: List[BenchReading]
     ) -> Optional[BenchReading]:
-        """Highest tier wins, with upgrade hysteresis (spec §2).
+        """Highest tier wins, with upgrade hysteresis (spec §2) AND the
+        cross-bench consistency gate (JUDGE-CROSS-BENCH-GATE-2026-08-05).
 
         Immediate degrade: if the active tier stopped answering, take
         the best available lower tier this tick.  Upgrade: a tier
-        better than the active one must answer `upgrade_polls`
-        consecutive ticks before adoption.
+        better than the active one must (a) answer `upgrade_polls`
+        consecutive ticks AND (b) agree with the trusted lower tier's
+        UTC within cross_bench_k * sqrt(sigma_c^2 + sigma_l^2) on every
+        one of those ticks — a gate failure restarts the advance window
+        cleanly.  Single-bench sites: no lower tier, gate vacuously
+        passes (unchanged behavior).
         """
         if not readings:
             self._candidate_tier = None
             self._candidate_count = 0
             return None
-        by_rank = sorted(
-            readings, key=lambda r: self.TIER_ORDER.index(r.tier)
-            if r.tier in self.TIER_ORDER else len(self.TIER_ORDER)
-        )
+        mono_now = self._mono()
+        by_rank = sorted(readings, key=lambda r: self._tier_rank(r.tier))
         best = by_rank[0]
         active_tier = self._best.tier if self._best is not None else None
-        active_rank = (
-            self.TIER_ORDER.index(active_tier)
-            if active_tier in self.TIER_ORDER else len(self.TIER_ORDER)
-        )
-        best_rank = self.TIER_ORDER.index(best.tier)
+        active_rank = self._tier_rank(active_tier)
+        best_rank = self._tier_rank(best.tier)
 
-        if active_tier is None or best_rank >= active_rank:
-            # Same tier or degrade — adopt immediately.
+        if active_tier is None:
+            # Bootstrap: nothing is trusted yet, so trust builds
+            # bottom-up within this tick — the lowest-tier reading is
+            # vacuously trusted, each higher tier must pass the gate
+            # against the trusted reading below it.  This closes the
+            # judge-restart hole: a deterministic-biased upper bench
+            # (the T6 incident shape) can never be re-adopted at tick 1
+            # just because everything answers at once.
             self._candidate_tier = None
             self._candidate_count = 0
+            return self._chain_consistent_locked(by_rank, mono_now)
+        if best_rank >= active_rank:
+            # Same tier or degrade — adopt immediately (spec §2:
+            # degrade-on-loss is never gated).  No upgrade candidate
+            # is proposed, so any recorded conflict is stale.
+            self._candidate_tier = None
+            self._candidate_count = 0
+            self._clear_cross_conflict_locked()
             return best
-        # Proposed upgrade — require consecutive confirmation.
-        if self._candidate_tier == best.tier:
-            self._candidate_count += 1
-        else:
+        # Proposed upgrade — hysteresis + cross-bench gate.
+        if self._candidate_tier != best.tier:
             self._candidate_tier = best.tier
-            self._candidate_count = 1
-        if self._candidate_count >= self.upgrade_polls:
-            self._candidate_tier = None
             self._candidate_count = 0
-            return best
+        ref = next((r for r in by_rank if r.tier == active_tier), None)
+        gate_ref = ref
+        if gate_ref is None:
+            # Active tier not answering this tick: gate against the
+            # highest available tier below the candidate ("T6 must
+            # agree with T5 when T5 is live, else with T4, etc.").
+            lowers = [r for r in by_rank
+                      if self._tier_rank(r.tier) > best_rank]
+            gate_ref = lowers[0] if lowers else None
+        gate_ok = (gate_ref is None
+                   or self._cross_gate_ok_locked(best, gate_ref, mono_now))
+        if gate_ok:
+            self._candidate_count += 1
+            if self._candidate_count >= self.upgrade_polls:
+                self._candidate_tier = None
+                self._candidate_count = 0
+                self._clear_cross_conflict_locked()
+                return best
+        else:
+            # Gate failed: the advance window restarts cleanly — the
+            # next agreeing poll counts as poll 1.
+            self._candidate_count = 0
         # Not confirmed yet: stay on the active tier if it still answers.
-        for r in by_rank:
-            if r.tier == active_tier:
-                return r
-        # Active tier gone: degrade path (best available).
+        if ref is not None:
+            return ref
+        # Active tier gone: immediate re-selection among the remaining
+        # readings, chain-gated bottom-up — loss of the reference must
+        # never become the moment a blocked candidate slips through.
         self._candidate_tier = None
         self._candidate_count = 0
-        return best
+        return self._chain_consistent_locked(by_rank, mono_now)
+
+    # ── cross-bench consistency gate (gate doc, amends spec §2) ─────
+
+    def _chain_consistent_locked(
+        self, by_rank: List[BenchReading], mono_now: float
+    ) -> BenchReading:
+        """Adopt the highest reading consistent with the chain below it.
+
+        The lowest-tier reading is vacuously trusted; each higher tier
+        is trusted only if it passes the gate against the reading
+        trusted so far.  A single reading passes vacuously.
+        """
+        chain = list(reversed(by_rank))     # lowest tier first
+        trusted = chain[0]
+        for cand in chain[1:]:
+            if self._cross_gate_ok_locked(cand, trusted, mono_now):
+                trusted = cand
+            else:
+                break
+        return trusted
+
+    def _cross_bench_delta_ns(
+        self, cand: BenchReading, ref: BenchReading, mono_now: float
+    ) -> float:
+        """Candidate-minus-reference UTC disagreement (ns), both
+        readings extrapolated to the same monotonic instant."""
+        return (cand.utc_at(mono_now) - ref.utc_at(mono_now)) * 1e9
+
+    def _cross_gate_ok_locked(
+        self, cand: BenchReading, ref: BenchReading, mono_now: float
+    ) -> bool:
+        """One gate evaluation: |delta| <= k_x * sqrt(s_c^2 + s_l^2).
+
+        On failure the conflict flag is recorded/refreshed and a
+        rate-limited CRITICAL names both tiers and the delta; on
+        success any conflict blaming this candidate is cleared (the
+        advance window then restarts cleanly at the caller).
+        """
+        delta_ns = self._cross_bench_delta_ns(cand, ref, mono_now)
+        bound_ns = self.cross_bench_k * math.sqrt(
+            cand.sigma_ns ** 2 + ref.sigma_ns ** 2
+        )
+        if abs(delta_ns) <= bound_ns:
+            if (self._cross_conflict is not None
+                    and self._cross_conflict.get("upper") == cand.tier):
+                logger.warning(
+                    f"OffsetJudge cross-bench gate: candidate {cand.tier} "
+                    f"agrees with {ref.tier} again "
+                    f"(delta={delta_ns/1e6:+.3f}ms within "
+                    f"{bound_ns/1e6:.3f}ms) — advance window restarts"
+                )
+                self._cross_conflict = None
+            return True
+        conflict = self._cross_conflict
+        if (conflict is None
+                or conflict.get("upper") != cand.tier
+                or conflict.get("lower") != ref.tier):
+            conflict = {
+                "upper": cand.tier,
+                "lower": ref.tier,
+                "delta_ns": round(delta_ns, 1),
+                "since_utc": self._iso_utc(self._time()),
+            }
+        else:
+            conflict = dict(conflict)
+        conflict["delta_ns"] = round(delta_ns, 1)
+        self._cross_conflict = conflict
+        if (mono_now - self._last_cross_critical_log
+                >= self.critical_log_interval_s):
+            self._last_cross_critical_log = mono_now
+            logger.critical(
+                f"OFFSET JUDGE CROSS-BENCH CONFLICT: candidate {cand.tier} "
+                f"disagrees with trusted {ref.tier} by "
+                f"{delta_ns/1e6:+.3f} ms (delta_ns={delta_ns:+.0f}), bound "
+                f"k_x*sqrt(sigma_c^2+sigma_l^2) = {self.cross_bench_k:.1f} x "
+                f"{math.sqrt(cand.sigma_ns**2 + ref.sigma_ns**2)/1e6:.3f} ms "
+                f"= {bound_ns/1e6:.3f} ms — advancement BLOCKED, judging "
+                f"stays on {ref.tier}; the rejected bench stays under "
+                f"shadow measurement (shadow_residuals in offset_judge.json)."
+            )
+        return False
+
+    def _clear_cross_conflict_locked(self) -> None:
+        if self._cross_conflict is not None:
+            self._cross_conflict = None
+
+    def _update_shadow_locked(
+        self,
+        readings: List[BenchReading],
+        adopted: Optional[BenchReading],
+        mono_now: float,
+    ) -> None:
+        """Shadow-mode measurement channel (gate doc): every polled
+        bench that is NOT the adopted one publishes its residual vs the
+        adopted bench each tick — a rejected bench's disagreement trend
+        is a first-class diagnostic (it measures the displaced peak
+        directly)."""
+        shadows: Dict[str, Dict] = {}
+        if adopted is not None:
+            for r in readings:
+                if r.tier == adopted.tier:
+                    continue
+                shadows[r.tier] = {
+                    "shadow_residual_ns": round(
+                        self._cross_bench_delta_ns(r, adopted, mono_now), 1
+                    ),
+                    "sigma_ns": round(r.sigma_ns, 1),
+                    "vs_tier": adopted.tier,
+                }
+        self._shadow_residuals = shadows
 
     def _measure_source_locked(
         self, st: _SourceState, bench: BenchReading, mono_now: float
@@ -1798,6 +1967,13 @@ class OffsetJudge:
             # recording or verdicts.
             "gpsdo_discipline": self._gpsdo_discipline,
             "gpsdo_detail": self._gpsdo_detail,
+            # Cross-bench consistency gate (spec §2 amended by
+            # JUDGE-CROSS-BENCH-GATE-2026-08-05): the currently-blocked
+            # upper bench (None when no candidate is refused) and the
+            # per-tick shadow residual of every non-adopted bench vs
+            # the adopted one.
+            "cross_bench_conflict": self._cross_conflict,
+            "shadow_residuals": self._shadow_residuals,
             # P3: the T6 residual-walk rate observable, host-global
             # (one ADC clock behind every source on this radiod).
             "t6_residual_rate": (
@@ -1845,8 +2021,12 @@ class OffsetJudge:
                     "rate_samples_per_utc_sec is the trusted nominal RTP "
                     "rate (spec §11: measured rate_ppm is recorded "
                     "alongside, never applied).  Additive advice only — "
-                    "subscribers keep their own dt-guards (spec §13.2)."
+                    "subscribers keep their own dt-guards (spec §13.2).  "
+                    "cross_bench_conflict (additive, gate amendment "
+                    "2026-08-05) names an upper bench currently refused "
+                    "adoption by cross-bench disagreement; null when clear."
                 ),
+                "cross_bench_conflict": self._cross_conflict,
                 "sources": contract_sources,
             },
             "sources": sources,

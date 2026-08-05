@@ -254,6 +254,11 @@ enabled = true
 k = 5.0                  # violation bound: |offset| > k * sigma_tier (empirical sigma, spec §13.1)
 tick_seconds = 10.0      # bench poll + publication cadence
 sustain_window_s = 60.0  # violation must persist this long before the CRITICAL flag (spec §9.1)
+# cross_bench_k = 5.0    # cross-bench consistency gate: a candidate bench is adopted
+                         # only if it agrees with the trusted lower tier within
+                         # cross_bench_k * sqrt(sigma_c^2 + sigma_l^2) over the whole
+                         # advance window (docs/JUDGE-CROSS-BENCH-GATE-2026-08-05.md);
+                         # failures publish cross_bench_conflict + shadow_residuals
 # publish_path = "/run/hf-timestd/offset_judge.json"     # default
 # fusion_status_path = "/run/hf-timestd/fusion_status.json"  # T3 bench input
 # pair_step_threshold_s = 0.75  # radiod pair change beyond this fractures the segment (spec §5)
