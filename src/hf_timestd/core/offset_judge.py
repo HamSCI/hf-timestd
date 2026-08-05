@@ -313,6 +313,118 @@ class FusionBench:
         )
 
 
+class NativeAnchorBench:
+    """T6 bench: the hf-timestd-native (RTP, UTC) anchor (spec §2, P2).
+
+    The NativeAnchor labels any RTP counter value by pure counter
+    arithmetic (``native_anchor.utc_ns_at_rtp`` — host-clock-free, the
+    highest-pedigree UTC this system produces).  To answer the bench
+    question "what is true UTC *now*", the anchor's label of the most
+    recently *arrived* T6 sample is handed off to the monotonic clock
+    at that sample's arrival instant:
+
+        reading.utc  = utc_ns_at_rtp(arrival_rtp, anchor) / 1e9
+        reading.mono = arrival_mono
+
+    The residual bias is the stream transport latency (the sample was
+    created before it arrived), bounded by ``LATENCY_SIGMA_FLOOR_NS``
+    — carried honestly as the bench sigma even though the anchor
+    itself is sub-µs.  Only answers while a valid anchor exists (the
+    T6 lifecycle invalidates it on GPSDO/MF unlock and RTP
+    discontinuity) and the T6 stream is flowing.
+
+    provider() -> Optional[(anchor, arrival_rtp, arrival_mono)].
+    """
+
+    LATENCY_SIGMA_FLOOR_NS = 25_000_000.0
+    ARRIVAL_MAX_AGE_S = 5.0
+
+    def __init__(
+        self,
+        provider: Callable[[], Optional[Tuple]],
+        mono_fn: Callable[[], float] = time.monotonic,
+    ):
+        self._provider = provider
+        self._mono = mono_fn
+
+    def poll(self) -> Optional[BenchReading]:
+        try:
+            state = self._provider()
+        except Exception:  # noqa: BLE001 — provider trouble ≠ judge trouble
+            return None
+        if state is None:
+            return None
+        anchor, arrival_rtp, arrival_mono = state
+        age = self._mono() - float(arrival_mono)
+        if age < 0 or age > self.ARRIVAL_MAX_AGE_S:
+            return None
+        try:
+            from .native_anchor import utc_ns_at_rtp
+            utc_ns = utc_ns_at_rtp(int(arrival_rtp) & 0xFFFFFFFF, anchor)
+        except Exception:  # noqa: BLE001
+            return None
+        return BenchReading(
+            tier="T6",
+            utc=utc_ns / 1e9,
+            sigma_ns=self.LATENCY_SIGMA_FLOOR_NS,
+            mono=float(arrival_mono),
+            detail={
+                "anchor_rtp": int(anchor.anchor_rtp),
+                "anchor_tier": str(anchor.captured_via_tier),
+                "chain_delay_ns": int(anchor.chain_delay_ns),
+                "arrival_age_s": round(age, 3),
+            },
+        )
+
+
+class LbeT5Bench:
+    """T5 bench: LB-142x GPS truth via the RTP pairing product (P2).
+
+    The provider returns a ``T5PairingProduct`` (see
+    ``t5_rtp_pairing.py``): the GPS/NMEA-attested UTC of the most
+    recent stream arrival, with the pairing's honest sigma (latency
+    floor + observed spread).  The bench simply re-frames it:
+
+        reading.utc  = product.truth_utc      (attested arrival UTC)
+        reading.mono = product.arrival_mono
+
+    provider() -> Optional[T5PairingProduct].
+    """
+
+    ARRIVAL_MAX_AGE_S = 5.0
+
+    def __init__(
+        self,
+        provider: Callable[[], Optional[object]],
+        mono_fn: Callable[[], float] = time.monotonic,
+    ):
+        self._provider = provider
+        self._mono = mono_fn
+
+    def poll(self) -> Optional[BenchReading]:
+        try:
+            product = self._provider()
+        except Exception:  # noqa: BLE001
+            return None
+        if product is None:
+            return None
+        age = self._mono() - float(product.arrival_mono)
+        if age < 0 or age > self.ARRIVAL_MAX_AGE_S:
+            return None
+        return BenchReading(
+            tier="T5",
+            utc=float(product.truth_utc),
+            sigma_ns=float(product.sigma_ns),
+            mono=float(product.arrival_mono),
+            detail={
+                "anchor_offset_ns": int(product.anchor_offset_ns),
+                "pps_utc_sec": int(product.pps_utc_sec),
+                "n_window": int(product.n_window),
+                "arrival_age_s": round(age, 3),
+            },
+        )
+
+
 # ────────────────────────────────────────────────────────────────────
 # Verdict + per-source state
 # ────────────────────────────────────────────────────────────────────
@@ -484,6 +596,14 @@ class OffsetJudge:
             except Exception as e:  # noqa: BLE001 — judge must never die silently
                 logger.error(f"OffsetJudge tick failed: {e}", exc_info=True)
             self._stop.wait(self.tick_seconds)
+
+    def add_bench(self, bench) -> None:
+        """Append a bench (P2: T6/T5 substrate benches wired by the
+        recorder once its own machinery exists).  The tier cascade in
+        :meth:`_select_bench_locked` orders readings by TIER_ORDER, so
+        registration order is irrelevant."""
+        with self._lock:
+            self.benches.append(bench)
 
     # ── registration (spec §7: per-source, never global) ─────────────
 

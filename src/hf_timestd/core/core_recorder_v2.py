@@ -493,6 +493,26 @@ class CoreRecorderV2:
             logger.error(f"T5RtpPairing init failed (T5 stays Phase-2A): {e}")
             self._t5_pairing = None
 
+        # ── T6/T5 substrate benches for the Offset Judge (P2) ───────
+        # T6: NativeAnchor projection (pure counter arithmetic when a
+        # valid anchor exists).  T5: the pairing product above.  Both
+        # ride providers with getattr guards because the anchor and the
+        # lb1421 probe materialise after __init__.
+        if self._offset_judge is not None:
+            try:
+                from .offset_judge import NativeAnchorBench, LbeT5Bench
+                self._offset_judge.add_bench(
+                    NativeAnchorBench(provider=self._t6_bench_state))
+                self._offset_judge.add_bench(
+                    LbeT5Bench(provider=self._t5_bench_state))
+                logger.info("OffsetJudge: T6 (NativeAnchor) + T5 (LB-142x "
+                            "pairing) benches wired")
+            except Exception as e:
+                logger.error(
+                    f"OffsetJudge T6/T5 bench wiring failed (judge "
+                    f"continues on P1 benches): {e}", exc_info=True,
+                )
+
         _t6_cfg = _timing_section.get('t6_pps')
         _legacy_cfg = _timing_section.get('l6_pps')
         if _t6_cfg is not None:
