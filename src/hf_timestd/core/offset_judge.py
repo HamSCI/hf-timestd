@@ -837,6 +837,12 @@ class OffsetJudge:
         self._restart_request_owner: Optional[SourceKey] = None
         self._restart_cooldown_until_wall: float = 0.0
         self._request_adopted: bool = False             # lazy startup adoption
+        # After adopting an artifact across a judge restart, hold off
+        # withdrawal until the sustain windows have had time to re-arm
+        # — otherwise a still-violating source would lose its request
+        # on tick 1 (in_violation needs sustain_window_s to re-assert)
+        # and the cooldown would block a re-request.
+        self._withdraw_grace_until_mono: float = 0.0
 
         # P3: second, independent rate observable — provider returning
         # the T6 residual-walk RateEstimate (wired by the recorder via
@@ -1388,9 +1394,10 @@ class OffsetJudge:
                     "write_request",
                     self._restart_request_payload_locked(st, sust, wall),
                 ))
-        # Withdraw when the owning source has cleared (or vanished).
+        # Withdraw when the owning source has cleared (or vanished);
+        # an adopted request gets a re-arm grace first.
         owner = self._restart_request_owner
-        if owner is not None:
+        if owner is not None and mono_now >= self._withdraw_grace_until_mono:
             owner_st = self._sources.get(owner)
             if (owner_st is None
                     or self._escalation_sustained_locked(owner_st, mono_now)
@@ -1536,6 +1543,8 @@ class OffsetJudge:
         except ValueError:
             self._restart_cooldown_until_wall = (
                 self._time() + self.restart_request_cooldown_s)
+        self._withdraw_grace_until_mono = (
+            self._mono() + self.sustain_window_s + 3.0 * self.tick_seconds)
         logger.info(
             f"OffsetJudge: adopted existing restart request for "
             f"{data.get('source_key')} (cooldown_until "
