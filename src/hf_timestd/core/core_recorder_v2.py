@@ -493,6 +493,20 @@ class CoreRecorderV2:
             logger.error(f"T5RtpPairing init failed (T5 stays Phase-2A): {e}")
             self._t5_pairing = None
 
+        # ── T6 residual-walk rate estimator (P3) ────────────────────
+        # Differentiates the per-edge PPS residual (local_minus_source)
+        # into an ADC-clock ppm — the judge's SECOND, independent rate
+        # observable (the first is the offset-series slope).  Fed at
+        # the SHM push site; reset on every native-anchor (re)capture.
+        # MEASURED AND RECORDED ONLY — never resampled, never fed back
+        # into labels (spec §11, audit G7).
+        try:
+            from .offset_judge import T6ResidualRateEstimator
+            self._t6_rate_est = T6ResidualRateEstimator()
+        except Exception as e:
+            logger.error(f"T6ResidualRateEstimator init failed: {e}")
+            self._t6_rate_est = None
+
         # ── T6/T5 substrate benches for the Offset Judge (P2) ───────
         # T6: NativeAnchor projection (pure counter arithmetic when a
         # valid anchor exists).  T5: the pairing product above.  Both
@@ -512,6 +526,18 @@ class CoreRecorderV2:
                     f"OffsetJudge T6/T5 bench wiring failed (judge "
                     f"continues on P1 benches): {e}", exc_info=True,
                 )
+            # P3: the T6 residual-walk rate observable rides its own
+            # guard — bench failure above must not cost the rate feed.
+            if self._t6_rate_est is not None:
+                try:
+                    self._offset_judge.set_t6_rate_provider(
+                        self._t6_rate_est.current)
+                    logger.info("OffsetJudge: T6 residual-walk rate "
+                                "observable wired (P3)")
+                except Exception as e:
+                    logger.error(
+                        f"OffsetJudge T6 rate wiring failed (judge "
+                        f"keeps offset-slope only): {e}")
 
         _t6_cfg = _timing_section.get('t6_pps')
         _legacy_cfg = _timing_section.get('l6_pps')
@@ -2081,6 +2107,20 @@ class CoreRecorderV2:
     # and the underlying state (anchor, probe, channel_info)
     # materialises asynchronously at runtime.
 
+    def _t6_rate_reset(self, cause: str) -> None:
+        """Restart the P3 residual-walk rate window (never raises).
+
+        Called at every native-anchor (re)capture/restore: the residual
+        reference frame moves with the anchor, so regressing across the
+        change would fabricate a rate step (spec §5 honesty)."""
+        est = getattr(self, '_t6_rate_est', None)
+        if est is None:
+            return
+        try:
+            est.reset(cause)
+        except Exception as e:  # noqa: BLE001 — metadata path, never fatal
+            logger.debug(f"T6 rate estimator reset failed: {e}")
+
     def _t6_bench_state(self):
         """NativeAnchorBench provider: (anchor, arrival_rtp, arrival_mono).
 
@@ -2360,6 +2400,7 @@ class CoreRecorderV2:
                 ),
                 captured_via_tier="T5",
             )
+            self._t6_rate_reset("native anchor captured via T5")
             logger.info(
                 f"T6 chain_delay disambiguated against T5 (LB-1421 NMEA): "
                 f"raw={result.chain_delay_ns} ns, "
@@ -2548,6 +2589,7 @@ class CoreRecorderV2:
                 captured_at_utc_ns=pps_firing_utc_ns,
                 captured_via_tier=str(ref_tier),
             )
+            self._t6_rate_reset(f"native anchor captured via {ref_tier}")
             if shift_samples != 0:
                 logger.info(
                     f"T6 chain_delay disambiguated against {ref_tier} "
@@ -3034,6 +3076,7 @@ class CoreRecorderV2:
                 if (persisted is not None
                         and persisted.anchor is not None):
                     self._t6_native_anchor = persisted.anchor
+                    self._t6_rate_reset("native anchor restored from store")
                     logger.info(
                         f"T6 native anchor restored from store: "
                         f"rtp={persisted.anchor.anchor_rtp}, "
@@ -3328,6 +3371,16 @@ class CoreRecorderV2:
                         self._t6_local_minus_source_history.append(
                             self._t6_last_local_minus_source_ns
                         )
+                        # P3: feed the residual-walk rate estimator —
+                        # x-axis is the edge's integer true second
+                        # (the GPS grid), y the sub-second residual.
+                        # Pure recording; nothing feeds back.
+                        rate_est = getattr(self, '_t6_rate_est', None)
+                        if rate_est is not None:
+                            rate_est.add_edge(
+                                ref_time_ns / 1e9,
+                                self._t6_last_local_minus_source_ns,
+                            )
                         # Chrony SHM facade — push (reference_time,
                         # system_time) so chrony can discipline the
                         # host clock toward GPS truth.  The chrony
@@ -3786,6 +3839,24 @@ class CoreRecorderV2:
 
             # T6 BPSK PPS calibrator status
             if self._t6_calibrator is not None:
+                # P3 residual-walk rate snapshot (None fields until the
+                # estimator has its minimum span).
+                _t6_rate_snapshot = {
+                    'ppm': None, 'sigma_ppm': None, 'n': None, 'span_s': None,
+                }
+                _rate_est = getattr(self, '_t6_rate_est', None)
+                if _rate_est is not None:
+                    try:
+                        _cur = _rate_est.current()
+                        if _cur is not None:
+                            _t6_rate_snapshot = {
+                                'ppm': round(_cur.ppm, 4),
+                                'sigma_ppm': round(_cur.sigma_ppm, 4),
+                                'n': _cur.n,
+                                'span_s': round(_cur.span_s, 1),
+                            }
+                    except Exception as e:  # noqa: BLE001 — status only
+                        logger.debug(f"t6 residual rate snapshot: {e}")
                 status['t6_pps'] = {
                     'enabled': True,
                     'locked': self._t6_calibrator.locked,
@@ -3846,6 +3917,14 @@ class CoreRecorderV2:
                     'local_minus_source_ns_window': len(
                         self._t6_local_minus_source_history
                     ),
+                    # P3: the residual-walk differentiated into an ADC
+                    # clock rate (ppm) — the judge's second, independent
+                    # rate observable.  None below the minimum span.
+                    # Recorded only; never fed back (spec §11 / G7).
+                    'residual_rate_ppm': _t6_rate_snapshot['ppm'],
+                    'residual_rate_sigma_ppm': _t6_rate_snapshot['sigma_ppm'],
+                    'residual_rate_n_edges': _t6_rate_snapshot['n'],
+                    'residual_rate_span_s': _t6_rate_snapshot['span_s'],
                     # hf-timestd-native (RTP, UTC) anchor — the single
                     # source of truth for T6 RTP→UTC labelling.  See
                     # docs/ARCHITECTURE-FIRST-PRINCIPLES.md §1 and
