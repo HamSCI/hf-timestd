@@ -202,6 +202,11 @@ class StreamRecorderV2:
         self._offset_judge = offset_judge
         self._judge_status_stream = status_stream
         self._judge_source_key: Optional[tuple] = None
+        # Ring-anchor provenance (P2 item 4 / audit G6): the raw radiod
+        # pair + the judge offset last written into the ring, so the
+        # revalidation tick can re-anchor when the judge's correction
+        # moves.  (gps_time_ns, rtp_timesnap, offset_ns) or None.
+        self._ring_anchor_state: Optional[tuple] = None
         # NOTE (2026-02-03): bootstrap_service parameter kept for API compatibility
         # but is no longer used. MetrologyEngine handles timing lock internally.
         
@@ -462,16 +467,10 @@ class StreamRecorderV2:
                         f"{self.config.description}: judge pair "
                         f"registration failed: {exc}"
                     )
-            if self.ring_buffer is not None:
-                try:
-                    self.ring_buffer.update_anchor(
-                        gps_time_ns=gps_time,
-                        rtp_timesnap=rtp_snap,
-                    )
-                except Exception as exc:
-                    logger.error(
-                        f"{self.config.description}: ring update_anchor failed: {exc}"
-                    )
+            # Ring anchor follows the same judged/corrected mapping the
+            # writer uses (P2 item 4 — audit G6: archive and ring must
+            # not silently diverge).
+            self._update_ring_anchor(gps_time, rtp_snap)
             logger.info(
                 f"{self.config.description}: Seeded timing from channel_info — "
                 f"GPS_TIME={gps_time}, RTP_TIMESNAP={rtp_snap}"
@@ -632,16 +631,10 @@ class StreamRecorderV2:
                         f"{self.config.description}: judge pair "
                         f"registration failed: {exc}"
                     )
-            if self.ring_buffer is not None:
-                try:
-                    self.ring_buffer.update_anchor(
-                        gps_time_ns=gps_time,
-                        rtp_timesnap=rtp_snap,
-                    )
-                except Exception as exc:
-                    logger.error(
-                        f"{self.config.description}: ring update_anchor failed: {exc}"
-                    )
+            # Ring anchor follows the same judged/corrected mapping the
+            # writer uses (P2 item 4 — audit G6: archive and ring must
+            # not silently diverge).
+            self._update_ring_anchor(gps_time, rtp_snap)
             logger.info(
                 f"{self.config.description}: Seeded timing from channel_info — "
                 f"GPS_TIME={gps_time}, RTP_TIMESNAP={rtp_snap}"
@@ -725,6 +718,78 @@ class StreamRecorderV2:
                 f"(revalidation degraded to creation-time snapshot): {exc}"
             )
 
+    # Ring re-anchor hysteresis: the ring's anchor is refreshed when the
+    # judge's correction has moved at least this far since the last ring
+    # write.  Keeps steady-state epoch bumps rare (each bump risks one
+    # reader-retry if it lands mid-copy) while bounding ring-vs-writer
+    # label divergence to ~this threshold + one revalidation tick.
+    RING_REANCHOR_MIN_DELTA_NS = 5_000_000.0  # 5 ms
+
+    def _current_judge_offset_ns(self, rtp_snap: int) -> float:
+        """The judge's current label correction for this source (0 when
+        no judge / no verdict — the raw-radiod pre-judge behavior)."""
+        if self._offset_judge is None or not self._judge_source_key:
+            return 0.0
+        try:
+            v = self._offset_judge.offset_for(self._judge_source_key, rtp_snap)
+        except Exception:  # noqa: BLE001 — judge trouble never disturbs the ring
+            return 0.0
+        return float(v.offset_ns) if v is not None else 0.0
+
+    def _update_ring_anchor(self, gps_time_ns: int, rtp_timesnap: int) -> None:
+        """Anchor the ring with the JUDGED mapping (P2 item 4, audit G6).
+
+        The ring stores a (gps_time_ns, rtp_timesnap) pair that readers
+        (metrology) resolve exactly like the writer's sidecar mapping —
+        but the ring format has no per-chunk "timing" block, so the
+        judge's correction is folded into the pair itself:
+
+            ring_gps_time_ns = radiod_gps_time_ns + offset_ns
+
+        which makes ring-resolved UTC == writer's corrected labels.
+        Called at every radiod pair adoption (seed + revalidation) and
+        re-invoked by the revalidation tick when the judge's offset has
+        moved beyond RING_REANCHOR_MIN_DELTA_NS.  Judge absent ⇒ raw
+        pair, byte-identical to the pre-judge ring.
+        """
+        if self.ring_buffer is None:
+            return
+        offset_ns = self._current_judge_offset_ns(int(rtp_timesnap))
+        try:
+            self.ring_buffer.update_anchor(
+                gps_time_ns=int(gps_time_ns + round(offset_ns)),
+                rtp_timesnap=int(rtp_timesnap),
+            )
+            self._ring_anchor_state = (
+                int(gps_time_ns), int(rtp_timesnap), float(offset_ns)
+            )
+            if offset_ns:
+                logger.info(
+                    f"{self.config.description}: ring anchor updated with "
+                    f"judged correction {offset_ns / 1e9:+.6f}s "
+                    f"(rtp_timesnap={int(rtp_timesnap)})"
+                )
+        except Exception as exc:
+            logger.error(
+                f"{self.config.description}: ring update_anchor failed: {exc}"
+            )
+
+    def _reanchor_ring_if_offset_drifted(self) -> None:
+        """Re-anchor the ring when the judge's correction has moved.
+
+        The writer picks up a fresh verdict at every chunk start; the
+        ring's anchor is a one-shot value, so without this the two
+        paths diverge by however far the offset walks (audit G6).  Runs
+        on the revalidation tick; the RING_REANCHOR_MIN_DELTA_NS
+        hysteresis keeps healthy steady state (offset flat) write-free.
+        """
+        if self.ring_buffer is None or self._ring_anchor_state is None:
+            return
+        gps_time_ns, rtp_timesnap, applied_ns = self._ring_anchor_state
+        current_ns = self._current_judge_offset_ns(rtp_timesnap)
+        if abs(current_ns - applied_ns) > self.RING_REANCHOR_MIN_DELTA_NS:
+            self._update_ring_anchor(gps_time_ns, rtp_timesnap)
+
     # A re-observed radiod pair that disagrees with the adopted mapping
     # by more than this is a genuine discontinuity (restart/re-snap) and
     # is adopted; below it, the disagreement is radiod status jitter /
@@ -768,6 +833,7 @@ class StreamRecorderV2:
         if gps_time is None or rtp_snap is None:
             return
 
+        adopted = False
         if self.archive_writer is not None:
             diff = self.archive_writer.evaluate_pair(gps_time, rtp_snap)
             if diff is None:
@@ -776,6 +842,7 @@ class StreamRecorderV2:
                 self.archive_writer.add_timing_snapshot(
                     gps_time_ns=gps_time, rtp_timesnap=rtp_snap
                 )
+                adopted = True
             elif abs(diff) > self.REVALIDATE_ADOPT_THRESHOLD_S:
                 logger.warning(
                     f"{self.config.description}: revalidation found radiod's "
@@ -789,6 +856,7 @@ class StreamRecorderV2:
                 self.archive_writer.add_timing_snapshot(
                     gps_time_ns=gps_time, rtp_timesnap=rtp_snap
                 )
+                adopted = True
             else:
                 logger.debug(
                     f"{self.config.description}: revalidation — pair steady "
@@ -803,6 +871,15 @@ class StreamRecorderV2:
                 self._judge_source_key, gps_time, rtp_snap,
                 self.config.sample_rate,
             )
+
+        # Ring/metrology unification (P2 item 4): the ring re-anchors at
+        # every pair adoption, and otherwise follows the judge's moving
+        # correction so ring-resolved UTC and the writer's corrected
+        # labels cannot silently diverge (audit G6).
+        if adopted:
+            self._update_ring_anchor(gps_time, rtp_snap)
+        else:
+            self._reanchor_ring_if_offset_drifted()
 
     def _set_filter_edges(self, ssrc: int):
         """Send filter edge commands to radiod if configured."""
