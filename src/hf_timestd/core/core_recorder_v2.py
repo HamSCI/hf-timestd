@@ -988,6 +988,9 @@ class CoreRecorderV2:
         last_health_check = 0
         last_quota_check = 0
         last_quality_tick = 0
+        # P2 radiod-pair revalidation: first tick 60 s in (channels are
+        # freshly seeded at startup, nothing to revalidate earlier).
+        last_pair_revalidate = time.time()
 
         try:
             while self.running:
@@ -1029,6 +1032,19 @@ class CoreRecorderV2:
                 if now - last_quality_tick >= 5:
                     quality_writer.tick()
                     last_quality_tick = now
+
+                # P2 per-source radiod-pair revalidation (every 60 s):
+                # re-observe each channel's advertised pair from its
+                # own listener-refreshed ChannelInfo (spec §7 scope —
+                # never global discovery) so a changed pair is adopted,
+                # and a wrong-but-steady one keeps being re-judged,
+                # within ~60 s of steady state.  Runs in both dedicated
+                # and shared-MultiStream modes (the shared mode has no
+                # per-recorder health thread to piggyback on).
+                if now - last_pair_revalidate >= 60:
+                    for _rec in list(self.recorders.values()):
+                        _rec.revalidate_radiod_pair()
+                    last_pair_revalidate = now
         
         except KeyboardInterrupt:
             logger.info("Received interrupt signal")

@@ -369,6 +369,33 @@ class BinaryArchiveWriter:
             )
             return None
 
+    def evaluate_pair(self, gps_time_ns: int, rtp_timesnap: int) -> Optional[float]:
+        """UTC disagreement (seconds) between a freshly observed radiod
+        pair and this writer's currently adopted mapping.
+
+        Returns ``fresh_utc − mapping_implied_utc`` at the fresh pair's
+        counter value, or None when no mapping has been adopted yet.
+        Used by the P2 revalidation tick (StreamRecorderV2.
+        revalidate_radiod_pair) to decide whether a re-observed pair is
+        steady-consistent status jitter (leave the steel-ruler mapping
+        alone) or a genuine discontinuity (adopt via
+        add_timing_snapshot).  Read-only — never mutates the mapping.
+        """
+        with self._lock:
+            if self._gps_time_unix is None or self._rtp_timesnap is None:
+                return None
+            delta = int((int(rtp_timesnap) - self._rtp_timesnap) & 0xFFFFFFFF)
+            if delta > 0x7FFFFFFF:
+                delta -= 0x100000000
+            implied_utc = self._gps_time_unix + delta / self.config.sample_rate
+        GPS_EPOCH_UNIX = 315964800
+        from .leap_second import get_current_gps_leap_seconds
+        fresh_utc = (
+            int(gps_time_ns) / 1_000_000_000
+            + GPS_EPOCH_UNIX - get_current_gps_leap_seconds()
+        )
+        return fresh_utc - implied_utc
+
     def add_timing_snapshot(self, gps_time_ns: int, rtp_timesnap: int) -> bool:
         """
         Record a GPS_TIME/RTP_TIMESNAP pair from radiod status.

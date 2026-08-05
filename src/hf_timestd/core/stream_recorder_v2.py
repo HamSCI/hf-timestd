@@ -404,6 +404,11 @@ class StreamRecorderV2:
 
         # Wire the Offset Judge now that the per-source key exists.
         self._wire_offset_judge()
+
+        # P2: keep this channel's radiod pair observable during steady
+        # state (own-stream STATUS listener feeding the 60 s
+        # revalidation tick).  Spec §7-scoped; see the method docs.
+        self._register_with_status_listener()
         
         logger.info(f"{self.config.description}: Channel ready SSRC {self.channel_info.ssrc:08x} "
                    f"at {self.channel_info.multicast_address}:{getattr(self.channel_info, 'port', 5004)}")
@@ -548,6 +553,11 @@ class StreamRecorderV2:
         # Wire the Offset Judge now that the per-source key exists.
         self._wire_offset_judge()
 
+        # P2: keep this channel's radiod pair observable during steady
+        # state (own-stream STATUS listener feeding the 60 s
+        # revalidation tick).  Spec §7-scoped; see the method docs.
+        self._register_with_status_listener()
+
         logger.info(
             f"{self.config.description}: Channel ready SSRC "
             f"{self.channel_info.ssrc:08x} at "
@@ -667,6 +677,132 @@ class StreamRecorderV2:
                     f"{self.config.description}: offset-judge wiring failed "
                     f"(recording continues uncorrected): {exc}"
                 )
+
+    def _register_with_status_listener(self) -> None:
+        """Wire this channel into ka9q-python's continuous STATUS listener.
+
+        The listener is bound to THIS client's own radiod status stream
+        (RadiodControl's status group) and updates only the registered
+        SSRC's ChannelInfo — the spec §7 scoping (per status-stream,
+        per-SSRC; never ``discover_channels()`` on a mixed multicast,
+        which was the March 2026 ``2d54c9c`` corruption vector).  With
+        the listener wired, ``channel_info.gps_time``/``rtp_timesnap``
+        refresh in place per radiod STATUS broadcast, and the P2
+        revalidation tick (:meth:`revalidate_radiod_pair`) re-observes
+        radiod's current claim from those fields.
+
+        Silent no-op on old ka9q-python (<3.16) — revalidation then
+        degrades to re-reading the creation-time snapshot (harmless:
+        it dedupes), and discontinuity recovery falls back to the
+        health monitor's silence-triggered channel recreation.
+        Safe to re-run on channel recreation: the new ChannelInfo
+        object must be (re-)registered so the listener mutates the
+        currently-used reference.
+        """
+        ci = self.channel_info
+        if ci is None or not getattr(ci, 'ssrc', 0) or self._control is None:
+            return
+        start_fn = getattr(self._control, 'start_status_listener', None)
+        if start_fn is None:
+            if not getattr(self, '_listener_absent_logged', False):
+                logger.info(
+                    f"{self.config.description}: ka9q-python STATUS listener "
+                    f"unavailable (<3.16) — radiod-pair revalidation limited "
+                    f"to the creation-time snapshot"
+                )
+                self._listener_absent_logged = True
+            return
+        try:
+            start_fn().register_channel(ci)
+            logger.info(
+                f"{self.config.description}: SSRC "
+                f"{getattr(ci, 'ssrc', 0):08x} wired to own-stream STATUS "
+                f"listener (gps_time/rtp_timesnap refresh per broadcast)"
+            )
+        except Exception as exc:
+            logger.warning(
+                f"{self.config.description}: STATUS-listener wiring failed "
+                f"(revalidation degraded to creation-time snapshot): {exc}"
+            )
+
+    # A re-observed radiod pair that disagrees with the adopted mapping
+    # by more than this is a genuine discontinuity (restart/re-snap) and
+    # is adopted; below it, the disagreement is radiod status jitter /
+    # host-clock slew and the steel-ruler mapping is left alone (the
+    # judge measures + corrects the residual against its benches on its
+    # own 10 s tick).  0.75 s matches the fleet re-anchor threshold and
+    # the judge's pair_step_threshold_s.
+    REVALIDATE_ADOPT_THRESHOLD_S = 0.75
+
+    def revalidate_radiod_pair(self) -> None:
+        """P2 per-source revalidation tick (called ~60 s by CoreRecorderV2).
+
+        Re-observes radiod's current (GPS_TIME, RTP_TIMESNAP) claim from
+        this channel's own listener-refreshed ChannelInfo (spec §7 scope)
+        and:
+
+        * adopts it (writer flush-and-adopt + judge segment fracture)
+          when it disagrees with the current mapping beyond
+          REVALIDATE_ADOPT_THRESHOLD_S — catches radiod restarts /
+          counter re-snaps that the silence-based health monitor never
+          sees because the stream keeps flowing;
+        * leaves the mapping alone on steady sub-threshold agreement —
+          a wrong-but-STEADY pair needs no re-adoption to be re-judged:
+          the judge measures the registered pair against its benches
+          every tick already (P1);
+        * never raises (recording must not be disturbed).
+        """
+        try:
+            self._revalidate_radiod_pair_inner()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                f"{self.config.description}: revalidation tick failed: {exc}"
+            )
+
+    def _revalidate_radiod_pair_inner(self) -> None:
+        ci = self.channel_info
+        if ci is None:
+            return
+        gps_time = getattr(ci, 'gps_time', None)
+        rtp_snap = getattr(ci, 'rtp_timesnap', None)
+        if gps_time is None or rtp_snap is None:
+            return
+
+        if self.archive_writer is not None:
+            diff = self.archive_writer.evaluate_pair(gps_time, rtp_snap)
+            if diff is None:
+                # No mapping adopted yet (writer still waiting for
+                # timing) — seed it now.
+                self.archive_writer.add_timing_snapshot(
+                    gps_time_ns=gps_time, rtp_timesnap=rtp_snap
+                )
+            elif abs(diff) > self.REVALIDATE_ADOPT_THRESHOLD_S:
+                logger.warning(
+                    f"{self.config.description}: revalidation found radiod's "
+                    f"advertised pair {diff:+.3f}s away from the adopted "
+                    f"mapping (threshold "
+                    f"{self.REVALIDATE_ADOPT_THRESHOLD_S}s) — adopting "
+                    f"(radiod restart / counter re-snap signature)"
+                )
+                # add_timing_snapshot flushes the in-progress chunk and
+                # relays the new pair to the judge (segment fracture).
+                self.archive_writer.add_timing_snapshot(
+                    gps_time_ns=gps_time, rtp_timesnap=rtp_snap
+                )
+            else:
+                logger.debug(
+                    f"{self.config.description}: revalidation — pair steady "
+                    f"({diff:+.4f}s vs adopted mapping); judge continues "
+                    f"judging the adopted pair on its own tick"
+                )
+        elif self._offset_judge is not None and self._judge_source_key:
+            # archive=False: the judge holds the only mapping for this
+            # source.  Its own dedupe / pair_step_threshold machinery
+            # filters status jitter vs genuine fractures.
+            self._offset_judge.register_radiod_pair(
+                self._judge_source_key, gps_time, rtp_snap,
+                self.config.sample_rate,
+            )
 
     def _set_filter_edges(self, ssrc: int):
         """Send filter edge commands to radiod if configured."""
