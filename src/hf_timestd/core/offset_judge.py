@@ -1708,12 +1708,42 @@ class OffsetJudge:
                 "bench_detail": best.detail,
             }
         sources: Dict[str, Dict] = {}
+        contract_sources: Dict[str, Dict] = {}
         for key, st in self._sources.items():
             v = None
             if st.ema_offset_ns is not None and best is not None:
                 v = self._verdict_locked(st, mono_now)
             slope, rate = st.slope_est, st.rate_est
             sust = self._escalation_sustained_locked(st, mono_now)
+            # §18 subscriber surface (client contract v0.7) — field
+            # names verbatim per CLAUDE.md / ARCHITECTURE-FIRST-
+            # PRINCIPLES.md.  utc_anchor_ns is the JUDGE-corrected UTC
+            # of rtp_anchor_sample; null (with tier/sigma) until the
+            # judge has a verdict, so a subscriber can never mistake a
+            # raw radiod mapping for a judged one.
+            contract_sources[self._key_str(key)] = {
+                "utc_anchor_ns": (
+                    int(round(st.gps_unix * 1e9 + v.offset_ns))
+                    if v is not None else None
+                ),
+                "tier": v.tier if v is not None else None,
+                "sigma_ns": round(v.sigma_ns, 1) if v is not None else None,
+                "snapshot_age_s": (
+                    round(v.judge_age_s, 3) if v is not None else None
+                ),
+                "rtp_anchor_sample": st.rtp_timesnap,
+                "rate_samples_per_utc_sec": st.sample_rate,
+                "radiod_id": self._radiod_id(key[0]),
+                "host_monotonic_at_anchor": st.mono_at_pair,
+                "offset_ns": (
+                    round(v.offset_ns, 1) if v is not None else None
+                ),
+                "rate_ppm": (
+                    round(v.rate_ppm, 4)
+                    if v is not None and v.rate_ppm is not None else None
+                ),
+                "segment_id": st.segment_id,
+            }
             sources[self._key_str(key)] = {
                 "offset_ns": round(v.offset_ns, 1) if v else None,
                 "sigma_ns": round(v.sigma_ns, 1) if v else None,
@@ -1789,6 +1819,26 @@ class OffsetJudge:
                         if self._restart_cooldown_until_wall > 0 else None
                     ),
                 },
+            },
+            # Client-contract v0.7 §18 timing-authority SUBSCRIBER
+            # SURFACE.  This is the versioned export the sigmond
+            # recorders (psk/wspr/meteor/mag, P4b) consume — the §18
+            # producer surface was previously documentation-only
+            # (CLAUDE.md + docs/ARCHITECTURE-FIRST-PRINCIPLES.md); it
+            # is produced here, per source, with the contract's field
+            # names verbatim.  STABLE AND VERSIONED by this key name:
+            # additive changes only; never rename or repurpose fields.
+            "contract_v07": {
+                "_doc": (
+                    "Client-contract v0.7 §18 timing-authority subscriber "
+                    "surface: utc_anchor_ns is the judge-corrected UTC of "
+                    "rtp_anchor_sample (null until a verdict exists); "
+                    "rate_samples_per_utc_sec is the trusted nominal RTP "
+                    "rate (spec §11: measured rate_ppm is recorded "
+                    "alongside, never applied).  Additive advice only — "
+                    "subscribers keep their own dt-guards (spec §13.2)."
+                ),
+                "sources": contract_sources,
             },
             "sources": sources,
         }
