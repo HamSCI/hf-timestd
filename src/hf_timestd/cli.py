@@ -1998,6 +1998,36 @@ Per-service overrides in [services] take precedence over the profile.
                 else:
                     print(f"   ⚠️  Upload pending — queued for retry")
 
+            # ── catch-up sweep (2026-08-05) ──────────────────────────────
+            # The timer only ever processed "yesterday", so a failed or
+            # skipped night became a permanent portal hole (AC0G-B4 lost
+            # 20260730 entirely and 20260803 to a package crash). After
+            # the normal run, retry any of the previous 7 days that never
+            # reached .upload_complete and still have source data, by
+            # re-invoking this same pipeline per day. GRAPE_SWEEP guards
+            # against recursion; failures are per-day and non-fatal.
+            if not os.environ.get('GRAPE_SWEEP') and not args.date:
+                import subprocess
+                from datetime import timedelta
+                today = datetime.now(tz=timezone.utc).date()
+                for back in range(2, 8):   # yesterday was handled above
+                    d = (today - timedelta(days=back)).strftime('%Y%m%d')
+                    day_dir = data_root / 'upload' / d
+                    if day_dir.exists() and list(day_dir.rglob('.upload_complete')):
+                        continue
+                    has_src = (any((data_root / 'raw_buffer').glob(f'*/{d}'))
+                               or any((data_root / 'products')
+                                      .glob(f'*/decimated/{d}.bin')))
+                    if not has_src:
+                        continue
+                    print(f"\n🔁 sweep: retrying incomplete day {d}")
+                    subprocess.run(
+                        [sys.argv[0], 'grape', 'daily', '--date', d,
+                         '--data-root', str(data_root),
+                         '--config', str(config_path)],
+                        env=dict(os.environ, GRAPE_SWEEP='1'),
+                        check=False)
+
         elif args.grape_command == 'decimate':
             from .grape.decimation_pipeline import DecimationPipeline
             
