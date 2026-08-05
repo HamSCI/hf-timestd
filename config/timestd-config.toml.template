@@ -257,7 +257,29 @@ sustain_window_s = 60.0  # violation must persist this long before the CRITICAL 
 # publish_path = "/run/hf-timestd/offset_judge.json"     # default
 # fusion_status_path = "/run/hf-timestd/fusion_status.json"  # T3 bench input
 # pair_step_threshold_s = 0.75  # radiod pair change beyond this fractures the segment (spec §5)
-# radiod_restart = false   # P4 escalation ladder step 3 (spec §9) — not implemented in P1
+
+# --- Escalation ladder (spec §9 steps 2-3) ---
+# Step 2: a violation (k*sigma offset OR sustained rate alarm) that persists
+# alert_after_s emits an alert through the same channel as the freshness
+# monitor (scripts/check-freshness-alert.sh): journald CRITICAL +
+# `logger -t hf-timestd-alert -p user.crit` + optional mail to
+# $TIMESTD_ALERT_EMAIL, at most one per alert_cooldown_s while it persists.
+# The alert names the likely cause: constant lag => radiod epoch fault
+# (restart clears it; labels are already judge-corrected), slope => clock
+# rate disagreement (restart will NOT fix it).
+# alert_after_s = 900.0
+# alert_cooldown_s = 3600.0
+
+# Step 3 (OPT-IN, site policy, spec §13.3): when enabled AND a violation
+# sustains restart_request_after_s, the judge writes an atomic REQUEST
+# artifact /run/hf-timestd/radiod-restart-request.json for the sigmond-side
+# watchdog — the first and only component empowered to touch radiod.
+# hf-timestd NEVER restarts radiod itself.  The request is withdrawn when
+# the violation clears; re-requests are limited to one per
+# restart_request_cooldown_s (6 h).  DEFAULT FALSE.
+radiod_restart_request = false
+# restart_request_after_s = 3600.0
+# restart_request_cooldown_s = 21600.0
 
 # === Service Profiles ===
 # Controls which services run.  Profiles define a baseline set of services;
