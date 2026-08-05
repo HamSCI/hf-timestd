@@ -805,6 +805,21 @@ class OffsetJudge:
         # over a healthy T5 because its honest wide sigma kept k*sigma
         # quiet).
         self.cross_bench_k = float(cfg.get("cross_bench_k", 5.0))
+        # Precision non-regression clause (gate amendment, cont'd): a
+        # VOLUNTARY upgrade is additionally refused when the candidate
+        # bench's reported sigma is materially worse than the
+        # incumbent's — tier rank must never regress the judge's
+        # demonstrated precision (spec §13.1: empirical accuracy
+        # governs; e.g. a 25 ms-floor T5 adopted over a 200 µs T4
+        # would widen the k*sigma violation bound ~100x and stop
+        # flagging ms-scale radiod anomalies).  Adoption requires
+        # sigma_candidate <= sigma_incumbent * sigma_regression_margin
+        # (default 2.0: modest inflation is a fair price for an
+        # independence upgrade; order-of-magnitude regressions are
+        # refused).  Degrade-on-loss is never sigma-gated — a wide
+        # honest bench beats none.
+        self.sigma_regression_margin = float(
+            cfg.get("sigma_regression_margin", 2.0))
 
         self.publish_path = Path(
             publish_path
@@ -843,6 +858,13 @@ class OffsetJudge:
         self._cross_conflict: Optional[Dict] = None
         self._shadow_residuals: Dict[str, Dict] = {}
         self._last_cross_critical_log: float = 0.0
+        # Precision-hold state: {candidate, incumbent,
+        # sigma_candidate_ns, sigma_incumbent_ns} while a voluntary
+        # upgrade is refused on sigma non-regression (None when clear),
+        # plus its own WARNING rate limiter (a hold is a precision
+        # policy, not a fault — never CRITICAL).
+        self._precision_hold: Optional[Dict] = None
+        self._last_precision_warning_log: float = 0.0
 
         # P4 ladder step 2 (alert) shared state.  The cooldown is
         # channel-global (one alert per cooldown across sources),
@@ -1199,14 +1221,16 @@ class OffsetJudge:
             # just because everything answers at once.
             self._candidate_tier = None
             self._candidate_count = 0
-            return self._chain_consistent_locked(by_rank, mono_now)
+            adopted = self._chain_consistent_locked(by_rank, mono_now)
+            self._release_holds_for_locked(adopted.tier)
+            return adopted
         if best_rank >= active_rank:
             # Same tier or degrade — adopt immediately (spec §2:
             # degrade-on-loss is never gated).  No upgrade candidate
-            # is proposed, so any recorded conflict is stale.
+            # is proposed, so any recorded conflict/hold is stale.
             self._candidate_tier = None
             self._candidate_count = 0
-            self._clear_cross_conflict_locked()
+            self._clear_advance_holds_locked()
             return best
         # Proposed upgrade — hysteresis + cross-bench gate.
         if self._candidate_tier != best.tier:
@@ -1223,12 +1247,18 @@ class OffsetJudge:
             gate_ref = lowers[0] if lowers else None
         gate_ok = (gate_ref is None
                    or self._cross_gate_ok_locked(best, gate_ref, mono_now))
+        if gate_ok and ref is not None:
+            # Precision non-regression: sigma-gate VOLUNTARY upgrades
+            # only (the incumbent still answers this tick).  A forced
+            # re-selection after incumbent loss is never sigma-gated —
+            # better a wide honest bench than none.
+            gate_ok = self._sigma_gate_ok_locked(best, ref, mono_now)
         if gate_ok:
             self._candidate_count += 1
             if self._candidate_count >= self.upgrade_polls:
                 self._candidate_tier = None
                 self._candidate_count = 0
-                self._clear_cross_conflict_locked()
+                self._clear_advance_holds_locked()
                 return best
         else:
             # Gate failed: the advance window restarts cleanly — the
@@ -1239,10 +1269,14 @@ class OffsetJudge:
             return ref
         # Active tier gone: immediate re-selection among the remaining
         # readings, chain-gated bottom-up — loss of the reference must
-        # never become the moment a blocked candidate slips through.
+        # never become the moment a cross-bench-blocked candidate
+        # slips through (sigma non-regression deliberately does NOT
+        # apply here: forced re-selection is not a voluntary upgrade).
         self._candidate_tier = None
         self._candidate_count = 0
-        return self._chain_consistent_locked(by_rank, mono_now)
+        adopted = self._chain_consistent_locked(by_rank, mono_now)
+        self._release_holds_for_locked(adopted.tier)
+        return adopted
 
     # ── cross-bench consistency gate (gate doc, amends spec §2) ─────
 
@@ -1325,9 +1359,67 @@ class OffsetJudge:
             )
         return False
 
-    def _clear_cross_conflict_locked(self) -> None:
-        if self._cross_conflict is not None:
+    def _sigma_gate_ok_locked(
+        self, cand: BenchReading, ref: BenchReading, mono_now: float
+    ) -> bool:
+        """Precision non-regression check for a VOLUNTARY upgrade.
+
+        Adoption over a still-answering incumbent additionally requires
+        sigma_candidate <= sigma_incumbent * sigma_regression_margin —
+        a higher tier must never materially widen the k*sigma violation
+        bound (spec §13.1: empirical accuracy governs).  On refusal a
+        precision_hold flag is published and a rate-limited WARNING
+        (not CRITICAL — this is a precision policy, not a fault) names
+        both benches; the refused candidate keeps being measured via
+        shadow_residuals.
+        """
+        margin = self.sigma_regression_margin
+        if cand.sigma_ns <= ref.sigma_ns * margin:
+            if (self._precision_hold is not None
+                    and self._precision_hold.get("candidate") == cand.tier):
+                logger.info(
+                    f"OffsetJudge precision hold released: candidate "
+                    f"{cand.tier} sigma {cand.sigma_ns/1e6:.3f} ms now "
+                    f"within {margin:.1f}x of incumbent {ref.tier} sigma "
+                    f"{ref.sigma_ns/1e6:.3f} ms"
+                )
+                self._precision_hold = None
+            return True
+        self._precision_hold = {
+            "candidate": cand.tier,
+            "incumbent": ref.tier,
+            "sigma_candidate_ns": round(cand.sigma_ns, 1),
+            "sigma_incumbent_ns": round(ref.sigma_ns, 1),
+        }
+        if (mono_now - self._last_precision_warning_log
+                >= self.critical_log_interval_s):
+            self._last_precision_warning_log = mono_now
+            logger.warning(
+                f"OFFSET JUDGE PRECISION HOLD: candidate {cand.tier} sigma "
+                f"{cand.sigma_ns/1e6:.3f} ms is worse than incumbent "
+                f"{ref.tier} sigma {ref.sigma_ns/1e6:.3f} ms x margin "
+                f"{margin:.1f} — voluntary upgrade refused (precision "
+                f"non-regression: tier rank must not widen the k*sigma "
+                f"violation bound); judging stays on {ref.tier}, candidate "
+                f"stays under shadow measurement."
+            )
+        return False
+
+    def _clear_advance_holds_locked(self) -> None:
+        """No upgrade candidate proposed / candidate adopted: any
+        recorded cross-bench conflict or precision hold is stale."""
+        self._cross_conflict = None
+        self._precision_hold = None
+
+    def _release_holds_for_locked(self, adopted_tier: str) -> None:
+        """A chain selection adopted `adopted_tier`: flags blaming that
+        tier are moot (others may still describe live refusals)."""
+        if (self._cross_conflict is not None
+                and self._cross_conflict.get("upper") == adopted_tier):
             self._cross_conflict = None
+        if (self._precision_hold is not None
+                and self._precision_hold.get("candidate") == adopted_tier):
+            self._precision_hold = None
 
     def _update_shadow_locked(
         self,
@@ -1976,6 +2068,11 @@ class OffsetJudge:
             # per-tick shadow residual of every non-adopted bench vs
             # the adopted one.
             "cross_bench_conflict": self._cross_conflict,
+            # Precision non-regression clause: a voluntary upgrade
+            # currently refused because the candidate's sigma would
+            # materially regress the judge's precision (None when
+            # clear).  The refused bench stays in shadow_residuals.
+            "precision_hold": self._precision_hold,
             "shadow_residuals": self._shadow_residuals,
             # P3: the T6 residual-walk rate observable, host-global
             # (one ADC clock behind every source on this radiod).

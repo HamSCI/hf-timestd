@@ -426,7 +426,12 @@ class TestCascadeT6T5T4:
         clock = FakeClock()
         t6 = FakeBench(clock, tier="T6", sigma_ns=25e6)
         t5 = FakeBench(clock, tier="T5", sigma_ns=25e6)
-        t4 = FakeBench(clock, tier="T4", sigma_ns=1e5)
+        # T4 sigma sits within the P5 sigma_regression_margin (2.0x) of
+        # the 25 ms substrate benches so this test keeps exercising the
+        # pure cascade/hysteresis discipline — a TIGHT T4 refusing a
+        # 25 ms candidate is now correct behavior and is covered by
+        # test_offset_judge_p5.TestPrecisionNonRegression.
+        t4 = FakeBench(clock, tier="T4", sigma_ns=15e6)
         judge = OffsetJudge(
             config={"enabled": True}, benches=[t4],
             publish_path=tmp_path / "offset_judge.json",

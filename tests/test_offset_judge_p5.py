@@ -185,9 +185,11 @@ class TestCrossBenchGate:
     def _blocked_pair(self, clock, tmp_path, **cfg):
         """Healthy T5 adopted first; then a 12 ms-biased T6 appears
         (the incident shape, with sigmas tight enough to resolve it:
-        bound = 5*sqrt((0.1ms)^2+(1ms)^2) ≈ 5.0 ms < 12 ms)."""
+        bound = 5*sqrt((0.1ms)^2+(0.15ms)^2) ≈ 0.9 ms < 12 ms; the T6
+        sigma also sits inside sigma_regression_margin so these tests
+        isolate the CROSS-BENCH gate from the precision hold)."""
         t5 = FakeBench(clock, tier="T5", sigma_ns=1e5)
-        t6 = FakeBench(clock, tier="T6", sigma_ns=1e6,
+        t6 = FakeBench(clock, tier="T6", sigma_ns=1.5e5,
                        bench_error_s=0.012, available=False)
         judge = make_judge(clock, tmp_path, [t5, t6], **cfg)
         register_healthy(judge, clock)
@@ -218,12 +220,12 @@ class TestCrossBenchGate:
         sh = snap["shadow_residuals"]["T6"]
         assert sh["shadow_residual_ns"] == pytest.approx(12e6, rel=1e-3)
         assert sh["vs_tier"] == "T5"
-        assert sh["sigma_ns"] == pytest.approx(1e6, rel=1e-3)
+        assert sh["sigma_ns"] == pytest.approx(1.5e5, rel=1e-3)
 
     def test_gate_admits_agreeing_bench(self, tmp_path):
         clock = FakeClock()
         t5 = FakeBench(clock, tier="T5", sigma_ns=1e5)
-        t6 = FakeBench(clock, tier="T6", sigma_ns=1e6, available=False)
+        t6 = FakeBench(clock, tier="T6", sigma_ns=1.5e5, available=False)
         judge = make_judge(clock, tmp_path, [t5, t6])
         register_healthy(judge, clock)
         judge.tick()

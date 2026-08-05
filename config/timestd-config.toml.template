@@ -259,6 +259,11 @@ sustain_window_s = 60.0  # violation must persist this long before the CRITICAL 
                          # cross_bench_k * sqrt(sigma_c^2 + sigma_l^2) over the whole
                          # advance window (docs/JUDGE-CROSS-BENCH-GATE-2026-08-05.md);
                          # failures publish cross_bench_conflict + shadow_residuals
+# sigma_regression_margin = 2.0  # precision non-regression: a voluntary upgrade is
+                         # refused (precision_hold published, WARNING) when
+                         # sigma_candidate > sigma_incumbent * this margin — tier rank
+                         # must not widen the k*sigma violation bound (spec §13.1);
+                         # degrade-on-loss is never sigma-gated
 # publish_path = "/run/hf-timestd/offset_judge.json"     # default
 # fusion_status_path = "/run/hf-timestd/fusion_status.json"  # T3 bench input
 # pair_step_threshold_s = 0.75  # radiod pair change beyond this fractures the segment (spec §5)
