@@ -1077,7 +1077,6 @@ class BinaryArchiveWriter:
     # should agree within milliseconds.  A large discrepancy means the
     # processing pipeline has fallen behind real-time — drop the data
     # rather than writing stale files that starve downstream services.
-    WALL_ANCHOR_AFTER_SEC = 300.0  # continuous staleness before wallclock fallback
     MAX_STALENESS_SECONDS = 120.0
 
     def _write_samples_inner(
@@ -1118,36 +1117,7 @@ class BinaryArchiveWriter:
                 )
                 self._last_stale_log = wallclock_now
             self.stale_drops += len(samples)
-            # Detect-and-stall is forbidden (fleet timing rule: detect,
-            # alarm LOUD, re-anchor). radiod's advertised GPS/RTP pair can
-            # wedge — observed 2026-08-05 on AC0G-B4: a constant ~1203 s
-            # lag on EVERY channel for days, every sample dropped, portal
-            # slivers only. If staleness persists and radiod offers no
-            # adoptable new pair (step-adoption above would have taken
-            # it), fall back to a wallclock anchor: timestamps degrade
-            # from GPS-grade to NTP-grade (chrony holds this host at
-            # sub-ms), which beats losing the data. The CRITICAL alarm
-            # keeps firing until a sane radiod anchor is adopted.
-            if getattr(self, '_stale_since', None) is None:
-                self._stale_since = wallclock_now
-            if wallclock_now - self._stale_since > self.WALL_ANCHOR_AFTER_SEC:
-                batch_dur = len(samples) / self.config.sample_rate
-                logger.critical(
-                    f"{self.config.channel_name}: WALL-ANCHOR FALLBACK — "
-                    f"radiod anchor implausible for "
-                    f"{wallclock_now - self._stale_since:.0f}s; re-anchoring "
-                    f"this stream to wallclock (NTP-grade timestamps) so "
-                    f"recording continues. Fix radiod to restore GPS-grade."
-                )
-                self._gps_time_unix = wallclock_now - batch_dur
-                self._rtp_timesnap = rtp_timestamp
-                self._stale_since = None
-                sample_unix_time = self._rtp_to_unix_time(rtp_timestamp)
-                sample_minute = (int(sample_unix_time) // self.file_duration_sec) * self.file_duration_sec
-            else:
-                return 0
-        else:
-            self._stale_since = None
+            return 0
 
         # Start new buffer if needed
         if self.current_buffer is None:
