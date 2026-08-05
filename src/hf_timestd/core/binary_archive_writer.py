@@ -638,7 +638,15 @@ class BinaryArchiveWriter:
                 'judge_tier': verdict.tier,
                 'judge_age_s': float(verdict.judge_age_s),
                 'segment_id': int(verdict.segment_id),
-                'rate_ppm': None,  # phase 3 (spec §11: recorded, never resampled)
+                # P3 (spec §10): the source's current segment rate
+                # estimate — RECORDED metadata only, never resampled,
+                # never folded into the labels (spec §11, audit G7).
+                # None until the estimator reaches its minimum span.
+                'rate_ppm': (
+                    float(verdict.rate_ppm)
+                    if getattr(verdict, 'rate_ppm', None) is not None
+                    else None
+                ),
             }
 
         buffer = MinuteBuffer(
