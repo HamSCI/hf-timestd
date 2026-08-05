@@ -93,6 +93,212 @@ def gps_time_ns_to_unix(gps_time_ns: int) -> float:
 
 
 # ────────────────────────────────────────────────────────────────────
+# Rate (frequency) estimation — spec §10 P3 + §11
+#
+# Doctrine (audit G7): frequency accuracy is MEASURED and RECORDED,
+# never corrected into the samples and never folded into the label
+# arithmetic — the RTP tick spacing stays the trusted steel ruler.
+# 1 ppm of rate disagreement == 1000 ns of offset walk per second.
+# ────────────────────────────────────────────────────────────────────
+
+PPM_PER_NS_PER_S = 1.0 / 1000.0   # ns/s → ppm
+# Sigma floor used ONLY when inverse-variance combining two estimates
+# (a noiseless synthetic regression legitimately reports sigma 0).
+RATE_COMBINE_SIGMA_FLOOR_PPM = 1e-4
+
+
+@dataclass(frozen=True)
+class RateEstimate:
+    """One rate-disagreement estimate: d(offset)/dt in ppm ± 1-sigma.
+
+    ``source`` is "offset-slope" (judge offset series regression),
+    "t6-residual" (BPSK PPS residual-walk differentiation) or
+    "combined" (inverse-variance blend of the two).
+    """
+    ppm: float
+    sigma_ppm: float
+    n: int
+    span_s: float
+    source: str
+
+
+def regress_rate_ppm(
+    t_s: np.ndarray, y_ns: np.ndarray
+) -> Optional[Tuple[float, float]]:
+    """Least-squares slope of y_ns(t_s) in ppm with its 1-sigma error.
+
+    Returns (ppm, sigma_ppm) or None when the series is degenerate
+    (<3 points or zero time spread).  sigma is the standard error of
+    the fitted slope from the regression residuals — an honest,
+    empirical uncertainty (spec §13.1), 0.0 for a noiseless series.
+    """
+    n = len(t_s)
+    if n < 3 or len(y_ns) != n:
+        return None
+    t0 = np.asarray(t_s, dtype=float)
+    t0 = t0 - t0[0]
+    y = np.asarray(y_ns, dtype=float)
+    sxx = float(np.sum((t0 - t0.mean()) ** 2))
+    if sxx <= 0.0:
+        return None
+    design = np.vstack([t0, np.ones(n)]).T
+    coef, *_ = np.linalg.lstsq(design, y, rcond=None)
+    slope_ns_per_s = float(coef[0])
+    resid = y - design @ coef
+    sse = float(np.sum(resid ** 2))
+    stderr_ns_per_s = math.sqrt(max(sse / (n - 2), 0.0) / sxx)
+    return (slope_ns_per_s * PPM_PER_NS_PER_S,
+            stderr_ns_per_s * PPM_PER_NS_PER_S)
+
+
+def combine_rate_estimates(
+    a: Optional[RateEstimate], b: Optional[RateEstimate]
+) -> Optional[RateEstimate]:
+    """Inverse-variance blend of two independent rate estimates.
+
+    With both present the result is "combined"; with one, that one is
+    passed through unchanged.  Sigmas are floored at
+    RATE_COMBINE_SIGMA_FLOOR_PPM for the weights only — the reported
+    sigma is the proper combined sigma of the floored weights, so a
+    noiseless estimate can never claim infinite weight.
+    """
+    if a is None:
+        return b
+    if b is None:
+        return a
+    wa = 1.0 / max(a.sigma_ppm, RATE_COMBINE_SIGMA_FLOOR_PPM) ** 2
+    wb = 1.0 / max(b.sigma_ppm, RATE_COMBINE_SIGMA_FLOOR_PPM) ** 2
+    ppm = (wa * a.ppm + wb * b.ppm) / (wa + wb)
+    sigma = math.sqrt(1.0 / (wa + wb))
+    return RateEstimate(
+        ppm=ppm, sigma_ppm=sigma,
+        n=a.n + b.n,
+        span_s=max(a.span_s, b.span_s),
+        source="combined",
+    )
+
+
+class T6ResidualRateEstimator:
+    """ADC-clock rate from the T6 PPS residual walk (spec P3, 2nd observable).
+
+    The T6 SHM push site computes, per accepted BPSK PPS edge, the
+    sub-second residual of the counter-arithmetic edge UTC against the
+    nearest integer second (``local_minus_source_ns`` — see
+    core_recorder_v2).  True PPS edges arrive on the exact GPS
+    integer-second grid, so if the ADC clock runs fast by r ppm the
+    residual walks by r·1000 ns per second.  Differentiating the walk
+    (windowed regression over (edge_true_second, residual)) therefore
+    measures the ADC clock rate INDEPENDENTLY of the judge's bench
+    offset slope — pure counter-vs-GPS-PPS arithmetic, no host clock.
+
+    Fed from the recorder's edge path (``add_edge``, cheap, called at
+    ~1 Hz); read by the judge via ``current()`` (thread-safe).  The
+    recorder calls ``reset()`` on every native-anchor (re)capture —
+    the residual reference frame moves with the anchor.
+
+    Fracture honesty (spec §5 applied to the rate window):
+      * residual wrap at the ±0.5 s boundary is unwrapped (a rounding
+        artifact, not an event);
+      * a per-edge jump beyond STEP_RESET_NS is an anchor/calibrator
+        event — the window restarts fresh, no smoothing across it;
+      * an edge gap beyond MAX_GAP_S (stream stall / re-lock) likewise
+        restarts the window.
+    """
+
+    HALF_SECOND_NS = 500_000_000
+    # Per-edge walk at 1 ppm is 1000 ns; GPSDO-class clocks walk <<
+    # that.  A 50 µs jump between consecutive edges is an event, not
+    # drift.
+    STEP_RESET_NS = 50_000.0
+    MAX_GAP_S = 30.0
+
+    def __init__(
+        self,
+        min_span_s: float = 120.0,
+        min_points: int = 20,
+        window_len: int = 900,          # ~15 min at 1 Hz
+    ):
+        self.min_span_s = float(min_span_s)
+        self.min_points = int(min_points)
+        self._lock = threading.Lock()
+        self._window: Deque[Tuple[float, float]] = deque(maxlen=int(window_len))
+        self._last_raw_ns: Optional[float] = None
+        self._last_unwrapped_ns: Optional[float] = None
+        self._last_t: Optional[float] = None
+        self._wrap_offset_ns: float = 0.0
+        self.resets: int = 0
+
+    def reset(self, cause: str = "") -> None:
+        """Restart the window (anchor recapture / explicit fracture)."""
+        with self._lock:
+            self._reset_locked()
+        if cause:
+            logger.info(f"T6ResidualRateEstimator reset ({cause})")
+
+    def _reset_locked(self) -> None:
+        self._window.clear()
+        self._last_raw_ns = None
+        self._last_unwrapped_ns = None
+        self._last_t = None
+        self._wrap_offset_ns = 0.0
+        self.resets += 1
+
+    def add_edge(self, edge_true_utc_s: float, residual_ns: float) -> None:
+        """Record one accepted PPS edge.
+
+        ``edge_true_utc_s``  the edge's integer true second (the
+                             rounded reference the residual was taken
+                             against) — the exact GPS-grid x-axis.
+        ``residual_ns``      sub-second residual (counter-arithmetic
+                             UTC − nearest integer second), ±0.5e9.
+        """
+        t = float(edge_true_utc_s)
+        raw = float(residual_ns)
+        with self._lock:
+            if self._last_t is not None and t - self._last_t > self.MAX_GAP_S:
+                self._reset_locked()
+            if self._last_t is not None and t <= self._last_t:
+                return  # duplicate / out-of-order edge — ignore
+            # Unwrap the ±0.5 s rounding boundary.
+            if self._last_raw_ns is not None:
+                d = raw - self._last_raw_ns
+                if d > self.HALF_SECOND_NS:
+                    self._wrap_offset_ns -= BILLION
+                elif d < -self.HALF_SECOND_NS:
+                    self._wrap_offset_ns += BILLION
+            unwrapped = raw + self._wrap_offset_ns
+            if (self._last_unwrapped_ns is not None
+                    and abs(unwrapped - self._last_unwrapped_ns)
+                    > self.STEP_RESET_NS):
+                # Anchor/calibrator event — fresh window (spec §5).
+                self._reset_locked()
+                unwrapped = raw  # wrap offset cleared with the window
+            self._window.append((t, unwrapped))
+            self._last_raw_ns = raw
+            self._last_unwrapped_ns = unwrapped
+            self._last_t = t
+
+    def current(self) -> Optional[RateEstimate]:
+        """Current rate estimate, or None below the minimum span."""
+        with self._lock:
+            pts = list(self._window)
+        if len(pts) < self.min_points:
+            return None
+        t = np.array([p[0] for p in pts])
+        y = np.array([p[1] for p in pts])
+        span = float(t[-1] - t[0])
+        if span < self.min_span_s:
+            return None
+        fit = regress_rate_ppm(t, y)
+        if fit is None:
+            return None
+        return RateEstimate(
+            ppm=fit[0], sigma_ppm=fit[1],
+            n=len(pts), span_s=span, source="t6-residual",
+        )
+
+
+# ────────────────────────────────────────────────────────────────────
 # Bench readings
 # ────────────────────────────────────────────────────────────────────
 
@@ -438,6 +644,12 @@ class OffsetVerdict:
     judge_age_s: float     # age of the newest bench reading
     segment_id: int        # spec §5 — never interpolate across segments
     in_violation: bool     # |offset| > k*sigma sustained (spec §9 step 1)
+    # P3 (spec §10): measured rate disagreement — RECORDED, never used
+    # to correct labels or samples (spec §11, audit G7).  None until
+    # the estimator has the minimum span in the current segment.
+    rate_ppm: Optional[float] = None
+    rate_sigma_ppm: Optional[float] = None
+    rate_source: Optional[str] = None   # "offset-slope"|"t6-residual"|"combined"
 
 
 @dataclass
@@ -460,6 +672,12 @@ class _SourceState:
     in_violation: bool = False
     anchor_fault_mono: Optional[float] = None   # last writer-side flag
     last_critical_log: float = 0.0              # monotonic, rate limiting
+    # P3 rate state — refreshed once per tick, cleared on fracture.
+    slope_est: Optional[RateEstimate] = None    # this segment's offset slope
+    rate_est: Optional[RateEstimate] = None     # combined (slope ⊕ t6)
+    rate_alarm_since: Optional[float] = None    # monotonic
+    rate_alarm: bool = False
+    last_rate_critical_log: float = 0.0         # monotonic, rate limiting
 
     def radiod_utc_now(self, mono_now: float) -> float:
         """radiod's implied UTC 'now', advanced on the steel ruler.
@@ -524,6 +742,16 @@ class OffsetJudge:
             cfg.get("holdover_sigma_growth_ns_per_s", 10_000.0)
         )
         self.critical_log_interval_s = float(cfg.get("critical_log_interval_s", 60.0))
+        # P3 rate loop (spec §10): minimum regression span before a
+        # rate is reported at all, and the sustained-|rate| alarm
+        # threshold.  A GPSDO-disciplined ADC should sit << 0.1 ppm;
+        # 1.0 ppm sustained is a genuine clock fault worth a CRITICAL.
+        # Measurement + alarm ONLY — no correction, no resampling,
+        # no escalation (P4 owns escalation; spec §11 / audit G7).
+        self.rate_min_span_s = float(cfg.get("rate_min_span_s", 120.0))
+        self.rate_min_points = int(cfg.get("rate_min_points", 6))
+        self.rate_alarm_ppm = float(cfg.get("rate_alarm_ppm", 1.0))
+        self.rate_sustain_window_s = float(cfg.get("rate_sustain_window_s", 60.0))
         # Writer-side anchor-fault flags auto-expire after this long
         # without re-assertion.
         self.anchor_fault_hold_s = float(cfg.get("anchor_fault_hold_s", 120.0))
@@ -560,6 +788,28 @@ class OffsetJudge:
         self._candidate_tier: Optional[str] = None      # upgrade hysteresis
         self._candidate_count: int = 0
         self._publish_error_logged = False
+
+        # P3: second, independent rate observable — provider returning
+        # the T6 residual-walk RateEstimate (wired by the recorder via
+        # set_t6_rate_provider; None until/unless T6 is active).
+        self._t6_rate_provider: Optional[Callable[[], Optional[RateEstimate]]] = None
+        self._t6_rate: Optional[RateEstimate] = None    # cached each tick
+
+        # P3: GPSDO discipline honesty — measurement metadata ONLY
+        # (never gates recording or verdicts).  Reads gpsdo-monitor's
+        # /run/gpsdo/*.json when present; "absent" otherwise.
+        self._gpsdo_probe = None
+        self._gpsdo_discipline: str = "absent"
+        self._gpsdo_detail: List[Dict] = []
+        if bool(cfg.get("gpsdo_enabled", True)):
+            try:
+                from .gpsdo_probe import GpsdoProbe
+                self._gpsdo_probe = GpsdoProbe(
+                    run_dir=Path(cfg.get("gpsdo_run_dir", "/run/gpsdo")),
+                    now_fn=time_fn,
+                )
+            except Exception as e:  # noqa: BLE001 — metadata only, never fatal
+                logger.debug(f"OffsetJudge: GpsdoProbe unavailable: {e}")
 
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
@@ -604,6 +854,17 @@ class OffsetJudge:
         registration order is irrelevant."""
         with self._lock:
             self.benches.append(bench)
+
+    def set_t6_rate_provider(
+        self, provider: Callable[[], Optional[RateEstimate]]
+    ) -> None:
+        """Wire the T6 residual-walk rate observable (P3).
+
+        ``provider`` is polled once per tick (slow path); it must be
+        thread-safe and return the current RateEstimate or None.
+        """
+        with self._lock:
+            self._t6_rate_provider = provider
 
     # ── registration (spec §7: per-source, never global) ─────────────
 
@@ -737,6 +998,7 @@ class OffsetJudge:
                 self.holdover_sigma_growth_ns_per_s
             tier = "T1"
         anchor_fault = self._anchor_fault_active_locked(st, mono_now)
+        rate = st.rate_est
         return OffsetVerdict(
             offset_ns=float(st.ema_offset_ns),
             sigma_ns=float(sigma_ns),
@@ -744,6 +1006,9 @@ class OffsetJudge:
             judge_age_s=float(age),
             segment_id=st.segment_id,
             in_violation=bool(st.in_violation or anchor_fault),
+            rate_ppm=(float(rate.ppm) if rate is not None else None),
+            rate_sigma_ppm=(float(rate.sigma_ppm) if rate is not None else None),
+            rate_source=(rate.source if rate is not None else None),
         )
 
     def _anchor_fault_active_locked(self, st: _SourceState, mono_now: float) -> bool:
@@ -768,19 +1033,45 @@ class OffsetJudge:
             if r is not None:
                 readings.append(r)
 
+        # Slow-path pre-polls (outside the lock): the T6 residual rate
+        # observable and the GPSDO discipline metadata.
+        t6_rate = None
+        provider = self._t6_rate_provider
+        if provider is not None:
+            try:
+                t6_rate = provider()
+            except Exception as e:  # noqa: BLE001 — observable trouble ≠ judge trouble
+                logger.debug(f"OffsetJudge t6 rate provider failed: {e}")
+        gpsdo_state, gpsdo_detail = self._poll_gpsdo()
+
         mono_now = self._mono()
         with self._lock:
+            self._t6_rate = t6_rate
+            self._gpsdo_discipline = gpsdo_state
+            self._gpsdo_detail = gpsdo_detail
             best = self._select_bench_locked(readings)
             if best is not None:
                 self._best = best
                 for st in self._sources.values():
                     self._measure_source_locked(st, best, mono_now)
-            # Violation evaluation runs every tick even in holdover so
-            # sustained windows keep counting / clearing.
+            # Violation + rate evaluation run every tick even in
+            # holdover so sustained windows keep counting / clearing.
             for st in self._sources.values():
+                self._refresh_rate_locked(st)
                 self._evaluate_violation_locked(st, mono_now)
+                self._evaluate_rate_alarm_locked(st, mono_now)
             snapshot = self._snapshot_locked(mono_now)
         self._publish(snapshot)
+
+    def _poll_gpsdo(self) -> Tuple[str, List[Dict]]:
+        """GPSDO discipline state — metadata only, never gating."""
+        if self._gpsdo_probe is None:
+            return "absent", []
+        try:
+            return self._gpsdo_probe.discipline()
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"OffsetJudge gpsdo discipline poll failed: {e}")
+            return "absent", []
 
     def _select_bench_locked(
         self, readings: List[BenchReading]
@@ -861,7 +1152,10 @@ class OffsetJudge:
             else:
                 st.ema_offset_ns += self.ema_alpha * (med_ns - st.ema_offset_ns)
 
-        st.history.append((mono_now, st.ema_offset_ns))
+        # Rate history takes the MEDIAN (outlier-rejected but unlagged)
+        # rather than the EMA: the EMA's convergence transient would
+        # bias a windowed slope; a constant median lag cannot.
+        st.history.append((mono_now, med_ns))
 
     def _evaluate_violation_locked(self, st: _SourceState, mono_now: float) -> None:
         """k·sigma sustained-violation logic + CRITICAL logging (spec §9.1)."""
@@ -891,6 +1185,79 @@ class OffsetJudge:
                 f"radiod's advertised epoch is contradicted."
             )
 
+    def _refresh_rate_locked(self, st: _SourceState) -> None:
+        """Recompute the per-source rate estimates (once per tick).
+
+        Two independent observables, cross-checked by combination:
+        the segment's offset-series slope (radiod-clock-vs-bench rate
+        disagreement) and, when the recorder supplies it, the T6 PPS
+        residual-walk rate.  MEASURED AND RECORDED ONLY — the result
+        never feeds back into labels or samples (spec §11, audit G7).
+        """
+        st.slope_est = self._offset_slope_estimate_locked(st)
+        st.rate_est = combine_rate_estimates(st.slope_est, self._t6_rate)
+
+    def _offset_slope_estimate_locked(
+        self, st: _SourceState
+    ) -> Optional[RateEstimate]:
+        """Windowed regression over this segment's offset history.
+
+        None until the segment has rate_min_points measurements over
+        at least rate_min_span_s (a fracture clears the history, so
+        the estimator restarts with the segment — spec §5)."""
+        if len(st.history) < max(self.rate_min_points, 3):
+            return None
+        t = np.array([h[0] for h in st.history])
+        off = np.array([h[1] for h in st.history])
+        span = float(t[-1] - t[0])
+        if span < self.rate_min_span_s:
+            return None
+        fit = regress_rate_ppm(t, off)
+        if fit is None:
+            return None
+        return RateEstimate(
+            ppm=fit[0], sigma_ppm=fit[1],
+            n=len(st.history), span_s=span, source="offset-slope",
+        )
+
+    def _evaluate_rate_alarm_locked(self, st: _SourceState, mono_now: float) -> None:
+        """Sustained-|rate| CRITICAL (P3 §10) — alarm only, no action.
+
+        A GPSDO-disciplined ADC should sit far below 0.1 ppm; a
+        sustained excess of rate_alarm_ppm names the channel and BOTH
+        independent estimates.  Escalation beyond logging is P4's."""
+        rate = st.rate_est
+        if rate is None or abs(rate.ppm) <= self.rate_alarm_ppm:
+            st.rate_alarm_since = None
+            st.rate_alarm = False
+            return
+        if st.rate_alarm_since is None:
+            st.rate_alarm_since = mono_now
+        if (mono_now - st.rate_alarm_since) < self.rate_sustain_window_s:
+            return
+        st.rate_alarm = True
+        if (mono_now - st.last_rate_critical_log
+                < self.critical_log_interval_s):
+            return
+        st.last_rate_critical_log = mono_now
+
+        def _fmt(est: Optional[RateEstimate]) -> str:
+            if est is None:
+                return "unavailable"
+            return (f"{est.ppm:+.3f}±{est.sigma_ppm:.3f} ppm "
+                    f"(n={est.n}, span={est.span_s:.0f}s)")
+
+        logger.critical(
+            f"OFFSET JUDGE RATE VIOLATION: {self._key_str(st.source_key)} "
+            f"rate={rate.ppm:+.3f} ppm ({rate.source}) exceeds "
+            f"±{self.rate_alarm_ppm:.2f} ppm sustained "
+            f">{self.rate_sustain_window_s:.0f}s — "
+            f"offset-slope: {_fmt(st.slope_est)}; "
+            f"t6-residual: {_fmt(self._t6_rate)}. "
+            f"Rate is RECORDED, never corrected into samples "
+            f"(spec §11); segment {st.segment_id}."
+        )
+
     def _open_segment_locked(
         self,
         st: _SourceState,
@@ -905,6 +1272,12 @@ class OffsetJudge:
         st.history.clear()
         st.violation_since = None
         st.in_violation = False
+        # Rate state restarts with the segment (spec §5 — never
+        # regress across a fracture).
+        st.slope_est = None
+        st.rate_est = None
+        st.rate_alarm_since = None
+        st.rate_alarm = False
         st.last_step = {
             "utc": self._time(),
             "cause": cause,
@@ -923,18 +1296,6 @@ class OffsetJudge:
     def _key_str(source_key: SourceKey) -> str:
         stream, ssrc = source_key
         return f"{stream}/{int(ssrc):08x}"
-
-    def _slope_ppm_locked(self, st: _SourceState) -> Optional[float]:
-        """d(offset)/dt within the current segment, in ppm (1 ppm = 1000 ns/s)."""
-        if len(st.history) < 4:
-            return None
-        t = np.array([h[0] for h in st.history])
-        off = np.array([h[1] for h in st.history])
-        span = t[-1] - t[0]
-        if span < 3 * self.tick_seconds:
-            return None
-        slope_ns_per_s = float(np.polyfit(t - t[0], off, 1)[0])
-        return slope_ns_per_s / 1000.0
 
     def _snapshot_locked(self, mono_now: float) -> Dict:
         best = self._best
@@ -958,6 +1319,7 @@ class OffsetJudge:
             v = None
             if st.ema_offset_ns is not None and best is not None:
                 v = self._verdict_locked(st, mono_now)
+            slope, rate = st.slope_est, st.rate_est
             sources[self._key_str(key)] = {
                 "offset_ns": round(v.offset_ns, 1) if v else None,
                 "sigma_ns": round(v.sigma_ns, 1) if v else None,
@@ -965,7 +1327,16 @@ class OffsetJudge:
                 "judge_age_s": round(v.judge_age_s, 3) if v else None,
                 "segment_id": st.segment_id,
                 "segment_cause": st.segment_cause,
-                "d_offset_dt_ppm": self._slope_ppm_locked(st),
+                "d_offset_dt_ppm": (
+                    round(slope.ppm, 4) if slope is not None else None
+                ),
+                # P3 rate record (spec §10) — measured, never applied.
+                "rate_ppm": round(rate.ppm, 4) if rate is not None else None,
+                "rate_sigma_ppm": (
+                    round(rate.sigma_ppm, 4) if rate is not None else None
+                ),
+                "rate_source": rate.source if rate is not None else None,
+                "rate_alarm": bool(st.rate_alarm),
                 "last_step": st.last_step,
                 "in_violation": bool(v.in_violation) if v else False,
                 "anchor_fault": self._anchor_fault_active_locked(st, mono_now),
@@ -973,6 +1344,7 @@ class OffsetJudge:
                 "radiod_rtp_timesnap": st.rtp_timesnap,
                 "sample_rate": st.sample_rate,
             }
+        t6r = self._t6_rate
         return {
             "schema": "offset-judge-v1",
             "utc_published": datetime.fromtimestamp(
@@ -980,6 +1352,22 @@ class OffsetJudge:
             ).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
             "k": self.k,
             "judge": judge_block,
+            # P3: GPSDO discipline honesty — measurement metadata only
+            # (locked | holdover | unlocked | absent); never gates
+            # recording or verdicts.
+            "gpsdo_discipline": self._gpsdo_discipline,
+            "gpsdo_detail": self._gpsdo_detail,
+            # P3: the T6 residual-walk rate observable, host-global
+            # (one ADC clock behind every source on this radiod).
+            "t6_residual_rate": (
+                {
+                    "ppm": round(t6r.ppm, 4),
+                    "sigma_ppm": round(t6r.sigma_ppm, 4),
+                    "n": t6r.n,
+                    "span_s": round(t6r.span_s, 1),
+                }
+                if t6r is not None else None
+            ),
             "sources": sources,
         }
 
