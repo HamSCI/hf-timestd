@@ -94,6 +94,79 @@ class GpsdoProbe:
             out.append(self._read_one(path))
         return out
 
+    # Ranking for the host-level discipline summary (best state wins).
+    _DISCIPLINE_RANK = {"locked": 0, "holdover": 1, "unlocked": 2, "absent": 3}
+
+    def discipline(self) -> tuple:
+        """GPSDO discipline state from the health block — P3 honesty.
+
+        The A-level hint is a boolean assertion; the Offset Judge's
+        provenance record wants the *measured* discipline state
+        (audit: "discipline is asserted from a boolean").  Derived per
+        fresh device from schema-v1 ``health``:
+
+          - ``locked``    pll_locked and GPS attested (gps_locked, or a
+                          2D/3D fix when the model doesn't report the
+                          HID lock bit)
+          - ``holdover``  pll_locked but GPS lost — GPSDO coasting on
+                          its oscillator
+          - ``unlocked``  pll_locked is False — no discipline claim at
+                          all
+          - ``absent``    no fresh, parseable device file
+
+        Returns ``(host_state, per_device_detail)`` where host_state is
+        the best state across devices.  Measurement metadata ONLY —
+        consumers must never gate recording on it (spec §11 doctrine:
+        degrade the pedigree, stamp it, keep the data).
+        """
+        detail: List[dict] = []
+        best = "absent"
+        for path in self._enumerate_files():
+            entry = self._discipline_one(path)
+            detail.append(entry)
+            if (self._DISCIPLINE_RANK.get(entry["state"], 3)
+                    < self._DISCIPLINE_RANK[best]):
+                best = entry["state"]
+        return best, detail
+
+    def _discipline_one(self, path: Path) -> dict:
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            return {"path": str(path), "serial": None, "state": "absent",
+                    "reason": "unreadable"}
+        if not isinstance(data, dict) or data.get("schema") != "v1":
+            return {"path": str(path), "serial": None, "state": "absent",
+                    "reason": "bad schema"}
+        device = data.get("device") if isinstance(data.get("device"), dict) else {}
+        serial = device.get("serial")
+        age_sec = self._age_seconds(data.get("written_utc"))
+        max_age = self._max_age_sec(data.get("probe_interval_sec"))
+        health = data.get("health") if isinstance(data.get("health"), dict) else {}
+        pll = health.get("pll_locked")
+        gps_locked = health.get("gps_locked")
+        gps_fix = health.get("gps_fix")
+
+        if age_sec is None or age_sec > max_age:
+            state, reason = "absent", f"stale ({age_sec and round(age_sec, 1)}s)"
+        elif pll is True:
+            gps_ok = (gps_locked is True) or (
+                gps_locked is None and gps_fix in ("2D", "3D"))
+            state = "locked" if gps_ok else "holdover"
+            reason = (f"pll_locked, gps_locked={gps_locked}, "
+                      f"gps_fix={gps_fix}")
+        elif pll is False:
+            state, reason = "unlocked", "pll_locked=false"
+        else:
+            state, reason = "absent", "no pll_locked field"
+        return {
+            "path": str(path), "serial": serial, "state": state,
+            "reason": reason,
+            "age_sec": (round(age_sec, 1) if age_sec is not None else None),
+            "pll_locked": pll, "gps_locked": gps_locked, "gps_fix": gps_fix,
+            "a_level_hint": data.get("a_level_hint"),
+        }
+
     # --- internal -------------------------------------------------------
 
     def _enumerate_files(self) -> List[Path]:
