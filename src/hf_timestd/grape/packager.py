@@ -180,11 +180,14 @@ class DailyDRFPackager:
         # "Failed to write data" — and the day becomes a permanent hole
         # (seen on AC0G-B4, 20260803). A repackage is always a full
         # rewrite: clear the day's channel dir before writing.
+        # NOTE: _build_output_structure returns the ch0 dir ITSELF — clear
+        # its contents (the first fix globbed 'ch*' INSIDE ch0 and matched
+        # nothing; 20260731 still collided).
         import shutil
-        for stale in output_dir.glob('ch*'):
-            if stale.is_dir():
-                logger.info(f"  clearing stale package output: {stale}")
-                shutil.rmtree(stale)
+        if any(output_dir.iterdir()):
+            logger.info(f"  clearing stale package output under {output_dir}")
+            shutil.rmtree(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
 
         # Write DRF
         self._write_drf(
