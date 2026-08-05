@@ -355,6 +355,101 @@ class TestCrossBenchGate:
         assert snap["cross_bench_conflict"] is None
 
 
+class TestPrecisionNonRegression:
+    """Sigma non-regression clause: a voluntary upgrade must not
+    materially regress the judge's precision (the AC0G-B4 deploy
+    shape: T4 chrony at ~200 µs vs the stream-arrival T5 pairing's
+    25 ms floor — tier-rank adoption would widen the k*sigma
+    violation bound ~100x and stop flagging ms-scale anomalies)."""
+
+    def _t4_incumbent_wide_t5(self, clock, tmp_path, t5_sigma=25e6, **cfg):
+        t4 = FakeBench(clock, tier="T4", sigma_ns=2e5)     # ~200 us chrony
+        t5 = FakeBench(clock, tier="T5", sigma_ns=t5_sigma,
+                       available=False)                    # agreeing, wide
+        judge = make_judge(clock, tmp_path, [t4, t5], **cfg)
+        register_healthy(judge, clock)
+        judge.tick()
+        assert tier_of(judge) == "T4"
+        t5.available = True
+        return judge, t4, t5
+
+    def test_wide_sigma_candidate_refused_over_tight_incumbent(self, tmp_path):
+        clock = FakeClock()
+        judge, t4, t5 = self._t4_incumbent_wide_t5(clock, tmp_path)
+        tick_n(judge, clock, 6)            # >> upgrade_polls
+        assert tier_of(judge) == "T4"      # precision hold, not adopted
+        snap = read_json(tmp_path / "offset_judge.json")
+        h = snap["precision_hold"]
+        assert h["candidate"] == "T5" and h["incumbent"] == "T4"
+        assert h["sigma_candidate_ns"] == pytest.approx(25e6, rel=1e-3)
+        assert h["sigma_incumbent_ns"] == pytest.approx(2e5, rel=1e-3)
+        # A hold is not a cross-bench fault; the refused bench stays
+        # under shadow measurement.
+        assert snap["cross_bench_conflict"] is None
+        assert snap["shadow_residuals"]["T5"]["vs_tier"] == "T4"
+
+    def test_hold_warning_rate_limited_and_not_critical(self, tmp_path, caplog):
+        clock = FakeClock()
+        judge, t4, t5 = self._t4_incumbent_wide_t5(clock, tmp_path)
+        with caplog.at_level(logging.WARNING, logger=oj.__name__):
+            tick_n(judge, clock, 5)        # 50 s < 60 s log interval
+        holds = [r for r in caplog.records
+                 if "PRECISION HOLD" in r.message]
+        assert len(holds) == 1             # rate-limited to one
+        assert holds[0].levelno == logging.WARNING   # a hold, not a fault
+        assert "T5" in holds[0].message and "T4" in holds[0].message
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger=oj.__name__):
+            tick_n(judge, clock, 7)        # crosses the 60 s interval
+        assert [r for r in caplog.records if "PRECISION HOLD" in r.message]
+
+    def test_adopted_when_sigma_within_margin(self, tmp_path):
+        clock = FakeClock()
+        judge, t4, t5 = self._t4_incumbent_wide_t5(
+            clock, tmp_path, t5_sigma=3.5e5)   # 1.75x <= margin 2.0
+        tick_n(judge, clock, 2)
+        assert tier_of(judge) == "T4"      # hysteresis still applies
+        tick_n(judge, clock, 1)
+        assert tier_of(judge) == "T5"
+        snap = read_json(tmp_path / "offset_judge.json")
+        assert snap["precision_hold"] is None
+
+    def test_adopted_regardless_on_incumbent_loss(self, tmp_path):
+        clock = FakeClock()
+        judge, t4, t5 = self._t4_incumbent_wide_t5(clock, tmp_path)
+        tick_n(judge, clock, 4)
+        assert tier_of(judge) == "T4"      # held while T4 answers
+        t4.available = False               # incumbent dies
+        tick_n(judge, clock, 1)
+        assert tier_of(judge) == "T5"      # wide honest bench beats none
+        snap = read_json(tmp_path / "offset_judge.json")
+        assert snap["precision_hold"] is None   # hold released on adoption
+
+    def test_margin_configurable(self, tmp_path):
+        clock = FakeClock()
+        assert make_judge(clock, tmp_path, []).sigma_regression_margin == 2.0
+        judge, t4, t5 = self._t4_incumbent_wide_t5(
+            clock, tmp_path, sigma_regression_margin=1000.0)
+        assert judge.sigma_regression_margin == 1000.0
+        tick_n(judge, clock, 3)            # 25e6 <= 2e5 * 1000 -> admitted
+        assert tier_of(judge) == "T5"
+
+    def test_hold_released_when_candidate_sigma_tightens(self, tmp_path):
+        """A DCD-grounded pairing (or converged bench) tightening its
+        sigma lifts the hold; adoption then needs the full window."""
+        clock = FakeClock()
+        judge, t4, t5 = self._t4_incumbent_wide_t5(clock, tmp_path)
+        tick_n(judge, clock, 4)
+        assert tier_of(judge) == "T4"
+        t5.sigma_ns = 3e5                  # tightens to 1.5x incumbent
+        tick_n(judge, clock, 1)
+        assert tier_of(judge) == "T4"      # window restarts
+        snap = read_json(tmp_path / "offset_judge.json")
+        assert snap["precision_hold"] is None
+        tick_n(judge, clock, 2)
+        assert tier_of(judge) == "T5"
+
+
 # ────────────────────────────────────────────────────────────────────
 # T5 bench decoupling from the T6 stream (feature 2)
 # ────────────────────────────────────────────────────────────────────
