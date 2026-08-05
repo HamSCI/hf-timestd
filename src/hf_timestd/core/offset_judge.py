@@ -672,6 +672,9 @@ class _SourceState:
     in_violation: bool = False
     anchor_fault_mono: Optional[float] = None   # last writer-side flag
     last_critical_log: float = 0.0              # monotonic, rate limiting
+    # P4 escalation ladder state (spec §9 steps 2-3).
+    alert_active: bool = False                  # past alert_after_s
+    alert_classification: Optional[str] = None  # radiod-epoch-fault | rate-disagreement
     # P3 rate state — refreshed once per tick, cleared on fracture.
     slope_est: Optional[RateEstimate] = None    # this segment's offset slope
     rate_est: Optional[RateEstimate] = None     # combined (slope ⊕ t6)
@@ -722,6 +725,7 @@ class OffsetJudge:
         publish_path: Optional[os.PathLike] = None,
         time_fn: Callable[[], float] = time.time,
         mono_fn: Callable[[], float] = time.monotonic,
+        alert_runner: Optional[Callable[..., subprocess.CompletedProcess]] = None,
     ):
         cfg = dict(config or {})
         self.enabled = bool(cfg.get("enabled", True))
@@ -742,6 +746,18 @@ class OffsetJudge:
             cfg.get("holdover_sigma_growth_ns_per_s", 10_000.0)
         )
         self.critical_log_interval_s = float(cfg.get("critical_log_interval_s", 60.0))
+        # P4 escalation ladder (spec §9 step 2): a violation (k·sigma
+        # offset OR sustained rate alarm) that persists this long emits
+        # an alert through the SAME channel the freshness monitor uses
+        # (scripts/check-freshness-alert.sh): journald CRITICAL +
+        # `logger -t hf-timestd-alert -p user.crit` + optional mail via
+        # $TIMESTD_ALERT_EMAIL, gated by a cooldown state file.
+        self.alert_after_s = float(cfg.get("alert_after_s", 900.0))
+        self.alert_cooldown_s = float(cfg.get("alert_cooldown_s", 3600.0))
+        self.alert_state_path = Path(cfg.get(
+            "alert_state_path",
+            "/var/lib/timestd/state/offset_judge_alert_sent",
+        ))
         # P3 rate loop (spec §10): minimum regression span before a
         # rate is reported at all, and the sustained-|rate| alarm
         # threshold.  A GPSDO-disciplined ADC should sit << 0.1 ppm;
@@ -788,6 +804,13 @@ class OffsetJudge:
         self._candidate_tier: Optional[str] = None      # upgrade hysteresis
         self._candidate_count: int = 0
         self._publish_error_logged = False
+
+        # P4 ladder step 2 (alert) shared state.  The cooldown is
+        # channel-global (one alert per cooldown across sources),
+        # mirroring check-freshness-alert.sh's single state file.
+        self._alert_run = alert_runner or subprocess.run
+        self._last_alert_mono: Optional[float] = None
+        self._alert_emitted: bool = False               # for clear bookkeeping
 
         # P3: second, independent rate observable — provider returning
         # the T6 residual-walk RateEstimate (wired by the recorder via
@@ -1060,8 +1083,12 @@ class OffsetJudge:
                 self._refresh_rate_locked(st)
                 self._evaluate_violation_locked(st, mono_now)
                 self._evaluate_rate_alarm_locked(st, mono_now)
+            # P4 escalation ladder (spec §9 steps 2-3): decisions under
+            # the lock, I/O (alert channel, request artifact) outside.
+            actions = self._escalation_actions_locked(mono_now)
             snapshot = self._snapshot_locked(mono_now)
         self._publish(snapshot)
+        self._run_escalation_actions(actions)
 
     def _poll_gpsdo(self) -> Tuple[str, List[Dict]]:
         """GPSDO discipline state — metadata only, never gating."""
@@ -1258,6 +1285,213 @@ class OffsetJudge:
             f"(spec §11); segment {st.segment_id}."
         )
 
+    # ── P4 escalation ladder (spec §9 steps 2-3) ─────────────────────
+
+    def _escalation_sustained_locked(
+        self, st: _SourceState, mono_now: float
+    ) -> Optional[float]:
+        """Seconds this source's violation condition has been sustained.
+
+        The ladder condition is `in_violation OR rate_alarm`; duration
+        is measured from the underlying condition's onset (the same
+        clock §9's 60 s / 15 min / 60 min rungs count on), so the 60 s
+        sustain that armed the flag is included.  None when clear.
+        """
+        sust: Optional[float] = None
+        if st.in_violation and st.violation_since is not None:
+            sust = mono_now - st.violation_since
+        if st.rate_alarm and st.rate_alarm_since is not None:
+            r = mono_now - st.rate_alarm_since
+            sust = r if sust is None else max(sust, r)
+        return sust
+
+    def _classification_locked(self, st: _SourceState) -> str:
+        """Spec §9 step 2: name the likely cause.
+
+        A significant measured rate (the offset is *sloping*) points at
+        clock-rate disagreement; otherwise a constant lag points at a
+        wrong radiod epoch (anchor fault — the B4 incident shape).
+        """
+        rate = st.rate_est
+        if st.rate_alarm or (
+            rate is not None and abs(rate.ppm) > self.rate_alarm_ppm
+        ):
+            return "rate-disagreement"
+        return "radiod-epoch-fault"
+
+    def _escalation_actions_locked(self, mono_now: float) -> List[Tuple]:
+        """Evaluate ladder steps 2-3 for every source; emit actions.
+
+        Mutates per-source escalation state under the lock and returns
+        the I/O actions to run after release: ("alert", subject, body)
+        and ("clear_alert_state",).
+        """
+        actions: List[Tuple] = []
+        any_active = False
+        for st in self._sources.values():
+            sust = self._escalation_sustained_locked(st, mono_now)
+            if sust is None:
+                st.alert_active = False
+                st.alert_classification = None
+                continue
+            any_active = True
+            st.alert_classification = self._classification_locked(st)
+            if sust < self.alert_after_s:
+                st.alert_active = False
+                continue
+            # Step 2 rung reached.
+            st.alert_active = True
+            if self._alert_gate_ok_locked(mono_now):
+                self._last_alert_mono = mono_now
+                self._alert_emitted = True
+                subject, body = self._compose_alert_locked(st, sust, mono_now)
+                actions.append(("alert", subject, body))
+        if not any_active and self._alert_emitted:
+            # All sources clear: reset the channel (mirror of
+            # check-freshness-alert.sh clear_alert) so the next
+            # violation alerts without inherited cooldown.
+            self._alert_emitted = False
+            self._last_alert_mono = None
+            actions.append(("clear_alert_state",))
+        return actions
+
+    def _alert_gate_ok_locked(self, mono_now: float) -> bool:
+        """Cooldown gate: in-process timer + shared state-file mtime."""
+        if (self._last_alert_mono is not None
+                and (mono_now - self._last_alert_mono) < self.alert_cooldown_s):
+            return False
+        try:
+            mtime = self.alert_state_path.stat().st_mtime
+            if 0.0 <= (self._time() - mtime) < self.alert_cooldown_s:
+                return False
+        except OSError:
+            pass
+        return True
+
+    def _compose_alert_locked(
+        self, st: _SourceState, sust: float, mono_now: float
+    ) -> Tuple[str, str]:
+        """Actionable alert text: source, offset, bound, tier, rate,
+        duration, classification (spec §9 step 2)."""
+        key_s = self._key_str(st.source_key)
+        cls = st.alert_classification or "radiod-epoch-fault"
+        best = self._best
+        tier = best.tier if best is not None else "T0"
+        sigma_ns = max(best.sigma_ns, 1.0) if best is not None else float("nan")
+        bound_ms = self.k * sigma_ns / 1e6
+        off_ms = (st.ema_offset_ns or 0.0) / 1e6
+        rate = st.rate_est
+        rate_s = (
+            f"{rate.ppm:+.3f}±{rate.sigma_ppm:.3f} ppm ({rate.source}, "
+            f"n={rate.n}, span={rate.span_s:.0f}s)"
+            if rate is not None else "unavailable"
+        )
+        if cls == "rate-disagreement":
+            explain = (
+                "offset is SLOPING: radiod/ADC clock rate disagrees with the "
+                "judge bench.  Check GPSDO discipline and the ADC clock — a "
+                "radiod restart will NOT fix a rate fault."
+            )
+        else:
+            explain = (
+                "offset is a CONSTANT LAG: radiod's advertised epoch is wrong "
+                "(anchor/epoch fault, the B4-incident shape).  Labels remain "
+                "judge-corrected; restarting radiod clears the offset "
+                "(cosmetic hygiene, spec §1)."
+            )
+        subject = (
+            f"offset-judge violation sustained {sust/60.0:.0f} min on {key_s}"
+        )
+        body = (
+            f"Source:         {key_s} (radiod {self._radiod_id(st.source_key[0])})\n"
+            f"Classification: {cls} — {explain}\n"
+            f"Offset:         {off_ms:+.3f} ms; bound k*sigma = "
+            f"{self.k:.0f} x {sigma_ns/1e6:.4f} ms = {bound_ms:.4f} ms "
+            f"(tier {tier})\n"
+            f"Rate:           {rate_s}\n"
+            f"Sustained:      {sust:.0f} s (segment {st.segment_id}, "
+            f"in_violation={st.in_violation}, rate_alarm={st.rate_alarm})\n"
+            f"Data labels remain corrected by the judge (spec §1); this alert "
+            f"is operator awareness, spec §9 step 2.\n"
+            f"Check: journalctl -u timestd-core-recorder | grep 'OFFSET JUDGE'; "
+            f"cat /run/hf-timestd/offset_judge.json"
+        )
+        return subject, body
+
+    def _run_escalation_actions(self, actions: List[Tuple]) -> None:
+        """Execute ladder I/O actions outside the lock (never fatal)."""
+        for act in actions:
+            kind = act[0]
+            try:
+                if kind == "alert":
+                    self._emit_alert(act[1], act[2])
+                elif kind == "clear_alert_state":
+                    self._clear_alert_state()
+            except Exception as e:  # noqa: BLE001 — escalation trouble ≠ judge trouble
+                logger.error(
+                    f"OffsetJudge escalation action {kind} failed: {e}"
+                )
+
+    def _emit_alert(self, subject: str, body: str) -> None:
+        """Send one alert through the freshness-alert channel.
+
+        Mirrors scripts/check-freshness-alert.sh send_alert():
+        journald CRITICAL (this process logs to journald), the
+        system journal via `logger -t hf-timestd-alert -p user.crit`,
+        optional mail to $TIMESTD_ALERT_EMAIL, and the cooldown state
+        file touched on emit.
+        """
+        logger.critical(f"OFFSET JUDGE ALERT: {subject}\n{body}")
+        try:
+            self.alert_state_path.parent.mkdir(parents=True, exist_ok=True)
+            self.alert_state_path.touch()
+        except OSError as e:
+            logger.warning(
+                f"OffsetJudge: cannot touch alert state file "
+                f"{self.alert_state_path}: {e}"
+            )
+        try:
+            self._alert_run(
+                ["logger", "-t", "hf-timestd-alert", "-p", "user.crit",
+                 f"{subject}: {body}"],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"OffsetJudge: logger(1) emit failed: {e}")
+        email = (os.environ.get("TIMESTD_ALERT_EMAIL") or "").strip()
+        if email:
+            try:
+                self._alert_run(
+                    ["mail", "-s", f"[hf-timestd] {subject}", email],
+                    input=body, capture_output=True, text=True,
+                    timeout=30, check=False,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    f"OffsetJudge: mail alert to {email} failed: {e}"
+                )
+
+    def _clear_alert_state(self) -> None:
+        try:
+            self.alert_state_path.unlink()
+            logger.info(
+                "OffsetJudge: alert cleared — violation condition resolved "
+                "on all sources"
+            )
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            logger.debug(f"OffsetJudge: alert state clear failed: {e}")
+
+    @staticmethod
+    def _radiod_id(stream: str) -> str:
+        """radiod identity from the source key's status-stream name
+        (strip any :port and a trailing `.local`)."""
+        s = str(stream or "").strip().split(":")[0]
+        if s.endswith(".local"):
+            s = s[: -len(".local")]
+        return s
+
     def _open_segment_locked(
         self,
         st: _SourceState,
@@ -1320,6 +1554,7 @@ class OffsetJudge:
             if st.ema_offset_ns is not None and best is not None:
                 v = self._verdict_locked(st, mono_now)
             slope, rate = st.slope_est, st.rate_est
+            sust = self._escalation_sustained_locked(st, mono_now)
             sources[self._key_str(key)] = {
                 "offset_ns": round(v.offset_ns, 1) if v else None,
                 "sigma_ns": round(v.sigma_ns, 1) if v else None,
@@ -1340,6 +1575,13 @@ class OffsetJudge:
                 "last_step": st.last_step,
                 "in_violation": bool(v.in_violation) if v else False,
                 "anchor_fault": self._anchor_fault_active_locked(st, mono_now),
+                # P4 ladder state (spec §9 steps 2-3) for smd status /
+                # dashboard rendering.
+                "escalation": {
+                    "sustained_s": round(sust, 1) if sust is not None else None,
+                    "alert_active": bool(st.alert_active),
+                    "classification": st.alert_classification,
+                },
                 "radiod_gps_time_ns": st.gps_time_ns,
                 "radiod_rtp_timesnap": st.rtp_timesnap,
                 "sample_rate": st.sample_rate,
