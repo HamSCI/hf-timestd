@@ -174,7 +174,18 @@ class DailyDRFPackager:
         # Build output directory structure
         date_obj = datetime.strptime(date_str, '%Y%m%d').replace(tzinfo=timezone.utc)
         output_dir = self._build_output_structure(date_obj)
-        
+
+        # Digital RF refuses to overwrite existing HDF5 files, so leftovers
+        # from an interrupted/failed run make every retry fail with
+        # "Failed to write data" — and the day becomes a permanent hole
+        # (seen on AC0G-B4, 20260803). A repackage is always a full
+        # rewrite: clear the day's channel dir before writing.
+        import shutil
+        for stale in output_dir.glob('ch*'):
+            if stale.is_dir():
+                logger.info(f"  clearing stale package output: {stale}")
+                shutil.rmtree(stale)
+
         # Write DRF
         self._write_drf(
             output_dir=output_dir,

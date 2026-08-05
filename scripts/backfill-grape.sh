@@ -61,7 +61,10 @@ done
 echo ""
 echo "=== Phase 2: Package + Upload ==="
 # Discover all dates with 9/9 decimated channels
-ALL_DATES=$(ls "$DATA_ROOT"/products/CHU_3330/decimated/*.bin 2>/dev/null | sed 's|.*/||;s|\.bin||' | sort)
+# Discover dates from ANY channel dir — CHU_3330 was hardcoded here and
+# no longer exists on 6-channel stations (CHU retired), which made this
+# loop silently empty.
+ALL_DATES=$(ls "$DATA_ROOT"/products/*/decimated/*.bin 2>/dev/null | sed 's|.*/||;s|\.bin||' | sort -u)
 
 for date in $ALL_DATES; do
     # Check if already uploaded
