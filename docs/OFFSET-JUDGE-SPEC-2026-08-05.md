@@ -238,6 +238,11 @@ lower tier within `k_x·sqrt(σ_c² + σ_l²)` (config
 advance window.  On failure the judge stays on the lower tier, publishes
 `cross_bench_conflict` + per-bench `shadow_residuals` in
 `offset_judge.json`, and logs a rate-limited CRITICAL; degrade-on-loss
-stays immediate and single-bench sites are unaffected.  This section is
+stays immediate and single-bench sites are unaffected.  A **precision
+non-regression clause** further refuses voluntary upgrades whose
+reported σ exceeds the incumbent's × `sigma_regression_margin`
+(default 2) — tier rank must not widen the k·σ violation bound
+(decision §13.1); refusals publish `precision_hold` with a rate-limited
+WARNING, and incumbent loss adopts regardless of σ.  This section is
 a pointer, not a rewrite — see the gate document for rule, rationale and
 implementation notes.
