@@ -758,6 +758,24 @@ class OffsetJudge:
             "alert_state_path",
             "/var/lib/timestd/state/offset_judge_alert_sent",
         ))
+        # P4 escalation ladder step 3 (spec §9.3, decision §13.3):
+        # OPT-IN radiod restart REQUEST.  hf-timestd NEVER restarts
+        # radiod itself — when enabled, a sustained violation publishes
+        # an atomic request artifact that the sigmond-side watchdog
+        # (the first and only component empowered to touch radiod) may
+        # act on.  DEFAULT FALSE — site policy.  Canonical key
+        # `radiod_restart_request`; the spec-§9 name `radiod_restart`
+        # is accepted as an alias.
+        self.restart_request_after_s = float(
+            cfg.get("restart_request_after_s", 3600.0))
+        self.radiod_restart_request = bool(cfg.get(
+            "radiod_restart_request", cfg.get("radiod_restart", False)))
+        self.restart_request_cooldown_s = float(
+            cfg.get("restart_request_cooldown_s", 21600.0))   # 6 h
+        self.restart_request_path = Path(cfg.get(
+            "restart_request_path",
+            "/run/hf-timestd/radiod-restart-request.json",
+        ))
         # P3 rate loop (spec §10): minimum regression span before a
         # rate is reported at all, and the sustained-|rate| alarm
         # threshold.  A GPSDO-disciplined ADC should sit << 0.1 ppm;
@@ -811,6 +829,14 @@ class OffsetJudge:
         self._alert_run = alert_runner or subprocess.run
         self._last_alert_mono: Optional[float] = None
         self._alert_emitted: bool = False               # for clear bookkeeping
+
+        # P4 ladder step 3 state.  One request artifact at a time; the
+        # owning source must clear before the artifact is withdrawn.
+        # cooldown_until (wall) survives withdrawal — re-request is
+        # rate-limited to one per restart_request_cooldown_s.
+        self._restart_request_owner: Optional[SourceKey] = None
+        self._restart_cooldown_until_wall: float = 0.0
+        self._request_adopted: bool = False             # lazy startup adoption
 
         # P3: second, independent rate observable — provider returning
         # the T6 residual-walk RateEstimate (wired by the recorder via
@@ -1327,8 +1353,12 @@ class OffsetJudge:
         and ("clear_alert_state",).
         """
         actions: List[Tuple] = []
+        if not self._request_adopted:
+            self._request_adopted = True
+            actions.extend(self._adopt_existing_request_locked())
+        wall = self._time()
         any_active = False
-        for st in self._sources.values():
+        for key, st in self._sources.items():
             sust = self._escalation_sustained_locked(st, mono_now)
             if sust is None:
                 st.alert_active = False
@@ -1346,6 +1376,27 @@ class OffsetJudge:
                 self._alert_emitted = True
                 subject, body = self._compose_alert_locked(st, sust, mono_now)
                 actions.append(("alert", subject, body))
+            # Step 3 rung: opt-in restart REQUEST (spec §9.3/§13.3).
+            if (self.radiod_restart_request
+                    and sust >= self.restart_request_after_s
+                    and self._restart_request_owner is None
+                    and wall >= self._restart_cooldown_until_wall):
+                self._restart_request_owner = key
+                self._restart_cooldown_until_wall = (
+                    wall + self.restart_request_cooldown_s)
+                actions.append((
+                    "write_request",
+                    self._restart_request_payload_locked(st, sust, wall),
+                ))
+        # Withdraw when the owning source has cleared (or vanished).
+        owner = self._restart_request_owner
+        if owner is not None:
+            owner_st = self._sources.get(owner)
+            if (owner_st is None
+                    or self._escalation_sustained_locked(owner_st, mono_now)
+                    is None):
+                self._restart_request_owner = None
+                actions.append(("withdraw_request", self._key_str(owner)))
         if not any_active and self._alert_emitted:
             # All sources clear: reset the channel (mirror of
             # check-freshness-alert.sh clear_alert) so the next
@@ -1418,6 +1469,80 @@ class OffsetJudge:
         )
         return subject, body
 
+    def _iso_utc(self, unix_s: float) -> str:
+        return datetime.fromtimestamp(unix_s, tz=timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+
+    def _restart_request_payload_locked(
+        self, st: _SourceState, sust: float, wall: float
+    ) -> Dict:
+        """radiod-restart-request-v1 artifact body (spec §9.3/§13.3)."""
+        best = self._best
+        return {
+            "schema": "radiod-restart-request-v1",
+            "requested_utc": self._iso_utc(wall),
+            "source_key": self._key_str(st.source_key),
+            "radiod_id": self._radiod_id(st.source_key[0]),
+            "offset_ms": round((st.ema_offset_ns or 0.0) / 1e6, 3),
+            "sustained_s": round(sust, 1),
+            "evidence": {
+                "tier": best.tier if best is not None else None,
+                "sigma_ns": (
+                    round(best.sigma_ns, 1) if best is not None else None
+                ),
+                "rate_ppm": (
+                    round(st.rate_est.ppm, 4)
+                    if st.rate_est is not None else None
+                ),
+                "classification": (
+                    st.alert_classification or self._classification_locked(st)
+                ),
+            },
+            "cooldown_until": self._iso_utc(self._restart_cooldown_until_wall),
+        }
+
+    def _adopt_existing_request_locked(self) -> List[Tuple]:
+        """First-tick adoption of a pre-existing request artifact.
+
+        A judge restart must neither double-request (cooldown is
+        re-adopted from the artifact) nor orphan a stale request
+        (an unparseable artifact, or one present while the feature is
+        disabled, is withdrawn).  Read-only file I/O; withdraw is
+        returned as an action.
+        """
+        try:
+            with self.restart_request_path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            return []
+        except (OSError, json.JSONDecodeError):
+            return [("withdraw_request", "unreadable artifact at startup")]
+        if data.get("schema") != "radiod-restart-request-v1":
+            return [("withdraw_request", "unknown schema at startup")]
+        if not self.radiod_restart_request:
+            return [("withdraw_request",
+                     "radiod_restart_request disabled by config")]
+        try:
+            stream, _, ssrc_hex = str(data["source_key"]).rpartition("/")
+            self._restart_request_owner = (stream, int(ssrc_hex, 16))
+        except (KeyError, ValueError):
+            return [("withdraw_request", "unparseable source_key at startup")]
+        try:
+            cd = datetime.strptime(
+                str(data.get("cooldown_until", "")), "%Y-%m-%dT%H:%M:%SZ"
+            ).replace(tzinfo=timezone.utc).timestamp()
+            self._restart_cooldown_until_wall = float(cd)
+        except ValueError:
+            self._restart_cooldown_until_wall = (
+                self._time() + self.restart_request_cooldown_s)
+        logger.info(
+            f"OffsetJudge: adopted existing restart request for "
+            f"{data.get('source_key')} (cooldown_until "
+            f"{data.get('cooldown_until')})"
+        )
+        return []
+
     def _run_escalation_actions(self, actions: List[Tuple]) -> None:
         """Execute ladder I/O actions outside the lock (never fatal)."""
         for act in actions:
@@ -1427,10 +1552,44 @@ class OffsetJudge:
                     self._emit_alert(act[1], act[2])
                 elif kind == "clear_alert_state":
                     self._clear_alert_state()
+                elif kind == "write_request":
+                    self._write_restart_request(act[1])
+                elif kind == "withdraw_request":
+                    self._withdraw_restart_request(act[1])
             except Exception as e:  # noqa: BLE001 — escalation trouble ≠ judge trouble
                 logger.error(
                     f"OffsetJudge escalation action {kind} failed: {e}"
                 )
+
+    def _write_restart_request(self, payload: Dict) -> None:
+        """Atomic tmp+rename publication of the restart request."""
+        self.restart_request_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.restart_request_path.with_suffix(".json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=1)
+            f.flush()
+            os.fsync(f.fileno())
+        tmp.replace(self.restart_request_path)
+        logger.critical(
+            f"RADIOD RESTART REQUESTED (opt-in, spec §9.3): "
+            f"{payload['source_key']} radiod_id={payload['radiod_id']} "
+            f"offset={payload['offset_ms']:+.3f}ms sustained "
+            f"{payload['sustained_s']:.0f}s "
+            f"classification={payload['evidence']['classification']} — "
+            f"request artifact {self.restart_request_path}; hf-timestd "
+            f"NEVER restarts radiod itself, the sigmond watchdog decides. "
+            f"Next request possible after {payload['cooldown_until']}."
+        )
+
+    def _withdraw_restart_request(self, why: str) -> None:
+        try:
+            self.restart_request_path.unlink()
+        except FileNotFoundError:
+            return
+        logger.critical(
+            f"RADIOD RESTART REQUEST WITHDRAWN ({why}) — removed "
+            f"{self.restart_request_path}"
+        )
 
     def _emit_alert(self, subject: str, body: str) -> None:
         """Send one alert through the freshness-alert channel.
@@ -1581,6 +1740,7 @@ class OffsetJudge:
                     "sustained_s": round(sust, 1) if sust is not None else None,
                     "alert_active": bool(st.alert_active),
                     "classification": st.alert_classification,
+                    "restart_requested": key == self._restart_request_owner,
                 },
                 "radiod_gps_time_ns": st.gps_time_ns,
                 "radiod_rtp_timesnap": st.rtp_timesnap,
@@ -1610,6 +1770,26 @@ class OffsetJudge:
                 }
                 if t6r is not None else None
             ),
+            # P4 ladder summary (spec §9): step-2/3 policy + the current
+            # restart-request artifact state (request only — hf-timestd
+            # never restarts radiod; the sigmond watchdog decides).
+            "escalation": {
+                "alert_after_s": self.alert_after_s,
+                "restart_request_enabled": self.radiod_restart_request,
+                "restart_request_after_s": self.restart_request_after_s,
+                "restart_request": {
+                    "active": self._restart_request_owner is not None,
+                    "source": (
+                        self._key_str(self._restart_request_owner)
+                        if self._restart_request_owner is not None else None
+                    ),
+                    "path": str(self.restart_request_path),
+                    "cooldown_until": (
+                        self._iso_utc(self._restart_cooldown_until_wall)
+                        if self._restart_cooldown_until_wall > 0 else None
+                    ),
+                },
+            },
             "sources": sources,
         }
 
