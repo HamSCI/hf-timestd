@@ -479,6 +479,20 @@ class CoreRecorderV2:
         else:
             logger.info("OffsetJudge disabled by [timing.offset_judge] config")
 
+        # ── T5 RTP pairing (P2, audit G5b) ──────────────────────────
+        # Pairs the LB-142x NMEA integer second against the RTP counter
+        # observed on the T6 stream, producing t5_lbe1421.anchor_offset_ns
+        # (the field LbeT5DirectProbe consumes — previously never
+        # emitted, so the T6↔T5 cross-check compared against a
+        # hardcoded 0).  Exists independently of the judge because the
+        # AuthorityRunner path consumes it via the status file.
+        try:
+            from .t5_rtp_pairing import T5RtpPairing
+            self._t5_pairing = T5RtpPairing()
+        except Exception as e:
+            logger.error(f"T5RtpPairing init failed (T5 stays Phase-2A): {e}")
+            self._t5_pairing = None
+
         _t6_cfg = _timing_section.get('t6_pps')
         _legacy_cfg = _timing_section.get('l6_pps')
         if _t6_cfg is not None:
@@ -2025,6 +2039,50 @@ class CoreRecorderV2:
         """
         self._lb1421_probe = probe
 
+    # ── Offset Judge bench providers (P2) ────────────────────────────
+    # Both run on the judge's tick thread; every attribute access is
+    # getattr-guarded because unit tests bypass __init__ via __new__
+    # and the underlying state (anchor, probe, channel_info)
+    # materialises asynchronously at runtime.
+
+    def _t6_bench_state(self):
+        """NativeAnchorBench provider: (anchor, arrival_rtp, arrival_mono).
+
+        Only answers while a valid T6 native anchor exists AND the T6
+        stream is delivering samples (the arrival point grounds the
+        bench's 'now' hand-off; NativeAnchorBench enforces freshness).
+        """
+        anchor = getattr(self, '_t6_native_anchor', None)
+        pairing = getattr(self, '_t5_pairing', None)
+        if anchor is None or pairing is None:
+            return None
+        arrival = pairing.latest_arrival
+        if arrival is None:
+            return None
+        return (anchor, arrival[0], arrival[1])
+
+    def _t5_bench_state(self):
+        """LbeT5Bench provider: current T5PairingProduct or None."""
+        pairing = getattr(self, '_t5_pairing', None)
+        probe = getattr(self, '_lb1421_probe', None)
+        ci = getattr(self, '_t6_channel_info', None)
+        if pairing is None or probe is None or ci is None:
+            return None
+        reading = probe.get_latest()
+        if reading is None:
+            return None
+        gps_time = getattr(ci, 'gps_time', None)
+        rtp_snap = getattr(ci, 'rtp_timesnap', None)
+        if gps_time is None or rtp_snap is None:
+            return None
+        cal = getattr(self, '_t6_calibrator', None)
+        sr = getattr(cal, 'sample_rate', None) if cal is not None else None
+        if not sr:
+            sr = getattr(ci, 'sample_rate', None)
+        if not sr:
+            return None
+        return pairing.compute(reading, gps_time, rtp_snap, int(sr))
+
     def _compute_rtp_to_utc_offset_ns(self) -> Optional[int]:
         """Pattern B: the offset that bridges ka9q's host-clock-derived
         ``rtp_to_wallclock`` to the hf-timestd-native anchor.
@@ -2644,6 +2702,15 @@ class CoreRecorderV2:
 
     def _t6_on_samples(self, samples, quality):
         """Sample callback for the BPSK PPS stream — feeds the calibrator."""
+        # T5 pairing arrival point (P2, audit G5b): record the RTP
+        # counter observed "now" so the LB-142x integer second can be
+        # paired against the substrate.  Single tuple assignment — safe
+        # on the hot path.
+        _pairing = getattr(self, '_t5_pairing', None)
+        if _pairing is not None:
+            _rtp_last = getattr(quality, 'last_rtp_timestamp', None)
+            if _rtp_last is not None:
+                _pairing.note_arrival(_rtp_last)
         # Defensive lazy-init for unit tests that bypass __init__ via
         # ``CoreRecorderV2.__new__(CoreRecorderV2)``.  In production
         # __init__ has already set these; in tests they are absent and
@@ -3791,6 +3858,38 @@ class CoreRecorderV2:
                         'age_sec': age_sec,
                         'device': str(getattr(lb_probe, 'device', '')),
                     }
+                    # P2 (audit G5b): the RTP-substrate-grounded pairing
+                    # product — anchor_offset_ns is the radiod-anchor
+                    # UTC prediction minus GPS/NMEA truth (prediction −
+                    # truth, the codebase-wide offset sign convention).
+                    # LbeT5DirectProbe:169-182 forwards it as T5's
+                    # offset_ms; before this the field was never emitted
+                    # and the T6↔T5 cross-check compared against a
+                    # hardcoded 0.  Fields stay None (grounded=False)
+                    # when the pairing has no fresh arrival/NMEA/pair —
+                    # the probe then falls back to Phase-2A trust-tier
+                    # semantics, exactly as before.
+                    product = None
+                    if reading.valid_fix:
+                        try:
+                            product = self._t5_bench_state()
+                        except Exception as e:
+                            logger.debug(f"T5 pairing compute failed: {e}")
+                    status['t5_lbe1421'].update({
+                        'anchor_offset_ns': (
+                            int(product.anchor_offset_ns)
+                            if product is not None else None
+                        ),
+                        'anchor_offset_sigma_ns': (
+                            int(round(product.sigma_ns))
+                            if product is not None else None
+                        ),
+                        'rtp_anchor_grounded': product is not None,
+                        'anchor_age_sec': (
+                            round(product.arrival_age_s, 3)
+                            if product is not None else None
+                        ),
+                    })
                 else:
                     status['t5_lbe1421'] = {
                         'enabled': True,
@@ -3799,6 +3898,10 @@ class CoreRecorderV2:
                         'age_sec': None,
                         'device': str(getattr(lb_probe, 'device', '')),
                         'reason': 'no reading yet',
+                        'anchor_offset_ns': None,
+                        'anchor_offset_sigma_ns': None,
+                        'rtp_anchor_grounded': False,
+                        'anchor_age_sec': None,
                     }
             # If no probe is attached, no t5_lbe1421 block at all —
             # LbeT5DirectProbe treats absence as "not configured".
