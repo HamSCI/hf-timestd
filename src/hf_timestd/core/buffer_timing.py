@@ -83,6 +83,14 @@ class BufferTiming:
     n_snapshots_used: int
     jitter_ms: float
 
+    # Offset Judge provenance (docs/OFFSET-JUDGE-SPEC-2026-08-05.md §8).
+    # When the sidecar carries a "timing" block, sample0_utc above is the
+    # CORRECTED UTC (raw radiod mapping + offset_applied_ns) and these
+    # fields record the pedigree.  Legacy sidecars: 0.0 / None (raw
+    # radiod mapping, exactly as before).
+    offset_applied_ns: float = 0.0
+    judge_tier: Optional[str] = None
+
     def sample_to_utc(self, sample_index: float) -> float:
         """Convert a sample index to a UTC timestamp."""
         return self.sample0_utc + sample_index / self.sample_rate
@@ -129,6 +137,19 @@ def resolve_buffer_timing(
     # Primary: top-level gps_time_ns / rtp_timesnap written by the archive
     # writer from its authoritative GPS/RTP mapping.  Always present when
     # timing is locked — no dependency on the timing poll thread.
+    # Offset Judge provenance block (OFFSET-JUDGE-SPEC-2026-08-05 §8).
+    # When present, the writer applied offset_ns to this chunk's labels
+    # (boundary placement + start_system_time); the raw radiod pair in
+    # the sidecar stays uncorrected, so the correction is re-applied
+    # here to reconstruct the corrected UTC downstream.  Legacy sidecars
+    # (no block) get offset 0 — behavior identical to before.
+    judge_block = metadata.get('timing') or {}
+    try:
+        judge_offset_ns = float(judge_block.get('offset_ns') or 0.0)
+    except (TypeError, ValueError):
+        judge_offset_ns = 0.0
+    judge_tier = judge_block.get('judge_tier')
+
     top_gps_ns = metadata.get('gps_time_ns')
     top_rtp_snap = metadata.get('rtp_timesnap')
     if top_gps_ns is not None and top_rtp_snap is not None:
@@ -136,7 +157,7 @@ def resolve_buffer_timing(
         leap = gps_leap_seconds_at_gps_time(top_gps_ns)
         gps_utc = top_gps_ns / BILLION + GPS_EPOCH_UNIX - leap
         delta = _rtp_delta_signed(start_rtp, int(top_rtp_snap))
-        sample0_utc = gps_utc + delta / sample_rate
+        sample0_utc = gps_utc + delta / sample_rate + judge_offset_ns / BILLION
 
         sst = float(metadata.get('start_system_time', 0))
         if sst > 0 and abs(sample0_utc - sst) > 1.0:
@@ -151,7 +172,9 @@ def resolve_buffer_timing(
             sample_rate=sample_rate,
             source='rtp_gps',
             n_snapshots_used=1,
-            jitter_ms=0.0
+            jitter_ms=0.0,
+            offset_applied_ns=judge_offset_ns,
+            judge_tier=judge_tier,
         )
 
     # Fallback: timing_snapshots[] array (for files written before this change)
@@ -166,7 +189,12 @@ def resolve_buffer_timing(
             jitter_ms=float('inf')
         )
 
-    return _from_rtp_gps(start_rtp, snapshots, sample_rate, metadata)
+    bt = _from_rtp_gps(start_rtp, snapshots, sample_rate, metadata)
+    if bt.source != 'no_timing' and judge_offset_ns:
+        bt.sample0_utc += judge_offset_ns / BILLION
+        bt.offset_applied_ns = judge_offset_ns
+        bt.judge_tier = judge_tier
+    return bt
 
 
 # ── internal helpers ─────────────────────────────────────────────────

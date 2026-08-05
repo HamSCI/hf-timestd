@@ -27,6 +27,7 @@ import queue
 import shutil
 import threading
 import time
+from collections import deque as _deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict, Any, List
@@ -126,6 +127,10 @@ class MinuteBuffer:
     timing_snapshots: List[TimingSnapshot] = field(default_factory=list)  # Snapshots for this minute
     flush_attempts: int = 0  # Number of failed flush attempts
     scratch_path: Optional[Path] = None  # backing file for the memmap; unlinked on success
+    # Offset Judge provenance captured at chunk start (spec §8 "timing"
+    # block).  None when no judge verdict was applied — the sidecar then
+    # omits the block entirely (legacy, raw-radiod-mapping chunk).
+    judge_timing: Optional[Dict[str, Any]] = None
     
     @property
     def is_complete(self) -> bool:
@@ -152,8 +157,20 @@ class BinaryArchiveWriter:
     # from a transient I/O error (e.g. NFS stall, tmpfs pressure).
     MAX_FLUSH_RETRIES = 3
 
-    def __init__(self, config: BinaryArchiveConfig):
+    def __init__(self, config: BinaryArchiveConfig,
+                 offset_judge: Optional[Any] = None,
+                 source_key: Optional[tuple] = None):
         self.config = config
+
+        # Offset Judge wiring (docs/OFFSET-JUDGE-SPEC-2026-08-05.md).
+        # When present, labels become radiod_mapping(rtp) + offset and
+        # every sidecar carries the spec §8 "timing" provenance block.
+        # When absent, behavior is exactly the pre-judge writer.
+        # source_key = (status_stream, ssrc); usually late-bound via
+        # set_offset_judge() because the SSRC is only known after
+        # ensure_channel().
+        self._offset_judge = offset_judge
+        self._judge_source_key = source_key
         
         if config.use_tiered_storage:
             from .tiered_storage import get_tiered_storage_manager
@@ -201,8 +218,21 @@ class BinaryArchiveWriter:
         self.samples_written = 0
         self.total_gaps = 0
         self.write_errors = 0
-        self.stale_drops = 0  # Samples dropped by staleness guard
+        self.stale_drops = 0  # Samples dropped by the split detector (BACKLOG verdicts)
         self.timing_drops = 0  # Samples dropped waiting for GPS_TIME
+        self.anchor_fault_events = 0  # Split-detector ANCHOR FAULT classifications (data kept)
+
+        # Split-detector observation window (spec §6): a short history of
+        # (wallclock, lag, unwrapped_rtp) points sampled at most once per
+        # second, spanning SPLIT_WINDOW_SECONDS.  From it we derive
+        # d(lag)/dt and the arrival rate that separate pipeline BACKLOG
+        # (shed load) from radiod ANCHOR FAULT (keep data — the judge's
+        # offset already corrects the label).
+        self._lag_window: 'deque' = _deque()
+        self._lag_last_append: float = 0.0
+        self._unwrapped_rtp: int = 0
+        self._last_raw_rtp: Optional[int] = None
+        self._last_split_log: float = 0.0
 
         # BPSK PPS chain-delay metadata (set externally by core_recorder).
         # As of 2026-05, archive wall_times are RAW RTP-derived values —
@@ -289,6 +319,55 @@ class BinaryArchiveWriter:
         """
         self._bpsk_chain_delay_ns = chain_delay_ns
         self._bpsk_chain_delay_applied = bool(applied)
+
+    def set_offset_judge(self, offset_judge: Any, source_key: tuple) -> None:
+        """Late-bind the Offset Judge + per-source key.
+
+        Called by the recorder after ensure_channel() has produced the
+        SSRC (the source_key = (status_stream, ssrc) can't exist before
+        that).  If a radiod pair was already adopted, register it with
+        the judge immediately so measurement starts without waiting for
+        the next anchor adoption.
+        """
+        with self._lock:
+            self._offset_judge = offset_judge
+            self._judge_source_key = source_key
+            gps_ns = self._gps_time_ns_raw
+            rtp_snap = self._rtp_timesnap
+        if gps_ns is not None and rtp_snap is not None:
+            self._judge_register_pair(gps_ns, rtp_snap)
+
+    def _judge_register_pair(self, gps_time_ns: int, rtp_timesnap: int) -> None:
+        """Forward an adopted radiod pair to the judge (never raises)."""
+        judge, key = self._offset_judge, self._judge_source_key
+        if judge is None or key is None:
+            return
+        try:
+            judge.register_radiod_pair(
+                key, gps_time_ns, rtp_timesnap, self.config.sample_rate
+            )
+        except Exception as e:  # noqa: BLE001 — judge trouble must never disturb recording
+            logger.warning(
+                f"{self.config.channel_name}: offset-judge pair registration "
+                f"failed (recording continues uncorrected): {e}"
+            )
+
+    def _judge_verdict(self, rtp_timestamp: int) -> Optional[Any]:
+        """Current judge verdict for this source, or None (raw mapping).
+
+        Cheap (lock + dict lookup inside the judge; no I/O) — safe on
+        the per-batch hot path.  Never raises.
+        """
+        judge, key = self._offset_judge, self._judge_source_key
+        if judge is None or key is None:
+            return None
+        try:
+            return judge.offset_for(key, rtp_timestamp)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(
+                f"{self.config.channel_name}: offset_for failed: {e}"
+            )
+            return None
 
     def add_timing_snapshot(self, gps_time_ns: int, rtp_timesnap: int) -> bool:
         """
@@ -394,6 +473,12 @@ class BinaryArchiveWriter:
             self._gps_time_unix = gps_unix_sec
             self._gps_time_ns_raw = gps_time_ns
             self._rtp_timesnap = rtp_timesnap
+
+            # Anchor adoption point: register the pair with the Offset
+            # Judge (spec §3 — estimated "at every radiod anchor
+            # adoption").  The judge dedupes identical pairs and
+            # fractures its segment on implausible steps / RTP wraps.
+            self._judge_register_pair(gps_time_ns, rtp_timesnap)
             if not self._timing_locked:
                 self._timing_locked = True
                 wait_dur = ''
@@ -432,12 +517,16 @@ class BinaryArchiveWriter:
         day_dir.mkdir(parents=True, exist_ok=True)
         return day_dir
     
-    def _start_new_minute(self, rtp_derived_time: float, rtp_timestamp: int) -> MinuteBuffer:
+    def _start_new_minute(self, rtp_derived_time: float, rtp_timestamp: int,
+                          verdict: Optional[Any] = None) -> MinuteBuffer:
         """Start a new chunk buffer.
 
         Args:
-            rtp_derived_time: Unix time derived from RTP timestamp (GPSDO-disciplined)
+            rtp_derived_time: Unix time derived from RTP timestamp
+                (GPSDO-disciplined; judge-corrected when a verdict was applied)
             rtp_timestamp: RTP timestamp of the packet that triggered this new chunk
+            verdict: Offset Judge verdict applied to rtp_derived_time (or
+                None for the raw radiod mapping)
 
         The RTP stream tells us the exact time. When a packet's RTP-derived UTC
         crosses a chunk boundary, we start a new buffer.
@@ -450,11 +539,15 @@ class BinaryArchiveWriter:
         chunk_boundary = (int(rtp_derived_time) // self.file_duration_sec) * self.file_duration_sec
 
         # Calculate RTP timestamp at the exact chunk boundary using the mapping:
-        #   UTC = GPS_TIME + (rtp - RTP_TIMESNAP) / sample_rate
-        #   rtp = RTP_TIMESNAP + (UTC - GPS_TIME) * sample_rate
+        #   UTC = GPS_TIME + (rtp - RTP_TIMESNAP) / sample_rate + offset
+        #   rtp = RTP_TIMESNAP + (UTC - offset - GPS_TIME) * sample_rate
         # Note: _rtp_timesnap is already in packet counter space
         # (see counter-space reconciliation in write_samples).
-        time_delta = chunk_boundary - self._gps_time_unix
+        # When a judge verdict corrected rtp_derived_time, the same
+        # offset must be removed here so sample position 0 lands on the
+        # chunk boundary in CORRECTED time.
+        offset_s = (verdict.offset_ns / 1e9) if verdict is not None else 0.0
+        time_delta = chunk_boundary - offset_s - self._gps_time_unix
         rtp_delta = int(time_delta * self.config.sample_rate)
         chunk_boundary_rtp = (self._rtp_timesnap + rtp_delta) & 0xFFFFFFFF
 
@@ -504,6 +597,23 @@ class BinaryArchiveWriter:
             samples = np.zeros(self.samples_per_chunk, dtype=np.complex64)
             scratch_path = None
 
+        # Offset Judge provenance (spec §8), frozen at chunk start: the
+        # verdict here is the one that positioned this chunk's boundary.
+        # The raw radiod pair is captured alongside so the sidecar is
+        # fully self-describing (raw mapping + applied correction).
+        judge_timing = None
+        if verdict is not None:
+            judge_timing = {
+                'radiod_gps_time_ns': self._gps_time_ns_raw,
+                'radiod_rtp_timesnap': self._rtp_timesnap,
+                'offset_ns': float(verdict.offset_ns),
+                'offset_sigma_ns': float(verdict.sigma_ns),
+                'judge_tier': verdict.tier,
+                'judge_age_s': float(verdict.judge_age_s),
+                'segment_id': int(verdict.segment_id),
+                'rate_ppm': None,  # phase 3 (spec §11: recorded, never resampled)
+            }
+
         buffer = MinuteBuffer(
             minute_boundary=chunk_boundary,
             samples=samples,
@@ -512,6 +622,7 @@ class BinaryArchiveWriter:
             start_system_time=float(chunk_boundary),  # Exactly on chunk boundary
             timing_snapshots=[],
             scratch_path=scratch_path,
+            judge_timing=judge_timing,
         )
 
         # Transfer any pending timing snapshots to this buffer
@@ -878,6 +989,13 @@ class BinaryArchiveWriter:
                 'bpsk_chain_delay_ns': self._bpsk_chain_delay_ns,
                 'bpsk_chain_delay_applied': self._bpsk_chain_delay_applied,
             }
+
+            # Offset Judge provenance block (spec §8, additive).  A chunk
+            # without a "timing" block is legacy (raw radiod mapping); a
+            # chunk with one is fully self-describing: raw pair + the
+            # correction applied to this chunk's labels.
+            if buffer.judge_timing is not None:
+                metadata['timing'] = buffer.judge_timing
             
             # Atomic write: write to temp file, fsync, then rename
             temp_json = json_path.with_suffix('.tmp')
@@ -1072,12 +1190,117 @@ class BinaryArchiveWriter:
             
             return self._write_samples_inner(samples, rtp_timestamp, gap_samples)
     
-    # Maximum allowed age of RTP-derived data relative to wallclock.
-    # chrony (NTP at worst, GPS+PPS at best) and GPSDO-disciplined RTP
-    # should agree within milliseconds.  A large discrepancy means the
-    # processing pipeline has fallen behind real-time — drop the data
-    # rather than writing stale files that starve downstream services.
+    # Split-detector trigger (spec §6, replacing the old one-sided
+    # wallclock staleness guard): when |wallclock - label| exceeds this,
+    # the detector classifies the discrepancy — it does NOT drop on the
+    # threshold alone.  Both signs are watched (future-dated labels are
+    # just as suspect as stale ones).
     MAX_STALENESS_SECONDS = 120.0
+
+    # Split-detector observation window and classification thresholds.
+    SPLIT_WINDOW_SECONDS = 30.0    # history span for d(lag)/dt + arrival rate
+    SPLIT_MIN_SPAN_SECONDS = 5.0   # min evidence span before classifying
+    SPLIT_BACKLOG_DLAG_MIN = 0.5   # d(lag)/dt above this ⇒ lag is growing
+    SPLIT_BACKLOG_ARRIVAL_MAX = 0.9  # arrival rate below this ⇒ sub-real-time
+
+    def _split_detector_should_drop(
+        self,
+        wallclock_now: float,
+        lag: float,
+        rtp_timestamp: int,
+        sample_unix_time: float,
+    ) -> bool:
+        """Spec §6 split detector.  Returns True ⇒ drop (BACKLOG only).
+
+        Observables at the drop site (both lag signs watched):
+          d(lag)/dt ≈ 1 s/s and arrival < 1× real-time  ⇒ BACKLOG:
+              the pipeline is genuinely behind — shed load (drop),
+              CRITICAL log.  This is the only timing-adjacent drop that
+              remains legitimate.
+          d(lag)/dt ≈ 0 and arrival ≈ 1× real-time      ⇒ ANCHOR FAULT:
+              radiod's epoch (or an uncorrected mapping) is wrong but
+              data flows at real-time — KEEP the samples (the judge's
+              offset corrects the label; absent a judge the label
+              pedigree is degraded, not the data), CRITICAL log +
+              judge violation flag.
+          insufficient evidence                          ⇒ KEEP
+              (never drop on a bare threshold).
+        """
+        # Maintain unwrapped RTP progression for the arrival-rate leg.
+        if self._last_raw_rtp is not None:
+            delta = int((rtp_timestamp - self._last_raw_rtp) & 0xFFFFFFFF)
+            if delta > 0x7FFFFFFF:
+                delta -= 0x100000000
+            self._unwrapped_rtp += delta
+        self._last_raw_rtp = rtp_timestamp
+
+        # Sample the observation window at most once per second.
+        if wallclock_now - self._lag_last_append >= 1.0 or not self._lag_window:
+            self._lag_window.append((wallclock_now, lag, self._unwrapped_rtp))
+            self._lag_last_append = wallclock_now
+            while (self._lag_window
+                   and wallclock_now - self._lag_window[0][0] > self.SPLIT_WINDOW_SECONDS):
+                self._lag_window.popleft()
+
+        if abs(lag) <= self.MAX_STALENESS_SECONDS:
+            return False
+
+        # Classify.  Need enough evidence span first — until then, keep
+        # the data (a wrong label is recoverable; a dropped sample is not).
+        w0, lag0, rtp0 = self._lag_window[0]
+        span = wallclock_now - w0
+        if span < self.SPLIT_MIN_SPAN_SECONDS or len(self._lag_window) < 3:
+            self._split_log(
+                wallclock_now,
+                f"{self.config.channel_name}: label {lag:+.1f}s vs wallclock "
+                f"(limit {self.MAX_STALENESS_SECONDS}s) — gathering evidence "
+                f"({span:.1f}s span) before classifying; KEEPING data."
+            )
+            return False
+
+        dlag_dt = (lag - lag0) / span
+        arrival_rate = ((self._unwrapped_rtp - rtp0) / self.config.sample_rate) / span
+
+        backlog = (
+            lag > 0
+            and dlag_dt > self.SPLIT_BACKLOG_DLAG_MIN
+            and arrival_rate < self.SPLIT_BACKLOG_ARRIVAL_MAX
+        )
+        if backlog:
+            self._split_log(
+                wallclock_now,
+                f"{self.config.channel_name}: PIPELINE BACKLOG — DROPPING data. "
+                f"lag={lag:+.1f}s growing at {dlag_dt:+.2f} s/s, arrival rate "
+                f"{arrival_rate:.2f}x real-time. Load shedding is legitimate; "
+                f"this is NOT an anchor fault."
+            )
+            return True
+
+        # Anchor fault (constant lag at real-time arrival) or ambiguous:
+        # never drop.  Flag the judge so offset_judge.json shows the
+        # violation (spec §9 step 1).
+        self.anchor_fault_events += 1
+        self._split_log(
+            wallclock_now,
+            f"{self.config.channel_name}: ANCHOR FAULT signature — "
+            f"lag={lag:+.1f}s (d(lag)/dt={dlag_dt:+.2f} s/s, arrival "
+            f"{arrival_rate:.2f}x real-time). KEEPING data: the offset judge "
+            f"corrects the label (or stamps the degraded pedigree). "
+            f"radiod's advertised epoch is suspect."
+        )
+        judge, key = self._offset_judge, self._judge_source_key
+        if judge is not None and key is not None:
+            try:
+                judge.flag_anchor_fault(key, lag)
+            except Exception:  # noqa: BLE001 — never disturb recording
+                pass
+        return False
+
+    def _split_log(self, wallclock_now: float, message: str) -> None:
+        """Rate-limited CRITICAL logging for the split detector."""
+        if wallclock_now - self._last_split_log > 10.0:
+            logger.critical(message)
+            self._last_split_log = wallclock_now
 
     def _write_samples_inner(
         self,
@@ -1097,38 +1320,40 @@ class BinaryArchiveWriter:
             samples = self._interpolate_gaps(samples)
         
         # Determine which chunk this belongs to FROM RTP TIMESTAMP (GPSDO-disciplined)
-        # This avoids wall clock jitter from NTP/chrony adjustments
-        sample_unix_time = self._rtp_to_unix_time(rtp_timestamp)
+        # This avoids wall clock jitter from NTP/chrony adjustments.
+        # When the Offset Judge has a verdict for this source, the label
+        # is the radiod mapping PLUS the judge's offset (spec §3:
+        # label(rtp) = UTC_radiod(rtp) + offset).  Judge absent ⇒ raw
+        # mapping, exactly the pre-judge behavior.
+        verdict = self._judge_verdict(rtp_timestamp)
+        offset_s = (verdict.offset_ns / 1e9) if verdict is not None else 0.0
+        sample_unix_time = self._rtp_to_unix_time(rtp_timestamp) + offset_s
         sample_minute = (int(sample_unix_time) // self.file_duration_sec) * self.file_duration_sec
-        
-        # Staleness guard: drop data that is behind wallclock.
-        # Under normal operation the difference is <1ms.  A large lag
-        # means our pipeline fell behind — continuing would create a
-        # growing backlog that starves every downstream service.
+
+        # Split detector (spec §6, replacing the old staleness guard):
+        # classifies a large wallclock-vs-label discrepancy as pipeline
+        # BACKLOG (drop — legitimate load shedding) or ANCHOR FAULT
+        # (KEEP — the judge's offset already corrects the label; samples
+        # are never dropped for timing reasons).
         wallclock_now = time.time()
-        staleness = wallclock_now - sample_unix_time
-        if staleness > self.MAX_STALENESS_SECONDS:
-            if not hasattr(self, '_last_stale_log') or wallclock_now - self._last_stale_log > 10.0:
-                logger.critical(
-                    f"{self.config.channel_name}: DROPPING STALE DATA — "
-                    f"RTP-derived time is {staleness:.1f}s behind wallclock "
-                    f"(limit {self.MAX_STALENESS_SECONDS}s). "
-                    f"sample_time={sample_unix_time:.3f} wall={wallclock_now:.3f}"
-                )
-                self._last_stale_log = wallclock_now
+        lag = wallclock_now - sample_unix_time
+        if self._split_detector_should_drop(
+                wallclock_now, lag, rtp_timestamp, sample_unix_time):
             self.stale_drops += len(samples)
             return 0
 
         # Start new buffer if needed
         if self.current_buffer is None:
-            self.current_buffer = self._start_new_minute(sample_unix_time, rtp_timestamp)
-        
+            self.current_buffer = self._start_new_minute(
+                sample_unix_time, rtp_timestamp, verdict=verdict)
+
         # Check if we've crossed into a new minute
         if sample_minute > self.current_buffer.minute_boundary:
             # Hand off to async worker; _try_flush always returns True
             # (either enqueued or abandoned on queue overflow).
             self._try_flush(self.current_buffer)
-            self.current_buffer = self._start_new_minute(sample_unix_time, rtp_timestamp)
+            self.current_buffer = self._start_new_minute(
+                sample_unix_time, rtp_timestamp, verdict=verdict)
         
         # Write to buffer at correct position based on RTP timestamp
         # In RTP mode, samples are positioned by their RTP offset from minute boundary
@@ -1218,6 +1443,7 @@ class BinaryArchiveWriter:
             'write_errors': self.write_errors,
             'stale_drops': self.stale_drops,
             'timing_drops': self.timing_drops,
+            'anchor_fault_events': self.anchor_fault_events,
             'current_buffer_pos': self.current_buffer.write_pos if self.current_buffer else 0,
             'flush_queue_depth': self._flush_queue.qsize(),
         }
