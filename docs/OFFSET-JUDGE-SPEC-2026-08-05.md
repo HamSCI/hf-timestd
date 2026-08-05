@@ -1,7 +1,8 @@
 # The Offset Judge — restoring offset-based timing correction to hf-timestd
 
-Status: DRAFT for review (rob / mjh). No code exists yet; this document is
-the contract to review before any is written.
+Status: **ACCEPTED 2026-08-05** — open questions resolved by AC0G (§13).
+This document is the implementation contract. mjh redlines still welcome;
+they amend, not block.
 
 Provenance: written 2026-08-05 after the AC0G-B4 anchor-wedge incident
 (radiod's advertised epoch ~1203 s wrong for six days; recording starved)
@@ -175,8 +176,12 @@ operator awareness, in order:
    the sigmond watchdog interface — the first and only place any
    component is empowered to touch radiod, and it is opt-in.
 
-Severity thresholds are tier-relative (T6 judges at µs, T3 at ms) —
-never the old calendar-day scale (audit G11).
+Severity thresholds are tier-relative and **empirical**: each bench
+continuously reports its own measured σ, and a source is in violation
+when |offset| exceeds k·σ_tier (k = 5 default) sustained over the
+window. The tiers' demonstrated accuracy defines the bounds — no
+hand-authored table to go stale (decision §13.1); never the old
+calendar-day scale (audit G11).
 
 ## 10. Migration phases
 
@@ -207,13 +212,17 @@ never the old calendar-day scale (audit G11).
   substrate-based reconstruction directly, and corrections are never
   fed back into FUSE's inputs. Documented, watched via the trend.
 
-## 12. Open questions for review
+## 12. Open questions — RESOLVED, see §13
 
-1. Tier bounds table (µs/ms per tier) — proposed values wanted from mjh.
-2. Should the sigmond recorders consume the judge in P4, or keep their
-   independent dt-guards permanently as diverse redundancy?
-3. Opt-in radiod restart: is a restart *request* to sigmond the right
-   interface, or should hf-timestd never hold that lever even opt-in?
-4. Retro-correction tooling for the 07-31..08-04 sliver era: with the
-   judge's model, wrongly-labelled surviving data could be re-labelled —
-   worth building, or let the scar stand?
+## 13. Decisions (AC0G, 2026-08-05)
+
+1. **Bounds are empirical.** The measured accuracy of each tier defines
+   its violation bound (k·σ from the bench's own live statistics), not a
+   static table. Folded into §9.
+2. **sigmond recorders keep their independent dt-guards permanently** as
+   diverse redundancy; the P4 judge export is additive advice, never a
+   replacement for their own defenses.
+3. **The opt-in radiod restart request stays** in the escalation ladder
+   (§9 step 3), default off, site policy to enable.
+4. **The 07-31..08-04 sliver scar stands.** No retro-relabeling tooling.
+   The gap is the honest record of the failure we learned from.
