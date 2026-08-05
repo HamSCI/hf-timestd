@@ -226,3 +226,18 @@ calendar-day scale (audit G11).
    (§9 step 3), default off, site policy to enable.
 4. **The 07-31..08-04 sliver scar stands.** No retro-relabeling tooling.
    The gap is the honest record of the failure we learned from.
+
+## 14. Amendment (2026-08-05): cross-bench consistency gate
+
+§2's judgement rule is **amended** by
+`JUDGE-CROSS-BENCH-GATE-2026-08-05.md` (accepted; motivating incident
+`T6-DISPLACED-PEAK-62MS-2026-08-05.md`): tier *advancement* additionally
+requires the candidate bench to agree with the highest already-trusted
+lower tier within `k_x·sqrt(σ_c² + σ_l²)` (config
+`[timing.offset_judge] cross_bench_k`, default 5) on every poll of the
+advance window.  On failure the judge stays on the lower tier, publishes
+`cross_bench_conflict` + per-bench `shadow_residuals` in
+`offset_judge.json`, and logs a rate-limited CRITICAL; degrade-on-loss
+stays immediate and single-bench sites are unaffected.  This section is
+a pointer, not a rewrite — see the gate document for rule, rationale and
+implementation notes.
