@@ -1388,6 +1388,28 @@ class CoreRecorderV2:
         # add_channel / ensure_channel.
         low_edge_hz = t6.get('low_edge_hz')
         high_edge_hz = t6.get('high_edge_hz')
+        # Channel gain (dB).  AGC stays OFF on every metrology channel by
+        # design: signal and noise vary substantially over 24 hours and
+        # AGC's unpredictable scaling is unacceptable in a scientific
+        # measurement.  For the *broadcast* channels that leaves the level
+        # wherever the front end puts it, which is why they are F32.
+        #
+        # T6 is the exception that can be set: HF-PPS is injected LOCALLY,
+        # so its level is known, constant, and under our control — a fixed
+        # gain is exact here, with none of the 24-hour variation that rules
+        # AGC out.  Worth setting because radiod's output encoding is in
+        # practice S16BE (F32 grants are lost to the lifetime keepalive —
+        # HamSCI/ka9q-python#3), so this channel really does live in 16-bit
+        # fixed point: measured on B4 at ~34 counts RMS of +-32767, about 5
+        # of 16 bits, i.e. ~38-41 dB quantisation SNR against a 51 dB
+        # channel — quantisation, not the RF, was the noise floor.
+        #
+        # Irrelevant to the 0.5 s coarse correlation (48 000 samples average
+        # quantisation away) but directly limiting for a short-integration
+        # fine stage over the ~52 us transition (~5 samples) — see
+        # HamSCI/hf-timestd#7.  Default 0.0 preserves prior behaviour;
+        # raise it only after checking headroom against observed peaks.
+        gain_db = float(t6.get('gain_db', 0.0))
 
         # Dedicated RadiodStream + per-channel UDP socket.
         try:
@@ -1397,7 +1419,7 @@ class CoreRecorderV2:
                 sample_rate=sr,
                 encoding=Encoding.F32,
                 agc_enable=False,
-                gain=0.0,
+                gain=gain_db,
                 low_edge=low_edge_hz,
                 high_edge=high_edge_hz,
                 # Same wider-timeout rationale as the shared-MultiStream
