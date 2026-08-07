@@ -37,6 +37,18 @@ log_info()  { logger -t "$LOG_TAG" -p user.info  "$*"; }
 log_warn()  { logger -t "$LOG_TAG" -p user.warning "$*"; }
 log_error() { logger -t "$LOG_TAG" -p user.err "$*"; }
 
+# True when sqlite_age() could not determine an age at all.  Distinct from a
+# genuinely empty/stale table, which yields a real number.  An unknown must
+# never be treated as evidence of a stall.
+age_unknown() { [[ "$1" == "UNKNOWN" ]]; }
+
+# Fail loudly and early if the freshness queries cannot run at all, rather
+# than letting every check silently degrade into "stale".
+if ! command -v sqlite3 >/dev/null 2>&1; then
+    log_error "sqlite3 not installed: SQLite freshness checks cannot run; \
+data-driven restarts are DISABLED this pass (install the sqlite3 package)"
+fi
+
 # Seconds since a file/dir was last modified. Returns 999999 if not found.
 file_age() {
     local path="$1"
@@ -98,13 +110,30 @@ sqlite_age() {
     fi
     local where="WHERE $time_col <= strftime('%s','now') + 120"
     [[ -n "$extra_where" ]] && where="$where AND $extra_where"
-    local age
+    local age rc
     age=$(sqlite3 -readonly "$SQLITE_DB" \
             "SELECT CAST(strftime('%s','now') - max($time_col) AS INTEGER) FROM $table $where;" \
             2>/dev/null)
-    # NULL (empty table) or any sqlite error → stale.
-    if [[ -z "$age" ]] || ! [[ "$age" =~ ^-?[0-9]+$ ]]; then
+    rc=$?
+    # A failed query is NOT evidence of a stall.  sqlite3 missing (rc 127),
+    # an unreadable/locked DB or a bad column all land here, and restarting
+    # healthy services because our own query tool broke is exactly the
+    # failure this watchdog is supposed to prevent -- it did precisely that
+    # on B4 for hours when sqlite3 was not installed, reporting every table
+    # as "stale for 999999s" while the data was fresh to the second.
+    # Report UNKNOWN so callers can alarm instead of act.
+    if (( rc != 0 )); then
+        echo UNKNOWN
+        return
+    fi
+    # Empty output is a genuine NULL from max() -- the table really has no
+    # qualifying rows, which IS staleness.
+    if [[ -z "$age" ]]; then
         echo 999999
+        return
+    fi
+    if ! [[ "$age" =~ ^-?[0-9]+$ ]]; then
+        echo UNKNOWN
         return
     fi
     # Negative ages can still appear inside the future-grace window
@@ -231,7 +260,9 @@ check_metrology() {
         local age
         age=$(sqlite_age "L1_metrology_measurements" "minute_boundary_utc" \
                         "channel='$channel'")
-        if [[ $age -gt $METROLOGY_STALE ]]; then
+        if age_unknown "$age"; then
+            log_error "cannot assess L1_metrology freshness for $channel (SQLite query failed) - NOT restarting $unit"
+        elif [[ $age -gt $METROLOGY_STALE ]]; then
             do_restart "$unit" "running but L1_metrology row for $channel stale for ${age}s (threshold: ${METROLOGY_STALE}s)"
             RESTARTS=$((RESTARTS + 1))
         fi
@@ -253,7 +284,9 @@ check_fusion() {
 
     local age
     age=$(sqlite_age "L3_fusion_timing" "minute_boundary")
-    if [[ $age -gt $FUSION_STALE ]]; then
+    if age_unknown "$age"; then
+        log_error "cannot assess L3_fusion_timing freshness (SQLite query failed) - NOT restarting $unit"
+    elif [[ $age -gt $FUSION_STALE ]]; then
         do_restart "$unit" "running but L3_fusion_timing stale for ${age}s (threshold: ${FUSION_STALE}s)"
         RESTARTS=$((RESTARTS + 1))
     fi
@@ -276,7 +309,9 @@ check_physics() {
     # producing either keeps the table fresh, so no channel filter.
     local age
     age=$(sqlite_age "L3_tec" "minute_boundary")
-    if [[ $age -gt $PHYSICS_STALE ]]; then
+    if age_unknown "$age"; then
+        log_error "cannot assess L3_tec freshness (SQLite query failed) - NOT restarting $unit"
+    elif [[ $age -gt $PHYSICS_STALE ]]; then
         do_restart "$unit" "running but L3_tec stale for ${age}s (threshold: ${PHYSICS_STALE}s)"
         RESTARTS=$((RESTARTS + 1))
     fi

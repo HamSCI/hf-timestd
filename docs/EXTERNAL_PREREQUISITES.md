@@ -24,6 +24,7 @@ gracefully — the system runs without them but loses specific capabilities.
 | 4 | [NASA Earthdata](#4-nasa-earthdata-account) | No | IONEX global TEC maps, DCB corrections | Parametric IRI / zero-bias fallback |
 | 5 | [PSWS account](#5-psws-account--ssh-key) | No | GRAPE Digital RF uploads to HamSCI | No data sharing |
 | 6 | [GNSS receiver](#6-gnss-receiver-zed-f9p) | No | Local VTEC monitoring, carrier-phase TEC | No local TEC |
+| 7 | [sqlite3 CLI](#7-sqlite3-cli) | **Yes** | Pipeline freshness checks | Watchdog restarts healthy services every 5 min |
 
 **No user action needed** for WAM-IPE (public S3 bucket), GIRO ionosonde
 data (open HTTP API), or NOMADS (public NOAA server) — these are fetched
@@ -99,6 +100,37 @@ used by chrony/gpsd for system time discipline.
 An HF antenna covering 2–30 MHz.  A horizontal dipole or fan dipole at
 ≥10 m height is typical.  The antenna choice directly affects which
 broadcast time stations (WWV, WWVH, CHU, BPM) are receivable.
+
+---
+
+## 7. sqlite3 CLI
+
+| | |
+|---|---|
+| **Required** | Yes |
+| **Why** | `scripts/pipeline-watchdog.sh` shells out to `sqlite3` to measure how fresh each data product is |
+| **Package** | `sqlite3` (Debian/Ubuntu) |
+
+The Python services use the `sqlite3` *module* (always present in CPython),
+but the watchdog is shell and needs the *command-line tool*, which Debian
+ships in a separate package that nothing else here pulls in.
+
+```bash
+sudo apt install sqlite3
+```
+
+### Verify
+
+```bash
+sqlite3 -readonly /var/lib/timestd/phase2/timestd.db \
+    "SELECT max(minute_boundary_utc) FROM L1_metrology_measurements;"
+```
+
+Without it every freshness query fails, and prior to the fail-safe added
+alongside this note the watchdog read that failure as "stale for 999999s"
+and restarted eight healthy services every five minutes.  Observed on
+AC0G-B4 2026-08-07: the restarts truncated each in-flight metrology minute,
+losing roughly 26 measurements an hour while the data itself was fine.
 
 ---
 
