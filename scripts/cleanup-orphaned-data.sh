@@ -25,7 +25,20 @@ SIZE=$(du -sh "$ORPHANED_DIR" | cut -f1)
 echo "Orphaned data size: $SIZE"
 echo ""
 
-# Safety check: ensure no processes have files open
+# Safety check: ensure no processes have files open.
+#
+# This guard is the only thing between this script and deleting data a service
+# is still writing.  `lsof ... | wc -l` yields 0 both when nothing is open and
+# when lsof is not installed -- and `set -e` does not catch it, because wc
+# succeeds either way.  On B4 2026-08-07 (no lsof) it reported 0 open files
+# while a recorder was actively writing to the directory under test.  A
+# destructive operation must not proceed on a precondition it could not check.
+if ! command -v lsof >/dev/null 2>&1; then
+    echo "❌ ERROR: lsof is not installed, so the open-file safety check cannot run."
+    echo "Refusing to delete $ORPHANED_DIR on an unverified precondition."
+    echo "Install it (apt install lsof) and re-run."
+    exit 1
+fi
 OPEN_FILES=$(lsof +D "$ORPHANED_DIR" 2>/dev/null | wc -l)
 if [ "$OPEN_FILES" -gt 0 ]; then
     echo "❌ ERROR: $OPEN_FILES files are currently open in $ORPHANED_DIR"

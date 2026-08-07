@@ -9,6 +9,15 @@
 #
 # Usage: timestd-metrology.sh {start|stop|restart|status} [config-file]
 
+# bc is used below to derive channel frequencies.  Without it the command
+# substitutions yield an EMPTY string rather than an error, so channels would be
+# launched with a blank frequency; fail here instead.
+if ! command -v bc &> /dev/null; then
+    echo "ERROR: bc is not installed; channel frequencies cannot be computed." >&2
+    echo "Install it (apt install bc) and re-run." >&2
+    exit 1
+fi
+
 # Source common settings (sets PYTHON, PROJECT_DIR, etc.)
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
@@ -81,8 +90,13 @@ start)
     mkdir -p "$DATA_ROOT/phase2"
     cd "$PROJECT_DIR"
     
-    # Check for stale HDF5 locks
-    if command -v h5clear &> /dev/null; then
+    # Check for stale HDF5 locks.
+    # lsof is required, not optional: `! lsof "$h5file"` is TRUE when lsof is
+    # merely absent, which would send h5clear at a file another process still
+    # holds open.  Skip the recovery rather than act on an unverifiable claim.
+    if command -v h5clear &> /dev/null && ! command -v lsof &> /dev/null; then
+        echo "   ⚠️  lsof not found: skipping HDF5 lock recovery (cannot verify which files are open; install lsof)"
+    elif command -v h5clear &> /dev/null; then
         echo "   🔍 Scanning for stale HDF5 file locks..."
         find "$DATA_ROOT/phase2" -name "*.h5" -type f -mmin -60 2>/dev/null | while read -r h5file; do
             if ! lsof "$h5file" >/dev/null 2>&1; then
