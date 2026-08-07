@@ -8,7 +8,7 @@ import logging
 import time
 import subprocess
 from typing import List, Dict, Optional
-from ka9q import discover_channels, ChannelInfo, RadiodControl
+from ka9q import discover_channels, ChannelInfo, RadiodControl, Encoding
 
 logger = logging.getLogger(__name__)
 
@@ -404,9 +404,9 @@ class ChannelManager:
                     description=description
                 )
                 if allocated:
-                    # Set encoding after creation
-                    if encoding == 'float':
-                        self._set_float_encoding(allocated)
+                    # Set encoding after creation: radiod otherwise leaves the
+                    # channel on whatever its preset defaults to (S16).
+                    self._set_encoding(allocated, encoding)
                     freq_to_ssrc[freq_hz] = allocated
                     success_count += 1
                 else:
@@ -453,44 +453,52 @@ class ChannelManager:
             logger.error(f"Failed to reconfigure channel {ssrc}: {e}")
             return None
     
-    def _set_float_encoding(self, ssrc: int):
+    def _set_encoding(self, ssrc: int, encoding: str):
         """
-        Set channel output encoding to float (complex64).
-        
+        Set a channel's output encoding.
+
         Args:
             ssrc: Channel SSRC
+            encoding: Encoding name, any spelling _encoding_to_int accepts
         """
+        value = self._encoding_to_int(encoding)
         try:
-            # Encoding value for float - check ka9q-python constants
-            # Typically: 0=S16, 1=F32, etc.
-            self.control.set_output_encoding(ssrc, self._encoding_to_int('float'))
-            logger.debug(f"Set encoding to float for SSRC {ssrc}")
+            self.control.set_output_encoding(ssrc, value)
+            logger.debug(f"Set encoding to {encoding} ({value}) for SSRC {ssrc}")
         except Exception as e:
-            logger.warning(f"Could not set float encoding for SSRC {ssrc}: {e}")
-    
-    @staticmethod
-    def _encoding_to_int(encoding: str) -> int:
+            logger.warning(f"Could not set encoding {encoding} for SSRC {ssrc}: {e}")
+
+    # Spellings accepted by ka9q-radio's own parse_encoding() (src/rtp.c), so
+    # config files can use radiod's names directly.
+    _ENCODING_ALIASES = {
+        'float': Encoding.F32LE, 'f32': Encoding.F32LE, 'f32le': Encoding.F32LE,
+        'f32be': Encoding.F32BE,
+        'int16': Encoding.S16LE, 's16le': Encoding.S16LE,
+        'int': Encoding.S16BE, 's16': Encoding.S16BE, 's16be': Encoding.S16BE,
+        'opus': Encoding.OPUS, 'opus-voip': Encoding.OPUS_VOIP,
+    }
+
+    @classmethod
+    def _encoding_to_int(cls, encoding: str) -> int:
         """
-        Convert encoding string to ka9q-radio integer value.
-        
+        Convert an encoding name to its ka9q-radio integer value.
+
+        Matching is case-insensitive.  The config files spell this "F32" while
+        this used to compare against the literal 'float', so a requested F32
+        channel silently kept radiod's S16 preset default.
+
         Args:
-            encoding: "float" or "int16"
-            
+            encoding: any spelling parse_encoding() takes, e.g. "F32", "s16le"
+
         Returns:
             Integer encoding value for radiod
         """
-        # ka9q-radio encoding values (from misc.h):
-        # S16 = 0, F32 = 1, OPUS = 2, etc.
-        if encoding == 'float':
-            return 4  # F32 (Encoding.F32)
-        elif encoding == 'int16':
-            return 1  # S16LE (Encoding.S16LE)
-        elif encoding == 'opus':
-            return 3  # OPUS (Encoding.OPUS)
-        else:
-            logger.warning(f"Unknown encoding '{encoding}', defaulting to float (4)")
-            return 4
-    
+        try:
+            return cls._ENCODING_ALIASES[str(encoding).strip().lower()]
+        except KeyError:
+            logger.warning(f"Unknown encoding {encoding!r}, defaulting to F32LE")
+            return Encoding.F32LE
+
     def close(self):
         """Close the control connection"""
         if self.control:
