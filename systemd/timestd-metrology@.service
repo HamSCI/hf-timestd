@@ -13,6 +13,15 @@ RequiresMountsFor=/dev/shm
 PartOf=timestd-metrology.target
 # Prevent old monolithic service from running alongside template instances
 Conflicts=timestd-metrology.service
+# Start rate limit -- MUST be in [Unit]; systemd ignores these in [Service],
+# which is where they sat until 2026-08-07.  This is what arms OnFailure
+# above: for a Restart=always service the failed state is only entered when
+# the start limit is exhausted.  With the keys ignored the default limit
+# (5 starts / 10s) applied, and RestartSec=15 spaces restarts 15s apart, so
+# the limit could never be reached -- a worker could crash-loop forever and
+# timestd-alert@ would never fire.  600s/10 makes "gave up" reachable again.
+StartLimitIntervalSec=600
+StartLimitBurst=10
 
 [Service]
 Type=simple
@@ -50,8 +59,9 @@ RestartSec=15
 # simultaneously and saturate CPU during IRI2020 initialization
 RestartSteps=3
 RestartMaxDelaySec=60
-StartLimitIntervalSec=600
-StartLimitBurst=10
+# StartLimitIntervalSec/StartLimitBurst are NOT here -- they are [Unit] keys.
+# systemd ignores them in [Service] (silently, bar one line in
+# systemd-analyze verify).  See the top of this file.
 
 # --- Resource limits ---
 # Each worker uses ~400-700 MB; cap at 1.2 GB to prevent runaway growth

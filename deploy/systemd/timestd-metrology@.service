@@ -5,6 +5,12 @@ After=timestd-core-recorder.service
 Wants=timestd-core-recorder.service
 # Isolate failures: one channel crashing doesn't affect others
 PartOf=timestd-metrology.target
+# Restart rate limit (see the Resilience block in [Service] for the backoff
+# schedule).  These MUST be in [Unit] -- systemd ignores them in [Service],
+# which is where they sat until 2026-08-07, so all 9 metrology workers ran
+# with no start-rate limiting at all.
+StartLimitIntervalSec=600
+StartLimitBurst=10
 
 [Service]
 Type=simple
@@ -40,8 +46,10 @@ RestartSec=15
 # simultaneously and saturate CPU during IRI2020 initialization
 RestartSteps=3
 RestartMaxDelaySec=60
-StartLimitIntervalSec=600
-StartLimitBurst=10
+# NOTE: StartLimitIntervalSec/StartLimitBurst live in [Unit], not here --
+# systemd parses them per-unit, not per-service, and silently ignores them
+# in [Service] ("Unknown key ... ignoring", visible only in
+# systemd-analyze verify).  They are set at the top of this file.
 
 # --- Resource limits ---
 # Each worker uses ~400-700 MB; cap at 1.2 GB to prevent runaway growth
