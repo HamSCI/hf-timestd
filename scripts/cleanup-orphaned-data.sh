@@ -39,6 +39,20 @@ if ! command -v lsof >/dev/null 2>&1; then
     echo "Install it (apt install lsof) and re-run."
     exit 1
 fi
+# Installing lsof is not enough: unprivileged, it cannot see file handles held
+# by OTHER users, and every service here runs as its own user (timestd,
+# magrec, ...).  Run as a normal operator the check returns 0 open files while
+# a service is actively writing -- measured on B4 2026-08-07: 0 as the login
+# user, 2 as root, for the same directory.  That is the same fail-open the
+# lsof check above guards against, so require the privilege that makes the
+# answer meaningful.
+if [ "$(id -u)" -ne 0 ]; then
+    echo "❌ ERROR: must run as root."
+    echo "Unprivileged, lsof cannot see other users' open files, so the safety"
+    echo "check would report 0 even while a service is writing to $ORPHANED_DIR."
+    echo "Re-run with sudo."
+    exit 1
+fi
 OPEN_FILES=$(lsof +D "$ORPHANED_DIR" 2>/dev/null | wc -l)
 if [ "$OPEN_FILES" -gt 0 ]; then
     echo "❌ ERROR: $OPEN_FILES files are currently open in $ORPHANED_DIR"
