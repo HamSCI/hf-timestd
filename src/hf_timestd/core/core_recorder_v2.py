@@ -3524,11 +3524,105 @@ class CoreRecorderV2:
                         # the T6 path — and even here only at the
                         # facade boundary, never feeding back into
                         # the anchor.
+                        # Capture the wall clock ONCE, so the value we
+                        # log is exactly the value chrony receives.
+                        _push_wall = time.time()
+                        # ---- hf-timestd#7 defect 1 ----
+                        # A refclock sample must be a SIMULTANEOUS pair:
+                        # "when the host clock read system_time, true time
+                        # was reference_time".  reference_time describes the
+                        # PPS edge, but system_time used to be read here, at
+                        # push -- and the boxcar MF cannot detect an edge
+                        # until it holds +-N = +-0.5 s around the candidate
+                        # (idx = arange(N, len(buf) - N)).  So the pair was
+                        # ~465 ms apart and chrony read that structural
+                        # detection latency as a half-second clock error,
+                        # marking HPPS falseticker at ~-545 ms with a 55 us
+                        # bound -- precise, repeatable, and wrong.  Measured
+                        # on AC0G-B4 2026-08-08: +546 ms before, +28 ms after.
+                        #
+                        # The RTP counter is GPSDO-locked, so the interval
+                        # between the edge and the newest ingested sample is
+                        # exact arithmetic.  Back it off the push wall clock
+                        # to recover what the host clock read AT the edge.
+                        # No new time source; nothing feeds back into the
+                        # anchor.
+                        #
+                        # Residual (not addressed here): network + radiod
+                        # buffering latency between a sample's true time and
+                        # its arrival here, ~one batch (20 ms at 96 kHz).
+                        # The structural half-second is the dominant term
+                        # and is removed exactly.
+                        _sys_at_edge = _push_wall
+                        _pair_fallback = None
+                        try:
+                            _rtp_buf = getattr(
+                                self._t6_calibrator, '_rtp_buf', None
+                            )
+                            _sr = int(self._t6_calibrator.sample_rate)
+                            if _rtp_buf is None or not len(_rtp_buf) or not _sr:
+                                _pair_fallback = "no rtp buffer"
+                            else:
+                                _delta = (
+                                    int(_rtp_buf[-1]) - int(last_edge_rtp)
+                                ) & 0xFFFFFFFF
+                                # Sanity bound: the structural lag is ~N
+                                # samples.  Past a few seconds the counter is
+                                # not what we think -- fall back rather than
+                                # publish nonsense.
+                                if 0 <= _delta <= 5 * _sr:
+                                    _sys_at_edge = _push_wall - _delta / _sr
+                                else:
+                                    _pair_fallback = (
+                                        "delta %d out of range" % _delta
+                                    )
+                        except Exception as _e:
+                            _pair_fallback = "%s: %s" % (type(_e).__name__, _e)
+
+                        # Falling back means system_time is read at push
+                        # again -- the ~0.5 s defect returns, silently, and
+                        # chrony would only reveal it as a falseticker much
+                        # later.  Say so.  Rate-limited to 1 / 5 min.
+                        if _pair_fallback is not None:
+                            _now_m = time.monotonic()
+                            if (_now_m - getattr(
+                                    self, '_t6_pair_fallback_last_warn', 0.0)
+                                    ) > 300.0:
+                                self._t6_pair_fallback_last_warn = _now_m
+                                logger.warning(
+                                    "T6 SHM pair: could not recover the host "
+                                    "clock at the edge (%s) -- falling back "
+                                    "to push-time system_time, which "
+                                    "re-introduces the MF detection latency "
+                                    "(~0.5 s) as an apparent clock offset. "
+                                    "See hf-timestd#7.",
+                                    _pair_fallback,
+                                )
+                        # ---- end fix ----
                         self._t6_shm.update(
                             reference_time=ref_time_ns / 1e9,
-                            system_time=time.time(),
+                            system_time=_sys_at_edge,
                             precision=-14,
                         )
+                        # Structural health signal.  push_lag is the MF's
+                        # detection latency (~N/sample_rate, ~455 ms at
+                        # 96 kHz); drift means the buffering changed.
+                        # offset_to_chrony is what chrony now receives, and
+                        # is the instrument for the residual chain-delay
+                        # error (hf-timestd#7 defect 2).  1 line / 5 min.
+                        _now_m = time.monotonic()
+                        if (_now_m - getattr(
+                                self, '_t6_seam_last_log', 0.0)) > 300.0:
+                            self._t6_seam_last_log = _now_m
+                            logger.info(
+                                "T6 SHM pair: push_lag=%.1f ms "
+                                "offset_to_chrony=%.3f ms "
+                                "chain_delay=%d ns residual=%d ns",
+                                (_push_wall - pps_firing_utc_ns / 1e9) * 1e3,
+                                (ref_time_ns / 1e9 - _sys_at_edge) * 1e3,
+                                int(effective_chain_delay),
+                                int(self._t6_last_local_minus_source_ns),
+                            )
                         self._t6_last_pushed_rtp = last_edge_rtp
                         self._t6_shm_push_count += 1
                         self._t6_shm_last_push_wall = time.monotonic()
