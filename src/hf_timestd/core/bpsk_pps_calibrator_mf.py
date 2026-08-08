@@ -368,6 +368,63 @@ class BpskPpsCalibratorMF:
         s = iq_samples.astype(np.complex64)
         batch_size = len(s)
 
+        # ---- #7: batch-labelling audit ----
+        # Below, every sample is labelled
+        #     rtp_batch = arange(batch_size) + rtp_timestamp
+        # which ASSUMES each batch is contiguous with the previous one and
+        # that rtp_timestamp names its first sample.  Every downstream
+        # timestamp -- the MF peak, chain_delay, the chrony SHM reference
+        # time -- inherits that assumption.  Measure it instead: the
+        # expected first-sample RTP is (previous declared + previous
+        # length).  A non-zero discrepancy is a genuine stream gap or a
+        # labelling error, and cumulative_drift is the quantity that would
+        # show up downstream as a chain-delay step.
+        #
+        # Motivation (AC0G-B4 2026-08-08): captured MF dumps show batches
+        # arriving at 1740/1800 samples rather than the nominal 1920, and
+        # 1200 RTP discontinuities of -59/+61 samples per 120 s -- the two
+        # batch sizes differ by exactly 60.  Meanwhile the calibrator
+        # adopted a chain-delay step of exactly 7680 samples (80.000 ms =
+        # 4 radiod blocks).  This audit tests whether the labelling drifts.
+        try:
+            _decl = int(rtp_timestamp) & 0xFFFFFFFF
+            _exp = getattr(self, '_lbl_expected_rtp', None)
+            _sizes = getattr(self, '_lbl_sizes', None)
+            if _sizes is None:
+                _sizes = self._lbl_sizes = {}
+            _sizes[batch_size] = _sizes.get(batch_size, 0) + 1
+            if _exp is not None:
+                _d = (_decl - _exp) & 0xFFFFFFFF
+                if _d >= (1 << 31):
+                    _d -= (1 << 32)
+                self._lbl_batches = getattr(self, '_lbl_batches', 0) + 1
+                _hist = getattr(self, '_lbl_hist', None)
+                if _hist is None:
+                    _hist = self._lbl_hist = {}
+                if _d:
+                    self._lbl_mismatch = getattr(self, '_lbl_mismatch', 0) + 1
+                    self._lbl_drift = getattr(self, '_lbl_drift', 0) + _d
+                    _hist[_d] = _hist.get(_d, 0) + 1
+                _now = time.monotonic()
+                if (_now - getattr(self, '_lbl_last_log', 0.0)) > 60.0:
+                    self._lbl_last_log = _now
+                    _drift = getattr(self, '_lbl_drift', 0)
+                    _mm = getattr(self, '_lbl_mismatch', 0)
+                    _nb = max(self._lbl_batches, 1)
+                    logger.warning(
+                        "T6 LABEL AUDIT: batches=%d mismatched=%d (%.2f%%) "
+                        "cumulative_drift=%+d samples (%+.3f ms) | "
+                        "discrepancies=%s | batch_sizes=%s",
+                        self._lbl_batches, _mm, 100.0 * _mm / _nb,
+                        _drift, _drift / self.sample_rate * 1e3,
+                        sorted(_hist.items(), key=lambda kv: -kv[1])[:5],
+                        sorted(_sizes.items(), key=lambda kv: -kv[1])[:5],
+                    )
+            self._lbl_expected_rtp = (_decl + batch_size) & 0xFFFFFFFF
+        except Exception:
+            pass
+        # ---- end batch-labelling audit ----
+
         if self._alpha is None:
             dt = batch_size / self.sample_rate
             self._alpha = float(
