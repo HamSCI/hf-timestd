@@ -3149,6 +3149,18 @@ class CoreRecorderV2:
                         persisted_effective_chain_delay_ns=persisted.effective_chain_delay_ns,
                         sample_rate=sr_local,
                     )
+                    # #7 defect 2 instrumentation: which path resolved the
+                    # ambiguity, and from what.  This path REPLAYS a stored
+                    # value -- compute_disambiguation_ns returns the shift
+                    # that makes raw equal the persisted effective to within
+                    # a sample, so a wrong value stored once is reproduced
+                    # verbatim on every subsequent start.
+                    self._t6_disambig_path = "persisted"
+                    self._t6_disambig_detail = (
+                        "persisted_effective=%d ns saved_at=%.0f"
+                        % (persisted.effective_chain_delay_ns,
+                           persisted.saved_at_unix)
+                    )
                     age_s = time.time() - persisted.saved_at_unix
                     # Restore the hf-timestd-native anchor from the v2
                     # store if present.  When the file is v1 (no
@@ -3235,10 +3247,46 @@ class CoreRecorderV2:
                     # T5 (LB-1421 NMEA over USB) — direct GPS reference,
                     # no chrony detour.  Falls through to T4 if T5 isn't
                     # wired or the reading is unavailable.
+                    _dpath = "t5-lb1421"
                     if not self._t6_disambiguate_via_t5_lb1421(result):
                         self._t6_disambiguate_via_external_reference(result)
+                        _dpath = "external-ref"
+                    self._t6_disambig_path = _dpath
+                    self._t6_disambig_detail = ""
                 # Apply disambiguation (set above either way) and lock in.
                 effective = result.chain_delay_ns + self._t6_disambiguation_ns
+                # ---- #7 defect 2 instrumentation ----
+                # Fires only at initial accept, so it is not a hot path.
+                # The question this answers: raw is measured to ~80 ns, yet
+                # pps_firing_utc lands 80 ms off an integer second on every
+                # edge.  A GPS PPS fires ON the second, so `effective` is
+                # wrong by that residual -- this shows which path chose it
+                # and from what input.  Note neither path constrains the
+                # shift to a whole wrap period; both can land anywhere.
+                try:
+                    _sr_i = int(self._t6_calibrator.sample_rate)
+                    logger.warning(
+                        "T6 DISAMBIG: path=%s raw=%d ns (%.6f ms) "
+                        "disambig=%d ns (%.6f ms) effective=%d ns "
+                        "(%.6f ms) | shift/wrap=%.4f shift/sample=%.2f | %s",
+                        getattr(self, '_t6_disambig_path', 'fallthrough'),
+                        result.chain_delay_ns,
+                        result.chain_delay_ns / 1e6,
+                        self._t6_disambiguation_ns,
+                        self._t6_disambiguation_ns / 1e6,
+                        effective,
+                        effective / 1e6,
+                        # A legitimate wrap resolution is a whole number of
+                        # template periods (half-second for the MF).  A
+                        # non-integer here means the shift is not a wrap
+                        # correction at all.
+                        self._t6_disambiguation_ns / 500_000_000.0,
+                        self._t6_disambiguation_ns * _sr_i / 1e9,
+                        getattr(self, '_t6_disambig_detail', ''),
+                    )
+                except Exception:
+                    pass
+                # ---- end instrumentation ----
                 # Layer B physical-plausibility guard at initial accept —
                 # the last unguarded entry point into the lock.  When no
                 # usable reference tier is available (T5 unwired, T4
