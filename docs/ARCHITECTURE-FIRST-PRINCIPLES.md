@@ -61,6 +61,20 @@ RX-888 front-end → ADC), and that is exactly what §8 calibrates and
 subtracts.  Once §8 is locked, the recovered PPS edge is good to
 ns-class.
 
+**Under the T6 anchor inversion**
+(`docs/design/T6_ANCHOR_INVERSION_DESIGN.md`), the analog-path
+definition above still describes the physical latency, but it is no
+longer what gets *fitted and subtracted* to produce the anchor.  When
+T6 is AUTHORITATIVE, `anchor_utc_ns = named_integer_second +
+delay_budget_ns`, where `delay_budget_ns` is a bounded (±1 ms hard
+validation bound), configured constant — not a per-lock fitted
+quantity.  Measured `chain_delay` (the fine-stage edge phase within
+the second) survives only as a reported diagnostic for cross-checking
+the delay budget; it is never applied as a correction.  Every
+historical `chain_delay` fit (32–106 ms) violated the microsecond-class
+analog-path definition above by three to four orders of magnitude —
+exactly the failure mode the inversion removes.
+
 **T5 sits below T6 because the same GPSDO's PPS, delivered over USB
 (LBE-1421 USB-NMEA, possibly USB-PPS on the same channel), is
 software-mediated.**  USB scheduling jitter floors the deliverable
