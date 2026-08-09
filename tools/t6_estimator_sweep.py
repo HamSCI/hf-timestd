@@ -78,7 +78,18 @@ def early_late_offset(avg_I, coarse, gate_ms, sample_rate):
         frac = 0.5 * (y0 - y2) / denom if denom != 0 else 0.0
     else:
         frac = 0.0
-    return float((coarse + span[k] + frac) % p)
+    # `late` = indices [c, c+g) and `early` = indices [c-g, c) (c = coarse
+    # + span[k]) share their boundary between discrete indices c-1 and c,
+    # i.e. at continuous position c-0.5 -- so a true edge sitting exactly
+    # on that boundary (where the gates are maximally unbalanced) reports
+    # here as c, half a sample high. Correct by -0.5 so this cross-check
+    # lands in the same continuous coordinate as the fine stage's own
+    # zero-crossing (linear-fit x0 over integer sample indices). Verified
+    # against BpskEdgeFineStage on synthetic data: before this correction
+    # the discrepancy was a deterministic +0.5 samples (~5.2 us @ 96 kHz),
+    # constant across edge positions and noise-independent; see the T6
+    # Task 7 acceptance-gate report.
+    return float((coarse + span[k] + frac - 0.5) % p)
 
 
 def _fold_block_I(iq_block, sample_rate, fold_seconds):

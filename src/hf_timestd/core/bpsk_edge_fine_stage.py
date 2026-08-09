@@ -83,39 +83,66 @@ class BpskEdgeFineStage:
         n = len(iq_samples)
         if n == 0:
             return None
-        decl = int(rtp_timestamp) & 0xFFFFFFFF
-        off = (decl - (self._cont & 0xFFFFFFFF)) & 0xFFFFFFFF
-        if self._reg_base is None:
-            self._reg_base = off
-        rel = _wrapped_signed(off - self._reg_base)
-        if abs(rel) > STREAM_RESTART_LIMIT_SEC * self.sample_rate:
-            logger.warning(
-                "T6 fine stage: declared RTP jumped %+d samples vs "
-                "continuity — treating as stream restart, resetting fold.",
-                rel,
-            )
-            self.reset()
-            self._reg_base = decl
-            rel = 0
-        self._reg_rel.append(rel)
+        decl0 = int(rtp_timestamp) & 0xFFFFFFFF
+        block_len = self.fold_seconds * self.sample_rate
+        consumed = 0
+        result: Optional[FineEdgeEstimate] = None
+        while consumed < n:
+            # Declared RTP for the start of this sub-chunk: the batch's
+            # declared timestamp advanced by however many of its
+            # samples were already consumed into a prior block this
+            # call (only >0 when this batch itself straddles a fold
+            # boundary).
+            decl = (decl0 + consumed) & 0xFFFFFFFF
+            off = (decl - (self._cont & 0xFFFFFFFF)) & 0xFFFFFFFF
+            if self._reg_base is None:
+                self._reg_base = off
+            rel = _wrapped_signed(off - self._reg_base)
+            if abs(rel) > STREAM_RESTART_LIMIT_SEC * self.sample_rate:
+                logger.warning(
+                    "T6 fine stage: declared RTP jumped %+d samples vs "
+                    "continuity — treating as stream restart, resetting fold.",
+                    rel,
+                )
+                self.reset()
+                self._reg_base = decl
+                rel = 0
+            self._reg_rel.append(rel)
 
-        idx = (self._cont + np.arange(n)) % self.sample_rate
-        sec = (self._cont + np.arange(n)) // self.sample_rate
-        sign = 1.0 - 2.0 * (sec & 1).astype(np.float64)
-        np.add.at(self._acc, idx, iq_samples.astype(np.complex128) * sign)
-        np.add.at(self._cnt, idx, 1)
-        self._cont += n
+            # Never cross the fold boundary within a single accumulation
+            # step: take at most however many samples remain in the
+            # current block, so `_cont` is exactly 0 at every block
+            # start -- the invariant the sign-alternation formula below
+            # assumes. A batch that spans one or more boundaries is
+            # handled by looping back around with the remainder feeding
+            # the freshly-reset block (previously, the whole batch was
+            # consumed even when it overshot the boundary, so every
+            # block after the first started phase-shifted from the true
+            # per-second boundary and its coherent average destructively
+            # cancelled -- see the T6 Task 7 acceptance-gate report).
+            take = min(n - consumed, block_len - self._cont)
+            chunk = iq_samples[consumed:consumed + take]
 
-        if self._cont >= self.fold_seconds * self.sample_rate:
-            est = self._finish_block()
-            # Save last_registration before reset clears it
-            saved_registration = self._last_registration
-            # Registration is re-derived per block: reset() clears
-            # _reg_base, and the next batch's declared RTP re-registers it.
-            self.reset()
-            self._last_registration = saved_registration
-            return est
-        return None
+            idx = (self._cont + np.arange(take)) % self.sample_rate
+            sec = (self._cont + np.arange(take)) // self.sample_rate
+            sign = 1.0 - 2.0 * (sec & 1).astype(np.float64)
+            np.add.at(self._acc, idx, chunk.astype(np.complex128) * sign)
+            np.add.at(self._cnt, idx, 1)
+            self._cont += take
+            consumed += take
+
+            if self._cont >= block_len:
+                est = self._finish_block()
+                # Save last_registration before reset clears it
+                saved_registration = self._last_registration
+                # Registration is re-derived per block: reset() clears
+                # _reg_base, and the next chunk's declared RTP
+                # re-registers it.
+                self.reset()
+                self._last_registration = saved_registration
+                if est is not None:
+                    result = est
+        return result
 
     def _registration_for_test(self) -> Optional[int]:
         # Return the current registration if we're accumulating,

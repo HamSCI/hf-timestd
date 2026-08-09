@@ -216,3 +216,35 @@ class TestLocalisation:
         err_us = abs(((ests[0].edge_offset_samples - edge + SR / 2) % SR
                       - SR / 2)) / SR * 1e6
         assert err_us < 1.0
+
+
+class TestFoldAcrossNonDividingBatches:
+    """Regression for the flush-boundary overshoot defect found by the
+    T6 Task 7 offline acceptance gate on t6-rawiq.bin.
+
+    1740 does not evenly divide fold_seconds*SR (8*96000=768000;
+    768000 % 1740 == 660): a flush used to consume the *whole*
+    triggering batch even when that overshot the boundary, so `_cont`
+    was never exactly 0 at the start of any block after the first.
+    Since sign-alternation is `(_cont + arange(n)) // sample_rate`
+    (relative to the last reset, not an absolute-second reference),
+    every subsequent block started phase-shifted from the true
+    per-second boundary and its coherent average destructively
+    cancelled -- silently: `_compute_estimate` just returned None (no
+    zero crossing found), with no counter or log distinguishing that
+    from "still accumulating". Fixed by splitting any batch that
+    crosses the boundary in `process_samples`, so `_cont` is always
+    exactly 0 at a block start.
+    """
+
+    def test_batch_1740_does_not_divide_fold_survives_three_consecutive_blocks(self):
+        edge = 43_181.4
+        iq = make_bpsk(SR, 24, edge, noise_rms=0.05)
+        stage = BpskEdgeFineStage(SR, fold_seconds=8)
+        stage.set_coarse_offset_samples(edge + 40)
+        ests = feed_batches(stage, iq, rtp0=555_555, batch=1740)
+        assert len(ests) == 3
+        assert stage.blocks_discarded == 0
+        offs = np.array([e.edge_offset_samples for e in ests])
+        spread_us = (offs.max() - offs.min()) / SR * 1e6
+        assert spread_us < 1.0
