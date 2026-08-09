@@ -145,7 +145,76 @@ class BpskEdgeFineStage:
         self._last_registration = registration
         return self._compute_estimate(avg, registration)
 
+    # Linear-fit band: samples with |I| below this fraction of the
+    # plateau participate in the zero-crossing fit (spec §3: ∓40%).
+    FIT_BAND_FRACTION = 0.4
+
     def _compute_estimate(self, avg: np.ndarray,
                           registration: int) -> Optional[FineEdgeEstimate]:
-        # Task 2 implements localisation.
-        return None
+        if self._coarse_offset is None:
+            return None
+        p = self.sample_rate
+        # Derotate: squaring removes the BPSK sign, leaving 2× carrier phase.
+        phi = 0.5 * float(np.angle(np.mean(avg.astype(np.complex128) ** 2)))
+        I = np.real(avg * np.exp(-1j * phi))
+
+        c = int(round(self._coarse_offset)) % p
+        W = max(8, int(self.search_window_ms * 1e-3 * p))
+        seg = np.take(I, np.arange(c - W, c + W + 1) % p)
+
+        outer = np.concatenate([seg[:W // 2], seg[-(W // 2):]])
+        A = float(np.median(np.abs(outer)))
+        if A <= 0.0:
+            return None
+
+        # Locate the sign-change candidate nearest the coarse offset
+        # (local index W). Polarity is normalised LOCALLY at that
+        # candidate rather than from the window's far extremes: when the
+        # true edge sits close to the fold-domain seam (pos=0, where the
+        # per-second-periodic derotated envelope has its own built-in
+        # wrap discontinuity — inherent to folding, not a signal defect),
+        # a search window wide enough to cover the coarse-offset
+        # uncertainty can contain both features. Using the window
+        # extremes for polarity picks up whichever side of the *seam*
+        # they happen to land on and can flip the true edge out of
+        # consideration; checking locally at the candidate avoids that.
+        changes = np.nonzero(np.diff(np.sign(seg)) != 0)[0]
+        if len(changes) == 0:
+            return None
+        k = int(changes[np.argmin(np.abs(changes - W))])
+        if seg[k] > seg[k + 1]:
+            # Falling locally: normalise so the fit sees a rising edge.
+            seg = -seg
+
+        band = self.FIT_BAND_FRACTION * A
+        lo, hi = k, k + 1
+        while lo > 0 and abs(seg[lo - 1]) < band:
+            lo -= 1
+        while hi < len(seg) - 1 and abs(seg[hi + 1]) < band:
+            hi += 1
+        if hi - lo < 1:
+            return None
+        xs = np.arange(lo, hi + 1, dtype=np.float64)
+        ys = seg[lo:hi + 1].astype(np.float64)
+        m, b = np.polyfit(xs, ys, 1)
+        if m <= 0.0:
+            return None
+        x0 = -b / m
+        fit_rms = float(np.sqrt(np.mean((ys - (m * xs + b)) ** 2)) / A)
+
+        edge_offset = (c - W + x0) % p
+        # Continuity position of the last edge inside this block, then
+        # map to RTP via the median registration.
+        k_last = (self._cont // p) - 1
+        c_edge = k_last * p + edge_offset
+        edge_rtp_float = registration + c_edge
+        edge_rtp = int(round(edge_rtp_float))
+        subsample = float(edge_rtp_float - edge_rtp)
+        return FineEdgeEstimate(
+            edge_offset_samples=float(edge_offset),
+            edge_rtp=edge_rtp & 0xFFFFFFFF,
+            edge_subsample=subsample,
+            n_seconds_folded=self.fold_seconds,
+            plateau_amplitude=A,
+            fit_rms=fit_rms,
+        )
