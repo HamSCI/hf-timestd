@@ -2474,7 +2474,23 @@ class CoreRecorderV2:
             # Invalidate so the legacy cascade re-captures via T5 —
             # loud fallback, never a silently stale T6 anchor.
             self._t6_native_anchor = None
-        # DEGRADED: hold the last good anchor (GPSDO coasting).
+            # Also reopen the legacy cascade's own gate.  The T5/T4
+            # cascade in _t6_on_samples only re-runs disambiguation
+            # when _t6_last_chain_delay_ns is None (first-lock branch);
+            # an authority-only unlock (e.g. DEGRADED dwell timeout
+            # while the MF itself is still locked) leaves that gate
+            # closed forever otherwise, and the HPPS/chrony feed goes
+            # dead until the fine stage independently re-acquires.
+            # Harmless double-set on the stuck-recovery path, which
+            # already clears these itself.
+            self._t6_last_chain_delay_ns = None
+            self._t6_disambiguation_ns = 0
+            recent_raw = getattr(self, '_t6_recent_raw', None)
+            if recent_raw is not None:
+                recent_raw.clear()
+        # DEGRADED: hold the last good anchor (GPSDO coasting) — the
+        # legacy cascade gate stays closed; coasting must not
+        # re-trigger a fresh disambiguation walk.
 
     def _t6_disambiguate_via_t5_lb1421(self, result) -> bool:
         """Disambiguate against T5 (LB-1421 GPSDO NMEA over USB-CDC).
@@ -3142,7 +3158,17 @@ class CoreRecorderV2:
                     fine_stage.set_coarse_offset_samples(coarse)
                 fine = fine_stage.process_samples(
                     samples, quality.last_rtp_timestamp)
-                if fine is not None and self._t6_authority is not None:
+                # Gate on a live coarse offset (Finding 3): after an MF
+                # reset/unlock, _chain_delay_samples goes None but the
+                # fine stage's own internal _coarse_offset is not
+                # cleared by reset() — consulting the authority against
+                # a stale-window estimate here would let it reach
+                # AUTHORITATIVE with the fine_coarse invariant inert
+                # (coarse=None short-circuits that check instead of
+                # enforcing it).  Skip the authority call entirely
+                # until a fresh locked coarse value is available again.
+                if (fine is not None and coarse is not None
+                        and self._t6_authority is not None):
                     named = self._t6_name_integer_second(fine.edge_rtp)
                     decision = self._t6_authority.on_fine_estimate(
                         fine, coarse, named)
@@ -3452,6 +3478,25 @@ class CoreRecorderV2:
                             f"Resetting lock for re-disambiguation on next cycle."
                         )
                         effective_chain_delay = self._t6_last_chain_delay_ns
+                        # Propagate the unlock to the T6 authority exactly
+                        # as stuck-recovery does (Finding 2): without
+                        # this, the T5 cascade below re-derives the
+                        # legacy anchor via a fresh disambiguation walk
+                        # while the authority still holds AUTHORITATIVE
+                        # off the old fine-stage estimate, then the fine
+                        # stage silently re-installs its own anchor with
+                        # no state transition logged — the anchor (and
+                        # pps_firing_utc pushed to chrony) steps by the
+                        # full coarse chain delay twice with nothing
+                        # exposed.  Reset the fine stage too so it
+                        # re-acquires cleanly against the new operating
+                        # point instead of localising against a stale
+                        # fold window.
+                        if getattr(self, '_t6_authority', None) is not None:
+                            self._t6_apply_authority_decision(
+                                self._t6_authority.on_mf_unlock())
+                        if getattr(self, '_t6_fine_stage', None) is not None:
+                            self._t6_fine_stage.reset()
                         self._t6_last_chain_delay_ns = None
                         self._t6_disambiguation_ns = 0
                         self._t6_wrap_rejections = 0
