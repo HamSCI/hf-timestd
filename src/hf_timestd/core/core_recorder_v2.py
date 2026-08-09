@@ -2868,6 +2868,33 @@ class CoreRecorderV2:
                     return None
         return None
 
+    @staticmethod
+    def _t6_fine_settings(t6_cfg: dict) -> dict:
+        """Parse + validate the fine-stage/authority keys of
+        [timing.t6_pps] (spec: docs/design/T6_ANCHOR_INVERSION_DESIGN.md
+        §7).  Raises ValueError on a delay budget outside the ±1 ms
+        physical bound — a larger value is absorbing timestamp error,
+        not measuring a chain delay, and must refuse loudly."""
+        from hf_timestd.core.t6_anchor_authority import DELAY_BUDGET_BOUND_NS
+        s = {
+            'fine_stage_enabled': bool(t6_cfg.get('fine_stage_enabled', True)),
+            'fine_fold_seconds': int(t6_cfg.get('fine_fold_seconds', 30)),
+            'delay_budget_ns': int(t6_cfg.get('delay_budget_ns', 10_000)),
+            'edge_period_tolerance_ns': int(
+                t6_cfg.get('edge_period_tolerance_ns', 5_000)),
+            'fine_coarse_max_ms': float(t6_cfg.get('fine_coarse_max_ms', 5.0)),
+            'degraded_unlock_after_sec': float(
+                t6_cfg.get('degraded_unlock_after_sec', 600.0)),
+        }
+        if abs(s['delay_budget_ns']) > DELAY_BUDGET_BOUND_NS:
+            raise ValueError(
+                f"[timing.t6_pps].delay_budget_ns={s['delay_budget_ns']} "
+                f"exceeds the ±1 ms physical bound (analog path + channel-"
+                f"filter group delay is µs to sub-ms; see "
+                f"docs/design/T6_ANCHOR_INVERSION_DESIGN.md §5)"
+            )
+        return s
+
     def _register_t6_with_status_listener(self, channel_info) -> None:
         """Wire the T6 channel into ka9q-python's continuous STATUS
         listener so its ``gps_time`` / ``rtp_timesnap`` anchor is

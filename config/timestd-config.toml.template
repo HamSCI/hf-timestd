@@ -373,6 +373,16 @@ enabled = false
 #                                 # better up to the receiver / aliasing limit.
 #                                 # Omit (or None) to use the iq preset's ±5 kHz default.
 
+[timing.t6_pps]
+# --- T6 anchor inversion (docs/design/T6_ANCHOR_INVERSION_DESIGN.md) ---
+# fine_stage_enabled = true        # coherent zero-crossing fine stage + T6 anchor authority
+# fine_fold_seconds = 30           # coherent fold length K (seconds)
+# delay_budget_ns = 10000          # TS-1 mod delay ~10 µs; group-delay term 0 pending
+#                                  # fleet characterisation. HARD BOUND ±1 ms.
+# edge_period_tolerance_ns = 5000  # invariant: successive edges advance by exactly 1 s
+# fine_coarse_max_ms = 5           # invariant: |fine − MF apex| bound
+# degraded_unlock_after_sec = 600  # DEGRADED longer than this → UNLOCKED
+
 [storage]
 # Storage backend. SQLite is the SOLE backend as of v7.0 — the HDF5
 # backend was deleted in the Phase-4 migration (see
