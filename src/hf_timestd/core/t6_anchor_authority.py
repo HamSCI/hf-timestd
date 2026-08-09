@@ -12,6 +12,7 @@ never logs silently-consequential decisions itself, and it never
 consults a wall clock (the injected ``now`` measures DEGRADED dwell
 only).
 """
+
 from __future__ import annotations
 
 import time
@@ -42,11 +43,15 @@ class T6AnchorDecision:
 
 
 class T6AnchorAuthority:
-    def __init__(self, sample_rate_hz: int, delay_budget_ns: int,
-                 edge_period_tolerance_ns: int = 5_000,
-                 fine_coarse_max_ms: float = 5.0,
-                 degraded_unlock_after_sec: float = 600.0,
-                 now: Callable[[], float] = time.monotonic):
+    def __init__(
+        self,
+        sample_rate_hz: int,
+        delay_budget_ns: int,
+        edge_period_tolerance_ns: int = 5_000,
+        fine_coarse_max_ms: float = 5.0,
+        degraded_unlock_after_sec: float = 600.0,
+        now: Callable[[], float] = time.monotonic,
+    ):
         if abs(int(delay_budget_ns)) > DELAY_BUDGET_BOUND_NS:
             raise ValueError(
                 f"delay_budget_ns={delay_budget_ns} exceeds the ±1 ms "
@@ -75,42 +80,56 @@ class T6AnchorAuthority:
         p = self.sample_rate_hz
         return abs((a - b + p / 2) % p - p / 2)
 
-    def _check(self, est: FineEdgeEstimate,
-               coarse_offset_samples: Optional[float],
-               named_second_utc: Optional[int]) -> tuple:
+    def _check(
+        self,
+        est: FineEdgeEstimate,
+        coarse_offset_samples: Optional[float],
+        named_second_utc: Optional[int],
+    ) -> tuple:
         v = []
         if self._prev_offset is not None:
-            d_ns = (self._wrapped_distance_samples(
-                est.edge_offset_samples, self._prev_offset)
-                / self.sample_rate_hz * 1e9)
+            d_ns = (
+                self._wrapped_distance_samples(
+                    est.edge_offset_samples, self._prev_offset
+                )
+                / self.sample_rate_hz
+                * 1e9
+            )
             if d_ns > self.edge_period_tolerance_ns:
                 v.append("edge_period")
         if coarse_offset_samples is not None:
-            d_ms = (self._wrapped_distance_samples(
-                est.edge_offset_samples, coarse_offset_samples)
-                / self.sample_rate_hz * 1e3)
+            d_ms = (
+                self._wrapped_distance_samples(
+                    est.edge_offset_samples, coarse_offset_samples
+                )
+                / self.sample_rate_hz
+                * 1e3
+            )
             if d_ms > self.fine_coarse_max_ms:
                 v.append("fine_coarse")
         if named_second_utc is None:
             v.append("naming_unavailable")
         return tuple(v)
 
-    def _build_anchor(self, est: FineEdgeEstimate,
-                      named_second_utc: int) -> NativeAnchor:
+    def _build_anchor(
+        self, est: FineEdgeEstimate, named_second_utc: int
+    ) -> NativeAnchor:
         sub_ns = int(round(est.edge_subsample * 1e9 / self.sample_rate_hz))
         return NativeAnchor(
             anchor_rtp=int(est.edge_rtp) & 0xFFFFFFFF,
-            anchor_utc_ns=(named_second_utc * _BILLION
-                           + self.delay_budget_ns - sub_ns),
+            anchor_utc_ns=(named_second_utc * _BILLION + self.delay_budget_ns - sub_ns),
             sample_rate_hz=self.sample_rate_hz,
             chain_delay_ns=self.delay_budget_ns,
             captured_at_utc_ns=named_second_utc * _BILLION,
             captured_via_tier="T6",
         )
 
-    def on_fine_estimate(self, est: FineEdgeEstimate,
-                         coarse_offset_samples: Optional[float],
-                         named_second_utc: Optional[int]) -> T6AnchorDecision:
+    def on_fine_estimate(
+        self,
+        est: FineEdgeEstimate,
+        coarse_offset_samples: Optional[float],
+        named_second_utc: Optional[int],
+    ) -> T6AnchorDecision:
         prev = self._state
         violations = self._check(est, coarse_offset_samples, named_second_utc)
 
@@ -132,8 +151,7 @@ class T6AnchorAuthority:
         # the last good anchor (GPSDO lets us coast), start/continue dwell.
         if self._degraded_since is None:
             self._degraded_since = self._now()
-        if (self._now() - self._degraded_since
-                > self.degraded_unlock_after_sec):
+        if self._now() - self._degraded_since > self.degraded_unlock_after_sec:
             return self._unlock(prev, violations)
         self._state = T6AuthorityState.DEGRADED
         return T6AnchorDecision(self._state, prev, self._anchor, violations)
@@ -141,8 +159,7 @@ class T6AnchorAuthority:
     def on_mf_unlock(self) -> T6AnchorDecision:
         return self._unlock(self._state, ("mf_unlock",))
 
-    def _unlock(self, prev: T6AuthorityState,
-                violations: tuple) -> T6AnchorDecision:
+    def _unlock(self, prev: T6AuthorityState, violations: tuple) -> T6AnchorDecision:
         self._state = T6AuthorityState.UNLOCKED
         self._anchor = None
         self._prev_offset = None

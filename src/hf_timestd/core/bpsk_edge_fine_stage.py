@@ -15,6 +15,7 @@ edge.  A registration spread beyond REGISTRATION_SPREAD_LIMIT samples
 means a genuine stream gap inside the block — the block is discarded
 (counted in ``blocks_discarded``), never silently used.
 """
+
 from __future__ import annotations
 
 import logging
@@ -52,8 +53,9 @@ class FineEdgeEstimate:
 
 
 class BpskEdgeFineStage:
-    def __init__(self, sample_rate: int, fold_seconds: int = 30,
-                 search_window_ms: float = 6.0):
+    def __init__(
+        self, sample_rate: int, fold_seconds: int = 30, search_window_ms: float = 6.0
+    ):
         if sample_rate < 8000:
             raise ValueError(f"sample_rate must be ≥ 8000 Hz, got {sample_rate}")
         if fold_seconds < 1:
@@ -70,16 +72,17 @@ class BpskEdgeFineStage:
         p = self.sample_rate
         self._acc = np.zeros(p, dtype=np.complex128)
         self._cnt = np.zeros(p, dtype=np.int64)
-        self._cont = 0                      # samples received since reset
+        self._cont = 0  # samples received since reset
         self._reg_base: Optional[int] = None
-        self._reg_rel: list[int] = []       # per-batch (declared − cont) − reg_base
+        self._reg_rel: list[int] = []  # per-batch (declared − cont) − reg_base
         self._last_registration: Optional[int] = None
 
     def set_coarse_offset_samples(self, offset: float) -> None:
         self._coarse_offset = float(offset) % self.sample_rate
 
-    def process_samples(self, iq_samples: np.ndarray,
-                        rtp_timestamp: int) -> Optional[FineEdgeEstimate]:
+    def process_samples(
+        self, iq_samples: np.ndarray, rtp_timestamp: int
+    ) -> Optional[FineEdgeEstimate]:
         n = len(iq_samples)
         if n == 0:
             return None
@@ -121,7 +124,7 @@ class BpskEdgeFineStage:
             # per-second boundary and its coherent average destructively
             # cancelled -- see the T6 Task 7 acceptance-gate report).
             take = min(n - consumed, block_len - self._cont)
-            chunk = iq_samples[consumed:consumed + take]
+            chunk = iq_samples[consumed : consumed + take]
 
             idx = (self._cont + np.arange(take)) % self.sample_rate
             sec = (self._cont + np.arange(take)) // self.sample_rate
@@ -161,7 +164,8 @@ class BpskEdgeFineStage:
                 "T6 fine stage: registration spread %d samples exceeds "
                 "%d — stream gap inside fold block, block discarded "
                 "(total discarded: %d).",
-                int(rels.max() - rels.min()), REGISTRATION_SPREAD_LIMIT,
+                int(rels.max() - rels.min()),
+                REGISTRATION_SPREAD_LIMIT,
                 self.blocks_discarded,
             )
             return None
@@ -176,20 +180,21 @@ class BpskEdgeFineStage:
     # plateau participate in the zero-crossing fit (spec §3: ∓40%).
     FIT_BAND_FRACTION = 0.4
 
-    def _compute_estimate(self, avg: np.ndarray,
-                          registration: int) -> Optional[FineEdgeEstimate]:
+    def _compute_estimate(
+        self, avg: np.ndarray, registration: int
+    ) -> Optional[FineEdgeEstimate]:
         if self._coarse_offset is None:
             return None
         p = self.sample_rate
         # Derotate: squaring removes the BPSK sign, leaving 2× carrier phase.
         phi = 0.5 * float(np.angle(np.mean(avg.astype(np.complex128) ** 2)))
-        I = np.real(avg * np.exp(-1j * phi))
+        in_phase = np.real(avg * np.exp(-1j * phi))
 
         c = int(round(self._coarse_offset)) % p
         W = max(8, int(self.search_window_ms * 1e-3 * p))
-        seg = np.take(I, np.arange(c - W, c + W + 1) % p)
+        seg = np.take(in_phase, np.arange(c - W, c + W + 1) % p)
 
-        outer = np.concatenate([seg[:W // 2], seg[-(W // 2):]])
+        outer = np.concatenate([seg[: W // 2], seg[-(W // 2) :]])
         A = float(np.median(np.abs(outer)))
         if A <= 0.0:
             return None
@@ -222,7 +227,7 @@ class BpskEdgeFineStage:
         if hi - lo < 1:
             return None
         xs = np.arange(lo, hi + 1, dtype=np.float64)
-        ys = seg[lo:hi + 1].astype(np.float64)
+        ys = seg[lo : hi + 1].astype(np.float64)
         m, b = np.polyfit(xs, ys, 1)
         if m <= 0.0:
             return None
