@@ -421,16 +421,21 @@ class CoreRecorderV2:
         # re-read from self._t6_config after that attribute is assigned
         # just below.
         self._t6_chain_delay_calib_s = 0.0
-        # Cross-restart disambiguation persistence.  Each restart used
-        # to re-run the T4 chrony comparison from scratch, which picked
-        # a different disambiguation every time (chrony slews
-        # continuously).  Loading a fresh persisted *effective*
-        # chain_delay lets us re-derive disambiguation from an invariant
-        # — the physical RF path — instead of from chrony's transient
-        # state.  See bpsk_chain_delay_store.py for the rationale and
+        # Cross-restart disambiguation persistence — diff-detector
+        # sidecar only.  The MF path used to persist here too (each
+        # restart re-ran the T4 chrony comparison from scratch, which
+        # picked a different disambiguation every time); see
+        # bpsk_chain_delay_store.py for that rationale and
         # docs/HF-PPS-CHRONY-TUNING.md §5 for the original symptom.
+        #
+        # Chain-delay persistence is retired on the T6 path (spec §6):
+        # under the anchor inversion no ms-scale fitted state exists to
+        # persist — the fine stage + authority re-derive the anchor
+        # from scratch in ~fine_fold_seconds after every re-lock.  A
+        # leftover store file from a pre-inversion build is ignored
+        # (logged once at INFO, not silently — see _t6_on_samples).
         from .bpsk_chain_delay_store import ChainDelayStore
-        self._t6_mf_chain_delay_store = ChainDelayStore("MF")
+        self._t6_mf_chain_delay_store = None
         self._t6_diff_chain_delay_store = ChainDelayStore("diff")
         # Counters for save-cadence debouncing (write once per
         # PERSIST_EVERY_N_EDGES accepted edges, not on every cycle).
@@ -621,6 +626,43 @@ class CoreRecorderV2:
                     )
                     logger.info(f"T6 BPSK PPS calibrator (matched-filter) initialized: "
                                 f"freq={freq_hz/1e6:.6f} MHz, sr={sr}")
+
+                    # ── T6 anchor inversion (spec: docs/design/
+                    # T6_ANCHOR_INVERSION_DESIGN.md) ────────────────────
+                    # Fine-stage sub-sample edge localisation + the
+                    # anchor-authority state machine.  Rides only the
+                    # matched-filter calibrator path — the legacy
+                    # per-sample-Δφ calibrator has no fold buffer to
+                    # localise against.
+                    fine_cfg = self._t6_fine_settings(self._t6_config)
+                    self._t6_fine_stage = None
+                    self._t6_authority = None
+                    self._t6_authority_last_decision = None
+                    if fine_cfg['fine_stage_enabled']:
+                        from hf_timestd.core.bpsk_edge_fine_stage import (
+                            BpskEdgeFineStage,
+                        )
+                        from hf_timestd.core.t6_anchor_authority import (
+                            T6AnchorAuthority,
+                        )
+                        self._t6_fine_stage = BpskEdgeFineStage(
+                            sr, fold_seconds=fine_cfg['fine_fold_seconds'])
+                        self._t6_authority = T6AnchorAuthority(
+                            sr,
+                            fine_cfg['delay_budget_ns'],
+                            edge_period_tolerance_ns=fine_cfg[
+                                'edge_period_tolerance_ns'],
+                            fine_coarse_max_ms=fine_cfg['fine_coarse_max_ms'],
+                            degraded_unlock_after_sec=fine_cfg[
+                                'degraded_unlock_after_sec'],
+                        )
+                        logger.info(
+                            "T6 anchor inversion armed: fold=%ds "
+                            "delay_budget=%d ns (spec: docs/design/"
+                            "T6_ANCHOR_INVERSION_DESIGN.md)",
+                            fine_cfg['fine_fold_seconds'],
+                            fine_cfg['delay_budget_ns'],
+                        )
                 else:
                     from hf_timestd.core.bpsk_pps_calibrator import BpskPpsCalibrator
                     self._t6_calibrator = BpskPpsCalibrator(
@@ -2384,6 +2426,56 @@ class CoreRecorderV2:
         except Exception:
             return None
 
+    def _t6_name_integer_second(self, edge_rtp: int) -> Optional[int]:
+        """Name the integer UTC second of a fine-stage edge (spec §2).
+
+        The coarse cascade (T5 NMEA preferred, radiod-pair wall estimate
+        as fallback) only NAMES the second — it needs ±0.5 s accuracy
+        and its noise cannot enter the sub-second value.  Residual
+        beyond ±0.4 s (margin inside the cell) → None (invariant 3)."""
+        try:
+            from ka9q.rtp_recorder import rtp_to_wallclock
+            wall = rtp_to_wallclock(
+                int(edge_rtp) & 0xFFFFFFFF, self._t6_channel_info)
+        except Exception:
+            return None
+        if wall is None:
+            return None
+        probe = getattr(self, '_lb1421_probe', None)
+        reading = probe.get_latest() if probe is not None else None
+        if reading is not None:
+            named = (int(reading.pps_utc_sec)
+                     + int(round(wall - reading.pps_utc_sec)))
+        else:
+            named = int(round(wall))
+        if abs(wall - named) > 0.4:
+            return None
+        return named
+
+    def _t6_apply_authority_decision(self, decision) -> None:
+        """Install/invalidate the T6 anchor per the authority decision.
+        Every state transition is loud (expose-don't-correct)."""
+        from hf_timestd.core.t6_anchor_authority import T6AuthorityState
+        prev = decision.previous_state
+        if decision.state is not prev:
+            logger.warning(
+                "T6 anchor authority: %s → %s%s",
+                prev.value, decision.state.value,
+                (f" (violations: {', '.join(decision.violations)})"
+                 if decision.violations else ""),
+            )
+        self._t6_authority_last_decision = decision
+        if decision.state is T6AuthorityState.AUTHORITATIVE:
+            self._t6_native_anchor = decision.anchor
+            if decision.state is not prev:
+                self._t6_rate_reset("native anchor captured via T6")
+        elif decision.state is T6AuthorityState.UNLOCKED and prev in (
+                T6AuthorityState.AUTHORITATIVE, T6AuthorityState.DEGRADED):
+            # Invalidate so the legacy cascade re-captures via T5 —
+            # loud fallback, never a silently stale T6 anchor.
+            self._t6_native_anchor = None
+        # DEGRADED: hold the last good anchor (GPSDO coasting).
+
     def _t6_disambiguate_via_t5_lb1421(self, result) -> bool:
         """Disambiguate against T5 (LB-1421 GPSDO NMEA over USB-CDC).
 
@@ -3035,6 +3127,33 @@ class CoreRecorderV2:
             samples, quality.last_rtp_timestamp
         )
 
+        # T6 anchor inversion (spec §2, §4): feed the fine stage with
+        # every batch, seed its coarse offset from the calibrator's
+        # locked chain_delay, and drive the authority state machine
+        # off any resulting sub-sample edge estimate.  Failures here
+        # MUST NOT affect the main calibrator/disambiguation path —
+        # this is a parallel, higher-precision observable layered on
+        # top of the proven MF cascade, not a replacement for it (yet).
+        fine_stage = getattr(self, '_t6_fine_stage', None)
+        if fine_stage is not None:
+            try:
+                coarse = self._t6_calibrator._chain_delay_samples
+                if result is not None and result.locked and coarse is not None:
+                    fine_stage.set_coarse_offset_samples(coarse)
+                fine = fine_stage.process_samples(
+                    samples, quality.last_rtp_timestamp)
+                if fine is not None and self._t6_authority is not None:
+                    named = self._t6_name_integer_second(fine.edge_rtp)
+                    decision = self._t6_authority.on_fine_estimate(
+                        fine, coarse, named)
+                    self._t6_apply_authority_decision(decision)
+            except Exception as e:
+                if not getattr(self, '_t6_fine_warned', False):
+                    logger.error(
+                        f"T6 fine stage failed (will retry each batch, "
+                        f"logged once): {e}", exc_info=True)
+                    self._t6_fine_warned = True
+
         # Differential-detector sidecar (offline A/B analysis).
         # Failures here MUST NOT affect main calibrator state;
         # swallow exceptions and log once per service lifetime.
@@ -3081,6 +3200,11 @@ class CoreRecorderV2:
                 f"at current operating point."
             )
             self._t6_calibrator.reset()
+            if getattr(self, '_t6_authority', None) is not None:
+                self._t6_apply_authority_decision(
+                    self._t6_authority.on_mf_unlock())
+            if getattr(self, '_t6_fine_stage', None) is not None:
+                self._t6_fine_stage.reset()
             self._t6_last_chain_delay_ns = None
             self._t6_disambiguation_ns = 0
             self._t6_wrap_rejections = 0
@@ -3123,163 +3247,42 @@ class CoreRecorderV2:
                 # First stable lock — disambiguate WHICH whole sample is the
                 # real PPS edge.
                 #
-                # Preferred path: load the last-known-good *effective*
-                # chain_delay from disk and compute the integer-sample
-                # shift that aligns the new raw value with it.  The
-                # physical RF path is invariant across restarts, so the
-                # effective chain_delay is too — using the persisted
-                # value avoids re-walking chrony's transient state and
-                # eliminates the per-restart drift (635 µs spread across
-                # three restarts observed on bee1 2026-05-21).  See
-                # bpsk_chain_delay_store.py.
-                #
-                # Fallback path (no fresh persisted value): compute the
-                # integer-sample shift that would move corrected
-                # wall_time into agreement with the highest-rank-
-                # available non-T6 timing-authority tier (T5 > T4 > T3).
-                # Per the timing model the system clock is downstream
-                # of the authority hierarchy, not a peer source — using
-                # it for disambiguation would be circular.  Sigma
-                # sanity check: reject any reference whose sigma is
-                # larger than the half-second-wrap value we're trying
-                # to disambiguate against (250 ms).
+                # Chain-delay persistence is retired on the T6 path
+                # (spec §6): under the anchor inversion no ms-scale
+                # fitted state exists to persist across restarts — the
+                # fine stage + authority re-derive the anchor from
+                # scratch in ~fine_fold_seconds after every re-lock, so
+                # this branch goes straight to the timing-tier cascade
+                # instead of consulting a persisted value.  A store
+                # file left over from a pre-inversion build is ignored
+                # (logged once at INFO, not silently).
                 sr_local = self._t6_calibrator.sample_rate
-                persisted = (
-                    self._t6_mf_chain_delay_store.load()
-                    if self._t6_mf_chain_delay_store is not None
-                    else None
-                )
-                # Layer B physical-plausibility guard on the persisted
-                # value — if a previous session captured into a
-                # sidelobe (chain_delay > ~250 ms), loading it would
-                # immediately publish wrong SHM values.  Refuse and
-                # fall through to fresh disambig.  Same rationale as
-                # the per-capture guard in
-                # ``_t6_disambiguate_via_t5_lb1421``.
-                _PERSIST_GUARD_NS = 250_000_000
-                if (persisted is not None
-                        and abs(persisted.effective_chain_delay_ns)
-                            > _PERSIST_GUARD_NS):
-                    logger.warning(
-                        f"T6 persisted effective_chain_delay "
-                        f"{persisted.effective_chain_delay_ns/1e6:+.1f} ms "
-                        f"exceeds physical-plausibility bound ±"
-                        f"{_PERSIST_GUARD_NS/1e6:.0f} ms — previous "
-                        f"session captured into a sidelobe.  Falling "
-                        f"through to fresh disambig."
-                    )
-                    persisted = None
-                if persisted is not None and persisted.sample_rate == sr_local:
-                    from .bpsk_chain_delay_store import compute_disambiguation_ns
-                    self._t6_disambiguation_ns = compute_disambiguation_ns(
-                        raw_chain_delay_ns=result.chain_delay_ns,
-                        persisted_effective_chain_delay_ns=persisted.effective_chain_delay_ns,
-                        sample_rate=sr_local,
-                    )
-                    # #7 defect 2 instrumentation: which path resolved the
-                    # ambiguity, and from what.  This path REPLAYS a stored
-                    # value -- compute_disambiguation_ns returns the shift
-                    # that makes raw equal the persisted effective to within
-                    # a sample, so a wrong value stored once is reproduced
-                    # verbatim on every subsequent start.
-                    self._t6_disambig_path = "persisted"
-                    self._t6_disambig_detail = (
-                        "persisted_effective=%d ns saved_at=%.0f"
-                        % (persisted.effective_chain_delay_ns,
-                           persisted.saved_at_unix)
-                    )
-                    age_s = time.time() - persisted.saved_at_unix
-                    # Restore the hf-timestd-native anchor from the v2
-                    # store if present.  When the file is v1 (no
-                    # anchor field), persisted.anchor is None and the
-                    # next disambig path will re-capture from a fresh
-                    # T5/T4 reading — same behaviour as a cold start.
-                    if persisted.anchor is not None:
-                        # Validate the persisted anchor's RTP namespace
-                        # against the current radiod session.  radiod
-                        # may restart and re-seed its RTP counter even
-                        # when the SSRC stays the same — when that
-                        # happens, the persisted ``anchor_rtp`` lives in
-                        # a different namespace from the current MF's
-                        # ``_last_edge_rtp``, and ``utc_ns_at_rtp`` would
-                        # do pure arithmetic between RTP values that
-                        # mean nothing relative to each other.  Observed
-                        # on bee1 2026-05-31 13:31 UTC: 245 M-sample
-                        # RTP-counter shift produced a +2 555 s HPPS
-                        # offset in chrony.
-                        #
-                        # Check: ``rtp_to_wallclock(anchor_rtp, channel)``
-                        # at restore time should be close to the
-                        # anchor's own ``anchor_utc_ns`` — chrony slewing
-                        # since capture shifts this by at most seconds,
-                        # so a > 30 s mismatch implies an RTP-namespace
-                        # discontinuity.  Refuse the load and force a
-                        # fresh first-lock disambig in the current
-                        # namespace.
-                        _RTP_NAMESPACE_MAX_DRIFT_S = 30.0
-                        if self._t6_channel_info is not None:
-                            try:
-                                from ka9q.rtp_recorder import rtp_to_wallclock
-                                wall = rtp_to_wallclock(
-                                    persisted.anchor.anchor_rtp,
-                                    self._t6_channel_info,
-                                )
-                                if wall is not None:
-                                    drift_s = (
-                                        wall - persisted.anchor.anchor_utc_ns / 1e9
-                                    )
-                                    if abs(drift_s) > _RTP_NAMESPACE_MAX_DRIFT_S:
-                                        logger.warning(
-                                            f"T6 persisted anchor's RTP "
-                                            f"namespace drifted "
-                                            f"{drift_s:+.1f} s since capture "
-                                            f"(radiod restarted with a new "
-                                            f"RTP-counter seed?); discarding "
-                                            f"persisted anchor + chain_delay "
-                                            f"and forcing a fresh disambig."
-                                        )
-                                        persisted = None
-                                        self._t6_disambiguation_ns = 0
-                            except Exception as e:
-                                logger.warning(
-                                    f"T6 persisted-anchor RTP-namespace "
-                                    f"check raised {e}; accepting persisted "
-                                    f"value (degraded mode)."
-                                )
-                if (persisted is not None
-                        and persisted.anchor is not None):
-                    self._t6_native_anchor = persisted.anchor
-                    self._t6_rate_reset("native anchor restored from store")
-                    logger.info(
-                        f"T6 native anchor restored from store: "
-                        f"rtp={persisted.anchor.anchor_rtp}, "
-                        f"utc_ns={persisted.anchor.anchor_utc_ns}, "
-                        f"sr={persisted.anchor.sample_rate_hz}, "
-                        f"tier={persisted.anchor.captured_via_tier}"
+                if (self._t6_mf_chain_delay_store is None
+                        and not getattr(
+                            self, '_t6_mf_store_leftover_logged', False)):
+                    from .bpsk_chain_delay_store import ChainDelayStore
+                    _leftover_path = ChainDelayStore("MF").path
+                    if _leftover_path.exists():
+                        logger.info(
+                            f"T6: leftover chain-delay store "
+                            f"{_leftover_path} found on disk but ignored "
+                            f"— persistence retired on the T6 path "
+                            f"(spec §6); re-lock re-derives from scratch."
                         )
-                    logger.info(
-                        f"T6 chain_delay disambiguated against persisted "
-                        f"effective={persisted.effective_chain_delay_ns} ns "
-                        f"({age_s:.0f}s old): raw={result.chain_delay_ns} ns, "
-                        f"shifting {self._t6_disambiguation_ns} ns "
-                        f"(skipping T4 chrony walk — invariant RF path)"
-                    )
-                else:
-                    if persisted is not None:
-                        logger.warning(
-                            f"T6 chain_delay persisted sample_rate "
-                            f"{persisted.sample_rate} != current {sr_local}; "
-                            f"falling back to disambiguation hierarchy"
-                        )
-                    # T5 (LB-1421 NMEA over USB) — direct GPS reference,
-                    # no chrony detour.  Falls through to T4 if T5 isn't
-                    # wired or the reading is unavailable.
-                    _dpath = "t5-lb1421"
-                    if not self._t6_disambiguate_via_t5_lb1421(result):
-                        self._t6_disambiguate_via_external_reference(result)
-                        _dpath = "external-ref"
-                    self._t6_disambig_path = _dpath
-                    self._t6_disambig_detail = ""
+                    self._t6_mf_store_leftover_logged = True
+                # Disambiguate against the timing-tier hierarchy: T5
+                # (LB-1421 NMEA over USB) — direct GPS reference, no
+                # chrony detour.  Falls through to T4 if T5 isn't wired
+                # or the reading is unavailable.  Sigma sanity check
+                # (in the tier helpers): reject any reference whose
+                # sigma is larger than the half-second-wrap value we're
+                # trying to disambiguate against (250 ms).
+                _dpath = "t5-lb1421"
+                if not self._t6_disambiguate_via_t5_lb1421(result):
+                    self._t6_disambiguate_via_external_reference(result)
+                    _dpath = "external-ref"
+                self._t6_disambig_path = _dpath
+                self._t6_disambig_detail = ""
                 # Apply disambiguation (set above either way) and lock in.
                 effective = result.chain_delay_ns + self._t6_disambiguation_ns
                 # ---- #7 defect 2 instrumentation ----
