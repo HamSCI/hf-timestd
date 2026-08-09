@@ -224,3 +224,34 @@ class TestAuthorityCoarseGate:
         cr._t6_authority.on_fine_estimate.assert_called_once()
         args = cr._t6_authority.on_fine_estimate.call_args.args
         assert args[1] == 43_181.0
+
+
+class TestAuthorityStatus:
+    def test_status_none_when_authority_absent(self):
+        r = CoreRecorderV2.__new__(CoreRecorderV2)
+        r._t6_authority = None
+        assert r._t6_authority_status() is None
+
+    def test_status_reflects_authoritative_state(self):
+        r = bare_recorder()
+        r._t6_rate_reset = lambda reason: None
+        r._t6_fine_stage = SimpleNamespace(blocks_discarded=2)
+        r._compute_rtp_to_utc_offset_ns = lambda: -80_000_000
+        d = r._t6_authority.on_fine_estimate(est(), 43_181.0, SECOND)
+        r._t6_apply_authority_decision(d)
+        s = r._t6_authority_status()
+        assert s['state'] == "AUTHORITATIVE"
+        assert s['violations'] == []
+        assert s['delay_budget_ns'] == 10_000
+        assert s['anchor_tier'] == "T6"
+        assert s['blocks_discarded'] == 2
+        assert s['t6_vs_radiod_pair_ms'] == pytest.approx(-80.0)
+
+    def test_status_before_first_estimate(self):
+        r = bare_recorder()
+        r._t6_fine_stage = SimpleNamespace(blocks_discarded=0)
+        r._compute_rtp_to_utc_offset_ns = lambda: None
+        s = r._t6_authority_status()
+        assert s['state'] == "ACQUIRING"
+        assert s['anchor_tier'] is None
+        assert s['t6_vs_radiod_pair_ms'] is None

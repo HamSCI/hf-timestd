@@ -2492,6 +2492,34 @@ class CoreRecorderV2:
         # legacy cascade gate stays closed; coasting must not
         # re-trigger a fresh disambiguation walk.
 
+    def _t6_authority_status(self) -> Optional[dict]:
+        """T6 authority block for the status JSON (spec §6 invariant 5:
+        cross-tier disagreement is REPORTED here, never corrects the
+        anchor)."""
+        auth = getattr(self, '_t6_authority', None)
+        if auth is None:
+            return None
+        decision = getattr(self, '_t6_authority_last_decision', None)
+        anchor = getattr(self, '_t6_native_anchor', None)
+        offset_ns = None
+        try:
+            offset_ns = self._compute_rtp_to_utc_offset_ns()
+        except Exception:
+            pass
+        fine = getattr(self, '_t6_fine_stage', None)
+        return {
+            'state': auth.state.value,
+            'violations': (list(decision.violations)
+                           if decision is not None else []),
+            'delay_budget_ns': auth.delay_budget_ns,
+            'anchor_tier': (anchor.captured_via_tier
+                            if anchor is not None else None),
+            'blocks_discarded': (fine.blocks_discarded
+                                 if fine is not None else 0),
+            't6_vs_radiod_pair_ms': (offset_ns / 1e6
+                                     if offset_ns is not None else None),
+        }
+
     def _t6_disambiguate_via_t5_lb1421(self, result) -> bool:
         """Disambiguate against T5 (LB-1421 GPSDO NMEA over USB-CDC).
 
@@ -4306,6 +4334,7 @@ class CoreRecorderV2:
                         if self._t6_native_anchor is not None else None
                     ),
                 }
+            status['t6_authority'] = self._t6_authority_status()
 
             # T5 LBE-1421 status block — published so the AuthorityRunner
             # side (LbeT5DirectProbe) can decide T5 availability without
