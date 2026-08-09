@@ -325,7 +325,10 @@ profile = "rtp"
 # iono_reanalysis = true      # Ionospheric reanalysis timer
 # pipeline_watchdog = true    # Pipeline health watchdog timer
 
-[timing.l6_pps]
+# [timing.t6_pps] — T6 anchor inversion + L6 BPSK PPS chain-delay calibration.
+# Legacy config name [timing.l6_pps] is still accepted at runtime (deprecated)
+# for already-deployed hosts; migrate to [timing.t6_pps] at next service restart.
+[timing.t6_pps]
 # L6 BPSK PPS chain-delay calibration via local RF injector (WB6CXC / TS1).
 # When enabled, core-recorder creates an IQ channel for the injected BPSK
 # signal and measures end-to-end RF->ADC->DSP->RTP chain delay.
@@ -372,8 +375,7 @@ enabled = false
 #                                 # band-limited polarity-flip step, so wider is
 #                                 # better up to the receiver / aliasing limit.
 #                                 # Omit (or None) to use the iq preset's ±5 kHz default.
-
-[timing.t6_pps]
+#
 # --- T6 anchor inversion (docs/design/T6_ANCHOR_INVERSION_DESIGN.md) ---
 # fine_stage_enabled = true        # coherent zero-crossing fine stage + T6 anchor authority
 # fine_fold_seconds = 30           # coherent fold length K (seconds)
