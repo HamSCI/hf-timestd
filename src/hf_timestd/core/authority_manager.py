@@ -760,10 +760,22 @@ class AuthorityManager:
 
     def _note_t6_authority(self, r: Optional[ProbeResult]) -> None:
         """Latch the T6 anchor-authority state from this tick's probe
-        result so ``_write_state`` can publish it.  A probe that goes
-        unavailable still carries the state when it has one (DEGRADED /
-        UNLOCKED are exactly the interesting cases); only a producer
-        that publishes nothing clears it."""
+        result so ``_write_state`` can publish it.
+
+        Coverage limit, stated honestly: ``BpskPpsProbe.poll`` returns
+        early — with an empty ``detail`` — whenever the status file is
+        missing/stale, ``t6_pps`` is disabled, the MF is not locked, or
+        ``local_minus_source_ns`` is absent.  Those early returns carry
+        no authority state, so ``authority.json`` reflects only the
+        states observable while the probe is otherwise healthy: in
+        practice DEGRADED (and ACQUIRING/AUTHORITATIVE) *while the MF
+        stays locked* — which is exactly the anchor-inversion failure
+        mode that was previously invisible.  An MF-unlock UNLOCKED
+        transition drops ``locked`` to false, so it shows up as the
+        probe going unavailable rather than as a published
+        ``t6_authority_state``; that transition remains visible in the
+        recorder's status JSON and in the journal (every transition is
+        logged at WARNING by ``_t6_apply_authority_decision``)."""
         d = (r.detail or {}) if r is not None else {}
         state = d.get("authority_state")
         self._t6_authority_state = state if isinstance(state, str) else None

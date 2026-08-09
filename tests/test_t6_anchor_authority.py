@@ -202,6 +202,54 @@ class TestRtpDomainComparison:
         assert d.violations == ()
 
 
+class TestRtpWrapPeriodicity:
+    """Re-review finding: comparing two mod-SR phases made the
+    periodicity check false-fire at every 32-bit RTP wrap.
+    ``2**32 % 96000 == 23296``, so the phase jumps 23 296 samples
+    (242.7 ms) at a wrap with the physical edge unmoved — a
+    deterministic false DEGRADED, 600 s dwell, then UNLOCKED and a
+    dropped anchor, once every 12.43 h.  The deviation is now taken
+    from the signed 32-bit counter delta, which wraps with the
+    counter."""
+
+    def test_phase_really_does_jump_at_the_wrap(self):
+        # Guards the premise: if this ever stops holding the test below
+        # is no longer testing anything.
+        assert (2**32) % SR == 23_296
+
+    def test_wrap_with_edge_unmoved_stays_authoritative(self, auth):
+        # Last estimate before the wrap, then one after: the edge has
+        # advanced by exact multiples of SR, so it has not moved at all.
+        before = est(rtp=(2**32 - 5 * SR) & 0xFFFFFFFF, sub=0.25)
+        d1 = auth.on_fine_estimate(before, phase(before), SECOND)
+        assert d1.state is T6AuthorityState.AUTHORITATIVE
+        after = est(rtp=(2**32 - 5 * SR + 30 * SR) & 0xFFFFFFFF, sub=0.25)
+        assert after.edge_rtp < before.edge_rtp  # counter really wrapped
+        # The old phase comparison saw 23_296 samples of "movement" here.
+        assert auth._wrapped_distance_samples(
+            phase(after), phase(before)) == pytest.approx(23_296.0)
+        d2 = auth.on_fine_estimate(after, phase(after), SECOND + 30)
+        assert d2.violations == ()
+        assert d2.state is T6AuthorityState.AUTHORITATIVE
+
+    def test_real_step_across_the_wrap_still_degrades(self, auth):
+        before = est(rtp=(2**32 - 5 * SR) & 0xFFFFFFFF, sub=0.25)
+        auth.on_fine_estimate(before, phase(before), SECOND)
+        # Same wrap, but the edge genuinely moved ~10 µs (0.96 samples).
+        after = est(rtp=(2**32 - 5 * SR + 30 * SR + 1) & 0xFFFFFFFF, sub=0.25)
+        d = auth.on_fine_estimate(after, phase(after), SECOND + 30)
+        assert "edge_period" in d.violations
+        assert d.state is T6AuthorityState.DEGRADED
+
+    def test_sub_sample_motion_across_the_wrap_is_measured(self, auth):
+        before = est(rtp=(2**32 - 5 * SR) & 0xFFFFFFFF, sub=-0.4)
+        auth.on_fine_estimate(before, phase(before), SECOND)
+        # +0.3 samples ≈ 3.1 µs, inside the 5 µs tolerance.
+        after = est(rtp=(2**32 - 5 * SR + 30 * SR) & 0xFFFFFFFF, sub=-0.1)
+        d = auth.on_fine_estimate(after, phase(after), SECOND + 30)
+        assert d.state is T6AuthorityState.AUTHORITATIVE
+
+
 class TestEstimateLiveness:
     """Final-review Finding 3: the authority is edge-triggered on fine
     estimates.  If estimates stop while the MF stays locked (the

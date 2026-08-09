@@ -31,6 +31,15 @@ from hf_timestd.core.native_anchor import NativeAnchor
 
 logger = logging.getLogger(__name__)
 
+_WRAP32 = 1 << 32
+
+
+def _wrapped_signed32(delta: int) -> int:
+    """Map a mod-2^32 RTP difference to signed [-2^31, 2^31)."""
+    d = delta & 0xFFFFFFFF
+    return d - _WRAP32 if d >= (1 << 31) else d
+
+
 _BILLION = 1_000_000_000
 DELAY_BUDGET_BOUND_NS = 1_000_000  # ±1 ms hard physical bound (spec §5)
 # Estimates arrive once per fold block; three missed blocks is an
@@ -84,7 +93,10 @@ class T6AnchorAuthority:
         self._now = now
         self._state = T6AuthorityState.ACQUIRING
         self._anchor: Optional[NativeAnchor] = None
-        self._prev_offset: Optional[float] = None
+        # (edge_rtp, edge_subsample) of the last estimate used as the
+        # periodicity reference — kept in raw counter form, NOT as a
+        # mod-SR phase, so the check survives the 32-bit RTP wrap.
+        self._prev_edge: Optional[tuple] = None
         self._degraded_since: Optional[float] = None
         # Liveness (spec §6, expose-don't-stall): when the estimate
         # stream dies while the MF stays locked, nothing edge-triggered
@@ -99,6 +111,28 @@ class T6AnchorAuthority:
     def _wrapped_distance_samples(self, a: float, b: float) -> float:
         p = self.sample_rate_hz
         return abs((a - b + p / 2) % p - p / 2)
+
+    def _period_deviation_samples(self, est: FineEdgeEstimate, prev: tuple) -> float:
+        """How far this edge sits from an exact whole number of seconds
+        after the previous one, in samples, wrapped to ±SR/2.
+
+        Computed from the **signed 32-bit RTP delta**, not from two
+        mod-SR phases.  ``2**32 % 96000 == 23296``, so at every RTP
+        counter wrap (~12.4 h at 96 kHz) the mod-SR phase jumps 23 296
+        samples — 242.7 ms — with the physical edge completely
+        unmoved.  Comparing phases therefore false-fired ``edge_period``
+        at every wrap, and because the stored reference stuck while
+        violating, the authority sat DEGRADED for the full 600 s dwell
+        and then UNLOCKED, dropping a perfectly good anchor and
+        thrashing the cascade, once per wrap.  The counter delta wraps
+        the same way the counter does, so the deviation stays correct
+        for any inter-estimate gap under ~6 h (half the wrap period).
+        """
+        prev_rtp, prev_sub = prev
+        p = self.sample_rate_hz
+        d = float(_wrapped_signed32(int(est.edge_rtp) - int(prev_rtp)))
+        d += float(est.edge_subsample) - float(prev_sub)
+        return abs((d + p / 2) % p - p / 2)
 
     def edge_phase_rtp(self, est: FineEdgeEstimate) -> float:
         """Edge position within the second in the **RTP domain**.
@@ -123,14 +157,17 @@ class T6AnchorAuthority:
     ) -> tuple:
         v = []
         phase = self.edge_phase_rtp(est)
-        if self._prev_offset is not None:
+        if self._prev_edge is not None:
             d_ns = (
-                self._wrapped_distance_samples(phase, self._prev_offset)
+                self._period_deviation_samples(est, self._prev_edge)
                 / self.sample_rate_hz
                 * 1e9
             )
             if d_ns > self.edge_period_tolerance_ns:
                 v.append("edge_period")
+        # fine_coarse stays a phase comparison: the MF coarse offset is
+        # itself a mod-SR phase of the same wrapped counter, so both
+        # sides move together at a wrap and the check is immune.
         if coarse_offset_samples is not None:
             d_ms = (
                 self._wrapped_distance_samples(
@@ -169,7 +206,7 @@ class T6AnchorAuthority:
 
         if not violations:
             self._anchor = self._build_anchor(est, named_second_utc)
-            self._prev_offset = self.edge_phase_rtp(est)
+            self._prev_edge = (int(est.edge_rtp), float(est.edge_subsample))
             self._degraded_since = None
             self._last_estimate_at = self._now()
             self._state = T6AuthorityState.AUTHORITATIVE
@@ -178,7 +215,7 @@ class T6AnchorAuthority:
         if prev in (T6AuthorityState.ACQUIRING, T6AuthorityState.UNLOCKED):
             # Not yet authoritative — keep (re)acquiring.  Track the
             # offset so periodicity has a reference once estimates clean up.
-            self._prev_offset = self.edge_phase_rtp(est)
+            self._prev_edge = (int(est.edge_rtp), float(est.edge_subsample))
             self._state = T6AuthorityState.ACQUIRING
             self._note_acquiring_violation(violations)
             return T6AnchorDecision(self._state, prev, None, violations)
@@ -276,7 +313,7 @@ class T6AnchorAuthority:
     def _unlock(self, prev: T6AuthorityState, violations: tuple) -> T6AnchorDecision:
         self._state = T6AuthorityState.UNLOCKED
         self._anchor = None
-        self._prev_offset = None
+        self._prev_edge = None
         self._degraded_since = None
         self._last_estimate_at = None
         return T6AnchorDecision(self._state, prev, None, violations)

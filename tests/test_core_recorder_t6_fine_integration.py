@@ -346,6 +346,10 @@ class TestAuthorityStatus:
         assert s['anchor_tier'] == "T6"
         assert s['blocks_discarded'] == 2
         assert s['t6_vs_radiod_pair_ms'] == pytest.approx(-80.0)
+        # Latched by the naming path; None until it has run.
+        assert s['naming_vs_radiod_pair_s'] is None
+        r._t6_naming_vs_radiod_pair_s = 0.65
+        assert r._t6_authority_status()['naming_vs_radiod_pair_s'] == 0.65
 
     def test_status_before_first_estimate(self):
         r = bare_recorder()

@@ -2658,6 +2658,14 @@ class CoreRecorderV2:
                                  if fine is not None else 0),
             't6_vs_radiod_pair_ms': (offset_ns / 1e6
                                      if offset_ns is not None else None),
+            # Naming-time cross-tier diagnostic: radiod-pair wall
+            # estimate minus the NMEA-derived edge UTC, latched by
+            # _t6_report_naming_vs_radiod_pair.  |value| > 0.5 s means
+            # the radiod pair would have named the WRONG integer second
+            # (spec §6 invariant 5: reported, never corrective).  None
+            # until the NMEA naming path has run at least once.
+            'naming_vs_radiod_pair_s': getattr(
+                self, '_t6_naming_vs_radiod_pair_s', None),
         }
 
     def _t6_disambiguate_via_t5_lb1421(self, result) -> bool:
