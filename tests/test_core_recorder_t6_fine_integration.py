@@ -24,26 +24,120 @@ def bare_recorder():
     r = CoreRecorderV2.__new__(CoreRecorderV2)
     r._t6_channel_info = SimpleNamespace()  # opaque; rtp_to_wallclock mocked
     r._lb1421_probe = None
+    r._t5_pairing = None
     r._t6_native_anchor = None
     r._t6_authority = T6AnchorAuthority(SR, 10_000)
     r._t6_authority_last_decision = None
     return r
 
 
-def est(rtp=1_000_000, offset=43_181.0):
+def est(rtp=1_000_000, offset=43_181.0, sub=0.0):
     return FineEdgeEstimate(
-        edge_offset_samples=offset, edge_rtp=rtp, edge_subsample=0.0,
+        edge_offset_samples=offset, edge_rtp=rtp, edge_subsample=sub,
         n_seconds_folded=30, plateau_amplitude=30.0, fit_rms=0.05,
     )
 
 
+def phase(e):
+    """RTP-domain edge phase — the domain the authority compares in
+    (final-review Finding 1).  ``edge_offset_samples`` is the fine
+    stage's fold-domain diagnostic and is deliberately NOT the same
+    number."""
+    return (e.edge_rtp + e.edge_subsample) % SR
+
+
+def nmea_recorder(now_wall, now_mono=5_000.0, arrival_rtp=1_000_000,
+                  pps_utc_sec=SECOND, arrival_mono=None):
+    """Recorder wired with a fresh NMEA reading and a real T5RtpPairing
+    driven by fake clocks, so the NMEA naming path is exercised end to
+    end without touching the host clock."""
+    from hf_timestd.core.t5_rtp_pairing import T5RtpPairing
+    r = bare_recorder()
+    r._lb1421_probe = SimpleNamespace(
+        get_latest=lambda **kw: SimpleNamespace(pps_utc_sec=pps_utc_sec))
+    r._t5_pairing = T5RtpPairing(time_fn=lambda: now_wall,
+                                 mono_fn=lambda: now_mono,
+                                 source="t6")
+    r._t5_pairing.note_arrival(
+        arrival_rtp,
+        mono=now_mono if arrival_mono is None else arrival_mono)
+    r._t6_fine_stage = SimpleNamespace(sample_rate=SR, blocks_discarded=0)
+    r._t6_calibrator = SimpleNamespace(sample_rate=SR)
+    return r
+
+
 class TestNaming:
+    """Final-review Finding 2.  The old NMEA branch computed
+    ``pps_utc_sec + round(wall − pps_utc_sec)``, which for an integer
+    ``pps_utc_sec`` is identically ``round(wall)``: NMEA contributed
+    nothing, and a radiod-pair ``wall`` error beyond ±0.5 s (seen in
+    fleet history) named the wrong second undetected.  These tests make
+    the NMEA path *distinguishable* from ``round(wall)`` by putting the
+    two on opposite sides of a second boundary."""
+
     def test_names_from_nmea_when_probe_fresh(self):
-        r = bare_recorder()
-        r._lb1421_probe = SimpleNamespace(
-            get_latest=lambda: SimpleNamespace(pps_utc_sec=SECOND))
-        # radiod-pair wall estimate is 80 ms off the true second — naming
-        # must still round to the NMEA-attested second.
+        # NMEA + arrival pairing put the edge at SECOND + 0.30 s.
+        r = nmea_recorder(now_wall=float(SECOND) + 0.30)
+        with patch('ka9q.rtp_recorder.rtp_to_wallclock',
+                   return_value=float(SECOND) + 0.080):
+            assert r._t6_name_integer_second(1_000_000) == SECOND
+
+    def test_nmea_beats_a_radiod_pair_wall_in_the_wrong_second(self, caplog):
+        # The distinguishing case: the radiod-pair wall estimate is
+        # 0.65 s past the NMEA-derived edge UTC, so round(wall) would
+        # name SECOND+1.  The NMEA-attested second must win, and the
+        # disagreement must be reported (spec §6 invariant 5).
+        r = nmea_recorder(now_wall=float(SECOND) + 0.30)
+        with caplog.at_level("WARNING"):
+            with patch('ka9q.rtp_recorder.rtp_to_wallclock',
+                       return_value=float(SECOND) + 0.95):
+                assert r._t6_name_integer_second(1_000_000) == SECOND
+        assert any("disagrees" in m for m in caplog.messages)
+        # Same wall, no NMEA → the fallback names the wrong second, which
+        # is precisely what the old code did unconditionally.
+        r2 = bare_recorder()
+        with patch('ka9q.rtp_recorder.rtp_to_wallclock',
+                   return_value=float(SECOND) + 0.95):
+            assert r2._t6_name_integer_second(1_000_000) == SECOND + 1
+
+    def test_nmea_path_needs_no_radiod_wallclock_at_all(self):
+        # rtp_to_wallclock is the quantity the inversion exists to
+        # bypass; a total failure of it must not stop T6 naming.
+        r = nmea_recorder(now_wall=float(SECOND) + 0.30)
+        with patch('ka9q.rtp_recorder.rtp_to_wallclock', return_value=None):
+            assert r._t6_name_integer_second(1_000_000) == SECOND
+
+    def test_edge_before_the_arrival_is_named_by_rtp_arithmetic(self):
+        # Edge 0.6 s of RTP counter before the paired arrival, arrival
+        # wall SECOND + 1.30 → edge UTC SECOND + 0.70 → second SECOND+1.
+        r = nmea_recorder(now_wall=float(SECOND) + 1.30,
+                          arrival_rtp=1_000_000 + int(0.6 * SR))
+        with patch('ka9q.rtp_recorder.rtp_to_wallclock', return_value=None):
+            assert r._t6_name_integer_second(1_000_000) == SECOND + 1
+
+    def test_nmea_residual_beyond_0p4s_returns_none(self):
+        # Edge lands 0.45 s from any integer second — outside the ±0.4 s
+        # margin of invariant 3, so naming refuses rather than guess.
+        r = nmea_recorder(now_wall=float(SECOND) + 0.45)
+        with patch('ka9q.rtp_recorder.rtp_to_wallclock', return_value=None):
+            assert r._t6_name_integer_second(1_000_000) is None
+
+    def test_stale_arrival_falls_back_to_wall(self):
+        # Arrival older than T5RtpPairing.ARRIVAL_MAX_AGE_S — the pairing
+        # is refused and the cascade drops to the radiod-pair estimate.
+        r = nmea_recorder(now_wall=float(SECOND) + 0.30,
+                          arrival_mono=5_000.0 - 60.0)
+        with patch('ka9q.rtp_recorder.rtp_to_wallclock',
+                   return_value=float(SECOND) - 0.120):
+            assert r._t6_name_integer_second(1_000_000) == SECOND
+        with patch('ka9q.rtp_recorder.rtp_to_wallclock', return_value=None):
+            assert r._t6_name_integer_second(1_000_000) is None
+
+    def test_host_nmea_disagreement_refuses_the_nmea_pairing(self):
+        # Host wall 30 s ahead of the NMEA second: outside the
+        # attestation window, so the NMEA branch refuses (it would
+        # otherwise emit a poisoned name) and the fallback answers.
+        r = nmea_recorder(now_wall=float(SECOND) + 30.30)
         with patch('ka9q.rtp_recorder.rtp_to_wallclock',
                    return_value=float(SECOND) + 0.080):
             assert r._t6_name_integer_second(1_000_000) == SECOND
@@ -70,7 +164,7 @@ class TestAnchorOwnership:
     def test_authoritative_decision_installs_t6_anchor(self, caplog):
         r = bare_recorder()
         r._t6_rate_reset = lambda reason: None
-        d = r._t6_authority.on_fine_estimate(est(), 43_181.0, SECOND)
+        d = r._t6_authority.on_fine_estimate(est(), phase(est()), SECOND)
         with caplog.at_level("WARNING"):
             r._t6_apply_authority_decision(d)
         assert r._t6_native_anchor is d.anchor
@@ -81,7 +175,7 @@ class TestAnchorOwnership:
     def test_unlock_invalidates_anchor_loudly(self, caplog):
         r = bare_recorder()
         r._t6_rate_reset = lambda reason: None
-        d1 = r._t6_authority.on_fine_estimate(est(), 43_181.0, SECOND)
+        d1 = r._t6_authority.on_fine_estimate(est(), phase(est()), SECOND)
         r._t6_apply_authority_decision(d1)
         d2 = r._t6_authority.on_mf_unlock()
         with caplog.at_level("WARNING"):
@@ -93,11 +187,13 @@ class TestAnchorOwnership:
     def test_degraded_holds_anchor_and_names_violation(self, caplog):
         r = bare_recorder()
         r._t6_rate_reset = lambda reason: None
-        d1 = r._t6_authority.on_fine_estimate(est(), 43_181.0, SECOND)
+        d1 = r._t6_authority.on_fine_estimate(est(), phase(est()), SECOND)
         r._t6_apply_authority_decision(d1)
-        moved = 43_181.0 + 10e-6 * SR
+        # Edge moved one sample (10.4 µs) in the RTP domain — where the
+        # periodicity invariant lives (final-review Finding 1).
+        moved = est(rtp=1_000_001)
         d2 = r._t6_authority.on_fine_estimate(
-            est(offset=moved), moved, SECOND + 30)
+            moved, phase(moved), SECOND + 30)
         with caplog.at_level("WARNING"):
             r._t6_apply_authority_decision(d2)
         assert r._t6_native_anchor is d1.anchor
@@ -107,10 +203,10 @@ class TestAnchorOwnership:
     def test_same_state_clean_updates_anchor_without_warning(self, caplog):
         r = bare_recorder()
         r._t6_rate_reset = lambda reason: None
-        d1 = r._t6_authority.on_fine_estimate(est(), 43_181.0, SECOND)
+        d1 = r._t6_authority.on_fine_estimate(est(), phase(est()), SECOND)
         r._t6_apply_authority_decision(d1)
         d2 = r._t6_authority.on_fine_estimate(
-            est(rtp=1_000_000 + 30 * SR), 43_181.0, SECOND + 30)
+            est(rtp=1_000_000 + 30 * SR), phase(est()), SECOND + 30)
         with caplog.at_level("WARNING"):
             caplog.clear()
             r._t6_apply_authority_decision(d2)
@@ -130,7 +226,7 @@ class TestUnlockReopensLegacyCascade:
     def test_unlock_from_authoritative_clears_legacy_cascade_gate(self, caplog):
         r = bare_recorder()
         r._t6_rate_reset = lambda reason: None
-        d1 = r._t6_authority.on_fine_estimate(est(), 43_181.0, SECOND)
+        d1 = r._t6_authority.on_fine_estimate(est(), phase(est()), SECOND)
         r._t6_apply_authority_decision(d1)
         # Simulate the legacy cascade having a lock in place — exactly
         # the state that must be cleared so _t6_on_samples's first-lock
@@ -150,14 +246,16 @@ class TestUnlockReopensLegacyCascade:
         # cascade — only a true UNLOCKED does.
         r = bare_recorder()
         r._t6_rate_reset = lambda reason: None
-        d1 = r._t6_authority.on_fine_estimate(est(), 43_181.0, SECOND)
+        d1 = r._t6_authority.on_fine_estimate(est(), phase(est()), SECOND)
         r._t6_apply_authority_decision(d1)
         r._t6_last_chain_delay_ns = 123_456
         r._t6_disambiguation_ns = 789
         r._t6_recent_raw = deque([1, 2, 3])
-        moved = 43_181.0 + 10e-6 * SR
+        # Edge moved one sample (10.4 µs) in the RTP domain — where the
+        # periodicity invariant lives (final-review Finding 1).
+        moved = est(rtp=1_000_001)
         d2 = r._t6_authority.on_fine_estimate(
-            est(offset=moved), moved, SECOND + 30)
+            moved, phase(moved), SECOND + 30)
         with caplog.at_level("WARNING"):
             r._t6_apply_authority_decision(d2)
         assert d2.state is T6AuthorityState.DEGRADED
@@ -192,7 +290,7 @@ def _bare_on_samples_recorder():
 class TestAuthorityCoarseGate:
     """Finding 3 (review of Task 5): after an MF reset/unlock,
     ``_chain_delay_samples`` goes None but ``BpskEdgeFineStage.reset()``
-    does not clear its own internal ``_coarse_offset`` — so a
+    does not clear its own internal ``_coarse_offset_rtp`` — so a
     stale-window fine estimate must never reach the authority while the
     calibrator has no live coarse offset, or the authority can claim
     AUTHORITATIVE with the fine_coarse invariant silently inert."""
@@ -203,6 +301,7 @@ class TestAuthorityCoarseGate:
         cr._t6_fine_stage = MagicMock()
         cr._t6_fine_stage.process_samples.return_value = est()
         cr._t6_authority = MagicMock()
+        cr._t6_authority.on_tick.return_value = None  # liveness: nothing due
 
         samples = MagicMock()
         quality = MagicMock(last_rtp_timestamp=0)
@@ -216,6 +315,7 @@ class TestAuthorityCoarseGate:
         cr._t6_fine_stage = MagicMock()
         cr._t6_fine_stage.process_samples.return_value = est()
         cr._t6_authority = MagicMock()
+        cr._t6_authority.on_tick.return_value = None  # liveness: nothing due
 
         samples = MagicMock()
         quality = MagicMock(last_rtp_timestamp=0)
@@ -237,7 +337,7 @@ class TestAuthorityStatus:
         r._t6_rate_reset = lambda reason: None
         r._t6_fine_stage = SimpleNamespace(blocks_discarded=2)
         r._compute_rtp_to_utc_offset_ns = lambda: -80_000_000
-        d = r._t6_authority.on_fine_estimate(est(), 43_181.0, SECOND)
+        d = r._t6_authority.on_fine_estimate(est(), phase(est()), SECOND)
         r._t6_apply_authority_decision(d)
         s = r._t6_authority_status()
         assert s['state'] == "AUTHORITATIVE"
@@ -255,3 +355,75 @@ class TestAuthorityStatus:
         assert s['state'] == "ACQUIRING"
         assert s['anchor_tier'] is None
         assert s['t6_vs_radiod_pair_ms'] is None
+
+
+class TestLivenessWiring:
+    """Finding 3 wiring: ``on_tick`` must run on every batch, including
+    the batch where the fine-stage block itself blew up — a swallowed
+    exception is one of the ways estimates stop arriving."""
+
+    def _cr(self):
+        cr = _bare_on_samples_recorder()
+        cr._t6_calibrator._chain_delay_samples = None
+        cr._t6_fine_stage = MagicMock()
+        cr._t6_fine_stage.process_samples.return_value = None
+        cr._t6_authority = MagicMock()
+        cr._t6_authority.on_tick.return_value = None
+        return cr
+
+    def test_tick_called_on_every_batch(self):
+        cr = self._cr()
+        cr._t6_on_samples(MagicMock(), MagicMock(last_rtp_timestamp=0))
+        cr._t6_authority.on_tick.assert_called_once()
+
+    def test_tick_called_even_when_the_fine_stage_raises(self):
+        cr = self._cr()
+        cr._t6_fine_stage.process_samples.side_effect = RuntimeError("boom")
+        cr._t6_on_samples(MagicMock(), MagicMock(last_rtp_timestamp=0))
+        cr._t6_authority.on_tick.assert_called_once()
+
+    def test_stale_decision_is_applied(self):
+        cr = self._cr()
+        applied = []
+        cr._t6_apply_authority_decision = applied.append
+        sentinel = object()
+        cr._t6_authority.on_tick.return_value = sentinel
+        cr._t6_on_samples(MagicMock(), MagicMock(last_rtp_timestamp=0))
+        assert applied == [sentinel]
+
+
+class TestAuthorityStateReachesTheProbe:
+    """Spec §4 (final-review Finding 4): authority transitions must
+    reach authority.json, not just the recorder's own status file.  The
+    only block ``BpskPpsProbe`` reads is ``t6_pps``, so the state rides
+    there and the probe forwards it in ``ProbeResult.detail``."""
+
+    def _status(self, tmp_path, **extra):
+        import json
+        from datetime import datetime, timezone
+        p = tmp_path / "core-recorder-status.json"
+        block = {
+            'enabled': True, 'locked': True, 'pps_consecutive': 20,
+            'local_minus_source_ns': 2384,
+        }
+        block.update(extra)
+        p.write_text(json.dumps({
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            't6_pps': block,
+        }))
+        return p
+
+    def test_probe_forwards_authority_state_and_violations(self, tmp_path):
+        from hf_timestd.core.bpsk_pps_probe import BpskPpsProbe
+        p = self._status(tmp_path, authority_state="DEGRADED",
+                         authority_violations=["estimate_stale"])
+        r = BpskPpsProbe(status_path=p).poll()
+        assert r.available is True
+        assert r.detail["authority_state"] == "DEGRADED"
+        assert r.detail["authority_violations"] == ["estimate_stale"]
+
+    def test_probe_omits_the_keys_on_a_producer_without_them(self, tmp_path):
+        from hf_timestd.core.bpsk_pps_probe import BpskPpsProbe
+        r = BpskPpsProbe(status_path=self._status(tmp_path)).poll()
+        assert "authority_state" not in r.detail
+        assert "authority_violations" not in r.detail

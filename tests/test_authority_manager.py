@@ -98,6 +98,33 @@ class TestAuthorityManager(unittest.TestCase):
         with self.out.open() as f:
             return json.load(f)
 
+    # ----- T6 anchor-authority state passthrough (design §4) -----
+
+    def test_t6_authority_state_reaches_authority_json(self) -> None:
+        """Spec §4 of the anchor-inversion design: the T6 authority
+        state must be visible to authority.json consumers, not only in
+        the recorder's own status file.  BpskPpsProbe forwards it in
+        ``detail``; the manager republishes it additively."""
+        p = FakeProbe("T6", ProbeResult(
+            "T6", available=True, offset_ms=0.002, sigma_ms=0.05,
+            frame="rtp",
+            detail={"authority_state": "DEGRADED",
+                    "authority_violations": ["estimate_stale"]},
+        ))
+        mgr = self._mgr([p], upgrade_hysteresis=1)
+        mgr.tick()
+        out = self._read()
+        self.assertEqual(out["t6_authority_state"], "DEGRADED")
+        self.assertEqual(out["t6_authority_violations"], ["estimate_stale"])
+
+    def test_authority_json_omits_t6_state_when_absent(self) -> None:
+        """Producers without the anchor inversion publish nothing —
+        legacy output stays byte-compatible."""
+        p = FakeProbe("T3", _measure("T3", 0.8, 0.5))
+        mgr = self._mgr([p], upgrade_hysteresis=1)
+        mgr.tick()
+        self.assertNotIn("t6_authority_state", self._read())
+
     # ----- hysteresis & selection -----
 
     def test_cold_start_no_active_until_hysteresis_met(self) -> None:

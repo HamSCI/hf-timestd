@@ -655,6 +655,10 @@ class CoreRecorderV2:
                             fine_coarse_max_ms=fine_cfg['fine_coarse_max_ms'],
                             degraded_unlock_after_sec=fine_cfg[
                                 'degraded_unlock_after_sec'],
+                            # Liveness: the authority needs to know the
+                            # expected estimate cadence to tell "quiet"
+                            # from "dead" (spec §6).
+                            fine_fold_seconds=fine_cfg['fine_fold_seconds'],
                         )
                         logger.info(
                             "T6 anchor inversion armed: fold=%ds "
@@ -2426,31 +2430,167 @@ class CoreRecorderV2:
         except Exception:
             return None
 
+    # A fine-stage edge is the last edge of the fold block that just
+    # completed, so it is at most ~1 s behind the batch that closed the
+    # block.  An edge further than this from the paired arrival means
+    # the stream or the RTP counter moved under us — refuse the NMEA
+    # pairing rather than name a second by extrapolation.
+    T6_NAMING_MAX_EDGE_AGE_SEC = 60.0
+
+    def _t6_name_second_via_nmea(self, edge_rtp: int) -> Optional[float]:
+        """NMEA-derived UTC of a fine-stage edge, or None.
+
+        Mirrors the epoch pairing of
+        :meth:`_t6_disambiguate_via_t5_lb1421` /
+        :meth:`_compute_lb1421_residual_ns`: the LB-1421 reading carries
+        its own capture epoch (``host_monotonic_at_read``, and a
+        ``valid_fix`` that is only True when gpsdo-monitor's published
+        NMEA second and the host clock agree at the integer-second
+        level), and ``T5RtpPairing`` carries the RTP counter observed at
+        a known monotonic instant.  Between them the edge's UTC follows
+        from counter arithmetic:
+
+            arrival_wall = now_wall − (now_mono − arrival_mono)
+            edge_utc     = arrival_wall + (edge_rtp − arrival_rtp)/SR
+
+        The integer-second AUTHORITY is NMEA's ``pps_utc_sec``; the host
+        clock only indexes *which* second, the sanctioned sub-second
+        indexing role documented in ``_t6_disambiguate_via_t5_lb1421``
+        and ``t5_rtp_pairing``.  Critically, ``rtp_to_wallclock`` — the
+        radiod GPS-pair estimate whose >0.5 s excursions are exactly
+        what the inversion exists to bypass — is not consulted at all.
+
+        Returns the (fractional) UTC of the edge; the caller rounds.
+        """
+        from .t5_rtp_pairing import T5RtpPairing
+        from .offset_judge import _rtp_delta_signed
+
+        probe = getattr(self, '_lb1421_probe', None)
+        pairing = getattr(self, '_t5_pairing', None)
+        if probe is None or pairing is None:
+            return None
+        reading = probe.get_latest()
+        if reading is None:
+            return None
+        arrival = pairing.latest_arrival
+        if arrival is None:
+            return None
+        sr = self._t6_sample_rate()
+        if not sr:
+            return None
+        arrival_rtp, arrival_mono = arrival
+        age = pairing.now_mono() - arrival_mono
+        if age < 0.0 or age > T5RtpPairing.ARRIVAL_MAX_AGE_S:
+            return None
+        arrival_wall = pairing.now_wall() - age
+        # NMEA attestation window — same guard T5RtpPairing.compute uses.
+        # Outside it, host and GPS truth disagree beyond what the reading
+        # attests and the pairing would be poisoned.
+        nmea_delay = arrival_wall - float(reading.pps_utc_sec)
+        if not (T5RtpPairing.NMEA_DELAY_MIN_S
+                <= nmea_delay
+                <= T5RtpPairing.NMEA_DELAY_MAX_S):
+            return None
+        delta_s = _rtp_delta_signed(
+            int(edge_rtp) & 0xFFFFFFFF, int(arrival_rtp)) / float(sr)
+        if abs(delta_s) > self.T6_NAMING_MAX_EDGE_AGE_SEC:
+            return None
+        return arrival_wall + delta_s
+
+    def _t6_sample_rate(self) -> Optional[int]:
+        """T6 channel sample rate from whichever T6 object is wired."""
+        for obj in (getattr(self, '_t6_fine_stage', None),
+                    getattr(self, '_t6_calibrator', None)):
+            sr = getattr(obj, 'sample_rate', None)
+            try:
+                sr = int(sr)
+            except (TypeError, ValueError):
+                continue
+            if sr > 0:
+                return sr
+        return None
+
     def _t6_name_integer_second(self, edge_rtp: int) -> Optional[int]:
         """Name the integer UTC second of a fine-stage edge (spec §2).
 
         The coarse cascade (T5 NMEA preferred, radiod-pair wall estimate
         as fallback) only NAMES the second — it needs ±0.5 s accuracy
         and its noise cannot enter the sub-second value.  Residual
-        beyond ±0.4 s (margin inside the cell) → None (invariant 3)."""
+        beyond ±0.4 s (margin inside the cell) → None (invariant 3).
+
+        The NMEA branch derives the second from the LB-1421 reading and
+        the RTP-substrate arrival pairing, NOT from
+        ``rtp_to_wallclock``.  The previous implementation added
+        ``round(wall − pps_utc_sec)`` back onto an integer
+        ``pps_utc_sec``, which is identically ``round(wall)`` — NMEA
+        contributed nothing and a radiod-pair wall error beyond ±0.5 s
+        (seen repeatedly in fleet history) named the wrong second with
+        no signal at all.  ``wall`` is now only the fallback source, and
+        its disagreement with the NMEA-derived second is *reported*
+        (spec §6 invariant 5), never used to correct or to veto.
+        """
+        edge_utc = self._t6_name_second_via_nmea(edge_rtp)
+        wall = None
         try:
             from ka9q.rtp_recorder import rtp_to_wallclock
             wall = rtp_to_wallclock(
                 int(edge_rtp) & 0xFFFFFFFF, self._t6_channel_info)
         except Exception:
-            return None
+            wall = None
+
+        if edge_utc is not None:
+            reading = self._lb1421_probe.get_latest()
+            if reading is None:
+                # Raced with a probe expiry between the two reads.
+                edge_utc = None
+            else:
+                # NMEA holds the integer-second authority; the host
+                # clock only says which second (see helper docstring).
+                named = (int(reading.pps_utc_sec)
+                         + int(round(edge_utc - reading.pps_utc_sec)))
+                if abs(edge_utc - named) > 0.4:
+                    return None
+                self._t6_report_naming_vs_radiod_pair(wall, edge_utc)
+                return named
+
         if wall is None:
             return None
-        probe = getattr(self, '_lb1421_probe', None)
-        reading = probe.get_latest() if probe is not None else None
-        if reading is not None:
-            named = (int(reading.pps_utc_sec)
-                     + int(round(wall - reading.pps_utc_sec)))
-        else:
-            named = int(round(wall))
+        named = int(round(wall))
         if abs(wall - named) > 0.4:
             return None
         return named
+
+    # Throttle for the cross-tier naming disagreement report.
+    T6_NAMING_DISAGREE_LOG_PERIOD_SEC = 300.0
+
+    def _t6_report_naming_vs_radiod_pair(
+        self, wall: Optional[float], edge_utc: float
+    ) -> None:
+        """Spec §6 invariant 5: T6-vs-radiod-pair disagreement is
+        REPORTED, never corrective.  A radiod-pair wall estimate more
+        than half a second from the NMEA-derived edge UTC would have
+        named the wrong second under the old rounding — say so, loudly
+        but throttled, and carry on with the NMEA answer."""
+        if wall is None:
+            return
+        delta = wall - edge_utc
+        self._t6_naming_vs_radiod_pair_s = delta
+        if abs(delta) <= 0.5:
+            return
+        now = time.monotonic()
+        last = getattr(self, '_t6_naming_disagree_log_wall', None)
+        if (last is not None
+                and now - last < self.T6_NAMING_DISAGREE_LOG_PERIOD_SEC):
+            return
+        self._t6_naming_disagree_log_wall = now
+        logger.warning(
+            "T6 naming: radiod-pair wall estimate disagrees with the "
+            "NMEA-derived edge UTC by %+.3f s (> 0.5 s) — the radiod "
+            "GPS pair would have named the WRONG integer second. "
+            "Naming from NMEA (T5) as designed; reported only, no "
+            "correction applied (spec §6 invariant 5).",
+            delta,
+        )
 
     def _t6_apply_authority_decision(self, decision) -> None:
         """Install/invalidate the T6 anchor per the authority decision.
@@ -3181,6 +3321,15 @@ class CoreRecorderV2:
         fine_stage = getattr(self, '_t6_fine_stage', None)
         if fine_stage is not None:
             try:
+                # ``_chain_delay_samples`` is ``edge_rtp_full %
+                # sample_rate`` — the RTP domain.  Both the fine stage
+                # (which translates into its own fold domain per block)
+                # and the authority (which converts estimates back via
+                # edge_rtp) speak that domain, so this value is handed
+                # over untranslated.  See the domain note in
+                # ``bpsk_edge_fine_stage``: they are NOT interchangeable
+                # and mixing them mis-places the ±6 ms search window by
+                # an arbitrary per-start amount.
                 coarse = self._t6_calibrator._chain_delay_samples
                 if result is not None and result.locked and coarse is not None:
                     fine_stage.set_coarse_offset_samples(coarse)
@@ -3188,7 +3337,7 @@ class CoreRecorderV2:
                     samples, quality.last_rtp_timestamp)
                 # Gate on a live coarse offset (Finding 3): after an MF
                 # reset/unlock, _chain_delay_samples goes None but the
-                # fine stage's own internal _coarse_offset is not
+                # fine stage's own internal _coarse_offset_rtp is not
                 # cleared by reset() — consulting the authority against
                 # a stale-window estimate here would let it reach
                 # AUTHORITATIVE with the fine_coarse invariant inert
@@ -3207,6 +3356,28 @@ class CoreRecorderV2:
                         f"T6 fine stage failed (will retry each batch, "
                         f"logged once): {e}", exc_info=True)
                     self._t6_fine_warned = True
+
+            # Liveness (spec §6).  Everything above is edge-triggered on
+            # a fine estimate.  If estimates stop arriving while the MF
+            # stays locked — discarded fold blocks, a mis-seeded window
+            # finding no crossing, the handler above swallowing every
+            # batch — no branch above ever runs again and the authority
+            # would hold AUTHORITATIVE with a frozen anchor still
+            # feeding chrony (detect-and-stall, forbidden by the spec).
+            # DELIBERATELY OUTSIDE the try above: the swallowed-exception
+            # case is precisely the one this must survive.
+            authority = getattr(self, '_t6_authority', None)
+            if authority is not None:
+                try:
+                    stale = authority.on_tick()
+                    if stale is not None:
+                        self._t6_apply_authority_decision(stale)
+                except Exception as e:
+                    if not getattr(self, '_t6_liveness_warned', False):
+                        logger.error(
+                            f"T6 authority liveness tick failed (logged "
+                            f"once): {e}", exc_info=True)
+                        self._t6_liveness_warned = True
 
         # Differential-detector sidecar (offline A/B analysis).
         # Failures here MUST NOT affect main calibrator state;
@@ -4334,7 +4505,21 @@ class CoreRecorderV2:
                         if self._t6_native_anchor is not None else None
                     ),
                 }
-            status['t6_authority'] = self._t6_authority_status()
+                # Spec §4: authority transitions must reach
+                # authority.json, not just this status file.  The only
+                # block BpskPpsProbe reads is ``t6_pps``, so the state
+                # rides here (probe → ProbeResult.detail →
+                # AuthorityManager → authority.json).  Kept as two flat
+                # additive keys so older probes ignore them harmlessly.
+                _t6_auth_status = self._t6_authority_status()
+                if _t6_auth_status is not None:
+                    status['t6_pps']['authority_state'] = (
+                        _t6_auth_status['state'])
+                    status['t6_pps']['authority_violations'] = (
+                        _t6_auth_status['violations'])
+            else:
+                _t6_auth_status = self._t6_authority_status()
+            status['t6_authority'] = _t6_auth_status
 
             # T5 LBE-1421 status block — published so the AuthorityRunner
             # side (LbeT5DirectProbe) can decide T5 availability without

@@ -281,6 +281,22 @@ class BpskPpsProbe:
         if isinstance(native_anchor, dict):
             detail["native_anchor"] = native_anchor
 
+        # T6 anchor-authority state (spec §4:
+        # docs/design/T6_ANCHOR_INVERSION_DESIGN.md).  ACQUIRING /
+        # AUTHORITATIVE / DEGRADED / UNLOCKED plus the named invariant
+        # violations, forwarded so the state reaches authority.json
+        # rather than dying in the recorder's status file.  Absent on
+        # producers older than the anchor inversion, and while the fine
+        # stage is disabled — omit rather than invent a state.
+        authority_state = t6.get("authority_state")
+        if isinstance(authority_state, str):
+            detail["authority_state"] = authority_state
+        authority_violations = t6.get("authority_violations")
+        if isinstance(authority_violations, list):
+            detail["authority_violations"] = [
+                str(v) for v in authority_violations
+            ]
+
         # Pattern B: the anchor-derived ``rtp_to_utc_offset_ns``
         # bridges ka9q's host-clock-derived rtp_to_wallclock to the
         # native anchor.  Authority_manager prefers this over the

@@ -127,8 +127,19 @@ def make_bpsk(sr, seconds, edge_offset_samples, edge_width_us=52.0,
 
 
 def run_stage(sr, iq, coarse, fold_seconds, rtp0=123_456, **stage_kw):
+    """``coarse`` is given here in the FOLD domain (position within the
+    second measured from the start of the fed array, which is what
+    ``make_bpsk`` parameterises).  The stage's public API takes the
+    **RTP domain** — ``rtp % sample_rate``, the domain
+    ``BpskPpsCalibratorMF._chain_delay_samples`` publishes — so
+    translate with the registration, which for ``feed_batches`` is
+    exactly ``rtp0``.  The default rtp0 is deliberately not a multiple
+    of the sample rate (123456 % 96000 = 27456), so every test routed
+    through here exercises a real domain difference.  Before the
+    RTP-domain handoff fix these tests passed a fold-domain coarse
+    straight in; that premise was the bug."""
     stage = BpskEdgeFineStage(sr, fold_seconds=fold_seconds, **stage_kw)
-    stage.set_coarse_offset_samples(coarse)
+    stage.set_coarse_offset_samples((rtp0 + coarse) % sr)
     ests = feed_batches(stage, iq, rtp0=rtp0)
     return stage, ests
 
@@ -196,7 +207,8 @@ class TestLocalisation:
     def test_mislabelled_batches_do_not_smear_the_edge(self):
         iq = make_bpsk(SR, 10, self.EDGE, noise_rms=0.02)
         stage = BpskEdgeFineStage(SR, fold_seconds=10)
-        stage.set_coarse_offset_samples(self.EDGE)
+        # RTP-domain coarse (registration = rtp0 = 999); see run_stage.
+        stage.set_coarse_offset_samples((999 + self.EDGE) % SR)
         n_batches = int(np.ceil(len(iq) / 1740))
         bad = {b: +60 for b in range(0, n_batches, 11)}
         ests = feed_batches(stage, iq, rtp0=999, mislabel=bad)
@@ -215,6 +227,73 @@ class TestLocalisation:
         _, ests = run_stage(SR, iq, coarse=edge, fold_seconds=10)
         err_us = abs(((ests[0].edge_offset_samples - edge + SR / 2) % SR
                       - SR / 2)) / SR * 1e6
+        assert err_us < 1.0
+
+
+class TestCoarseOffsetDomain:
+    """Final-review Finding 1: the coarse offset handed over by
+    ``BpskPpsCalibratorMF`` is ``edge_rtp_full % sample_rate`` — the RTP
+    domain — while the fold buffer indexes by samples-since-stage-start.
+    The two differ by ``registration % sample_rate``, an arbitrary value
+    fixed by wherever the stage happened to start.  Feeding the RTP
+    value into a fold-domain search window mis-places the ±6 ms window
+    by that amount (286 ms in the reviewer's repro), so the stage
+    produced no estimates at all in production, while near the fold seam
+    it could localise the seam instead of the edge.
+    """
+
+    EDGE = 43_181.4          # fold-domain edge position
+    RTP0 = 123_456           # % 96000 == 27456: domains differ by 286 ms
+
+    def test_production_style_rtp_domain_coarse_localises(self):
+        # Exactly what the recorder does: hand over the MF's
+        # `_chain_delay_samples`, i.e. (rtp of the edge) % SR.
+        coarse_rtp = (self.RTP0 + self.EDGE) % SR
+        assert abs(coarse_rtp - self.EDGE) > 0.1 * SR  # domains really differ
+        iq = make_bpsk(SR, 10, self.EDGE, noise_rms=0.05)
+        stage = BpskEdgeFineStage(SR, fold_seconds=10)
+        stage.set_coarse_offset_samples(coarse_rtp)
+        ests = feed_batches(stage, iq, rtp0=self.RTP0)
+        assert len(ests) == 1
+        err_us = abs(ests[0].edge_offset_samples - self.EDGE) / SR * 1e6
+        assert err_us < 1.0
+
+    def test_edge_rtp_phase_matches_the_rtp_domain_coarse(self):
+        # The authority compares (edge_rtp + subsample) % SR against the
+        # same coarse — both must land on the same RTP phase.
+        coarse_rtp = (self.RTP0 + self.EDGE) % SR
+        iq = make_bpsk(SR, 10, self.EDGE, noise_rms=0.02)
+        stage = BpskEdgeFineStage(SR, fold_seconds=10)
+        stage.set_coarse_offset_samples(coarse_rtp)
+        est = feed_batches(stage, iq, rtp0=self.RTP0)[0]
+        phase = (est.edge_rtp + est.edge_subsample) % SR
+        err_us = abs((phase - coarse_rtp + SR / 2) % SR - SR / 2) / SR * 1e6
+        assert err_us < 1.0
+
+    def test_translation_helper_inverts_the_registration(self):
+        stage = BpskEdgeFineStage(SR, fold_seconds=4)
+        stage.set_coarse_offset_samples((self.RTP0 + self.EDGE) % SR)
+        assert stage.coarse_offset_fold_domain(self.RTP0) == pytest.approx(
+            self.EDGE % SR)
+        # A stage that started one sample later shifts the fold position
+        # by exactly one sample — the arbitrariness the bug ignored.
+        assert stage.coarse_offset_fold_domain(self.RTP0 + 1) == pytest.approx(
+            (self.EDGE - 1) % SR)
+
+    def test_seam_adjacent_edge_is_not_confused_with_the_fold_seam(self):
+        # Edge 20 samples past the true second boundary, with a
+        # registration that puts the fold seam ~half a second away from
+        # the RTP-domain coarse: the old mixed-domain seeding searched
+        # around the wrong place entirely.
+        edge = 20.0
+        rtp0 = 48_000 + 7  # seam sits mid-second in the RTP domain
+        iq = make_bpsk(SR, 10, edge, noise_rms=0.02)
+        stage = BpskEdgeFineStage(SR, fold_seconds=10)
+        stage.set_coarse_offset_samples((rtp0 + edge) % SR)
+        ests = feed_batches(stage, iq, rtp0=rtp0)
+        assert len(ests) == 1
+        err_us = abs((ests[0].edge_offset_samples - edge + SR / 2) % SR
+                     - SR / 2) / SR * 1e6
         assert err_us < 1.0
 
 
@@ -241,7 +320,8 @@ class TestFoldAcrossNonDividingBatches:
         edge = 43_181.4
         iq = make_bpsk(SR, 24, edge, noise_rms=0.05)
         stage = BpskEdgeFineStage(SR, fold_seconds=8)
-        stage.set_coarse_offset_samples(edge + 40)
+        # RTP-domain coarse (registration = rtp0 = 555_555); see run_stage.
+        stage.set_coarse_offset_samples((555_555 + edge + 40) % SR)
         ests = feed_batches(stage, iq, rtp0=555_555, batch=1740)
         assert len(ests) == 3
         assert stage.blocks_discarded == 0

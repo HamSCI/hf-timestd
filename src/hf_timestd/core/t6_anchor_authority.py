@@ -9,12 +9,18 @@ The coarse cascade only NAMES the integer second (±0.5 s duty); its
 noise cannot enter the sub-second value by construction.  All state
 transitions are returned to the caller for loud logging — this module
 never logs silently-consequential decisions itself, and it never
-consults a wall clock (the injected ``now`` measures DEGRADED dwell
-only).
+consults a wall clock (the injected ``now`` is monotonic and measures
+only DEGRADED dwell, estimate staleness and log throttling).
+
+Two entry points drive it: ``on_fine_estimate`` (edge-triggered, once
+per fold block) and ``on_tick`` (level-triggered, every batch), the
+latter existing so that the *absence* of estimates is itself detected
+rather than freezing the last anchor forever.
 """
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -23,8 +29,15 @@ from typing import Callable, Optional
 from hf_timestd.core.bpsk_edge_fine_stage import FineEdgeEstimate
 from hf_timestd.core.native_anchor import NativeAnchor
 
+logger = logging.getLogger(__name__)
+
 _BILLION = 1_000_000_000
 DELAY_BUDGET_BOUND_NS = 1_000_000  # ±1 ms hard physical bound (spec §5)
+# Estimates arrive once per fold block; three missed blocks is an
+# unambiguous stall, not jitter.
+ESTIMATE_STALE_INTERVALS = 3.0
+# Throttle for the "still ACQUIRING" visibility warning.
+ACQUIRING_WARN_PERIOD_SEC = 300.0
 
 
 class T6AuthorityState(str, Enum):
@@ -50,6 +63,7 @@ class T6AnchorAuthority:
         edge_period_tolerance_ns: int = 5_000,
         fine_coarse_max_ms: float = 5.0,
         degraded_unlock_after_sec: float = 600.0,
+        fine_fold_seconds: float = 30.0,
         now: Callable[[], float] = time.monotonic,
     ):
         if abs(int(delay_budget_ns)) > DELAY_BUDGET_BOUND_NS:
@@ -66,11 +80,17 @@ class T6AnchorAuthority:
         self.edge_period_tolerance_ns = int(edge_period_tolerance_ns)
         self.fine_coarse_max_ms = float(fine_coarse_max_ms)
         self.degraded_unlock_after_sec = float(degraded_unlock_after_sec)
+        self.fine_fold_seconds = float(fine_fold_seconds)
         self._now = now
         self._state = T6AuthorityState.ACQUIRING
         self._anchor: Optional[NativeAnchor] = None
         self._prev_offset: Optional[float] = None
         self._degraded_since: Optional[float] = None
+        # Liveness (spec §6, expose-don't-stall): when the estimate
+        # stream dies while the MF stays locked, nothing edge-triggered
+        # would ever fire again and the anchor would freeze silently.
+        self._last_estimate_at: Optional[float] = None
+        self._last_acquiring_warn_at: Optional[float] = None
 
     @property
     def state(self) -> T6AuthorityState:
@@ -80,6 +100,21 @@ class T6AnchorAuthority:
         p = self.sample_rate_hz
         return abs((a - b + p / 2) % p - p / 2)
 
+    def edge_phase_rtp(self, est: FineEdgeEstimate) -> float:
+        """Edge position within the second in the **RTP domain**.
+
+        ``est.edge_offset_samples`` is in the fine stage's *fold*
+        domain (samples since that stage's own start, mod the sample
+        rate) and is offset from the RTP domain by an arbitrary
+        per-block registration — see the domain note in
+        ``bpsk_edge_fine_stage``.  Every quantity this class compares
+        against (the MF coarse offset, and the previous estimate,
+        which may have been produced under a different registration)
+        is RTP-domain, so the estimate is converted here from the
+        fields that *are* RTP-domain: ``edge_rtp + edge_subsample``.
+        """
+        return (int(est.edge_rtp) + float(est.edge_subsample)) % self.sample_rate_hz
+
     def _check(
         self,
         est: FineEdgeEstimate,
@@ -87,11 +122,10 @@ class T6AnchorAuthority:
         named_second_utc: Optional[int],
     ) -> tuple:
         v = []
+        phase = self.edge_phase_rtp(est)
         if self._prev_offset is not None:
             d_ns = (
-                self._wrapped_distance_samples(
-                    est.edge_offset_samples, self._prev_offset
-                )
+                self._wrapped_distance_samples(phase, self._prev_offset)
                 / self.sample_rate_hz
                 * 1e9
             )
@@ -100,7 +134,7 @@ class T6AnchorAuthority:
         if coarse_offset_samples is not None:
             d_ms = (
                 self._wrapped_distance_samples(
-                    est.edge_offset_samples, coarse_offset_samples
+                    phase, float(coarse_offset_samples) % self.sample_rate_hz
                 )
                 / self.sample_rate_hz
                 * 1e3
@@ -135,16 +169,18 @@ class T6AnchorAuthority:
 
         if not violations:
             self._anchor = self._build_anchor(est, named_second_utc)
-            self._prev_offset = est.edge_offset_samples
+            self._prev_offset = self.edge_phase_rtp(est)
             self._degraded_since = None
+            self._last_estimate_at = self._now()
             self._state = T6AuthorityState.AUTHORITATIVE
             return T6AnchorDecision(self._state, prev, self._anchor, ())
 
         if prev in (T6AuthorityState.ACQUIRING, T6AuthorityState.UNLOCKED):
             # Not yet authoritative — keep (re)acquiring.  Track the
             # offset so periodicity has a reference once estimates clean up.
-            self._prev_offset = est.edge_offset_samples
+            self._prev_offset = self.edge_phase_rtp(est)
             self._state = T6AuthorityState.ACQUIRING
+            self._note_acquiring_violation(violations)
             return T6AnchorDecision(self._state, prev, None, violations)
 
         # AUTHORITATIVE or DEGRADED with a violation → DEGRADED, hold
@@ -156,6 +192,84 @@ class T6AnchorAuthority:
         self._state = T6AuthorityState.DEGRADED
         return T6AnchorDecision(self._state, prev, self._anchor, violations)
 
+    def estimate_stale_after_sec(
+        self, expected_interval_sec: Optional[float] = None
+    ) -> float:
+        """How long without an accepted estimate counts as stale."""
+        interval = (
+            self.fine_fold_seconds
+            if expected_interval_sec is None
+            else float(expected_interval_sec)
+        )
+        return ESTIMATE_STALE_INTERVALS * interval
+
+    def on_tick(
+        self, expected_interval_sec: Optional[float] = None
+    ) -> Optional[T6AnchorDecision]:
+        """Liveness invariant — call on every batch (spec §6).
+
+        The rest of this class is edge-triggered on fine estimates.  If
+        estimates stop arriving while the MF stays locked (discarded
+        fold blocks, a swallowed exception in the fine-stage feed, a
+        mis-seeded search window finding nothing), nothing would ever
+        re-evaluate the state and the authority would sit
+        AUTHORITATIVE forever with a frozen anchor still feeding
+        chrony.  That is exactly the detect-and-stall failure the spec
+        forbids, so absence of estimates is itself a violation:
+        ``estimate_stale`` → DEGRADED, and the normal DEGRADED dwell
+        then carries it to UNLOCKED and the legacy cascade.
+
+        Returns None when there is nothing to report (the common case —
+        this runs on the sample hot path and must stay cheap).
+        """
+        if self._state not in (
+            T6AuthorityState.AUTHORITATIVE,
+            T6AuthorityState.DEGRADED,
+        ):
+            return None
+        now = self._now()
+        if self._last_estimate_at is None:
+            # Reached AUTHORITATIVE/DEGRADED without a timestamped
+            # estimate (defensive) — start the clock now.
+            self._last_estimate_at = now
+            return None
+        if now - self._last_estimate_at <= self.estimate_stale_after_sec(
+            expected_interval_sec
+        ):
+            return None
+
+        prev = self._state
+        if self._degraded_since is None:
+            self._degraded_since = now
+        if now - self._degraded_since > self.degraded_unlock_after_sec:
+            return self._unlock(prev, ("estimate_stale",))
+        self._state = T6AuthorityState.DEGRADED
+        return T6AnchorDecision(self._state, prev, self._anchor, ("estimate_stale",))
+
+    def _note_acquiring_violation(self, violations: tuple) -> None:
+        """Throttled visibility for acquiring-forever.
+
+        ACQUIRING with repeated violations is silent by design (no
+        state change, no anchor), so a permanently-broken estimator
+        looks identical to a cold start.  Say so at WARNING, at most
+        once per ACQUIRING_WARN_PERIOD_SEC.
+        """
+        if not violations:
+            return
+        now = self._now()
+        last = self._last_acquiring_warn_at
+        if last is not None and now - last < ACQUIRING_WARN_PERIOD_SEC:
+            return
+        self._last_acquiring_warn_at = now
+        logger.warning(
+            "T6 anchor authority: still ACQUIRING — estimates keep "
+            "violating invariants (%s).  No T6 anchor is being "
+            "published; the legacy T5/T4 cascade is carrying the "
+            "chrony feed.  (Repeated at most every %.0f s.)",
+            ", ".join(violations),
+            ACQUIRING_WARN_PERIOD_SEC,
+        )
+
     def on_mf_unlock(self) -> T6AnchorDecision:
         return self._unlock(self._state, ("mf_unlock",))
 
@@ -164,4 +278,5 @@ class T6AnchorAuthority:
         self._anchor = None
         self._prev_offset = None
         self._degraded_since = None
+        self._last_estimate_at = None
         return T6AnchorDecision(self._state, prev, None, violations)

@@ -164,6 +164,21 @@ class T5RtpPairing:
         """(rtp, mono) of the most recent batch, or None."""
         return self._arrival
 
+    # The injected clocks, exposed so other consumers of the arrival
+    # record (e.g. the T6 integer-second naming in CoreRecorderV2) read
+    # the *same* clocks the arrival was stamped with — mixing a real
+    # monotonic against a fake-clock arrival would silently invalidate
+    # the age computation.
+
+    def now_mono(self) -> float:
+        """Injected monotonic clock — same one ``note_arrival`` stamps."""
+        return self._mono()
+
+    def now_wall(self) -> float:
+        """Injected wall clock (sanctioned sub-second indexing role only —
+        see the module docstring)."""
+        return self._time()
+
     # ── evaluation ───────────────────────────────────────────────────
 
     def compute(

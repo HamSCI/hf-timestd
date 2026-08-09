@@ -14,6 +14,32 @@ of all batch declarations in the fold block, so the measured
 edge.  A registration spread beyond REGISTRATION_SPREAD_LIMIT samples
 means a genuine stream gap inside the block — the block is discarded
 (counted in ``blocks_discarded``), never silently used.
+
+## Coarse-offset domain (read before touching ``set_coarse_offset_samples``)
+
+Two different "position within the second" domains exist here and they
+are NOT interchangeable:
+
+* **RTP domain** — ``rtp % sample_rate``.  This is what
+  ``BpskPpsCalibratorMF._chain_delay_samples`` reports (it is literally
+  ``edge_rtp_full % sample_rate``) and it is the domain the whole
+  service speaks.
+* **Fold domain** — ``continuity_index % sample_rate``, where continuity
+  counts samples since this stage last reset.  The fold buffer, and
+  therefore ``FineEdgeEstimate.edge_offset_samples``, live here.
+
+The two differ by ``registration % sample_rate``, where the
+registration is the declared RTP of the first sample of the block —
+an arbitrary value that changes whenever the stage resets.  Feeding an
+RTP-domain coarse straight into the fold-domain search window
+mis-places the ±6 ms window by that arbitrary amount (286 ms in the
+reviewer's repro), so the stage finds nothing at all, or — near the
+fold seam — localises the seam instead of the edge.
+
+``set_coarse_offset_samples`` therefore takes the **RTP domain** (the
+producer's domain, no translation at the call site) and the stage
+translates into its own fold domain at estimate time, using the
+registration it just measured for that very block.
 """
 
 from __future__ import annotations
@@ -64,7 +90,9 @@ class BpskEdgeFineStage:
         self.fold_seconds = int(fold_seconds)
         self.search_window_ms = float(search_window_ms)
         self.blocks_discarded = 0
-        self._coarse_offset: Optional[float] = None
+        # RTP-domain coarse (see module docstring).  Translated to the
+        # fold domain per block in _compute_estimate.
+        self._coarse_offset_rtp: Optional[float] = None
         self._last_avg_for_test: Optional[np.ndarray] = None
         self.reset()
 
@@ -78,7 +106,26 @@ class BpskEdgeFineStage:
         self._last_registration: Optional[int] = None
 
     def set_coarse_offset_samples(self, offset: float) -> None:
-        self._coarse_offset = float(offset) % self.sample_rate
+        """Seed the search window with the coarse edge position.
+
+        ``offset`` is in the **RTP domain** — ``rtp % sample_rate``,
+        exactly what ``BpskPpsCalibratorMF._chain_delay_samples``
+        publishes.  The caller does no translation; this stage converts
+        to its own fold domain per block (module docstring).
+        """
+        self._coarse_offset_rtp = float(offset) % self.sample_rate
+
+    def coarse_offset_fold_domain(self, registration: int) -> Optional[float]:
+        """Translate the stored RTP-domain coarse into the fold domain
+        for a block whose median registration is ``registration``.
+
+        RTP at continuity index ``c`` is ``registration + c``, so a
+        given RTP phase ``E`` sits at fold index
+        ``(E − registration) mod sample_rate``.
+        """
+        if self._coarse_offset_rtp is None:
+            return None
+        return (self._coarse_offset_rtp - int(registration)) % self.sample_rate
 
     def process_samples(
         self, iq_samples: np.ndarray, rtp_timestamp: int
@@ -183,14 +230,15 @@ class BpskEdgeFineStage:
     def _compute_estimate(
         self, avg: np.ndarray, registration: int
     ) -> Optional[FineEdgeEstimate]:
-        if self._coarse_offset is None:
+        coarse_fold = self.coarse_offset_fold_domain(registration)
+        if coarse_fold is None:
             return None
         p = self.sample_rate
         # Derotate: squaring removes the BPSK sign, leaving 2× carrier phase.
         phi = 0.5 * float(np.angle(np.mean(avg.astype(np.complex128) ** 2)))
         in_phase = np.real(avg * np.exp(-1j * phi))
 
-        c = int(round(self._coarse_offset)) % p
+        c = int(round(coarse_fold)) % p
         W = max(8, int(self.search_window_ms * 1e-3 * p))
         seg = np.take(in_phase, np.arange(c - W, c + W + 1) % p)
 

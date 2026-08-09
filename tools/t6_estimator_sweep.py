@@ -38,7 +38,16 @@ import numpy as np
 def replay_fine(iq, sample_rate, coarse_offset, fold_seconds, batch=1740,
                  search_window_ms=6.0):
     """Run BpskEdgeFineStage over an in-memory IQ array in service-sized
-    batches with clean synthetic RTP labels.  Returns all estimates."""
+    batches with clean synthetic RTP labels.  Returns all estimates.
+
+    Domain note: ``set_coarse_offset_samples`` takes the RTP domain
+    (``rtp % sample_rate``).  This harness labels file position ``i``
+    with RTP ``i``, i.e. rtp0 = 0, so the stage's registration is 0 and
+    the RTP and fold domains coincide — ``--coarse`` is therefore a
+    plain file-domain position within the second, unchanged by the
+    RTP-domain handoff fix.  A harness variant with a nonzero rtp0
+    would have to pass ``(rtp0 + file_offset) % sample_rate``.
+    """
     from hf_timestd.core.bpsk_edge_fine_stage import BpskEdgeFineStage
     stage = BpskEdgeFineStage(int(sample_rate), fold_seconds=int(fold_seconds),
                                search_window_ms=float(search_window_ms))

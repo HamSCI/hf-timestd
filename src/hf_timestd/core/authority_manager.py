@@ -223,6 +223,11 @@ class AuthorityManager:
         # demote-on-breach hysteresis; resets when the breach clears
         # or T6 stops being the picked tier.
         self._t6_consecutive_breach_ticks: int = 0
+        # T6 anchor-authority state as of the last poll, forwarded by
+        # BpskPpsProbe (spec §4 of the anchor-inversion design).  None
+        # until a producer publishes it.
+        self._t6_authority_state: Optional[str] = None
+        self._t6_authority_violations: Optional[List[str]] = None
 
     def tick(self) -> AuthorityState:
         """Run one authority-decision cycle: poll probes, update
@@ -248,6 +253,7 @@ class AuthorityManager:
                 return state
 
         results = self._poll_all()
+        self._note_t6_authority(results.get("T6"))
         self._update_hysteresis(results)
         active = self._pick_active(results)
         # Phase 2B — demote T6→T5 when the drift monitor reports a
@@ -752,6 +758,20 @@ class AuthorityManager:
             disagreement_flags=disagreement_flags,
         )
 
+    def _note_t6_authority(self, r: Optional[ProbeResult]) -> None:
+        """Latch the T6 anchor-authority state from this tick's probe
+        result so ``_write_state`` can publish it.  A probe that goes
+        unavailable still carries the state when it has one (DEGRADED /
+        UNLOCKED are exactly the interesting cases); only a producer
+        that publishes nothing clears it."""
+        d = (r.detail or {}) if r is not None else {}
+        state = d.get("authority_state")
+        self._t6_authority_state = state if isinstance(state, str) else None
+        viol = d.get("authority_violations")
+        self._t6_authority_violations = (
+            [str(v) for v in viol] if isinstance(viol, list) else None
+        )
+
     def _write_state(self, state: AuthorityState) -> None:
         payload: dict = {
             "schema": SCHEMA_VERSION,
@@ -766,6 +786,19 @@ class AuthorityManager:
             "last_transition_utc": state.last_transition_utc,
             "disagreement_flags": state.disagreement_flags,
         }
+
+        # Additive v1 extension: the T6 anchor-authority state
+        # (ACQUIRING / AUTHORITATIVE / DEGRADED / UNLOCKED) and its
+        # named invariant violations, per §4 of the anchor-inversion
+        # design — consumers of authority.json can see the T6 anchor
+        # degrade without opening the recorder's status file.  Omitted
+        # entirely when the producer publishes no state, so legacy
+        # output is byte-compatible.
+        if self._t6_authority_state is not None:
+            payload["t6_authority_state"] = self._t6_authority_state
+            if self._t6_authority_violations is not None:
+                payload["t6_authority_violations"] = (
+                    self._t6_authority_violations)
 
         # Additive v1 extension: governor_radiod names which radiod's
         # RTP timebase this Fusion offset is computed against (§4.5.1
