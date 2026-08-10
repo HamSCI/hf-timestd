@@ -2934,14 +2934,18 @@ class CoreRecorderV2:
                 f"falling back to T4."
             )
             return False
-        effective_chain_delay_ns = int(round(residual_sec * 1e9))
+        effective_chain_delay_ns, reported_residual_ns = (
+            self._t6_resolve_chain_delay_ns(
+                residual_sec, self._t6_chain_delay_calib_s))
+        self._t6_report_derived_residual(
+            "HFPS", reported_residual_ns, effective_chain_delay_ns)
         # Layer B physical-plausibility guard — same rationale as
         # the HPPS path; see ``_t6_disambiguate_via_t5_lb1421``.
         T6_PHYSICAL_CHAIN_DELAY_MAX_NS = 250_000_000
-        if abs(effective_chain_delay_ns) > T6_PHYSICAL_CHAIN_DELAY_MAX_NS:
+        if abs(reported_residual_ns) > T6_PHYSICAL_CHAIN_DELAY_MAX_NS:
             logger.warning(
                 f"HFPS T5 disambig: implied chain_delay "
-                f"{effective_chain_delay_ns/1e6:+.1f} ms exceeds "
+                f"{reported_residual_ns/1e6:+.1f} ms exceeds "
                 f"physical-plausibility bound ±"
                 f"{T6_PHYSICAL_CHAIN_DELAY_MAX_NS/1e6:.0f} ms — "
                 f"sidelobe / phantom-peak capture.  Falling back "
