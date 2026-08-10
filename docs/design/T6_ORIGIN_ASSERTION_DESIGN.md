@@ -155,8 +155,27 @@ the criterion passes. Rollback is file restore plus a service restart.
 
 ## 9. Open questions
 
-1. What establishes the physical sub-ms chain delay? No independent
-   measurement exists on this station today.
+1. **The codebase contradicts itself on the expected magnitude, and the
+   data fits the larger figure.** `t6_anchor_authority.py:44` bounds
+   chain delay at **±1 ms** ("analog TS-1→ADC path plus channel-filter
+   group delay is microseconds to sub-millisecond"). But the MF path's
+   own Layer-B guard in `core_recorder_v2.py` says: *"typical in-shack
+   RF paths land in 10-100 ms, with the upstream radiod filter
+   group-delay being the dominant contribution (up to ~150 ms at narrow
+   filter widths)"* — and sets its bound at 250 ms.
+
+   The 2026-08-10 rate sweep is monotonic in filter width and fits the
+   larger figure: 31.84 ms (±25 kHz), 45.75 ms (±11 kHz), 108.89 ms
+   (±5.5 kHz). A `constant + k/bandwidth` model fits all three inside the
+   run-to-run variance.
+
+   **So much of the tens of milliseconds may be REAL radiod filter group
+   delay, not error.** This does not affect stage 1 — the criterion is
+   repeatability and the variance is unexplained either way — but it
+   means `chain_delay_calib_s = 0` is a knowingly wrong constant chosen
+   to make the experiment clean, not a harmless default. Resolving which
+   bound is right, and whether group delay is calibrable per channel
+   config, is stage 2 work.
 2. Why 58 authority transitions per night? The re-locks are the trigger
    for re-derivation; asserting the origin removes the *consequence* but
    not the flapping. Tracked separately (`edge_period`, `mf_unlock`).
