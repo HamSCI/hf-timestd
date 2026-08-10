@@ -327,6 +327,15 @@ path preserves configs (if_absent renders) and the grape watermark.
 - Confirm quota/retention contract (§8) — hf-timestd pruning other repos'
   products by registry declaration.
 - HamSCI org repo creation + push permissions for the four new repos.
+- **Magnetometer timing provenance gap** (Michael, 2026-08-10): mag-recorder
+  stamps readings from the host clock (sysclock frame — the instrument is not
+  radiod-sampled, so the RTP invariant legitimately does not apply), but the
+  data carries a timestamp with NO provenance annotation. Proposed fix, cheap:
+  stamp a `to_timing_authority`-style sidecar block (tier + σ derived from
+  chrony state) on mag products so they meet the same annotated-timing bar as
+  the RTP-frame clients. Belongs to mag-recorder, not this split — but the
+  contract shape (provenance block) should come from `hamsci_dsp.timing` so
+  it stays uniform fleet-wide.
 
 ## 12. Pre-gate evaluations (added in review, Michael 2026-08-10)
 
