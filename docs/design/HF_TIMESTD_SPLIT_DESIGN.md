@@ -327,3 +327,49 @@ path preserves configs (if_absent renders) and the grape watermark.
 - Confirm quota/retention contract (§8) — hf-timestd pruning other repos'
   products by registry declaration.
 - HamSCI org repo creation + push permissions for the four new repos.
+
+## 12. Pre-gate evaluations (added in review, Michael 2026-08-10)
+
+Two open questions about the post-split core. Both are config/offline
+experiments on B4 — no timing-core code changes — runnable during the T6
+wait; their outcomes amend this spec before Phase 1 begins.
+
+### E1 — WWVB receiver utility
+
+WWVB is pooled into fusion as one more D_clock source: the core-recorder
+decode loop → `wwvb_fusion.py` L1 row (same `timing_error_ms` convention as
+the HF workers) → combiner consumes it verbatim
+(`multi_broadcast_fusion.py:2043`) beside WWV/WWVH/CHU/BPM, with a
+groundwave-only delay model (`wwvb_propagation.py`). It is the one pool
+member immune to the shared ionospheric-model error — a potentially valuable
+independent cross-check — but its own docstring grades an uncalibrated WWVB
+source MARGINAL (propagation-model residual + antenna-geometry offset must be
+absorbed by GPS-learned calibration).
+
+Measure on B4 over ≥3 days: decode success rate + L1 row cadence; fused
+offset vs GPS truth (offset-judge benches) with WWVB in and out of the pool;
+day/night split (night skywave contamination is the known LF failure mode).
+
+**Decision:** contributor (keep + add calibration) · witness-only (keep at
+zero weight) · retire (delete the ~530-line WWVB block from core_recorder_v2
+plus the four `wwvb_*` modules — core diet in the split's spirit).
+
+### E2 — FUSION quality without GNSS-VTEC
+
+Post-split, a station without a raw-capable GNSS receiver is the TYPICAL
+fleet configuration, not a corner: gnss-vtec is an optional client, and
+Phase 2 removes the in-loop TECEstimator fallback (below-noise-floor by its
+own docstring). Such stations get no fusion-level iono correction at all;
+what remains is l2-calibration's climatological propagation subtraction
+(IRI/IONEX). Question: does T3 hold its 0.5–2 ms (A1) budget without the
+GNSS-VTEC Δiono correction?
+
+Measure on B4 (has GNSS + GPS truth): (a) harvest the applied Δiono
+distribution from fusion journals — read-only; (b) A/B the correction on/off
+against the judge benches; (c) trial climatological IONEX TEC substituted
+where GNSS-VTEC would go, as a zero-install-cost Phase-2 fallback candidate.
+Baseline: B4 overnight T3 σ = 3.26 ms with all corrections active.
+
+**Decision:** Phase-2 fallback = nothing (absence is within budget) ·
+climatological IONEX substitute; plus a documented expected T3 σ for
+GNSS-less DASI stations.

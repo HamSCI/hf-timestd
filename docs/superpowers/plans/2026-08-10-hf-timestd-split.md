@@ -19,6 +19,10 @@ shared data layer), per `docs/design/HF_TIMESTD_SPLIT_DESIGN.md`.
       against the live segment). Currently ~80 ms, block-quantised — NOT met.
 - [ ] rob co-review of the spec's §11 open items (hamsci-dsp charter, names,
       quota contract, org repo creation).
+- [ ] E1 — WWVB utility evaluation complete, disposition decided
+      (spec §12: contributor / witness-only / retire).
+- [ ] E2 — FUSION-sans-VTEC characterization complete, Phase-2 fallback
+      chosen (spec §12: nothing vs climatological IONEX).
 
 ## Global constraints
 
