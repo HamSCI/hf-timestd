@@ -373,3 +373,37 @@ Baseline: B4 overnight T3 σ = 3.26 ms with all corrections active.
 **Decision:** Phase-2 fallback = nothing (absence is within budget) ·
 climatological IONEX substitute; plus a documented expected T3 σ for
 GNSS-less DASI stations.
+
+### Interim findings (2026-08-10, read-only recon on B4 via web-api :8000)
+
+**E1 — WWVB is not merely marginal, it is unexercised.** B4 does not
+configure WWVB at all: absent from the 17 configured broadcasts
+(`/api/stations/broadcasts`), absent from the 24 h broadcasts dashboard, and
+`stations_used` in live fusion is `[WWV, WWVH]` only. The consumer code is
+idle. Additionally the `L3_fusion_timing` schema carries per-station stats
+for WWV/WWVH/CHU/BPM but has **no WWVB columns** — a schema gap to close if
+WWVB is kept. Consequence: E1 must first *enable* WWVB on a station (config +
+core-recorder restart — deferred while the T6 hands-off measurement window is
+live) before any utility measurement exists. The retire option currently has
+zero production evidence against it.
+
+**E2 — both iono corrections are already fusion-authority-only.** Code
+confirms (`multi_broadcast_fusion.py:3490` and the TECEstimator block):
+in RTP-authority mode, GNSS-VTEC Δiono is *never applied* to D_clock
+(cross-check + confidence boost only), and the TECEstimator fallback carries
+the same `if not self.is_rtp_authority` gate. Every GPSDO/A1 DASI install
+runs RTP authority, so for the typical fleet station:
+- Phase 2's TECEstimator removal changes nothing in the fused output;
+- gnss-vtec's absence costs only the cross-check, not accuracy.
+The genuine E2 question narrows to **fusion-authority (non-GPSDO) stations**,
+which B4 cannot A/B in production without an authority-mode switch. Remaining
+E2 work: (a) confirm B4's `[timing] authority = rtp` from config when shell
+access permits (near-certain: template default + design docs); (b) decide
+whether fusion-mode characterization needs a testbed or waits for a real
+fusion-authority deployment; (c) the cross-check's diagnostic value is an
+argument for keeping gnss-vtec install-optional but recommended.
+
+Baseline recorded (21 h, 9026 fusion cycles via `/api/metrology/fusion/history`):
+fused D_clock mean +0.05 ms, sd 0.60 ms; published σ mean 3.5 ms; grades
+C:8181 / D:650 / B:195. Note σ sits above the METROLOGY T3 (A1) 0.5–2 ms
+budget — worth its own look, independent of this split.
