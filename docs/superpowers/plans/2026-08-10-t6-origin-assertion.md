@@ -347,22 +347,34 @@ Expected: at least one line, throttled to one per 300 s, showing a derived resid
 
 - [ ] **Step 5: Run overnight, then evaluate the criterion**
 
-After ≥8 h, extract origins as in Step 1 into `/tmp/origin_after.txt` and compute the spread:
+After the window closes, extract anchors **scoped to the current radiod
+session** and run `scripts/t6_origin_spread.py`:
 
-```python
-import re, sys
-rows = []
-for line in open(sys.argv[1]):
-    m = re.search(r'rtp=(\d+), utc_ns=(\d+), sr=(\d+)', line)
-    if m:
-        rtp, utc_ns, sr = int(m[1]), int(m[2]), int(m[3])
-        rows.append(utc_ns - (rtp / sr) * 1e9)
-if not rows:
-    sys.exit("no anchors captured")
-spread_us = (max(rows) - min(rows)) / 1e3
-print(f"n={len(rows)}  spread={spread_us:.3f} us")
-print("PASS" if spread_us < 10.4 else "FAIL")
+```bash
+SINCE=$(systemctl show radiod@AC0G-B4 -p ActiveEnterTimestamp --value)
+journalctl -u timestd-core-recorder --since "$SINCE" --no-pager \
+  | grep -oE 'native_anchor: rtp=[0-9]+, utc_ns=[0-9]+, sr=[0-9]+' \
+  > /tmp/origin_after.txt
+python3 scripts/t6_origin_spread.py /tmp/origin_after.txt
 ```
+
+Two corrections to the naive metric, both learned from the pre-change
+baseline (which returned a nonsensical 93-minute spread):
+
+1. **Scope to one radiod session.** `origin = utc_ns - rtp/sr` is UTC at
+   `rtp=0`. A radiod restart resets the RTP epoch, so origins from
+   different radiod lifetimes are not comparable. **A radiod restart
+   during the window invalidates the run.** Restarting the *recorder* is
+   fine — that is what generates the re-locks being measured.
+2. **Reduce modulo the RTP wrap, in integer arithmetic.** `rtp` is 32-bit,
+   so the origin is defined only modulo `2**32/sr` (12.4 h at 96 kHz), and
+   the spread must be the *circular* spread (period minus the largest
+   gap). Do the arithmetic in ints: `utc_ns` is ~1.8e18 where float64
+   granularity is ~256 ns. The `+44743 s` HFPS offset seen on 2026-08-09
+   was one such wrap, not a clock error.
+
+The script splits by sample rate, so anchors left over from a rate sweep
+do not contaminate the result.
 
 **PASS:** spread < 10.4 µs (one sample at 96 kHz) across all re-locks in the window → the derivation was the variance source; the spec's wider architectural change is warranted.
 **FAIL:** spread still tens of ms → the diagnosis is wrong. Do not commit. Return to what else changes at re-lock; the reported residuals in the journal are the evidence trail.
