@@ -160,5 +160,32 @@ the criterion passes. Rollback is file restore plus a service restart.
 2. Why 58 authority transitions per night? The re-locks are the trigger
    for re-derivation; asserting the origin removes the *consequence* but
    not the flapping. Tracked separately (`edge_period`, `mf_unlock`).
-3. Does the same circularity affect T3/FUSION's offset determination?
-   `METROLOGY.md` groups T3 with T6 as payload-signal products.
+3. ~~Does the same circularity affect T3/FUSION's offset determination?~~
+   **Answered 2026-08-10: no, but T3 has a different dependency.**
+   T3 never calls `rtp_to_wallclock` — all eight consumers of that
+   function are T6-side or archive-side; `multi_broadcast_fusion.py`,
+   the metrology engine and the tick detector are absent. Nothing
+   derives a correction from the thing being corrected.
+
+   However T3's product is `d_clock_fused_ms` — the T3 bench computes
+   *"judge UTC = wallclock + fused clock offset"* — i.e. **a correction
+   to the host clock**, not a position in the sample stream. And
+   `authority_manager._build_state` publishes it unchanged as
+   `rtp_to_utc_offset_ns` (the anchor-derived branch is `active == "T6"`
+   only; T3 falls through to `offset_ms`).
+
+   Publishing a host-clock correction as an RTP→UTC offset is coherent
+   **only while RTP time ≈ host time**. That holds on B4 — radiod's
+   anchor measured 0.35–0.82 ms from the host clock, and the published
+   T3 offset is 92 µs — because radiod and the labelling clients share
+   a machine. It would not hold in the multi-host case the RTP-primacy
+   invariant exists to protect, and T3's uncertainty budget does not
+   model the divergence.
+
+   Consequence for `METROLOGY.md`: its claim that T6 and T3 are both
+   *"independent of the system clock entirely and survive arbitrary
+   system-clock drift"* is true of T3's **measurement** but not of its
+   **product**. T6's product is genuinely clock-independent; T3's is a
+   host-clock correction. The doc should be amended.
+
+   **Not a defect on B4 today.** Out of scope for stage 1.
