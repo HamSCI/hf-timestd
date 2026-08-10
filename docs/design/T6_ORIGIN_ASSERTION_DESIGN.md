@@ -111,16 +111,22 @@ repeatability, not magnitude, and any constant satisfies it.
 
 ## 6. Acceptance criterion
 
-> **Across a night's re-locks, the origin is identical to within one
-> sample (10.4 µs at 96 kHz).**
->
-> One sample is the natural floor: the asserted origin is an integer
-> RTP index plus a constant, so any spread beyond sub-sample rounding
-> means something is still being re-derived.
+> **Within a single channel lifetime, across every organic re-lock, the
+> implied origin is identical to within one sample (10.4 µs at 96 kHz).**
 
-Measured by chrony's HPPS/HFPS offsets holding a single value, and by
-`chain_delay_samples` in `bpsk_diff_edges.csv`. The present behaviour —
-31.84 vs 47.30 ms at identical configuration — fails this.
+**Scope to a channel lifetime — this is not optional.** `origin = utc_ns -
+rtp/sr` is UTC at `rtp=0`. The RTP epoch resets on a radiod restart AND on
+T6 channel re-creation: every recorder restart destroys and recreates the
+channel, and radiod restarts its counter near 2**31 (observed identical
+`last_rtp_timestamp=2147489288` across separate acquisitions). Origins from
+different channel lifetimes are therefore incomparable, and no amount of
+restarting produces evidence. Segment on the `T6 BPSK PPS first samples`
+log line; `scripts/t6_origin_spread.py` does this.
+
+Corollary: the window must be **uninterrupted hours**, not merely hours.
+A restart-driven run (2026-08-10 14:31, 6 restarts) yielded n=1 per
+segment and no verdict; the overnight run yielded n=42 in one segment
+precisely because nothing touched it.
 
 Magnitude is explicitly **not** the criterion: the absolute value depends
 on `chain_delay_calib_s`, which has never been established on any station.
