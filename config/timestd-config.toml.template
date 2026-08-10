@@ -334,14 +334,22 @@ profile = "rtp"
 # signal and measures end-to-end RF->ADC->DSP->RTP chain delay.
 # The correction is applied to all channels' RTP-to-UTC mapping.
 enabled = false
-# frequency_hz = TBD              # RF frequency of injector (Hz) -- REQUIRED when enabled
-# sample_rate = 96000             # Channel SR. Recommended 96000 with the matched-filter
-#                                 # calibrator + ±25 kHz channel filter; legacy default 16000.
-# consecutive_required = 10       # Valid edges before lock
-# edge_tolerance_samples = 30     # Max edge position deviation in samples
-#                                 # (scale with sample_rate: 5 at 16 kHz, 30 at 96 kHz)
-# filter_500hz_notch = false      # Apply 500 Hz notch (legacy calibrator only; default false)
-# description = "BPSK_PPS"        # Channel description
+# The keys below are inert while enabled=false.  setup-station.sh's TS-1
+# probe (scripts/ts1-probe.sh) fills enabled + frequency_hz automatically
+# when an injector is detected: frequency_hz is the ALIAS of the TS-1 TX
+# frequency under the ADC clock (TX 84.225 MHz -> 45.375 MHz at 129.6
+# Msps, 19.425 MHz at 64.8 Msps).
+frequency_hz = 0                  # injected (aliased) frequency; REQUIRED when enabled
+sample_rate = 96000               # matched-filter calibrator channel SR
+low_edge_hz = -25000
+high_edge_hz = 25000
+consecutive_required = 10         # valid edges before lock
+edge_tolerance_samples = 30       # scale with sample_rate: 5 @16k, 30 @96k
+use_matched_filter = true         # MF calibrator (fine stage rides this path)
+use_magnitude_correlation = false # Method 2 Re-projection; Method 4 magnitude
+                                  # peak-pick FAILED twice (BPSK-PPS-DETECTION-
+                                  # METHODS.md §4-5) — do not enable
+description = "BPSK_PPS"
 #
 # Calibrator selection:
 # use_matched_filter = false      # When true, use the textbook matched-filter

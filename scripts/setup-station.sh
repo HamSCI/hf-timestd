@@ -459,11 +459,44 @@ echo -e "  ${DIM}L6 chain-delay calibration uses a local BPSK PPS signal injecte
 echo -e "  ${DIM}into the RF front-end to measure and correct end-to-end timing.${NC}"
 echo -e "  ${DIM}This requires the WB6CXC PPS injector hardware and GPS+PPS.${NC}"
 echo ""
-prompt_yn L6_PPS_ENABLED "Do you have a BPSK PPS injector?" "n"
+# TS-1 (Turn Island TimeSync) detection: the injector presents as a USB
+# CDC console (Adafruit Trinket M0) and reports its own TX frequency; the
+# injected frequency seen by radiod is the alias under the ADC clock.
+TS1_INFO=""
+if [[ -x "$PROJECT_DIR/scripts/ts1-probe.sh" ]]; then
+    TS1_INFO=$("$PROJECT_DIR/scripts/ts1-probe.sh" 2>/dev/null || true)
+fi
+if grep -q "^TS1_PRESENT=yes" <<< "$TS1_INFO" && ! grep -q "^TS1_ERROR=" <<< "$TS1_INFO"; then
+    _ts1_fw=$(sed -n 's/^TS1_FIRMWARE=//p' <<< "$TS1_INFO")
+    _ts1_tx=$(sed -n 's/^TS1_TX_HZ=//p' <<< "$TS1_INFO")
+    _ts1_lock=$(sed -n 's/^TS1_GPS_LOCK=//p' <<< "$TS1_INFO")
+    log_info "TS-1 TimeSync injector detected: ${_ts1_fw:-unknown firmware}, TX ${_ts1_tx:-?} Hz, GPS lock: ${_ts1_lock:-?}"
+    auto_or_prompt RX888_ADC_HZ "RX888 ADC sample rate (Hz)" STATION_RX888_ADC_HZ \
+        "ADC clock the injector aliases under (129600000 or 64800000)" false
+    RX888_ADC_HZ="${RX888_ADC_HZ:-129600000}"
+    if [[ -n "$_ts1_tx" ]]; then
+        if (( _ts1_tx > RX888_ADC_HZ / 2 )); then
+            L6_PPS_FREQUENCY=$(( RX888_ADC_HZ - _ts1_tx ))
+        else
+            L6_PPS_FREQUENCY=$_ts1_tx
+        fi
+        log_info "Injected (aliased) frequency: ${L6_PPS_FREQUENCY} Hz"
+        prompt_yn L6_PPS_ENABLED "Enable T6 sample-precise timing from this TS-1?" "y"
+    else
+        log_warn "TS-1 console did not report a TX frequency — falling back to manual entry"
+        prompt_yn L6_PPS_ENABLED "Enable T6 using this injector?" "y"
+        [[ "$L6_PPS_ENABLED" == "true" ]] && prompt L6_PPS_FREQUENCY "Injected (aliased) frequency (Hz)" "45375000" "45375000 for a 129.6 Msps RX888" true
+    fi
+    if [[ "$_ts1_lock" != "yes" && "$L6_PPS_ENABLED" == "true" ]]; then
+        log_warn "TS-1 reports NO GPS lock — T6 will not produce valid timing until it locks (check GPS antenna)"
+    fi
+else
+    prompt_yn L6_PPS_ENABLED "Do you have a BPSK PPS injector?" "n"
+fi
 
-L6_PPS_FREQUENCY=""
-if [[ "$L6_PPS_ENABLED" == "true" ]]; then
-    prompt L6_PPS_FREQUENCY "Injector RF frequency (Hz)" "" "e.g. 3500000 for 3.5 MHz" true
+L6_PPS_FREQUENCY="${L6_PPS_FREQUENCY:-}"
+if [[ "$L6_PPS_ENABLED" == "true" && -z "$L6_PPS_FREQUENCY" ]]; then
+    prompt L6_PPS_FREQUENCY "Injector RF frequency (Hz)" "" "e.g. 45375000 (129.6 Msps RX888 alias)" true
 fi
 
 # =============================================================================
@@ -771,10 +804,10 @@ if rtp_acc:
 # L6 BPSK PPS calibration
 l6_enabled = e("WIZ_L6_PPS_ENABLED")
 if l6_enabled == "true":
-    set_bare("timing.l6_pps", "enabled", "true")
+    set_bare("timing.t6_pps", "enabled", "true")
     l6_freq = e("WIZ_L6_PPS_FREQUENCY")
     if l6_freq:
-        set_bare("timing.l6_pps", "frequency_hz", l6_freq)
+        set_bare("timing.t6_pps", "frequency_hz", l6_freq)
 
 # Archive control (per channel group)
 archive_enabled = e("WIZ_ARCHIVE_ENABLED", "true")
