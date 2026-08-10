@@ -2592,6 +2592,51 @@ class CoreRecorderV2:
             delta,
         )
 
+    # Throttle for the derived-residual diagnostic.
+    T6_RESIDUAL_REPORT_PERIOD_SEC = 300.0
+
+    @staticmethod
+    def _t6_resolve_chain_delay_ns(
+        residual_sec: float, chain_delay_calib_s: float
+    ) -> tuple[int, int]:
+        """Return ``(asserted_ns, reported_residual_ns)``.
+
+        Stage 1 of ``docs/design/T6_ORIGIN_ASSERTION_DESIGN.md`` §5: the
+        chain delay is ASSERTED from configuration and never derived
+        from radiod's advertised wall clock.  Deriving it made the
+        correction to radiod's RTP→UTC mapping a function of that same
+        mapping, and re-deriving it at every authority UNLOCK (58 in one
+        night on AC0G-B4) produced a different origin each time.
+
+        The derived residual is returned alongside for REPORTING only.
+        """
+        return (int(round(chain_delay_calib_s * 1e9)),
+                int(round(residual_sec * 1e9)))
+
+    def _t6_report_derived_residual(
+        self, feed: str, reported_ns: int, asserted_ns: int
+    ) -> None:
+        """Spec §6 invariant 5 pattern: report, never correct.
+
+        The derived residual is the diagnostic that produced
+        T6_ORIGIN_ASSERTION_DESIGN.  It keeps being measured and
+        surfaced; it simply stops steering the anchor.
+        """
+        self._t6_derived_residual_ns = reported_ns
+        now = time.monotonic()
+        last = getattr(self, '_t6_residual_report_wall', None)
+        if (last is not None
+                and now - last < self.T6_RESIDUAL_REPORT_PERIOD_SEC):
+            return
+        self._t6_residual_report_wall = now
+        logger.warning(
+            "T6 %s: derived residual %+.3f ms (radiod wall-clock minus "
+            "NMEA integer second) — REPORTED ONLY, not corrective; "
+            "chain_delay asserted as %+.3f ms from chain_delay_calib_s "
+            "(T6_ORIGIN_ASSERTION_DESIGN §5)",
+            feed, reported_ns / 1e6, asserted_ns / 1e6,
+        )
+
     def _t6_apply_authority_decision(self, decision) -> None:
         """Install/invalidate the T6 anchor per the authority decision.
         Every state transition is loud (expose-don't-correct)."""
@@ -2761,7 +2806,11 @@ class CoreRecorderV2:
                 return False
             # Physical chain_delay = sub-second residual after the
             # integer-second alignment above.
-            effective_chain_delay_ns = int(round(residual_sec * 1e9))
+            effective_chain_delay_ns, reported_residual_ns = (
+                self._t6_resolve_chain_delay_ns(
+                    residual_sec, self._t6_chain_delay_calib_s))
+            self._t6_report_derived_residual(
+                "HPPS", reported_residual_ns, effective_chain_delay_ns)
             # Layer B physical-plausibility guard.  The RF chain
             # delay from TS-1 BPSK modulator → coax → RX-888 ADC →
             # radiod DSP is bounded by hardware geometry: typical
@@ -2780,10 +2829,10 @@ class CoreRecorderV2:
             # first-lock will retry.  See
             # docs/TSL3_COSTAS_DRIFT_2026-05-18.md §"Layer B".
             T6_PHYSICAL_CHAIN_DELAY_MAX_NS = 250_000_000  # 250 ms
-            if abs(effective_chain_delay_ns) > T6_PHYSICAL_CHAIN_DELAY_MAX_NS:
+            if abs(reported_residual_ns) > T6_PHYSICAL_CHAIN_DELAY_MAX_NS:
                 logger.warning(
                     f"T6 T5 disambig: implied chain_delay "
-                    f"{effective_chain_delay_ns/1e6:+.1f} ms exceeds "
+                    f"{reported_residual_ns/1e6:+.1f} ms exceeds "
                     f"physical-plausibility bound ±"
                     f"{T6_PHYSICAL_CHAIN_DELAY_MAX_NS/1e6:.0f} ms — "
                     f"sidelobe / phantom-peak capture.  Falling back "
