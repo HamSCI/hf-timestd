@@ -154,7 +154,7 @@ Insert immediately **after** the `_t6_report_naming_vs_radiod_pair` method (it e
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `cd /root/appliance/repos/hf-timestd && python -m pytest tests/test_core_recorder_t6_origin_assertion.py -v`
-Expected: PASS, 5 passed
+Expected: PASS — every test in the new file green
 
 - [ ] **Step 5: Wire the MF/HPPS call site**
 
@@ -250,7 +250,7 @@ and replace `effective_chain_delay_ns` with `reported_residual_ns` inside that g
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cd /root/appliance/repos/hf-timestd && python -m pytest tests/test_core_recorder_t6_origin_assertion.py -v`
-Expected: PASS, 6 passed
+Expected: PASS — same count as Task 1 left behind; this task adds no tests, so any change here is a regression
 
 - [ ] **Step 4: Run the full suite**
 
