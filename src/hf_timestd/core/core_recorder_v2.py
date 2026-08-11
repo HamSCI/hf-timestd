@@ -110,6 +110,28 @@ def allocate_stable_ssrc(freq_hz: float, preset: str, sample_rate: int) -> int:
 
 
 
+def resolve_batch_rtp(quality, _warned=[False]):
+    """Truthful RTP label for a delivered sample batch.
+
+    Prefer ``quality.delivered_rtp_start`` (ka9q-python >= 3.21.0: the
+    resequencer's true first-sample timestamp, gap fills included).
+    Fall back to ``last_rtp_timestamp`` — the last RECEIVED packet's
+    header — with a one-time warning: that label desynchronizes from
+    the delivered stream under loss (the T6 origin-slip root cause,
+    docs/T6-BLOCK-SLIP-ROOT-CAUSE-2026-08-10.md).
+    """
+    rtp = getattr(quality, 'delivered_rtp_start', None)
+    if rtp is not None:
+        return rtp
+    if not _warned[0]:
+        _warned[0] = True
+        logging.getLogger(__name__).warning(
+            "quality.delivered_rtp_start unavailable (ka9q-python < 3.21.0?) — "
+            "falling back to last_rtp_timestamp; batch labels will carry "
+            "packet-boundary wobble and slip under stream loss")
+    return getattr(quality, 'last_rtp_timestamp', None)
+
+
 class CoreRecorderV2:
     """
     Core recorder V2: Uses ka9q-python RadiodStream and RadiodControl.
@@ -1732,7 +1754,7 @@ class CoreRecorderV2:
             )
             self._wwvb_first_sample_logged = True
 
-        rtp0 = getattr(quality, 'last_rtp_timestamp', None)
+        rtp0 = resolve_batch_rtp(quality)
         with self._wwvb_buf_lock:
             # Maintain the RTP anchor (RTP of buffer sample 0).
             # last_rtp_timestamp is the RTP of samples[0] for this batch — the
@@ -3369,7 +3391,7 @@ class CoreRecorderV2:
             self._t6_input_bad = bad_now
 
         result = self._t6_calibrator.process_samples(
-            samples, quality.last_rtp_timestamp
+            samples, resolve_batch_rtp(quality)
         )
 
         # T6 anchor inversion (spec §2, §4): feed the fine stage with
@@ -3395,7 +3417,7 @@ class CoreRecorderV2:
                 if result is not None and result.locked and coarse is not None:
                     fine_stage.set_coarse_offset_samples(coarse)
                 fine = fine_stage.process_samples(
-                    samples, quality.last_rtp_timestamp)
+                    samples, resolve_batch_rtp(quality))
                 # Gate on a live coarse offset (Finding 3): after an MF
                 # reset/unlock, _chain_delay_samples goes None but the
                 # fine stage's own internal _coarse_offset_rtp is not
