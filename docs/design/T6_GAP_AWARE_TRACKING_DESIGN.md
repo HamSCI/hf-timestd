@@ -14,16 +14,33 @@ fraction repeated to the nanosecond. Two label pathologies reach the
 calibrator: benign cancelling ±60-sample wobble (recorder repackaging) and
 genuine sustained RTP jumps (real loss).
 
-**Refinement from code reading (2026-08-11):** the coarse peak's RTP is
-already taken from the declared per-sample array (`rtp_at_y[pi]`), so the
-defect is NOT a simple buffer-index lookup. The suspect surfaces are
-(a) the correlation/boxcar window mixing pre- and post-gap samples so the
-peak lands on a sample whose declared RTP is not the true edge, (b) the
-fine-fold's continuity indexing and median RTP registration across a gap,
-and (c) the step-adoption/disambiguation machinery re-homing on
-gap-shifted evidence. **Task 0 of the plan is to reproduce the slip in a
-synthetic-gap unit test and localize the exact line — no fix before the
-failing test exists.**
+**FINAL LOCALIZATION (2026-08-11, Task 0 executed):** the calibrator and
+fine stage are EXONERATED — synthetic-gap tests with honest labels
+XPASSed on first run (coarse MF holds the edge; the fine stage discards
+the gap-spanning fold block and re-registers on-grid; both now guarded
+by regression tests in `tests/test_bpsk_calibrator_gap_tracking.py`).
+The defect is the LABEL SOURCE:
+
+    core_recorder_v2._t6_on_samples:
+        self._t6_calibrator.process_samples(samples, quality.last_rtp_timestamp)
+
+`quality.last_rtp_timestamp` is the RTP header of the most recently
+RECEIVED packet (ka9q-python stream.py:572, stamped pre-resequencer),
+while `samples` is the resequenced/zero-filled (and, under consumer
+stalls, deque-eviction-shortened) output. In steady state the mismatch
+is near-constant (absorbed into chain delay) with packet-boundary
+jitter = the measured ±60 two-state wobble; during stall-and-catchup the
+label races ahead of the delivered backlog and re-syncs = the measured
+block-quantised slips and the cancelling ±N-block pairs in the overnight
+CSV. One line explains every signature.
+
+**Fix (minimal, at the seam):** the resequencer already tracks the true
+timestamp of every emitted sample (`next_expected_ts`). Expose the
+delivered chunk's first-sample RTP (`quality.delivered_rtp_start`,
+maintained across batching in RadiodStream) and use it in
+`_t6_on_samples` (fallback to the old field + a one-time warning when
+absent, for version skew). Honest labels turn every loss into the
+exact case the components are proven to handle.
 
 ## 2. Design principles
 

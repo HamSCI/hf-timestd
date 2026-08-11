@@ -8,7 +8,30 @@
 (possibly) `core/core_recorder_v2.py` disambiguation wiring; tests beside
 the existing T6 suites (reuse their synthetic BPSK generators).
 
-## Task 0 — reproduce the slip (failing test first)
+## Task 0 — reproduce the slip (failing test first) — DONE 2026-08-11
+Outcome: components EXONERATED (tests XPASSed → kept as regression
+guards); defect localized to the label source (spec §1). Tasks below
+REWRITTEN accordingly; original component-fix tasks 1–3 are OBSOLETE.
+
+## Task 0b — reproduce the LABEL mechanism
+- [ ] Test that feeds resequenced-style batches labelled with a
+      last-received-header model (label races ahead during a simulated
+      stall backlog) and shows the edge slip; flips green with Task 1+2.
+
+## Task 1 — ka9q-python: expose delivered RTP
+- [ ] PacketResequencer: return per-chunk first-sample timestamp (it is
+      `next_expected_ts` at emission start; fills included).
+- [ ] RadiodStream/MultiStream: maintain `quality.delivered_rtp_start`
+      across delivery batching; document in REQUIREMENTS (KQP-Q new).
+- [ ] Unit tests incl. gap, capped-gap, eviction, wrap.
+
+## Task 2 — hf-timestd: use it
+- [ ] `_t6_on_samples` (and the WWVB consumer's equivalent) label batches
+      with `delivered_rtp_start` when present; one-time WARN fallback.
+- [ ] Bump ka9q-python minimum in pyproject (evaluate against the pinned
+      ka9q-radio per the contract discipline).
+
+## OBSOLETE (kept for the record) — original Tasks 1–3
 - [ ] Build on the existing synthetic BPSK-PPS generators in the T6 tests:
       stream batches with declared-RTP labels; inject (a) the cancelling
       ±60 wobble pattern (11-batch cycle from the LABEL AUDIT), (b) a
