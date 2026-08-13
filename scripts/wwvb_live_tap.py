@@ -104,7 +104,7 @@ def main() -> int:
     from ka9q import Encoding, RadiodControl, RadiodStream
 
     print(f"WWVB live tap — connecting to {args.radiod} ...")
-    control = RadiodControl(args.radiod)
+    control = RadiodControl(args.radiod, client_id="hf-timestd-wwvb-tap")
     try:
         channel_info = control.ensure_channel(
             frequency_hz=args.frequency_hz,

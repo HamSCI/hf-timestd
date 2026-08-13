@@ -2,7 +2,7 @@
 from ka9q import RadiodControl
 import time
 
-CTL = RadiodControl('239.192.152.141')
+CTL = RadiodControl('239.192.152.141', client_id="hf-timestd-verify")
 
 # 1. Create explicit channel
 print("Creating channel A...")

@@ -141,7 +141,7 @@ def run_pipeline_test(
     logger.info(f"Connecting to radiod at {status_address}...")
     
     try:
-        control = RadiodControl(status_address)
+        control = RadiodControl(status_address, client_id="hf-timestd-pipeline-test")
         logger.info("✅ Connected to radiod")
     except Exception as e:
         logger.error(f"Failed to connect to radiod: {e}")
