@@ -1050,6 +1050,32 @@ def cmd_shm_init(args) -> int:
     return 1 if failed else 0
 
 
+def _grape_daily_summary(upload_attempted: bool, upload_ok: bool,
+                         pipeline_status: dict) -> list:
+    """Trailing upload lines for `grape daily`.
+
+    Extracted because the inline version referenced a `status` dict that no
+    scope had held since the hs_uploader switch, so it raised NameError on
+    every successful night. The damage was out of all proportion to a
+    summary line: the pipeline had already decimated, packaged, uploaded,
+    cleaned up and saved state, then died formatting its own report. systemd
+    called that a failure -- 30 days with zero successful exits -- and,
+    worse, the catch-up sweep that recovers missed days sits AFTER this
+    point and had therefore never run once.
+
+    Returning lines instead of printing them is what makes it testable, and
+    it is why the caller can afford to treat reporting as non-fatal.
+    """
+    if not upload_attempted:
+        return []
+    if not upload_ok:
+        return ["   \u26a0\ufe0f  Upload pending \u2014 queued for retry"]
+    how = (pipeline_status or {}).get("upload_status", "completed")
+    if how == "external":
+        return ["   upload: shipped by hs-uploader.service (external daemon)"]
+    return [f"   upload: drained via hs_uploader ({how})"]
+
+
 def main():
     """Main entry point for hf-timestd command"""
     # Quiet stderr for sigmond client-contract subcommands so they emit
@@ -1992,11 +2018,19 @@ Per-service overrides in [services] take precedence over the profile.
             print(f"\n✅ GRAPE daily pipeline complete for {date_str}")
             print(f"   {len(decimated)}/{expected_count} channels decimated")
             print(f"   {len(spectrograms)} spectrograms generated")
-            if upload_attempted:
-                if upload_ok:
-                    print(f"   {status['completed']} dataset(s) uploaded to PSWS")
-                else:
-                    print(f"   ⚠️  Upload pending — queued for retry")
+            # Reporting must not be able to discard a completed run. The
+            # NameError this replaced killed the process here, after every
+            # stage had succeeded and state was saved -- which also made the
+            # catch-up sweep below unreachable. Surface a formatting failure
+            # loudly, then carry on; the work is already done and the sweep
+            # still needs to run.
+            try:
+                for line in _grape_daily_summary(upload_attempted, upload_ok,
+                                                 pipeline_status):
+                    print(line)
+            except Exception as exc:                      # pragma: no cover
+                print(f"   \u26a0\ufe0f  could not format the upload summary: "
+                      f"{exc!r} (pipeline itself completed)")
 
             # ── catch-up sweep (2026-08-05) ──────────────────────────────
             # The timer only ever processed "yesterday", so a failed or

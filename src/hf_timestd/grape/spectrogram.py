@@ -180,7 +180,12 @@ class CarrierSpectrogramGenerator:
                 else:
                     return ['WWV', 'WWVH']
             except Exception as e:
-                logger.debug(f"Failed to extract stations from {file_path}: {e}")
+                # `file_path` never existed in this scope: the handler raised
+                # NameError instead of falling back, and an f-string evaluates
+                # regardless of log level, so it fired whenever the parse
+                # failed. Same defect family as the `status` NameError in
+                # cli.py -- an error path that cannot run.
+                logger.debug(f"Failed to extract stations from {channel_name!r}: {e}")
                 return ['WWV', 'WWVH']
         
         return []
