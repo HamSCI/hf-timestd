@@ -218,9 +218,20 @@ def build_authority_runner_from_config(
     # be a dict; silently fall through to {} for any other shape.
     auth_cfg = _timing.get("authority_manager", None)
     if not isinstance(auth_cfg, dict):
-        auth_cfg = _timing.get("authority", None)
-    if not isinstance(auth_cfg, dict):
-        auth_cfg = {}
+        _legacy = _timing.get("authority", None)
+        if _legacy is not None and not isinstance(_legacy, dict):
+            # This exact shape cost a day: B4 ships `timing.authority = "rtp"`,
+            # a scalar, which the old code discarded as "not a dict" without a
+            # word. Every tier's config then read {} and T6 was silently never
+            # registered while `[timing.t6_pps] enabled = true` sat in the file
+            # looking correct.
+            log.warning(
+                "timing.authority is %s (%r), not a table — ignoring it for "
+                "authority-manager config. Tier settings belong under "
+                "[timing.authority_manager]; probe REGISTRATION no longer "
+                "depends on it.", type(_legacy).__name__, _legacy,
+            )
+        auth_cfg = _legacy if isinstance(_legacy, dict) else {}
     interval_sec = float(auth_cfg.get("interval_sec", 30.0))
     hysteresis = int(auth_cfg.get("upgrade_hysteresis", 3))
     a_level_cfg = auth_cfg.get("a_level", "A1")
@@ -258,8 +269,17 @@ def build_authority_runner_from_config(
 
     t3_cfg = auth_cfg.get("t3", {}) or {}
     t4_cfg = auth_cfg.get("t4", {}) or {}
-    t5_cfg = auth_cfg.get("t5", {}) or {}
-    t6_cfg = auth_cfg.get("t6", {}) or {}
+    t5_cfg = dict(auth_cfg.get("t5") if isinstance(auth_cfg.get("t5"), dict) else {})
+    # `[timing] lb1421_enabled` is the deployed spelling of the T5 off switch.
+    if "lb1421_enabled" not in t5_cfg and "lb1421_enabled" in _timing:
+        t5_cfg["lb1421_enabled"] = _timing["lb1421_enabled"]
+    # T6 settings live in two places in the wild: the modern
+    # [timing.authority_manager.t6] and the deployed [timing.t6_pps].
+    # Merge both, modern wins — otherwise an operator's documented off
+    # switch (`[timing.t6_pps] enabled = false`) would be read by nobody,
+    # which is the same silence that hid this bug in the first place.
+    t6_cfg = {**(_timing.get("t6_pps") if isinstance(_timing.get("t6_pps"), dict) else {}),
+              **(auth_cfg.get("t6") if isinstance(auth_cfg.get("t6"), dict) else {})}
     t2_cfg = auth_cfg.get("t2", {}) or {}
 
     t4_peers: List[str] = list(t4_cfg.get("peers", []) or [])
@@ -272,7 +292,18 @@ def build_authority_runner_from_config(
         ),
     ]
 
-    if t6_cfg.get("enabled"):
+    # Registration is by DETECTION, not configuration. Every probe below
+    # reports `available=False` with a reason when its source is absent, so
+    # registering one costs nothing and a missing config can no longer make a
+    # tier silently invisible. Config supplies tuning, and an explicit
+    # `enabled = false` still opts out.
+    #
+    #   T6  TS-1 present and locked      -> probe reads core-recorder-status
+    #   T5  LBE-1421 present on USB      -> probe reads the same status file
+    #   T3  always                        -> fusion is the floor
+    #   T4  outside information           -> genuinely needs configured peers
+    #
+    if t6_cfg.get("enabled", True) is not False:
         # Backward-compat: older configs key the sigma floor as ``sigma_ms``
         # (the historical hardcoded sigma value).  Accept both — preferring
         # the new name when both are set.
@@ -295,8 +326,16 @@ def build_authority_runner_from_config(
     # See project_rtp_substrate_architecture: T5 is canonically the
     # LBE-1421 USB-NMEA path.  The chrony route remains for environments
     # without LBE-1421.
+    # T5 precedence: EXPLICIT config beats detection, or a host with no
+    # LBE-1421 that deliberately points T5 at a chrony refclock would get a
+    # permanently-unavailable direct probe and lose its working path. That
+    # regression was caught by test_t5_chrony_refid_still_works_without_lb1421.
     t5_lb1421_status = t5_cfg.get("lb1421_status_path")
-    if t5_lb1421_status or t5_cfg.get("lb1421_enabled"):
+    _t5_lb_explicit = bool(t5_lb1421_status) or t5_cfg.get("lb1421_enabled") is True
+    _t5_chrony_explicit = "refid" in t5_cfg or bool(t5_cfg.get("enabled"))
+    if _t5_lb_explicit or (
+        not _t5_chrony_explicit and t5_cfg.get("lb1421_enabled", True) is not False
+    ):
         probes.append(LbeT5DirectProbe(
             status_path=Path(
                 t5_lb1421_status

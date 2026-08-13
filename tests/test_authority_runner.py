@@ -118,7 +118,12 @@ class TestBuildAuthorityRunnerFromConfig(unittest.TestCase):
             authority_output_path=self.tmp / "authority.json",
         )
         t_levels = [p.t_level for p in runner.manager.probes]
-        self.assertEqual(t_levels, ["T3"])
+        # Registration is by detection now: T6 and T5 self-register and
+        # report unavailable when their hardware is absent, so an empty
+        # config no longer hides a tier. T3 remains the floor.
+        self.assertIn("T3", t_levels)
+        self.assertIn("T6", t_levels)
+        self.assertIn("T5", t_levels)
         self.assertEqual(runner.interval_sec, 30.0)
 
     def test_full_config_registers_all_probes(self) -> None:
@@ -141,7 +146,8 @@ class TestBuildAuthorityRunnerFromConfig(unittest.TestCase):
             authority_output_path=self.tmp / "authority.json",
         )
         t_levels = sorted(p.t_level for p in runner.manager.probes)
-        self.assertEqual(t_levels, ["T2", "T3", "T4", "T5"])
+        # T6 now self-registers alongside the configured tiers.
+        self.assertEqual(sorted(t_levels), ["T2", "T3", "T4", "T5", "T6"])
         self.assertEqual(runner.interval_sec, 10.0)
         self.assertEqual(runner.manager.upgrade_hysteresis, 2)
 
@@ -231,7 +237,11 @@ class TestBuildAuthorityRunnerFromConfig(unittest.TestCase):
             authority_output_path=self.tmp / "authority.json",
         )
         t_levels = sorted(p.t_level for p in runner.manager.probes)
-        self.assertEqual(t_levels, ["T2", "T3"])
+        # T6/T5 self-register; the point of this test is that T2 matches
+        # any server when no T4 peers are configured.
+        self.assertIn("T2", t_levels)
+        self.assertIn("T3", t_levels)
+        self.assertNotIn("T4", t_levels)
 
     def test_authority_manager_namespace_is_primary(self) -> None:
         """[timing.authority_manager] is the canonical location and
@@ -268,8 +278,18 @@ class TestBuildAuthorityRunnerFromConfig(unittest.TestCase):
             fusion_status_path=self.tmp / "fusion_status.json",
             authority_output_path=self.tmp / "authority.json",
         )
-        # Defaults applied; T3 FusionStatusProbe is the only baseline probe.
-        self.assertEqual([p.t_level for p in runner.manager.probes], ["T3"])
+        # Defaults applied — and, crucially, the tiers survive.
+        #
+        # This assertion used to read `== ["T3"]`, which locked in the very
+        # bug the docstring describes. Not raising was necessary but not
+        # sufficient: B4 ships exactly this config with a working TS-1, and
+        # for months reported T3 because the scalar silently zeroed every
+        # tier's settings and T6 was never registered. A malformed operator
+        # preference must not be able to take a hardware tier off the board.
+        t_levels = [p.t_level for p in runner.manager.probes]
+        self.assertIn("T3", t_levels)
+        self.assertIn("T6", t_levels, "scalar authority key suppressed T6")
+        self.assertIn("T5", t_levels)
         self.assertEqual(runner.interval_sec, 30.0)
         self.assertEqual(runner.manager.upgrade_hysteresis, 3)
 
