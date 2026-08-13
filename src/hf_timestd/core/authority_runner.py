@@ -216,21 +216,24 @@ def build_authority_runner_from_config(
         _timing = {}
     # Prefer the new key; accept the legacy sub-table if it happens to
     # be a dict; silently fall through to {} for any other shape.
+    # `timing.authority` is NOT ours. sigmond owns that key and reads it from
+    # this very file to decide whether hf-timestd provides timing at all
+    # (sigmond/lib/sigmond/clients/hftimestd.py: `provides_timing`). On B4 it
+    # holds the string "rtp", and it is correct there — it must not be
+    # "cleaned up".
+    #
+    # Reading it as our tier-config sub-table was a namespace collision, and
+    # an expensive one: the string was discarded as "not a dict", every tier's
+    # settings silently became {}, and T6 was never registered on a host with
+    # a working TS-1 while `[timing.t6_pps] enabled = true` sat in the file
+    # looking correct. Probe registration no longer depends on this config at
+    # all (see below), but we also stop reading someone else's key.
+    #
+    # A dict here is still accepted, for any deployment that genuinely used
+    # the old sub-table shape before sigmond claimed the name.
     auth_cfg = _timing.get("authority_manager", None)
     if not isinstance(auth_cfg, dict):
         _legacy = _timing.get("authority", None)
-        if _legacy is not None and not isinstance(_legacy, dict):
-            # This exact shape cost a day: B4 ships `timing.authority = "rtp"`,
-            # a scalar, which the old code discarded as "not a dict" without a
-            # word. Every tier's config then read {} and T6 was silently never
-            # registered while `[timing.t6_pps] enabled = true` sat in the file
-            # looking correct.
-            log.warning(
-                "timing.authority is %s (%r), not a table — ignoring it for "
-                "authority-manager config. Tier settings belong under "
-                "[timing.authority_manager]; probe REGISTRATION no longer "
-                "depends on it.", type(_legacy).__name__, _legacy,
-            )
         auth_cfg = _legacy if isinstance(_legacy, dict) else {}
     interval_sec = float(auth_cfg.get("interval_sec", 30.0))
     hysteresis = int(auth_cfg.get("upgrade_hysteresis", 3))
