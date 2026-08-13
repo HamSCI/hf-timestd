@@ -882,30 +882,25 @@ class StreamRecorderV2:
             self._reanchor_ring_if_offset_drifted()
 
     def _set_filter_edges(self, ssrc: int):
-        """Send filter edge commands to radiod if configured."""
+        """Send filter edge commands to radiod if configured.
+
+        Uses the public RadiodControl.set_filter() (audit F15) — it sends
+        the same LOW_EDGE/HIGH_EDGE TLV fields the old hand-rolled buffer
+        did (field order differs; radiod's TLV decoder is a tag-keyed
+        linear scan, so order is irrelevant) and drops this file's reach
+        into ka9q.control wire-encoding internals.
+        """
         low = self.config.low_edge
         high = self.config.high_edge
         if low is None and high is None:
             return
-        
+
         try:
-            import secrets
-            from ka9q.types import StatusType
-            from ka9q.control import encode_int, encode_double, encode_eol, CMD
-            
-            cmdbuffer = bytearray()
-            cmdbuffer.append(CMD)
-            encode_int(cmdbuffer, StatusType.OUTPUT_SSRC, ssrc)
-            encode_int(cmdbuffer, StatusType.COMMAND_TAG, secrets.randbits(31))
-            
-            if low is not None:
-                encode_double(cmdbuffer, StatusType.LOW_EDGE, float(low))
-            if high is not None:
-                encode_double(cmdbuffer, StatusType.HIGH_EDGE, float(high))
-            
-            encode_eol(cmdbuffer)
-            self._control.send_command(cmdbuffer)
-            
+            self._control.set_filter(
+                ssrc,
+                low_edge=float(low) if low is not None else None,
+                high_edge=float(high) if high is not None else None,
+            )
             logger.info(f"{self.config.description}: Set filter edges: low={low}, high={high}")
         except Exception as e:
             logger.warning(f"{self.config.description}: Failed to set filter edges: {e}")
