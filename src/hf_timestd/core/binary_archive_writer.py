@@ -141,6 +141,27 @@ class MinuteBuffer:
         return max(0, len(self.samples) - self.write_pos)
 
 
+#: Nice increment for the archive flush workers, relative to the recorder.
+#: +10 keeps them clearly behind capture and decode without risking the
+#: starvation that SCHED_IDLE would (see _flush_worker_loop).
+_FLUSH_WORKER_NICE = 10
+
+
+def _renice_current_thread(nice: int) -> None:
+    """Lower the calling THREAD's priority. Best-effort.
+
+    Nice is per-task on Linux, so this affects only this worker, not the
+    recorder's capture threads. Failure is not worth an exception in a
+    daemon worker — the flush still works, just at the old priority — so
+    it is logged once and swallowed.
+    """
+    try:
+        os.setpriority(os.PRIO_PROCESS, 0, os.getpriority(os.PRIO_PROCESS, 0) + nice)
+    except (OSError, PermissionError, AttributeError) as exc:
+        logger.warning("could not renice flush worker (+%d): %r — "
+                       "compression will run at the recorder's priority", nice, exc)
+
+
 class BinaryArchiveWriter:
     """
     Simple binary archive writer for Phase 1 raw IQ data.
@@ -829,7 +850,24 @@ class BinaryArchiveWriter:
         independent files so there's no inter-channel ordering need;
         the parallelism gives us 9× concurrent compression+fsync
         instead of the old serial-on-the-receive-thread behavior.
+
+        The worker runs at LOWER priority than the rest of the recorder.
+        It inherited the unit's ``Nice=-10``, which meant zstd ran at
+        *elevated* priority — every channel's chunk closes on the same
+        300 s wall-clock epoch, so six 57.6 MB compressions fired
+        simultaneously, phase-locked to the minute-aligned metrology and
+        2-minute WSPR cycles, and outranked the capture path while doing
+        it. Compression is bulk work with seconds of slack; capture has
+        none.
+
+        Deliberately nice rather than SCHED_IDLE. ``_flush_queue`` is
+        bounded and the overflow policy is to log and DROP rather than
+        backpressure the network reader, so a worker that never gets
+        scheduled loses archive chunks. Nice yields to everything that
+        matters without that cliff — and it needs no model of when the
+        bursts are, which is the part that would go stale.
         """
+        _renice_current_thread(_FLUSH_WORKER_NICE)
         while not self._flush_stop.is_set():
             try:
                 buffer = self._flush_queue.get(timeout=1.0)
