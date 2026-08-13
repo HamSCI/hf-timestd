@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from ka9q import discover_channels, Encoding
+from ka9q import discover_channels
 
 print("Discovering channels...")
 chs = discover_channels('239.192.152.141', listen_duration=1.0)

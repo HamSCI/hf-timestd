@@ -1450,7 +1450,6 @@ class CoreRecorderV2:
         self._wait_for_chrony_settled()
 
         from ka9q import RadiodStream, Encoding
-        from ka9q.types import StatusType
 
         t6 = self._t6_config
         freq_hz = int(t6['frequency_hz'])
