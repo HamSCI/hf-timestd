@@ -2394,8 +2394,8 @@ class CoreRecorderV2:
                 or self._t6_channel_info is None):
             return None
         try:
-            from ka9q.rtp_recorder import rtp_to_wallclock
-            wall = rtp_to_wallclock(
+            from ka9q.rtp_recorder import rtp_to_utc
+            wall = rtp_to_utc(
                 int(self._t6_native_anchor.anchor_rtp) & 0xFFFFFFFF,
                 self._t6_channel_info,
             )
@@ -2439,8 +2439,8 @@ class CoreRecorderV2:
             return None
         try:
             self._t6_channel_info.chain_delay_correction_ns = None
-            from ka9q.rtp_recorder import rtp_to_wallclock
-            raw_wall_time_sec = rtp_to_wallclock(
+            from ka9q.rtp_recorder import rtp_to_utc
+            raw_wall_time_sec = rtp_to_utc(
                 last_edge_rtp, self._t6_channel_info
             )
             if raw_wall_time_sec is None:
@@ -2563,8 +2563,8 @@ class CoreRecorderV2:
         edge_utc = self._t6_name_second_via_nmea(edge_rtp)
         wall = None
         try:
-            from ka9q.rtp_recorder import rtp_to_wallclock
-            wall = rtp_to_wallclock(
+            from ka9q.rtp_recorder import rtp_to_utc
+            wall = rtp_to_utc(
                 int(edge_rtp) & 0xFFFFFFFF, self._t6_channel_info)
         except Exception:
             wall = None
@@ -2779,8 +2779,8 @@ class CoreRecorderV2:
             if last_edge_rtp is None or self._t6_channel_info is None:
                 return False
             self._t6_channel_info.chain_delay_correction_ns = None
-            from ka9q.rtp_recorder import rtp_to_wallclock
-            raw_wall_time_sec = rtp_to_wallclock(
+            from ka9q.rtp_recorder import rtp_to_utc
+            raw_wall_time_sec = rtp_to_utc(
                 last_edge_rtp, self._t6_channel_info
             )
             if raw_wall_time_sec is None:
@@ -3040,8 +3040,8 @@ class CoreRecorderV2:
             # applying chain_delay (kept None on ChannelInfo so the
             # subtraction inside rtp_to_wallclock is a no-op).
             self._t6_channel_info.chain_delay_correction_ns = None
-            from ka9q.rtp_recorder import rtp_to_wallclock
-            raw_wall_time_sec = rtp_to_wallclock(last_edge_rtp, self._t6_channel_info)
+            from ka9q.rtp_recorder import rtp_to_utc
+            raw_wall_time_sec = rtp_to_utc(last_edge_rtp, self._t6_channel_info)
             if raw_wall_time_sec is None:
                 return
             wall_time_sec = raw_wall_time_sec - (result.chain_delay_ns / 1e9)
@@ -4070,11 +4070,11 @@ class CoreRecorderV2:
                     )
                     if diff_edge_advanced:
                         self._t6_channel_info.chain_delay_correction_ns = None
-                        from ka9q.rtp_recorder import rtp_to_wallclock
+                        from ka9q.rtp_recorder import rtp_to_utc
                         # Step 1: rtp_to_wallclock gives the local
                         # wall time of the sample where we OBSERVED
                         # the polarity flip.
-                        raw_wall_time_sec = rtp_to_wallclock(
+                        raw_wall_time_sec = rtp_to_utc(
                             diff_last_edge_rtp, self._t6_channel_info
                         )
                         if raw_wall_time_sec is not None:

@@ -78,7 +78,7 @@ class TestNaming:
     def test_names_from_nmea_when_probe_fresh(self):
         # NMEA + arrival pairing put the edge at SECOND + 0.30 s.
         r = nmea_recorder(now_wall=float(SECOND) + 0.30)
-        with patch('ka9q.rtp_recorder.rtp_to_wallclock',
+        with patch('ka9q.rtp_recorder.rtp_to_utc',
                    return_value=float(SECOND) + 0.080):
             assert r._t6_name_integer_second(1_000_000) == SECOND
 
@@ -89,14 +89,14 @@ class TestNaming:
         # disagreement must be reported (spec §6 invariant 5).
         r = nmea_recorder(now_wall=float(SECOND) + 0.30)
         with caplog.at_level("WARNING"):
-            with patch('ka9q.rtp_recorder.rtp_to_wallclock',
+            with patch('ka9q.rtp_recorder.rtp_to_utc',
                        return_value=float(SECOND) + 0.95):
                 assert r._t6_name_integer_second(1_000_000) == SECOND
         assert any("disagrees" in m for m in caplog.messages)
         # Same wall, no NMEA → the fallback names the wrong second, which
         # is precisely what the old code did unconditionally.
         r2 = bare_recorder()
-        with patch('ka9q.rtp_recorder.rtp_to_wallclock',
+        with patch('ka9q.rtp_recorder.rtp_to_utc',
                    return_value=float(SECOND) + 0.95):
             assert r2._t6_name_integer_second(1_000_000) == SECOND + 1
 
@@ -104,7 +104,7 @@ class TestNaming:
         # rtp_to_wallclock is the quantity the inversion exists to
         # bypass; a total failure of it must not stop T6 naming.
         r = nmea_recorder(now_wall=float(SECOND) + 0.30)
-        with patch('ka9q.rtp_recorder.rtp_to_wallclock', return_value=None):
+        with patch('ka9q.rtp_recorder.rtp_to_utc', return_value=None):
             assert r._t6_name_integer_second(1_000_000) == SECOND
 
     def test_edge_before_the_arrival_is_named_by_rtp_arithmetic(self):
@@ -112,14 +112,14 @@ class TestNaming:
         # wall SECOND + 1.30 → edge UTC SECOND + 0.70 → second SECOND+1.
         r = nmea_recorder(now_wall=float(SECOND) + 1.30,
                           arrival_rtp=1_000_000 + int(0.6 * SR))
-        with patch('ka9q.rtp_recorder.rtp_to_wallclock', return_value=None):
+        with patch('ka9q.rtp_recorder.rtp_to_utc', return_value=None):
             assert r._t6_name_integer_second(1_000_000) == SECOND + 1
 
     def test_nmea_residual_beyond_0p4s_returns_none(self):
         # Edge lands 0.45 s from any integer second — outside the ±0.4 s
         # margin of invariant 3, so naming refuses rather than guess.
         r = nmea_recorder(now_wall=float(SECOND) + 0.45)
-        with patch('ka9q.rtp_recorder.rtp_to_wallclock', return_value=None):
+        with patch('ka9q.rtp_recorder.rtp_to_utc', return_value=None):
             assert r._t6_name_integer_second(1_000_000) is None
 
     def test_stale_arrival_falls_back_to_wall(self):
@@ -127,10 +127,10 @@ class TestNaming:
         # is refused and the cascade drops to the radiod-pair estimate.
         r = nmea_recorder(now_wall=float(SECOND) + 0.30,
                           arrival_mono=5_000.0 - 60.0)
-        with patch('ka9q.rtp_recorder.rtp_to_wallclock',
+        with patch('ka9q.rtp_recorder.rtp_to_utc',
                    return_value=float(SECOND) - 0.120):
             assert r._t6_name_integer_second(1_000_000) == SECOND
-        with patch('ka9q.rtp_recorder.rtp_to_wallclock', return_value=None):
+        with patch('ka9q.rtp_recorder.rtp_to_utc', return_value=None):
             assert r._t6_name_integer_second(1_000_000) is None
 
     def test_host_nmea_disagreement_refuses_the_nmea_pairing(self):
@@ -138,25 +138,25 @@ class TestNaming:
         # attestation window, so the NMEA branch refuses (it would
         # otherwise emit a poisoned name) and the fallback answers.
         r = nmea_recorder(now_wall=float(SECOND) + 30.30)
-        with patch('ka9q.rtp_recorder.rtp_to_wallclock',
+        with patch('ka9q.rtp_recorder.rtp_to_utc',
                    return_value=float(SECOND) + 0.080):
             assert r._t6_name_integer_second(1_000_000) == SECOND
 
     def test_falls_back_to_wall_rounding_without_probe(self):
         r = bare_recorder()
-        with patch('ka9q.rtp_recorder.rtp_to_wallclock',
+        with patch('ka9q.rtp_recorder.rtp_to_utc',
                    return_value=float(SECOND) - 0.120):
             assert r._t6_name_integer_second(1_000_000) == SECOND
 
     def test_residual_beyond_0p4s_returns_none(self):
         r = bare_recorder()
-        with patch('ka9q.rtp_recorder.rtp_to_wallclock',
+        with patch('ka9q.rtp_recorder.rtp_to_utc',
                    return_value=float(SECOND) + 0.45):
             assert r._t6_name_integer_second(1_000_000) is None
 
     def test_wallclock_unavailable_returns_none(self):
         r = bare_recorder()
-        with patch('ka9q.rtp_recorder.rtp_to_wallclock', return_value=None):
+        with patch('ka9q.rtp_recorder.rtp_to_utc', return_value=None):
             assert r._t6_name_integer_second(1_000_000) is None
 
 

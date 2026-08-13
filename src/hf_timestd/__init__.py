@@ -89,7 +89,12 @@ from .channel_manager import ChannelManager
 from ka9q import discover_channels, ChannelInfo, RadiodControl
 
 # ka9q timing functions (GPS_TIME/RTP_TIMESNAP support)
-from ka9q import rtp_to_wallclock, parse_rtp_header
+from ka9q import rtp_to_utc, parse_rtp_header
+
+# Legacy alias for hf-timestd's own downstream importers ("rtp_to_wallclock"
+# is deprecated in ka9q-python — audit F16).  Bound directly to rtp_to_utc
+# so it never routes through ka9q's DeprecationWarning wrapper.
+rtp_to_wallclock = rtp_to_utc
 
 # Re-export ka9q functions for backward compatibility
 discover_channels_via_control = discover_channels  # Legacy alias
@@ -131,6 +136,7 @@ __all__ = [
     "ChannelInfo",
     "RadiodControl",
     # Timing (from ka9q-python)
+    "rtp_to_utc",
     "rtp_to_wallclock",
     "parse_rtp_header",
 ]
