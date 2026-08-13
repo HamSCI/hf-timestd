@@ -78,6 +78,10 @@ class TieredStorageConfig:
     archive_interval_seconds: float = 30.0  # How often to run archiver
 
     # Channel info (set at runtime)
+    # NOTE: this default is a footgun. A TieredStorageConfig() built without
+    # arguments sizes the hot buffer for NINE channels at 20% of RAM. B4 logs
+    # exactly one such defaulted call at every recorder start. Kept for
+    # compatibility with existing constructors; always pass num_channels.
     num_channels: int = 9
 
     # File duration — must match BinaryArchiveConfig.file_duration_sec so that

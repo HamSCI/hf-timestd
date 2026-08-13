@@ -951,6 +951,15 @@ class CoreRecorderV2:
                     hot_minutes=int(tiered_hot_minutes) if tiered_hot_minutes is not None else 5,
                     ram_percent=float(tiered_ram_percent) if tiered_ram_percent is not None else TieredStorageConfig.ram_percent,
                     num_channels=num_channels,
+                    # Must be threaded through: the hot buffer's floor is
+                    # "one whole chunk plus margin" (see calculate_hot_minutes),
+                    # so leaving this at the 600 s dataclass default pinned the
+                    # ring at 11 minutes -- 725 MB for six channels -- no matter
+                    # what the operator set. On B4 that was the difference
+                    # between 725 MB and ~400 MB on a box that was OOM-killing
+                    # this very process hourly.
+                    file_duration_sec=int(self.recorder_config.get(
+                        'file_duration_sec', TieredStorageConfig.file_duration_sec)),
                 )
                 
                 from . import tiered_storage
