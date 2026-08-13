@@ -1264,26 +1264,31 @@ class CoreRecorderV2:
 
             logger.info(f"Initializing {len(self.channel_specs)} configured channels...")
 
-            # Compute ring-buffer depth once for all channels using the
-            # same RAM-budget policy the tiered-storage hot buffer used.
-            # The ring minimum (MIN_HOT_MINUTES) now starts at 4 to give
-            # metrology workers at least a couple of minutes of headroom
-            # past the longest file-chunk duration.  Phase 1 is additive:
-            # ring_seconds > 0 just means "also publish into the ring";
-            # nothing reads from it yet.
+            # Ring depth comes from metrology's requirement (see
+            # ring_buffer.RING_DEFAULT_MINUTES), NOT from the archive's
+            # chunk policy. Overriding: `ring_minutes` in [recorder].
+            #
+            # The old comment here claimed "nothing reads from it yet" —
+            # stale since at least 2026-08: each channel's ring is mapped by
+            # exactly two processes, this recorder writing and that
+            # channel's timestd-metrology@<channel> service reading.
             file_duration_sec = int(self.recorder_config.get('file_duration_sec', 600))
             ring_enabled = bool(self.recorder_config.get('ring_buffer', True))
             if ring_enabled:
-                from .tiered_storage import calculate_hot_minutes
-                hot_minutes = calculate_hot_minutes(
-                    num_channels=len(self.channel_specs),
-                    ram_percent=float(self.recorder_config.get('ring_ram_percent', 20)),
-                    file_duration_sec=file_duration_sec,
+                from .ring_buffer import (
+                    RING_DEFAULT_MINUTES, RING_MIN_MINUTES, RING_WINDOW_SEC,
                 )
-                ring_seconds = hot_minutes * 60
+                ring_minutes = max(
+                    RING_MIN_MINUTES,
+                    int(self.recorder_config.get('ring_minutes',
+                                                 RING_DEFAULT_MINUTES)),
+                )
+                ring_seconds = ring_minutes * 60
                 logger.info(
-                    f"Ring buffer enabled: {hot_minutes} minutes "
-                    f"({ring_seconds}s) per channel × {len(self.channel_specs)} channels"
+                    f"Ring buffer enabled: {ring_minutes} minutes "
+                    f"({ring_seconds}s) per channel × {len(self.channel_specs)} "
+                    f"channels — sized for metrology's {RING_WINDOW_SEC}s window, "
+                    f"independent of the archive chunk duration"
                 )
             else:
                 ring_seconds = 0

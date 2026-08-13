@@ -31,6 +31,24 @@ The full plan, including phasing and rollback notes, lives at
 
 from __future__ import annotations
 
+
+#: How deep the ring must be, in seconds.
+#:
+#: The ring feeds metrology, which reads 60-second windows aligned to UTC
+#: minute boundaries with no file I/O on the hot path. Its depth is therefore
+#: that window plus slack for a worker that falls behind — it has nothing to
+#: do with the archive's chunk duration.
+#:
+#: It used to be sized by `tiered_storage.calculate_hot_minutes()`, the
+#: ARCHIVE's policy, whose floor is "one whole chunk plus margin". That pinned
+#: the ring at 7-11 minutes to serve a 60-second requirement: 461-725 MB of
+#: unreclaimable shared memory across six channels, on a 9.3 GB host that was
+#: OOM-killing the recorder that owns it. Sizing a buffer by someone else's
+#: constraint is how that happened; these constants exist so it cannot recur.
+RING_WINDOW_SEC = 60          # metrology's window — the actual requirement
+RING_DEFAULT_MINUTES = 3      # window + 2 min of slack for a lagging worker
+RING_MIN_MINUTES = 2          # never less than window + 1 min
+
 import hashlib
 import logging
 import os
