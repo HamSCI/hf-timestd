@@ -307,7 +307,12 @@ class Lb1421T5Probe:
     def _pick_file(self) -> Optional[Path]:
         if not self.run_dir.is_dir():
             return None
-        if self.serial is not None:
+        # "*" is the config's wildcard idiom and "" is an unset value; both
+        # mean "any device", not a file literally named that.  Treating them
+        # literally is why B4 ran from deployment until 2026-08-14 with the
+        # probe silently returning None and every T6 disambiguation falling
+        # through to T4 chronyc-tracking.
+        if self.serial is not None and self.serial not in ("*", ""):
             candidate = self.run_dir / f"{self.serial}.json"
             return candidate if candidate.is_file() else None
         # No explicit serial: pick the first per-device file, skipping

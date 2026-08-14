@@ -82,3 +82,26 @@ def test_genuine_step_survives_wrapping():
     assert abs(wrap_chain_delay_ns(-80_000_000)) == 80_000_000
     # ...and one expressed across the wrap boundary is still 80 ms
     assert abs(wrap_chain_delay_ns(PERIOD - 80_000_000)) == 80_000_000
+
+
+def test_lb1421_probe_treats_wildcard_serial_as_auto_pick(tmp_path):
+    """A `serial` of '*' means "any device", not a file literally named '*.json'.
+
+    B4 ran with serial='*' (the config's wildcard idiom) from deployment until
+    2026-08-14. _pick_file() built `<run_dir>/*.json` as a literal path, never
+    matched, so the probe's _latest stayed None and every T6 disambiguation
+    silently fell through to T4 chronyc-tracking. T6 was therefore anchored on
+    a ~0.7 ms reference while carrying a 5 ns fine stage.
+    """
+    from hf_timestd.core.lb1421_t5_probe import Lb1421T5Probe
+    (tmp_path / "index.json").write_text("{}")
+    dev = tmp_path / "0C7BB80D10EF.json"
+    dev.write_text("{}")
+    for serial in ("*", "", None):
+        p = Lb1421T5Probe(run_dir=str(tmp_path), serial=serial)
+        assert p._pick_file() == dev, f"serial={serial!r} should auto-pick"
+    # An explicit serial still selects exactly that device.
+    p = Lb1421T5Probe(run_dir=str(tmp_path), serial="0C7BB80D10EF")
+    assert p._pick_file() == dev
+    p = Lb1421T5Probe(run_dir=str(tmp_path), serial="NOSUCHDEVICE")
+    assert p._pick_file() is None
