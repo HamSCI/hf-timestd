@@ -3724,7 +3724,9 @@ class CoreRecorderV2:
                     f"T6 chain_delay initial accept: {result.chain_delay_ns} ns "
                     f"(effective with disambiguation: {effective} ns)"
                 )
-            elif abs((result.chain_delay_ns + self._t6_disambiguation_ns) - self._t6_last_chain_delay_ns) > WRAP_THRESHOLD_NS:
+            elif abs(wrap_chain_delay_ns(
+                    (result.chain_delay_ns + self._t6_disambiguation_ns)
+                    - self._t6_last_chain_delay_ns)) > WRAP_THRESHOLD_NS:
                 # Suspicious jump — log once per burst and use the
                 # last-accepted chain_delay for downstream propagation.
                 # Falling through (rather than `return`-ing early) keeps
@@ -3758,7 +3760,8 @@ class CoreRecorderV2:
                     t5_implied = self._t5_implied_effective_chain_delay()
                     if (t5_implied is not None
                             and self._t6_last_chain_delay_ns is not None
-                            and abs(t5_implied - self._t6_last_chain_delay_ns)
+                            and abs(wrap_chain_delay_ns(
+                                t5_implied - self._t6_last_chain_delay_ns))
                                 > self.T6_STEP_RECOVERY_T5_SANITY_NS):
                         # T5 says the physical chain_delay has NOT
                         # actually changed; the cluster is a phantom.
@@ -3769,7 +3772,7 @@ class CoreRecorderV2:
                             f"{t5_implied:.0f} ns, old locked = "
                             f"{self._t6_last_chain_delay_ns} ns, "
                             f"disagreement = "
-                            f"{t5_implied - self._t6_last_chain_delay_ns:+.0f} ns "
+                            f"{wrap_chain_delay_ns(int(t5_implied - self._t6_last_chain_delay_ns)):+d} ns "
                             f"(threshold ±{self.T6_STEP_RECOVERY_T5_SANITY_NS} ns). "
                             f"Phantom edge from packet-loss zero-fill or "
                             f"matched-filter sidelobe.  Holding old lock; "
@@ -3839,7 +3842,7 @@ class CoreRecorderV2:
                             f"T6 chain_delay jump rejected: "
                             f"new={result.chain_delay_ns} ns, "
                             f"last_accepted={self._t6_last_chain_delay_ns} ns, "
-                            f"delta={result.chain_delay_ns - self._t6_last_chain_delay_ns} ns "
+                            f"delta={wrap_chain_delay_ns(result.chain_delay_ns - self._t6_last_chain_delay_ns)} ns "
                             f"(threshold {WRAP_THRESHOLD_NS} ns); "
                             f"rejections={self._t6_wrap_rejections}"
                         )

@@ -60,3 +60,25 @@ def test_deadlock_band_is_reachable_after_wrap():
         assert abs(wrap_chain_delay_ns(raw)) <= SHIFT_MAX
         # and a correct shift can always land inside the guard
         assert abs(wrap_chain_delay_ns(raw + (0 - raw))) <= GUARD
+
+
+def test_modular_difference_of_same_instant_is_zero():
+    """The jump detector compares two modular quantities; the DIFFERENCE
+    must be folded too, or the same physical value in two representations
+    reads as a full-second jump.
+
+    Observed on B4 2026-08-14 23:05 after the guard fix landed:
+        new=843,431,895   last_accepted=-156,568,105   delta=1,000,000,000
+    Those are the same instant; the delta is exactly one period.
+    """
+    new, last = 843_431_895, -156_568_105
+    assert new - last == PERIOD                      # reads as a 1 s jump
+    assert wrap_chain_delay_ns(new - last) == 0      # actually no change
+
+
+def test_genuine_step_survives_wrapping():
+    """A real chain-delay step must still be detected after folding."""
+    assert abs(wrap_chain_delay_ns(80_000_000)) == 80_000_000      # 80 ms step
+    assert abs(wrap_chain_delay_ns(-80_000_000)) == 80_000_000
+    # ...and one expressed across the wrap boundary is still 80 ms
+    assert abs(wrap_chain_delay_ns(PERIOD - 80_000_000)) == 80_000_000
