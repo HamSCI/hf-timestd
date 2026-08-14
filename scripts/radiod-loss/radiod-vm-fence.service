@@ -1,0 +1,17 @@
+[Unit]
+Description=Keep qemu non-vCPU threads off radiod's isolated CPU pair
+Documentation=https://claude.ai/code/artifact/8afd4b8a-1eb6-44cc-abd3-62cfc07ac5bd
+After=qemu.slice
+
+[Service]
+Type=simple
+# Re-applies periodically: io_uring spawns iou-wrk threads at runtime and they
+# inherit the VM-wide 0-13 mask, so a one-shot fence decays. Also holds KSM off:
+# with a single VM it merges ~76 pages from billions scanned, and its TLB
+# shootdowns land on the very CPUs we are protecting.
+ExecStart=/usr/local/sbin/radiod-vm-fence.sh 100 14-15 30
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
