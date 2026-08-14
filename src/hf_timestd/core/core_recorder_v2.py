@@ -132,6 +132,32 @@ def resolve_batch_rtp(quality, _warned=[False]):
     return getattr(quality, 'last_rtp_timestamp', None)
 
 
+
+# One PPS period.  The MF reports chain delay as a modular position in
+# [0, SR) -- see bpsk_pps_calibrator_mf, which deliberately does NOT wrap and
+# delegates absolute resolution to the disambiguation logic here.
+_T6_PPS_PERIOD_NS = 1_000_000_000
+
+
+def wrap_chain_delay_ns(effective_ns: int) -> int:
+    """Fold a chain delay onto the representative nearest zero.
+
+    ``effective = raw + disambiguation_shift`` is modular in the PPS period,
+    but the disambiguation shift is bounded to +/-0.5 s by construction
+    (``offset_sec = wall - round(wall)``).  So ``effective`` can only reach
+    ``raw +/- 500 ms`` while the plausibility guard demands +/-250 ms -- those
+    intersect only for ``raw <= 750 ms``.  Above that the guard could never be
+    satisfied and T6 refused every locked cycle indefinitely (B4, 2026-08-14:
+    raw pinned at 843.4 ms by an RTP-epoch re-base after a radiod restart,
+    zero anchors for 4+ hours).
+
+    Folding first makes the guard test the physical quantity it means to test.
+    Values already inside the band are returned unchanged.
+    """
+    half = _T6_PPS_PERIOD_NS // 2
+    return ((int(effective_ns) + half) % _T6_PPS_PERIOD_NS) - half
+
+
 class CoreRecorderV2:
     """
     Core recorder V2: Uses ka9q-python RadiodStream and RadiodControl.
@@ -3069,7 +3095,7 @@ class CoreRecorderV2:
             # captured_via_tier reflects which tier of the cascade
             # supplied the integer second.
             from .native_anchor import NativeAnchor
-            effective_chain_delay_ns = int(
+            effective_chain_delay_ns = wrap_chain_delay_ns(
                 result.chain_delay_ns + self._t6_disambiguation_ns
             )
             # Layer B physical-plausibility guard — same rationale as
@@ -3605,7 +3631,8 @@ class CoreRecorderV2:
                 self._t6_disambig_path = _dpath
                 self._t6_disambig_detail = ""
                 # Apply disambiguation (set above either way) and lock in.
-                effective = result.chain_delay_ns + self._t6_disambiguation_ns
+                effective = wrap_chain_delay_ns(
+                    result.chain_delay_ns + self._t6_disambiguation_ns)
                 # ---- #7 defect 2 instrumentation ----
                 # Fires only at initial accept, so it is not a hot path.
                 # The question this answers: raw is measured to ~80 ns, yet
