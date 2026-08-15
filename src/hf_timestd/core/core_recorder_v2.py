@@ -162,6 +162,25 @@ def newest_sample_rtp(quality) -> Optional[int]:
     return (int(start) + int(n)) & 0xFFFFFFFF
 
 
+def t6_chain_delay_uncalibrated(t6_config) -> bool:
+    """True when T6 is enabled but asserts a zero RF chain delay.
+
+    ``chain_delay_calib_s`` is asserted, never derived
+    (T6_ORIGIN_ASSERTION_DESIGN §5), and defaults to 0.0.  Unset, it
+    claims the TS-1 BPSK modulator -> coax -> RX-888 ADC -> radiod DSP
+    -> RTP path takes exactly no time, so the anchor pins to the integer
+    second and every label is early by the whole chain delay (B4
+    2026-08-15: -16.098 ms against T4, with the capture log recording
+    the +15.863 ms it had just measured and discarded).
+
+    Reporting only -- deriving the value here is precisely what the
+    assertion design removed.
+    """
+    if not t6_config.get("enabled", False):
+        return False
+    return float(t6_config.get("chain_delay_calib_s", 0.0)) == 0.0
+
+
 def wrap_chain_delay_ns(effective_ns: int) -> int:
     """Fold a chain delay onto the representative nearest zero.
 
@@ -654,6 +673,16 @@ class CoreRecorderV2:
         self._t6_chain_delay_calib_s = float(
             self._t6_config.get('chain_delay_calib_s', 0.0)
         )
+        if t6_chain_delay_uncalibrated(self._t6_config):
+            logger.warning(
+                "T6 enabled with chain_delay_calib_s unset (0.000 ms): the "
+                "native anchor will pin to the integer second and every "
+                "sample label will be EARLY by the whole RF chain delay. "
+                "Measure it against an independent bench — the judge's "
+                "shadow_residual for T6 vs T4 is exactly this quantity — "
+                "and set [timing.t6_pps] chain_delay_calib_s. Asserted, "
+                "never derived (T6_ORIGIN_ASSERTION_DESIGN §5)."
+            )
         if self._t6_config.get('enabled', False):
             freq_hz = self._t6_config.get('frequency_hz')
             if freq_hz is None:

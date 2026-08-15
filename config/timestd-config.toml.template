@@ -351,6 +351,30 @@ use_magnitude_correlation = false # Method 2 Re-projection; Method 4 magnitude
                                   # METHODS.md §4-5) — do not enable
 description = "BPSK_PPS"
 #
+# chain_delay_calib_s = 0.0       # REQUIRED per site when enabled=true.
+#                                 # End-to-end RF delay: TS-1 BPSK modulator ->
+#                                 # coax -> RX-888 ADC -> radiod DSP -> RTP.
+#                                 # ASSERTED from this value and never derived
+#                                 # (T6_ORIGIN_ASSERTION_DESIGN §5: deriving it
+#                                 # from radiod's advertised wall clock made the
+#                                 # correction a function of the mapping it was
+#                                 # correcting — 58 different origins in one
+#                                 # night on AC0G-B4).
+#                                 # ⚠ Leaving it unset does NOT disable the
+#                                 # correction, it asserts ZERO: the anchor pins
+#                                 # to the integer second and every sample label
+#                                 # is early by the whole chain delay.  AC0G-B4
+#                                 # ran this way until 2026-08-15 and T6 read
+#                                 # -16.098 ms against T4.
+#                                 # HOW TO MEASURE (needs an independent bench,
+#                                 # not radiod's own wall clock): with T6
+#                                 # enabled and this key at 0, read
+#                                 # shadow_residuals.T6.shadow_residual_ns from
+#                                 # /run/hf-timestd/offset_judge.json over a few
+#                                 # minutes.  Its magnitude IS the chain delay.
+#                                 # Set this key to that value in seconds, then
+#                                 # confirm the residual collapses toward zero.
+#
 # Calibrator selection:
 # use_matched_filter = false      # When true, use the textbook matched-filter
 #                                 # calibrator (Costas + integrate-and-dump MF +
