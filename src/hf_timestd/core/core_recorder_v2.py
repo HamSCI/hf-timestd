@@ -139,6 +139,22 @@ def resolve_batch_rtp(quality, _warned=[False]):
 _T6_PPS_PERIOD_NS = 1_000_000_000
 
 
+def format_native_anchor_log(anchor, tier) -> str:
+    """The one anchor-capture log shape, shared by every capture path.
+
+    ``scripts/t6_origin_spread.py`` derives origins from these lines and
+    needs rtp, utc_ns AND sr from each.  Two of the three capture sites
+    used to hand-roll a shorter form — the external-reference lines
+    omitted sr, and its "already aligned" variant omitted utc_ns too —
+    so those anchors were invisible to the tool.  Formatting in one
+    place, pinned by a test against the tool's own regex, keeps producer
+    and consumer from drifting apart again.
+    """
+    return (f"native_anchor: rtp={anchor.anchor_rtp}, "
+            f"utc_ns={anchor.anchor_utc_ns}, "
+            f"sr={anchor.sample_rate_hz}, tier={tier}")
+
+
 def newest_sample_rtp(quality) -> Optional[int]:
     """RTP label of the sample just past the newest DELIVERED one.
 
@@ -2844,6 +2860,22 @@ class CoreRecorderV2:
             self._t6_native_anchor = decision.anchor
             if decision.state is not prev:
                 self._t6_rate_reset("native anchor captured via T6")
+            # Log the anchor in the shape scripts/t6_origin_spread.py
+            # parses.  Post-inversion THIS is the anchor -- the coarse
+            # capture is logged and then superseded seconds later -- so
+            # without this the origin-spread tool could only ever see
+            # the anchor that stopped being used.  Throttled: the fine
+            # stage refreshes per fold block, and every state change is
+            # logged regardless.
+            _now = time.monotonic()
+            _last = getattr(self, '_t6_anchor_log_wall', None)
+            if (decision.state is not prev or _last is None
+                    or _now - _last >= self.T6_RESIDUAL_REPORT_PERIOD_SEC):
+                self._t6_anchor_log_wall = _now
+                logger.info(
+                    "T6 anchor authority AUTHORITATIVE; %s",
+                    format_native_anchor_log(decision.anchor, "T6"),
+                )
         elif decision.state is T6AuthorityState.UNLOCKED and prev in (
                 T6AuthorityState.AUTHORITATIVE, T6AuthorityState.DEGRADED):
             # Invalidate so the legacy cascade re-captures via T5 —
@@ -3071,9 +3103,7 @@ class CoreRecorderV2:
                 f"residual={residual_sec*1000:+.3f} ms, "
                 f"effective_chain_delay={effective_chain_delay_ns} ns "
                 f"(no integer-sample-shift step — direct GPS reference); "
-                f"native_anchor: rtp={self._t6_native_anchor.anchor_rtp}, "
-                f"utc_ns={self._t6_native_anchor.anchor_utc_ns}, "
-                f"sr={sr}, tier=T5"
+                f"{format_native_anchor_log(self._t6_native_anchor, 'T5')}"
             )
             return True
         except Exception as e:
@@ -3263,17 +3293,14 @@ class CoreRecorderV2:
                     f"offset {offset_sec*1000:+.3f} ms; disagreement "
                     f"{disagreement_sec*1000:+.1f} ms; shifting "
                     f"{shift_samples} samples ({self._t6_disambiguation_ns} ns); "
-                    f"native_anchor: rtp={self._t6_native_anchor.anchor_rtp}, "
-                    f"utc_ns={self._t6_native_anchor.anchor_utc_ns}, "
-                    f"tier={ref_tier}"
+                    f"{format_native_anchor_log(self._t6_native_anchor, ref_tier)}"
                 )
             else:
                 logger.info(
                     f"T6 chain_delay disambiguated against {ref_tier}: "
                     f"already aligned within one sample "
                     f"(disagreement {disagreement_sec*1000:+.3f} ms); "
-                    f"native_anchor: rtp={self._t6_native_anchor.anchor_rtp}, "
-                    f"tier={ref_tier}"
+                    f"{format_native_anchor_log(self._t6_native_anchor, ref_tier)}"
                 )
         except Exception as e:
             logger.warning(f"T6 disambiguation failed: {e}")
