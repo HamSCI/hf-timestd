@@ -560,7 +560,14 @@ class NativeAnchorBench:
             return None
         if state is None:
             return None
-        anchor, arrival_rtp, arrival_mono = state
+        # 4-tuple carries the least-delayed-arrival floor (P2 latency
+        # correction); the 3-tuple form is the pre-floor contract and
+        # keeps the conservative transport bound.
+        floor = None
+        if len(state) == 4:
+            anchor, arrival_rtp, arrival_mono, floor = state
+        else:
+            anchor, arrival_rtp, arrival_mono = state
         age = self._mono() - float(arrival_mono)
         if age < 0 or age > self.ARRIVAL_MAX_AGE_S:
             return None
@@ -569,17 +576,37 @@ class NativeAnchorBench:
             utc_ns = utc_ns_at_rtp(int(arrival_rtp) & 0xFFFFFFFF, anchor)
         except Exception:  # noqa: BLE001
             return None
+        detail = {
+            "anchor_rtp": int(anchor.anchor_rtp),
+            "anchor_tier": str(anchor.captured_via_tier),
+            "chain_delay_ns": int(anchor.chain_delay_ns),
+            "arrival_age_s": round(age, 3),
+        }
+        if floor is None:
+            # No floor yet: the latest arrival, carrying the transport
+            # latency as an honest (wide) bound.
+            return BenchReading(
+                tier="T6",
+                utc=utc_ns / 1e9,
+                sigma_ns=self.LATENCY_SIGMA_FLOOR_NS,
+                mono=float(arrival_mono),
+                detail=detail,
+            )
+        # The least-delayed arrival in the window sets the mono->UTC
+        # map; the latest arrival only proves the stream is alive.
+        detail.update({
+            "floor_n": int(floor.n),
+            "floor_span_s": round(float(floor.span_s), 3),
+            "latest_arrival_lag_ns": int(
+                round((float(floor.offset_s) + float(arrival_mono))
+                      * 1e9 - utc_ns)),
+        })
         return BenchReading(
             tier="T6",
-            utc=utc_ns / 1e9,
-            sigma_ns=self.LATENCY_SIGMA_FLOOR_NS,
+            utc=float(floor.offset_s) + float(arrival_mono),
+            sigma_ns=float(floor.sigma_ns),
             mono=float(arrival_mono),
-            detail={
-                "anchor_rtp": int(anchor.anchor_rtp),
-                "anchor_tier": str(anchor.captured_via_tier),
-                "chain_delay_ns": int(anchor.chain_delay_ns),
-                "arrival_age_s": round(age, 3),
-            },
+            detail=detail,
         )
 
 

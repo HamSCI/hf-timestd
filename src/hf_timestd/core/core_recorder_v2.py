@@ -139,6 +139,29 @@ def resolve_batch_rtp(quality, _warned=[False]):
 _T6_PPS_PERIOD_NS = 1_000_000_000
 
 
+def newest_sample_rtp(quality) -> Optional[int]:
+    """RTP label of the sample just past the newest DELIVERED one.
+
+    ``quality.last_rtp_timestamp`` is the last RECEIVED packet's header,
+    stamped before the resequencer runs; ka9q-python added
+    ``delivered_rtp_start`` specifically to replace that use for sample
+    labelling ("the latter ... desynchronizes from delivered samples
+    under loss", stream_quality.py) after the T6 origin slips of
+    2026-08-11.  The delivered batch runs from ``delivered_rtp_start``
+    for ``batch_samples_delivered`` samples, so its leading edge -- the
+    newest sample we actually hold -- is their sum.
+
+    Falls back to the received header when the producer predates the
+    field, which is the pre-fix behavior.
+    """
+    start = getattr(quality, "delivered_rtp_start", None)
+    n = getattr(quality, "batch_samples_delivered", 0) or 0
+    if start is None:
+        last = getattr(quality, "last_rtp_timestamp", None)
+        return None if last is None else int(last) & 0xFFFFFFFF
+    return (int(start) + int(n)) & 0xFFFFFFFF
+
+
 def wrap_chain_delay_ns(effective_ns: int) -> int:
     """Fold a chain delay onto the representative nearest zero.
 
@@ -568,6 +591,17 @@ class CoreRecorderV2:
         except Exception as e:
             logger.error(f"T6ResidualRateEstimator init failed: {e}")
             self._t6_rate_est = None
+
+        # Least-delayed-arrival filter for the T6 bench hand-off.  Fed
+        # from the delivery callback (~55/s), read on the judge's tick.
+        # Without it the bench publishes the stream transport latency as
+        # clock error: measured -27.7 ms on B4 2026-08-14/15.
+        try:
+            from .t6_arrival_floor import ArrivalFloorTracker
+            self._t6_arrival_floor = ArrivalFloorTracker()
+        except Exception as e:
+            logger.error(f"ArrivalFloorTracker init failed: {e}")
+            self._t6_arrival_floor = None
 
         # ── T6/T5 substrate benches for the Offset Judge (P2) ───────
         # T6: NativeAnchor projection (pure counter arithmetic when a
@@ -2256,6 +2290,14 @@ class CoreRecorderV2:
         Called at every native-anchor (re)capture/restore: the residual
         reference frame moves with the anchor, so regressing across the
         change would fabricate a rate step (spec §5 honesty)."""
+        floor = getattr(self, '_t6_arrival_floor', None)
+        if floor is not None:
+            try:
+                # Offsets are relative to the anchor: the frame moves
+                # with it, so the old window is a different frame.
+                floor.reset(cause)
+            except Exception as e:  # noqa: BLE001 — never fatal
+                logger.debug(f"T6 arrival floor reset failed: {e}")
         est = getattr(self, '_t6_rate_est', None)
         if est is None:
             return
@@ -2264,12 +2306,57 @@ class CoreRecorderV2:
         except Exception as e:  # noqa: BLE001 — metadata path, never fatal
             logger.debug(f"T6 rate estimator reset failed: {e}")
 
+    def _t6_note_arrival(self, quality) -> None:
+        """Record the T6 stream arrival point: label + transport floor.
+
+        Two things happen per delivered batch (~55/s on B4):
+
+        * the T5 pairing gets the arrival label -- now the END of the
+          delivered batch (``newest_sample_rtp``) rather than the last
+          RECEIVED packet's pre-resequencer header;
+        * the arrival floor tracker gets this batch's (label_utc - mono)
+          offset, so the bench can later answer from the LEAST delayed
+          arrival instead of whichever one happened to land last.
+
+        The floor must be fed here, on the delivery path, and not from
+        the bench poll: the judge ticks every 10 s, so a poll-fed window
+        would hold one arrival and filter nothing.
+
+        Hot path -- never raises.
+        """
+        _pairing = getattr(self, '_t5_pairing', None)
+        if _pairing is None:
+            return
+        rtp = newest_sample_rtp(quality)
+        if rtp is None:
+            return
+        _pairing.note_arrival(rtp)
+
+        tracker = getattr(self, '_t6_arrival_floor', None)
+        anchor = getattr(self, '_t6_native_anchor', None)
+        if tracker is None or anchor is None:
+            return
+        try:
+            from .native_anchor import utc_ns_at_rtp
+            mono = _pairing.now_mono()
+            utc_s = utc_ns_at_rtp(rtp, anchor) / 1e9
+            tracker.note(utc_s - mono, mono)
+        except Exception as e:  # noqa: BLE001 — diagnostics never fatal
+            logger.debug(f"T6 arrival floor note failed: {e}")
+
     def _t6_bench_state(self):
-        """NativeAnchorBench provider: (anchor, arrival_rtp, arrival_mono).
+        """NativeAnchorBench provider: (anchor, arrival_rtp, arrival_mono,
+        floor).
 
         Only answers while a valid T6 native anchor exists AND the T6
         stream is delivering samples (the arrival point grounds the
         bench's 'now' hand-off; NativeAnchorBench enforces freshness).
+
+        ``floor`` is the least-delayed arrival seen recently (see
+        ``t6_arrival_floor``).  It is the element that keeps the bench
+        from publishing the transport latency as clock error; None until
+        the window has filled, in which case the bench falls back to the
+        conservative transport bound.
         """
         anchor = getattr(self, '_t6_native_anchor', None)
         pairing = getattr(self, '_t5_pairing', None)
@@ -2278,7 +2365,14 @@ class CoreRecorderV2:
         arrival = pairing.latest_arrival
         if arrival is None:
             return None
-        return (anchor, arrival[0], arrival[1])
+        floor = None
+        tracker = getattr(self, '_t6_arrival_floor', None)
+        if tracker is not None:
+            try:
+                floor = tracker.estimate(pairing.now_mono())
+            except Exception as e:  # noqa: BLE001 — bench must not die
+                logger.debug(f"T6 arrival floor estimate failed: {e}")
+        return (anchor, arrival[0], arrival[1], floor)
 
     def _wire_t5_fallback_arrival(self, description: str, recorder) -> None:
         """Give an archive stream its own T5 pairing arrival tracker.
@@ -3343,11 +3437,7 @@ class CoreRecorderV2:
         # counter observed "now" so the LB-142x integer second can be
         # paired against the substrate.  Single tuple assignment — safe
         # on the hot path.
-        _pairing = getattr(self, '_t5_pairing', None)
-        if _pairing is not None:
-            _rtp_last = getattr(quality, 'last_rtp_timestamp', None)
-            if _rtp_last is not None:
-                _pairing.note_arrival(_rtp_last)
+        self._t6_note_arrival(quality)
         # Defensive lazy-init for unit tests that bypass __init__ via
         # ``CoreRecorderV2.__new__(CoreRecorderV2)``.  In production
         # __init__ has already set these; in tests they are absent and
