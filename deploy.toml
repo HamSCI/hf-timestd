@@ -156,7 +156,13 @@ units = [
     "timestd-metrology.target",
     "timestd-fusion.service",
     "timestd-l2-calibration.service",
-    "timestd-physics.service",
+    # timestd-physics.service — DISABLED 2026-08-10 (standing decision), and
+    # re-listed here by mistake: a deploy kept re-enabling it.  The physics
+    # stage still carries 2 HDF5 assumptions that the wwv-h-iono Phase-3 port
+    # resolves; until that lands it produces nothing trustworthy.  Note
+    # l2-calibration DOES produce L2_timing_measurements, so the product is not
+    # orphaned — only the physics stage is held.  Unit file retained
+    # (disable-not-delete); re-add this line when Phase-3 lands.
     "timestd-radiod-monitor.service",
     "timestd-web-api.service",
     "timestd-vtec.service",
