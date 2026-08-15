@@ -32,6 +32,7 @@ ANCHOR = re.compile(
     r'native_anchor: rtp=(\d+)'
     r'(?:, utc_ns=(\d+))?'
     r'(?:, sr=(\d+))?'
+    r'(?:, tier=(\w+))?'
 )
 # Leading timestamp in either journalctl style, for the report only.
 TIMESTAMP = re.compile(
@@ -57,7 +58,7 @@ def parse_log(lines):
     """Segment a journal by channel lifetime.
 
     Returns a list of segments, each with usable ``anchors`` as
-    ``(rtp, utc_ns, sr)`` and a count of ``unusable`` anchor lines --
+    ``(rtp, utc_ns, sr, tier)`` and a count of ``unusable`` lines --
     ones that named an anchor but lacked utc_ns or sr, which cannot be
     turned into an origin and must not be quietly ignored.
     """
@@ -76,13 +77,18 @@ def parse_log(lines):
             # Previously dropped without a word.
             cur = _new_segment(_timestamp(line), implicit=True)
             segments.append(cur)
-        rtp, utc_ns, sr = m.group(1), m.group(2), m.group(3)
+        rtp, utc_ns, sr, tier = m.group(1), m.group(2), m.group(3), m.group(4)
         if utc_ns is None or sr is None:
             cur['unusable'] += 1
             continue
-        cur['anchors'].append((int(rtp), int(utc_ns), int(sr)))
+        cur['anchors'].append((int(rtp), int(utc_ns), int(sr), tier or '?'))
         cur['timestamps'].append(_timestamp(line))
     return segments
+
+
+def origin_ns(rtp, utc_ns, sr):
+    """Where this anchor places the RTP counter's origin, mod one wrap."""
+    return (utc_ns - (rtp * 10**9) // sr) % ((2**32 * 10**9) // sr)
 
 
 def segment_spread_ns(anchors):
@@ -98,8 +104,9 @@ def segment_spread_ns(anchors):
     if any(a[2] != sr for a in anchors):
         raise ValueError("mixed sample rates within one segment")
     period = (2**32 * 10**9) // sr
-    vals = sorted((utc - (rtp * 10**9) // sr) % period
-                  for rtp, utc, _ in anchors)
+    # Index rather than unpack: anchors carry a tier as a 4th field,
+    # and the spread math is indifferent to it.
+    vals = sorted(origin_ns(a[0], a[1], a[2]) for a in anchors)
     gaps = [vals[j + 1] - vals[j] for j in range(len(vals) - 1)]
     gaps.append(period - (vals[-1] - vals[0]))
     return period - max(gaps)
@@ -120,20 +127,48 @@ def main(argv):
         note = (f"  [{s['unusable']} unusable anchor line(s): no utc_ns/sr]"
                 if s['unusable'] else '')
         a = s['anchors']
-        if len(a) < 2:
-            print(f"  segment {i} (from {s['start']}){tag}: "
-                  f"{len(a)} usable anchor(s) — cannot measure{note}")
+        print(f"  segment {i} (from {s['start']}){tag}:{note}")
+        if not a:
+            print("      no usable anchors — cannot measure")
             continue
-        try:
-            spread = segment_spread_ns(a)
-        except ValueError as e:
-            print(f"  segment {i} (from {s['start']}){tag}: {e}{note}")
-            continue
-        measured += 1
-        verdict = 'PASS' if spread < SPREAD_GATE_NS else 'FAIL'
-        print(f"  segment {i} (from {s['start']}){tag}: n={len(a)}  "
-              f"spread={spread/1000:.3f} us  {verdict}   "
-              f"[{s['timestamps'][0]} .. {s['timestamps'][-1]}]{note}")
+        # Capture tiers are DIFFERENT QUANTITIES, never one spread.  The
+        # coarse cascade asserts a chain delay with no subsample term;
+        # the fine stage resolves one.  Pooling them reports that fixed
+        # offset as drift — on B4 2026-08-15 a real 0.010 us of
+        # fine-stage spread read as 5.127 us once the coarse capture
+        # from the same lifetime was mixed in.
+        by_tier = {}
+        for idx, anc in enumerate(a):
+            by_tier.setdefault(anc[3], []).append((anc, s['timestamps'][idx]))
+        for tier in sorted(by_tier):
+            group = by_tier[tier]
+            anchors = [g[0] for g in group]
+            if len(anchors) < 2:
+                print(f"      tier={tier}: n={len(anchors)} — cannot measure")
+                continue
+            try:
+                spread = segment_spread_ns(anchors)
+            except ValueError as e:
+                print(f"      tier={tier}: {e}")
+                continue
+            measured += 1
+            verdict = 'PASS' if spread < SPREAD_GATE_NS else 'FAIL'
+            print(f"      tier={tier}: n={len(anchors)}  "
+                  f"spread={spread/1000:.3f} us  {verdict}   "
+                  f"[{group[0][1]} .. {group[-1][1]}]")
+        if len(by_tier) > 1:
+            # Kept, because it is a real diagnostic — the subsample term
+            # the coarse path cannot see — just not a spread.
+            meds = {t: sorted(origin_ns(g[0][0], g[0][1], g[0][2])
+                              for g in grp)[len(grp) // 2]
+                    for t, grp in by_tier.items()}
+            base = min(meds, key=lambda t: (t != 'T6', t))
+            for tier in sorted(meds):
+                if tier == base:
+                    continue
+                print(f"      cross-tier origin offset: {tier}−{base} = "
+                      f"{(meds[tier] - meds[base]) / 1000:+.3f} us "
+                      f"(a fixed capture-path offset, NOT drift)")
 
     if unusable_total:
         print(f"\n{unusable_total} anchor line(s) were unusable — they named "

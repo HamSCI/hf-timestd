@@ -30,7 +30,8 @@ SR = 96_000
 PERIOD_NS = (2**32 * 10**9) // SR
 
 
-def _anchor_line(rtp, utc_ns, ts_style="default", sr=SR, utc=True):
+def _anchor_line(rtp, utc_ns, ts_style="default", sr=SR, utc=True,
+                 tier="T5"):
     """A real T6 anchor log line in either journalctl output format."""
     if ts_style == "default":
         prefix = "Aug 15 01:34:24 AC0G-B4 timestd-core-recorder[2045223]:"
@@ -42,7 +43,7 @@ def _anchor_line(rtp, utc_ns, ts_style="default", sr=SR, utc=True):
         body += f", utc_ns={utc_ns}"
     if sr:
         body += f", sr={sr}"
-    body += ", tier=T5"
+    body += f", tier={tier}"
     return (f"{prefix} 2026-08-15 01:34:24,544 - INFO - T6 chain_delay "
             f"disambiguated against T5 (LB-1421 NMEA): {body}\n")
 
@@ -157,7 +158,8 @@ def test_every_anchor_log_line_the_recorder_emits_is_parseable():
     segs = parse_log([_create_line(), line])
 
     assert segs[0]["unusable"] == 0
-    assert segs[0]["anchors"] == [(2148472777, 1786757664016618000, 96_000)]
+    assert segs[0]["anchors"] == [
+        (2148472777, 1786757664016618000, 96_000, "T5")]
 
 
 def test_the_authoritative_fine_stage_anchor_is_logged_for_the_tool(caplog):
@@ -194,4 +196,59 @@ def test_the_authoritative_fine_stage_anchor_is_logged_for_the_tool(caplog):
     segs = parse_log([_create_line()] + [r.getMessage() + "\n"
                                          for r in caplog.records])
     assert segs[0]["unusable"] == 0
-    assert (2225172937, 1786760000016628000, 96_000) in segs[0]["anchors"]
+    assert (2225172937, 1786760000016628000, 96_000, "T6") in segs[0]["anchors"]
+
+
+# ────────────────────────────────────────────────────────────────────
+# Tiers are different quantities and must not share a spread
+# ────────────────────────────────────────────────────────────────────
+
+def _mixed_tier_log():
+    """One coarse T5 capture plus three fine-stage T6 anchors.
+
+    The real B4 shape, 2026-08-15: T5 asserts 16.618000 ms (group delay
+    only) while the fine stage resolves 16.623119 ms (+ delay budget
+    − subsample).  Their 5.119 us difference is a coarse-vs-fine OFFSET,
+    not origin drift, and pooling them reported it as 5.127 us of
+    spread — 500x the real figure.
+    """
+    rtp0, utc0 = 1_000_000, 1_786_000_000_016_618_000
+    lines = [_create_line()]
+    lines.append(_anchor_line(rtp0, utc0, tier="T5"))
+    for k, jitter in enumerate((0, -2, +8), start=1):
+        lines.append(_anchor_line(rtp0 + k * SR,
+                                  utc0 + k * 10**9 + 5_119 + jitter,
+                                  tier="T6"))
+    return lines
+
+
+def test_parse_records_the_capture_tier():
+    segs = parse_log(_mixed_tier_log())
+
+    assert [a[3] for a in segs[0]["anchors"]] == ["T5", "T6", "T6", "T6"]
+
+
+def test_tiers_are_measured_separately(tmp_path, capsys):
+    log = tmp_path / "j.log"
+    log.write_text("".join(_mixed_tier_log()))
+
+    assert main([str(log)]) == 0
+    out = capsys.readouterr().out
+
+    # The fine-stage anchors are tight; the pooled figure was not.
+    assert "tier=T6" in out and "spread=0.010 us" in out
+    # And no line may pool the two tiers into one spread.
+    assert "n=4" not in out
+
+
+def test_the_cross_tier_offset_is_reported_not_discarded(tmp_path, capsys):
+    """It is the subsample term the coarse path cannot see — a real
+    diagnostic, just not a spread."""
+    log = tmp_path / "j.log"
+    log.write_text("".join(_mixed_tier_log()))
+
+    main([str(log)])
+    out = capsys.readouterr().out
+
+    assert "cross-tier" in out.lower()
+    assert "5.1" in out
