@@ -21,6 +21,7 @@ construct cannot come back unnoticed.
 """
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -34,9 +35,14 @@ AWKS = [a for a in ("mawk", "gawk", "awk", "busybox") if shutil.which(a)]
 
 
 def list_units(awk: str, cwd: Path = REPO):
-    """Run deploy.sh's unit reader with a specific awk on PATH."""
-    shim = cwd / ".awkshim"
-    shim.mkdir(exist_ok=True)
+    """Run deploy.sh's unit reader with a specific awk on PATH.
+
+    The shim goes in a TEMP dir, never in the repo: an earlier version
+    created it at the repo root, where `git add -A` swept it into a
+    commit and the machine-specific path inside it then broke `git pull`
+    on a deployed host ("cannot create directory at '.awkshim'").
+    """
+    shim = Path(tempfile.mkdtemp(prefix="awkshim-"))
     # busybox is a multi-call binary: it needs the applet name.
     exe = shutil.which(awk)
     argv = f"{exe} awk" if awk == "busybox" else exe

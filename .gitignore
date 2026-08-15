@@ -122,3 +122,6 @@ check_shm_layout
 # install to /etc/hf-timestd/timestd-config.toml (the production path). Never
 # commit a station-specific config here.
 config/timestd-config.toml
+
+# transient shim created by tests/test_deploy_unit_parsing.py
+.awkshim/
