@@ -39,12 +39,17 @@
 #   sudo ./scripts/deploy.sh --no-restart     # sync only, leave services alone
 #   sudo ./scripts/deploy.sh --force-dirty    # bypass clean-tree check
 #   sudo ./scripts/deploy.sh --dry-run        # print what would happen
+#   ./scripts/deploy.sh --list-units          # print the units step 5 would
+#                                             # restart, and exit (no root).
+#                                             # Use this to verify the
+#                                             # deploy.toml reader works on a
+#                                             # host BEFORE trusting a deploy.
 #
 # Exit codes:
 #   0  success
 #   1  uncommitted changes blocked the run
 #   2  pip install failed or post-install import verify failed
-#   3  systemctl restart failed
+#   3  systemctl restart failed, or --restart-recorder did not restart it
 #   4  generic error (including source tree unreachable by service user)
 # =============================================================================
 
@@ -55,7 +60,31 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 INSTALL_DIR="/opt/git/sigmond/hf-timestd"
 VENV_DIR="$INSTALL_DIR/venv"
-DEPLOY_TOML="$PROJECT_DIR/deploy.toml"
+DEPLOY_TOML="${DEPLOY_TOML:-$PROJECT_DIR/deploy.toml}"
+
+# Tiny TOML reader for the [systemd] units = [...] block.  POSIX awk
+# only: match() takes TWO arguments here.  The three-argument capture
+# form is a GNU extension, and Debian ships mawk as /usr/bin/awk, so
+# the gawk-only version parsed nothing on every production host while
+# passing on any dev box with gawk (AC0G-B4 2026-08-15 — deploy
+# restarted nothing and reported success).  A commented-out entry
+# inside the array stays commented: `#` lines are skipped whole.
+read_units_from_deploy_toml() {
+    awk '
+        /^\[systemd\]/                     { in_systemd = 1; next }
+        in_systemd && /^\[/                 { in_systemd = 0 }
+        in_systemd && /^units[[:space:]]*=/ { in_units = 1 }
+        in_units {
+            line = $0
+            sub(/#.*/, "", line)
+            while (match(line, /"[^"]+"/)) {
+                print substr(line, RSTART + 1, RLENGTH - 2)
+                line = substr(line, RSTART + RLENGTH)
+            }
+            if ($0 ~ /\]/) { in_units = 0 }
+        }
+    ' "$1"
+}
 
 # Service user the systemd units run as.  An editable install is only
 # useful if this user can actually reach the source tree at runtime,
@@ -69,6 +98,8 @@ FORCE_DIRTY=false
 DO_RESTART=true
 RESTART_RECORDER=false
 DRY_RUN=false
+LIST_UNITS=false
+RECORDER_RESTARTED=false
 
 # ── Output helpers (stderr for humans; stdout reserved for data) ────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
@@ -90,10 +121,25 @@ while [[ $# -gt 0 ]]; do
         --no-restart)        DO_RESTART=false; shift ;;
         --restart-recorder)  RESTART_RECORDER=true; shift ;;
         --dry-run|-n)        DRY_RUN=true; shift ;;
+        --list-units)        LIST_UNITS=true; shift ;;
         --help|-h)           usage ;;
         *) log_error "Unknown option: $1"; exit 4 ;;
     esac
 done
+
+# Read-only query: print what step 5 WOULD restart and exit.  Needs no
+# root, and is the direct way to check the deploy.toml reader on a host
+# before trusting a deploy (see --help).
+if [[ "$LIST_UNITS" == "true" ]]; then
+    mapfile -t _units < <(read_units_from_deploy_toml "$DEPLOY_TOML")
+    if [[ ${#_units[@]} -eq 0 ]]; then
+        log_error "deploy.toml parsed to no units at all ($DEPLOY_TOML) — " \
+                  "the [systemd] block is missing or the reader failed"
+        exit 4
+    fi
+    printf '%s\n' "${_units[@]}"
+    exit 0
+fi
 
 if [[ "$EUID" -ne 0 ]]; then
     log_error "Must run as root: sudo $0"
@@ -244,22 +290,6 @@ fi
 # but may be deleted.
 
 # ── Step 5: systemctl restart (units from deploy.toml) ──────────────────────
-read_units_from_deploy_toml() {
-    # Tiny TOML reader good enough for [systemd] units = [...] block.
-    # No tomllib in bash, but the structure is regular enough.
-    awk '
-        /^\[systemd\]/        { in_systemd = 1; next }
-        in_systemd && /^\[/   { in_systemd = 0 }
-        in_systemd && /^units[[:space:]]*=/ { in_units = 1 }
-        in_units {
-            while (match($0, /"([^"]+)"/, m)) {
-                print m[1]
-                $0 = substr($0, RSTART + RLENGTH)
-            }
-            if ($0 ~ /\]/) { in_units = 0 }
-        }
-    ' "$1"
-}
 
 if [[ "$DO_RESTART" == "true" ]]; then
     log_step "Step 5: restart services from deploy.toml"
@@ -270,8 +300,10 @@ if [[ "$DO_RESTART" == "true" ]]; then
     fi
 
     UNITS=()
+    PARSED=0
     while IFS= read -r unit; do
         [[ -z "$unit" ]] && continue
+        PARSED=$((PARSED + 1))
         if [[ "$RESTART_RECORDER" != "true" && "$unit" == "timestd-core-recorder.service" ]]; then
             log_info "skipping $unit (use --restart-recorder to bounce it; causes brief data gap)"
             continue
@@ -279,8 +311,18 @@ if [[ "$DO_RESTART" == "true" ]]; then
         UNITS+=("$unit")
     done < <(read_units_from_deploy_toml "$DEPLOY_TOML")
 
+    # Parsing NOTHING is a broken reader, not an empty manifest, and must
+    # never be survivable: on AC0G-B4 2026-08-15 a gawk-only construct
+    # made this zero under mawk, and the deploy went on to restart
+    # nothing and report success.
+    if [[ "$PARSED" -eq 0 ]]; then
+        log_error "deploy.toml parsed to no units at all ($DEPLOY_TOML) — " \
+                  "the [systemd] block is missing or the reader failed; " \
+                  "check with: $0 --list-units"
+        exit 4
+    fi
     if [[ ${#UNITS[@]} -eq 0 ]]; then
-        log_warn "deploy.toml lists no units to restart"
+        log_info "all $PARSED unit(s) filtered out; nothing to restart"
     fi
 
     for unit in "${UNITS[@]}"; do
@@ -295,14 +337,23 @@ if [[ "$DO_RESTART" == "true" ]]; then
         if systemctl restart "$unit"; then
             STATE="$(systemctl is-active "$unit" 2>/dev/null || echo unknown)"
             log_info "$unit: $STATE"
+            [[ "$unit" == "timestd-core-recorder.service" ]] && RECORDER_RESTARTED=true
         else
             log_error "$unit: restart failed"
             exit 3
         fi
     done
 
-    if [[ "$RESTART_RECORDER" == "true" ]]; then
+    # Report what HAPPENED, not what was asked for.  This used to key
+    # off the flag, so a deploy that restarted nothing still announced a
+    # bounce (AC0G-B4 2026-08-15) — the new code was installed but not
+    # running, and nothing said so.
+    if [[ "$RECORDER_RESTARTED" == "true" ]]; then
         log_warn "core-recorder bounced — expect a few seconds of missing IQ"
+    elif [[ "$RESTART_RECORDER" == "true" ]]; then
+        log_error "--restart-recorder was given but the recorder was NOT " \
+                  "restarted — the new code is installed and NOT running"
+        exit 3
     fi
 else
     log_info "step 5 skipped (--no-restart)"
