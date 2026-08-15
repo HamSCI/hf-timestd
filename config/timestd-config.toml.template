@@ -411,8 +411,30 @@ description = "BPSK_PPS"
 # --- T6 anchor inversion (docs/design/T6_ANCHOR_INVERSION_DESIGN.md) ---
 # fine_stage_enabled = true        # coherent zero-crossing fine stage + T6 anchor authority
 # fine_fold_seconds = 30           # coherent fold length K (seconds)
-# delay_budget_ns = 10000          # TS-1 mod delay ~10 µs; group-delay term 0 pending
-#                                  # fleet characterisation. HARD BOUND ±1 ms.
+# delay_budget_ns = 10000          # TS-1 modulator path only (~10 µs).
+#                                  # HARD BOUND ±1 ms — the guard exists to stop
+#                                  # timestamp error being absorbed here, so do
+#                                  # NOT widen it; the radiod filter group delay
+#                                  # has its own term below.
+# filter_group_delay_ns = 0        # radiod channel-filter group delay — the
+#                                  # DOMINANT term, milliseconds not µs.  Was
+#                                  # "0 pending fleet characterisation"; AC0G-B4
+#                                  # measured 16_618_000 (16.618 ms) at 96 kHz /
+#                                  # ±25 kHz edges on 2026-08-15.  HARD BOUND
+#                                  # ±250 ms (reaches ~150 ms at the narrowest
+#                                  # filter widths).
+#                                  # ⚠ Site-specific: it follows the CHANNEL
+#                                  # FILTER, so re-measure if low_edge_hz /
+#                                  # high_edge_hz / sample_rate change.
+#                                  # ⚠ While the T6 authority is AUTHORITATIVE
+#                                  # this is the knob that matters, NOT
+#                                  # chain_delay_calib_s — the fine-stage edge
+#                                  # defines the anchor and the coarse
+#                                  # chain_delay becomes a diagnostic.
+#                                  # HOW TO MEASURE: leave at 0, then read
+#                                  # shadow_residuals.T6 from
+#                                  # /run/hf-timestd/offset_judge.json over
+#                                  # ~15 min; its magnitude is this value.
 # edge_period_tolerance_ns = 5000  # invariant: successive edges advance by exactly 1 s
 # fine_coarse_max_ms = 5           # invariant: |fine − MF apex| bound
 # degraded_unlock_after_sec = 600  # DEGRADED longer than this → UNLOCKED

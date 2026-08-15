@@ -761,6 +761,8 @@ class CoreRecorderV2:
                         self._t6_authority = T6AnchorAuthority(
                             sr,
                             fine_cfg['delay_budget_ns'],
+                            filter_group_delay_ns=fine_cfg[
+                                'filter_group_delay_ns'],
                             edge_period_tolerance_ns=fine_cfg[
                                 'edge_period_tolerance_ns'],
                             fine_coarse_max_ms=fine_cfg['fine_coarse_max_ms'],
@@ -773,10 +775,14 @@ class CoreRecorderV2:
                         )
                         logger.info(
                             "T6 anchor inversion armed: fold=%ds "
-                            "delay_budget=%d ns (spec: docs/design/"
-                            "T6_ANCHOR_INVERSION_DESIGN.md)",
+                            "delay_budget=%d ns filter_group_delay=%d ns "
+                            "(asserted chain delay %.3f ms; spec: "
+                            "docs/design/T6_ANCHOR_INVERSION_DESIGN.md)",
                             fine_cfg['fine_fold_seconds'],
                             fine_cfg['delay_budget_ns'],
+                            fine_cfg['filter_group_delay_ns'],
+                            (fine_cfg['delay_budget_ns']
+                             + fine_cfg['filter_group_delay_ns']) / 1e6,
                         )
                 else:
                     from hf_timestd.core.bpsk_pps_calibrator import BpskPpsCalibrator
@@ -2881,6 +2887,9 @@ class CoreRecorderV2:
             'violations': (list(decision.violations)
                            if decision is not None else []),
             'delay_budget_ns': auth.delay_budget_ns,
+            'filter_group_delay_ns': auth.filter_group_delay_ns,
+            'asserted_chain_delay_ns': (
+                auth.delay_budget_ns + auth.filter_group_delay_ns),
             'anchor_tier': (anchor.captured_via_tier
                             if anchor is not None else None),
             'blocks_discarded': (fine.blocks_discarded
@@ -3396,11 +3405,15 @@ class CoreRecorderV2:
         §7).  Raises ValueError on a delay budget outside the ±1 ms
         physical bound — a larger value is absorbing timestamp error,
         not measuring a chain delay, and must refuse loudly."""
-        from hf_timestd.core.t6_anchor_authority import DELAY_BUDGET_BOUND_NS
+        from hf_timestd.core.t6_anchor_authority import (
+            DELAY_BUDGET_BOUND_NS, FILTER_GROUP_DELAY_BOUND_NS,
+        )
         s = {
             'fine_stage_enabled': bool(t6_cfg.get('fine_stage_enabled', True)),
             'fine_fold_seconds': int(t6_cfg.get('fine_fold_seconds', 30)),
             'delay_budget_ns': int(t6_cfg.get('delay_budget_ns', 10_000)),
+            'filter_group_delay_ns': int(
+                t6_cfg.get('filter_group_delay_ns', 0)),
             'edge_period_tolerance_ns': int(
                 t6_cfg.get('edge_period_tolerance_ns', 5_000)),
             'fine_coarse_max_ms': float(t6_cfg.get('fine_coarse_max_ms', 5.0)),
@@ -3413,6 +3426,13 @@ class CoreRecorderV2:
                 f"exceeds the ±1 ms physical bound (analog path + channel-"
                 f"filter group delay is µs to sub-ms; see "
                 f"docs/design/T6_ANCHOR_INVERSION_DESIGN.md §5)"
+            )
+        if abs(s['filter_group_delay_ns']) > FILTER_GROUP_DELAY_BOUND_NS:
+            raise ValueError(
+                f"[timing.t6_pps].filter_group_delay_ns="
+                f"{s['filter_group_delay_ns']} exceeds the ±250 ms "
+                f"physical bound (radiod channel-filter group delay "
+                f"reaches ~150 ms only at the narrowest widths)"
             )
         return s
 

@@ -42,6 +42,16 @@ def _wrapped_signed32(delta: int) -> int:
 
 _BILLION = 1_000_000_000
 DELAY_BUDGET_BOUND_NS = 1_000_000  # ±1 ms hard physical bound (spec §5)
+# radiod's channel-filter group delay is a DIFFERENT physical term from
+# the TS-1 modulator path, and a much larger one: the coarse cascade
+# already notes it is "the dominant contribution (up to ~150 ms at
+# narrow filter widths)".  Spec §5 folded it into the ±1 ms budget on
+# the belief it was sub-millisecond, and the template carried it as
+# "0 pending fleet characterisation"; AC0G-B4 measured 16.618 ms
+# against T4 on 2026-08-15 (n=90 over 15 min).  It gets its own name
+# and its own bound so the ±1 ms budget keeps guarding what it was
+# built to guard — absorbed timestamp error.
+FILTER_GROUP_DELAY_BOUND_NS = 250_000_000  # ±250 ms, as the coarse path
 # Estimates arrive once per fold block; three missed blocks is an
 # unambiguous stall, not jitter.
 ESTIMATE_STALE_INTERVALS = 3.0
@@ -69,6 +79,7 @@ class T6AnchorAuthority:
         self,
         sample_rate_hz: int,
         delay_budget_ns: int,
+        filter_group_delay_ns: int = 0,
         edge_period_tolerance_ns: int = 5_000,
         fine_coarse_max_ms: float = 5.0,
         degraded_unlock_after_sec: float = 600.0,
@@ -84,8 +95,17 @@ class T6AnchorAuthority:
                 f"larger value is absorbing timestamp error, not "
                 f"measuring a chain delay."
             )
+        if abs(int(filter_group_delay_ns)) > FILTER_GROUP_DELAY_BOUND_NS:
+            raise ValueError(
+                f"filter_group_delay_ns={filter_group_delay_ns} exceeds "
+                f"the ±250 ms physical bound: radiod's channel-filter "
+                f"group delay reaches ~150 ms only at the narrowest "
+                f"widths, so a larger value is absorbing timestamp "
+                f"error, not measuring a filter."
+            )
         self.sample_rate_hz = int(sample_rate_hz)
         self.delay_budget_ns = int(delay_budget_ns)
+        self.filter_group_delay_ns = int(filter_group_delay_ns)
         self.edge_period_tolerance_ns = int(edge_period_tolerance_ns)
         self.fine_coarse_max_ms = float(fine_coarse_max_ms)
         self.degraded_unlock_after_sec = float(degraded_unlock_after_sec)
@@ -186,11 +206,15 @@ class T6AnchorAuthority:
         self, est: FineEdgeEstimate, named_second_utc: int
     ) -> NativeAnchor:
         sub_ns = int(round(est.edge_subsample * 1e9 / self.sample_rate_hz))
+        # Both asserted terms of the RF path: the TS-1 modulator chain
+        # (microseconds) and radiod's channel-filter group delay
+        # (milliseconds).  Separately bounded, summed here.
+        asserted_ns = self.delay_budget_ns + self.filter_group_delay_ns
         return NativeAnchor(
             anchor_rtp=int(est.edge_rtp) & 0xFFFFFFFF,
-            anchor_utc_ns=(named_second_utc * _BILLION + self.delay_budget_ns - sub_ns),
+            anchor_utc_ns=(named_second_utc * _BILLION + asserted_ns - sub_ns),
             sample_rate_hz=self.sample_rate_hz,
-            chain_delay_ns=self.delay_budget_ns,
+            chain_delay_ns=asserted_ns,
             captured_at_utc_ns=named_second_utc * _BILLION,
             captured_via_tier="T6",
         )
