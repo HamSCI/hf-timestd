@@ -1272,8 +1272,17 @@ class OffsetJudge:
             lowers = [r for r in by_rank
                       if self._tier_rank(r.tier) > best_rank]
             gate_ref = lowers[0] if lowers else None
-        gate_ok = (gate_ref is None
-                   or self._cross_gate_ok_locked(best, gate_ref, mono_now))
+        cross_ok = (gate_ref is None
+                    or self._cross_gate_ok_locked(best, gate_ref, mono_now))
+        gate_ok = cross_ok
+        if not cross_ok:
+            # The cross-bench conflict is the operative block, so the
+            # sigma gate does not run this tick and cannot refresh or
+            # release any hold it published earlier.  Drop it: a frozen
+            # sigma_candidate_ns reads as the candidate's CURRENT
+            # precision (AC0G-B4 2026-08-15 kept publishing 25 ms long
+            # after the measured sigma had fallen to 0.98 ms).
+            self._precision_hold = None
         if gate_ok and ref is not None:
             # Precision non-regression: sigma-gate VOLUNTARY upgrades
             # only (the incumbent still answers this tick).  A forced

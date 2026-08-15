@@ -454,6 +454,38 @@ class TestPrecisionNonRegression:
 # T5 bench decoupling from the T6 stream (feature 2)
 # ────────────────────────────────────────────────────────────────────
 
+
+    def test_precision_hold_does_not_go_stale_when_the_cross_gate_takes_over(
+            self, tmp_path):
+        """AC0G-B4 2026-08-15: the hold kept publishing
+        sigma_candidate_ns = 25 ms long after the candidate's measured
+        sigma had fallen to 0.98 ms.
+
+        _sigma_gate_ok_locked only runs when the cross gate PASSES, so
+        once a cross-bench conflict starts blocking, the hold is never
+        re-evaluated and freezes whatever it last held.  A stale number
+        in the published snapshot is worse than no number: it was read
+        as the candidate's current precision.
+        """
+        clock = FakeClock()
+        judge, t4, t5 = self._t4_incumbent_wide_t5(clock, tmp_path)
+        tick_n(judge, clock, 6)
+        assert read_json(tmp_path / "offset_judge.json")[
+            "precision_hold"]["sigma_candidate_ns"] == pytest.approx(25e6,
+                                                                     rel=1e-3)
+
+        # The candidate's sigma is measured honestly now, and that same
+        # honesty exposes a real disagreement — so the CROSS gate blocks.
+        t5.sigma_ns = 1e5
+        t5.bench_error_s = 0.012
+        tick_n(judge, clock, 3)
+
+        snap = read_json(tmp_path / "offset_judge.json")
+        assert snap["cross_bench_conflict"] is not None
+        # The operative reason is the conflict; the hold must not linger
+        # advertising a sigma the candidate no longer has.
+        assert snap["precision_hold"] is None
+
 class FakeReading:
     """Duck-typed Lb1421Reading (mirrors the P2 suite)."""
 

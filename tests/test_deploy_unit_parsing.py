@@ -102,3 +102,36 @@ def test_a_manifest_with_no_units_is_an_error_not_a_warning(tmp_path):
 
     assert r.returncode != 0
     assert "no units" in r.stderr.lower()
+
+
+# ────────────────────────────────────────────────────────────────────
+# The installed-unit guard
+# ────────────────────────────────────────────────────────────────────
+
+def check_units(units, cwd=REPO):
+    """Run deploy.sh's installed-unit check over the given unit names."""
+    r = subprocess.run(
+        ["bash", str(DEPLOY_SH), "--check-units", *units],
+        cwd=cwd, env={"PATH": "/usr/bin:/bin", "HOME": "/tmp"},
+        capture_output=True, text=True, timeout=60,
+    )
+    return dict(line.split() for line in r.stdout.split("\n") if line.strip())
+
+
+def test_a_timer_is_recognised_as_installed():
+    """`--type=service,target` EXCLUDES timers, so the guard exited 1 for
+    every .timer and deploy.sh skipped all seven in deploy.toml as "not
+    installed" — while they were installed and active.  A restart that
+    silently covers only part of the manifest.
+    """
+    assert check_units(["apt-daily.timer"])["apt-daily.timer"] == "installed"
+
+
+def test_a_service_is_recognised_as_installed():
+    assert check_units(["cron.service"])["cron.service"] == "installed"
+
+
+def test_a_missing_unit_is_recognised_as_missing():
+    assert check_units(
+        ["definitely-not-a-real-unit.service"]
+    )["definitely-not-a-real-unit.service"] == "missing"

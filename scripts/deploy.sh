@@ -86,6 +86,18 @@ read_units_from_deploy_toml() {
     ' "$1"
 }
 
+# Is this unit installed on the host?
+#
+# The type filter MUST include timer.  `--type=service,target` excludes
+# timers outright, so this exited 1 for every .timer in deploy.toml and
+# step 5 skipped all seven as "not installed" while they were installed
+# and active — a restart that silently covered only part of the
+# manifest.
+unit_is_installed() {
+    systemctl list-unit-files --no-legend --no-pager \
+        --type=service,target,timer "$1" &>/dev/null
+}
+
 # Service user the systemd units run as.  An editable install is only
 # useful if this user can actually reach the source tree at runtime,
 # so we verify traversability before `pip install -e` and re-verify by
@@ -99,6 +111,7 @@ DO_RESTART=true
 RESTART_RECORDER=false
 DRY_RUN=false
 LIST_UNITS=false
+CHECK_UNITS=false
 RECORDER_RESTARTED=false
 
 # ── Output helpers (stderr for humans; stdout reserved for data) ────────────
@@ -122,6 +135,7 @@ while [[ $# -gt 0 ]]; do
         --restart-recorder)  RESTART_RECORDER=true; shift ;;
         --dry-run|-n)        DRY_RUN=true; shift ;;
         --list-units)        LIST_UNITS=true; shift ;;
+        --check-units)       CHECK_UNITS=true; shift; break ;;
         --help|-h)           usage ;;
         *) log_error "Unknown option: $1"; exit 4 ;;
     esac
@@ -130,6 +144,15 @@ done
 # Read-only query: print what step 5 WOULD restart and exit.  Needs no
 # root, and is the direct way to check the deploy.toml reader on a host
 # before trusting a deploy (see --help).
+# Read-only: report whether each named unit is installed.  Needs no
+# root, and is how the installed-unit guard is tested.
+if [[ "$CHECK_UNITS" == "true" ]]; then
+    for u in "$@"; do
+        if unit_is_installed "$u"; then echo "$u installed"; else echo "$u missing"; fi
+    done
+    exit 0
+fi
+
 if [[ "$LIST_UNITS" == "true" ]]; then
     mapfile -t _units < <(read_units_from_deploy_toml "$DEPLOY_TOML")
     if [[ ${#_units[@]} -eq 0 ]]; then
@@ -326,7 +349,7 @@ if [[ "$DO_RESTART" == "true" ]]; then
     fi
 
     for unit in "${UNITS[@]}"; do
-        if ! systemctl list-unit-files --no-legend --no-pager --type=service,target "$unit" &>/dev/null; then
+        if ! unit_is_installed "$unit"; then
             log_warn "$unit: not installed, skipping"
             continue
         fi
