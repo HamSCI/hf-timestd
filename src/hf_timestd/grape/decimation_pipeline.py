@@ -15,6 +15,51 @@ from .decimation import StatefulDecimator
 logger = logging.getLogger(__name__)
 
 
+# Grade ladder, uncertainty arm only — matches
+# l2_calibration_service._determine_quality_grade (A <2 ms, B <4, C <8,
+# else D).  "X" stays reserved for "no verdict", which is a different
+# statement from "a bad one".
+_GRADE_LADDER = ((2.0, "A"), (4.0, "B"), (8.0, "C"))
+UNKNOWN_TIMING = (0.0, 999.9, "X")
+
+
+def timing_from_sidecar(meta):
+    """(d_clock_ms, uncertainty_ms, quality_grade) for one raw chunk.
+
+    The sidecar records the Offset Judge verdict under ``timing``
+    (``offset_ns``, ``offset_sigma_ns``, ``judge_tier``) — written by
+    ``binary_archive_writer``.  This pipeline used to look for flat
+    ``uncertainty_ms`` / ``quality_grade`` / ``d_clock_ms`` keys that no
+    producer has ever written, so every minute of every product shipped
+    the unknown sentinels regardless of tier (AC0G-B4: all 1440 minutes
+    of 20260814).
+
+    Flat keys still win where a producer does supply them.  Absent both,
+    the sentinels are returned unchanged: a chunk recorded without a
+    verdict must keep saying so.
+
+    Forward-only — already-written products are not revisited.
+    """
+    if not meta:
+        return UNKNOWN_TIMING
+    if meta.get("uncertainty_ms") is not None:
+        return (float(meta.get("d_clock_ms", 0.0)),
+                float(meta["uncertainty_ms"]),
+                str(meta.get("quality_grade", "X")))
+    timing = meta.get("timing") or {}
+    sigma_ns = timing.get("offset_sigma_ns")
+    if sigma_ns is None:
+        # A verdict we cannot put an uncertainty on is not a verdict.
+        return UNKNOWN_TIMING
+    uncertainty_ms = float(sigma_ns) / 1e6
+    grade = "D"
+    for bound, letter in _GRADE_LADDER:
+        if uncertainty_ms < bound:
+            grade = letter
+            break
+    return (float(timing.get("offset_ns", 0.0)) / 1e6, uncertainty_ms, grade)
+
+
 def _per_minute_gap(meta: Optional[dict]) -> int:
     """Estimate per-minute raw-sample gap from a chunk's sidecar metadata.
 
@@ -194,14 +239,7 @@ class DecimationPipeline:
                 meta = None
 
             if decimated_chunk is not None and len(decimated_chunk) > 0:
-                d_clock = 0.0
-                uncertainty = 999.9
-                grade = 'X'
-
-                if meta:
-                    d_clock = meta.get('d_clock_ms', 0.0)
-                    uncertainty = meta.get('uncertainty_ms', 999.9)
-                    grade = meta.get('quality_grade', 'X')
+                d_clock, uncertainty, grade = timing_from_sidecar(meta)
 
                 success = output_buffer.write_minute(
                     minute_utc=float(minute_ts),
