@@ -23,6 +23,7 @@ about asserting zero.
 """
 import pytest
 
+from hf_timestd.cli import t6_group_delay_issue
 from hf_timestd.core.core_recorder_v2 import t6_chain_delay_uncalibrated
 
 
@@ -46,3 +47,46 @@ def test_disabled_t6_is_not_flagged():
     """No T6, no anchor, nothing to mis-label."""
     assert t6_chain_delay_uncalibrated(
         {"enabled": False, "chain_delay_calib_s": 0.0}) is False
+
+
+# ────────────────────────────────────────────────────────────────────
+# Fresh-install surface: `hf-timestd validate`
+# ────────────────────────────────────────────────────────────────────
+
+def test_validate_flags_an_armed_t6_with_no_measured_group_delay():
+    """A DASI image ships filter_group_delay_ns unset, i.e. zero.
+
+    Zero is SAFE but never right: with an honest sigma the cross-bench
+    gate blocks T6 loudly (AC0G-B4 sat at T4 with CRITICAL every 60 s
+    until it was measured), so the site degrades rather than lying.  It
+    just never gets T6.  validate is the sigmond contract surface a
+    fresh install actually reads, so it must say so there.
+    """
+    issue = t6_group_delay_issue({"timing": {"t6_pps": {"enabled": True}}})
+
+    assert issue is not None
+    assert issue["severity"] == "warn"
+    assert "filter_group_delay_ns" in issue["message"]
+
+
+def test_validate_is_quiet_once_the_group_delay_is_measured():
+    issue = t6_group_delay_issue(
+        {"timing": {"t6_pps": {"enabled": True,
+                               "filter_group_delay_ns": 16_618_000}}})
+
+    assert issue is None
+
+
+def test_validate_is_quiet_when_t6_is_disabled():
+    issue = t6_group_delay_issue({"timing": {"t6_pps": {"enabled": False}}})
+
+    assert issue is None
+
+
+def test_validate_is_quiet_when_the_fine_stage_is_off():
+    """Without the fine stage the anchor comes from the coarse cascade,
+    where chain_delay_calib_s is the knob instead."""
+    issue = t6_group_delay_issue(
+        {"timing": {"t6_pps": {"enabled": True, "fine_stage_enabled": False}}})
+
+    assert issue is None

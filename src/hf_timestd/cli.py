@@ -221,6 +221,51 @@ def _handle_inventory(args):
     print(json.dumps(payload, indent=2))
 
 
+def t6_group_delay_issue(cfg):
+    """Contract issue when the T6 fine stage is armed with no measured
+    radiod filter group delay, else None.
+
+    ``filter_group_delay_ns`` defaults to 0, which asserts that radiod's
+    channel filter has no group delay.  It has milliseconds of it —
+    16.618 ms measured on AC0G-B4 at 96 kHz / ±25 kHz.
+
+    Zero is SAFE: with an honest bench sigma the cross-bench gate
+    catches the resulting disagreement and refuses to promote T6, so the
+    site degrades to T4 loudly rather than publishing a wrong time.  It
+    simply never gets T6.  That is worth saying on the surface a fresh
+    install reads, because nothing else will mention it.
+
+    Deliberately NOT shipped as a fleet default: the value follows the
+    channel filter, and a default that happened to land within the gate
+    bound of a site's true value would promote T6 with milliseconds of
+    error — quietly.  Zero fails loudly; a plausible wrong number does
+    not.
+    """
+    t6 = ((cfg.get('timing', {}) or {}).get('t6_pps', {}) or {})
+    if not t6.get('enabled', False):
+        return None
+    if not t6.get('fine_stage_enabled', True):
+        return None
+    if float(t6.get('filter_group_delay_ns', 0)) != 0.0:
+        return None
+    return {
+        'severity': 'warn',
+        'instance': 'default',
+        'message': (
+            '[timing.t6_pps].filter_group_delay_ns is unset (0): radiod\'s '
+            'channel-filter group delay is milliseconds, so the T6 anchor '
+            'is early by that much and the cross-bench gate will refuse to '
+            'promote T6 (the site stays on T4 and logs CRITICAL). Measure '
+            'it: leave 0, let T6 lock, then read '
+            'shadow_residuals.T6.shadow_residual_ns from '
+            '/run/hf-timestd/offset_judge.json over ~15 min — its '
+            'magnitude in ns IS the value. Site-specific: follows the '
+            'channel filter, so re-measure if low_edge_hz / high_edge_hz '
+            '/ sample_rate change.'
+        ),
+    }
+
+
 def _handle_validate_contract(args):
     """`hf-timestd validate --json` — sigmond client-contract surface.
 
@@ -268,6 +313,10 @@ def _handle_validate_contract(args):
                     'instance': 'default',
                     'message':  'ka9q.status_address is empty (no radiod binding)',
                 })
+            _gd = t6_group_delay_issue(cfg)
+            if _gd is not None:
+                issues.append(_gd)
+
             recorder = cfg.get('recorder', {}) or {}
             channels_count = sum(
                 len((g.get('channels', []) or []))
