@@ -241,17 +241,19 @@ start_service "timestd-l2-calibration" "L2 Calibrated Timing"
 # Phase 3: Fusion and physics
 log_step "Phase 3: Starting fusion and physics..."
 
-# CRITICAL: Clear any stale SHM segments before starting fusion
-# If chrony created them first, they'll have wrong permissions (root:600)
-# Fusion needs to create them with timestd:666 for chrony to read
-log_info "  Clearing stale Chrony SHM segments..."
-for key in 0x4e545030 0x4e545031; do
-    shmid=$(ipcs -m 2>/dev/null | grep "$key" | awk '{print $2}')
-    if [[ -n "$shmid" ]]; then
-        ipcrm -m "$shmid" 2>/dev/null || true
-        log_info "    Removed SHM $key (id=$shmid)"
-    fi
-done
+# SHM segments are deliberately NOT removed here.  This used to ipcrm units 0
+# and 1 before starting fusion, on the premise that "if chrony created them
+# first they'll have wrong permissions (root:600), so fusion must create them".
+# That premise is superseded twice over:
+#   * sigmond-shm-precreate.service creates NTP0-3 as root:0666 BEFORE any
+#     producer or consumer, so there is nothing to out-race; and
+#   * ensure_segments() / ChronySHM._connect_sysv repair permissions IN PLACE
+#     via shmctl(IPC_SET), precisely so the segment never has to be recreated.
+# shmctl(IPC_RMID) only MARKS a segment for destruction, so removing one under a
+# still-attached chronyd orphans it silently at the next writer restart -- see
+# hf-timestd#16 and the identical block removed from install.sh.
+# timestd-fusion.service:69 states the policy outright: never ipcrm the shared
+# SHM segments.
 
 start_service "timestd-fusion" "Fusion → Chrony SHM"
 start_service "timestd-physics" "TEC Estimation"

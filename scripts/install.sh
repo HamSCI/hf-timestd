@@ -799,6 +799,24 @@ if [[ -n "$CHRONY_CONF" ]]; then
     if [[ -d /etc/chrony/conf.d ]]; then
         install -m 0644 "$PROJECT_DIR/config/chrony-timestd-refclocks.conf" \
             /etc/chrony/conf.d/timestd-refclocks.conf
+        # The drop-in is installed under a name that DIFFERS from the source
+        # file.  Older installs placed it under the SOURCE name, and chrony
+        # includes conf.d/*.conf -- so leaving that copy behind defines every
+        # refclock TWICE.  The duplicates contend for the same SHM unit (chrony
+        # clears `valid` on read, so whichever instance polls first consumes the
+        # sample) and sit at reach 0 forever.  Invisible until chronyd next
+        # restarts, which can be months after the install.  hf-timestd#17.
+        if [[ -e /etc/chrony/conf.d/chrony-timestd-refclocks.conf ]]; then
+            mv -f /etc/chrony/conf.d/chrony-timestd-refclocks.conf \
+                  /etc/chrony/conf.d/chrony-timestd-refclocks.conf.legacy-disabled
+            log_warn "Disabled legacy duplicate refclock drop-in (chrony-timestd-refclocks.conf)"
+        fi
+        # Converge to exactly one definition, or say so.  A silent duplicate is
+        # what made this cost a session to find.
+        _n_fuse_files=$(grep -l 'refid FUSE' /etc/chrony/conf.d/*.conf 2>/dev/null | wc -l)
+        if [[ "$_n_fuse_files" -ne 1 ]]; then
+            log_warn "chrony conf.d defines refid FUSE in $_n_fuse_files files (expected 1) — chrony will create duplicate, permanently unreachable sources"
+        fi
         log_info "Chrony FUSE/HPPS refclocks installed (conf.d)"
     elif ! grep -q 'refid FUSE' "$CHRONY_CONF" 2>/dev/null; then
         echo "include $PROJECT_DIR/config/chrony-timestd-refclocks.conf" >> "$CHRONY_CONF"
@@ -845,11 +863,26 @@ EOF
     log_info "UDP buffers configured"
 fi
 
-# ── Clear stale SHM segments ──
-for key in 0x4e545030 0x4e545031; do
-    shmid=$(ipcs -m | grep "$key" | awk '{print $2}' || true)
-    [[ -n "$shmid" ]] && ipcrm -m "$shmid" 2>/dev/null || true
-done
+# ── Chrony SHM segments: deliberately NOT touched here ──
+# This used to be a "clear stale SHM segments" loop running
+#     ipcrm -m $(ipcs -m | grep -e 0x4e545030 -e 0x4e545031 | awk '{print $2}')
+# on every install.  That is the exact operation core/chrony_shm.py refuses to
+# perform and documents as forbidden (ChronySHM._connect_sysv, ensure_segments):
+# shmctl(IPC_RMID) only MARKS a SysV segment for destruction, so NOTHING breaks
+# at install time -- chronyd and the writer both stay attached and keep working.
+# At the next restart of the WRITER it shmget()s a fresh segment while chronyd
+# stays mapped to the orphan, and the refclock goes silent with no log line
+# anywhere.  On AC0G-B4 the install ran 2026-08-15 16:19 and FUSE died
+# 2026-08-16 13:20 -- 21 h later, at an unrelated deploy -- then sat dead for
+# 9.5 h while the station ran on a defective HPPS alone.  hf-timestd#16.
+#
+# The key list also explains why only FUSE died: units 0 and 1 were listed,
+# units 2 (HPPS) and 3 were not.
+#
+# Segment lifecycle belongs to sigmond-shm-precreate.service (NTP0-3 root:0666,
+# created before any producer or consumer), as the Phase 6 comment above states.
+# Permission repair is shmctl(IPC_SET) IN PLACE -- ensure_segments() already
+# does this correctly from the Python side.  Never remove-and-recreate.
 
 # ── CPU affinity (radiod co-located only) ──
 if [[ "$RADIOD_LOCAL" == "true" ]]; then
