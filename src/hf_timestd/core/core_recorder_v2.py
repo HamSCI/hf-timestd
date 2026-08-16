@@ -2899,6 +2899,72 @@ class CoreRecorderV2:
         # legacy cascade gate stays closed; coasting must not
         # re-trigger a fresh disambiguation walk.
 
+    def _t6_hpps_publishable(self) -> bool:
+        """Whether the HPPS chrony-SHM refclock may be fed right now.
+
+        A push is a claim: "when the host clock read ``system_time``,
+        true UTC was ``reference_time``".  Two states have no grounds
+        for that claim:
+
+        * the Costas loop is in a phase excursion — the calibrator is
+          coasting on the last-good chain delay and accepting no edges
+          (see ``bpsk_pps_calibrator_mf``: "edge acceptance gated");
+        * the anchor authority is DEGRADED or UNLOCKED — the anchor is
+          stale, or was withdrawn and re-derived by the coarse cascade
+          from an MF edge detected *during* the outage.
+
+        Publishing anyway is strictly worse than going quiet.  chrony
+        copes with a refclock that DISAPPEARS far better than with one
+        that lies: a source that stops updating drops out of the
+        selection algorithm and the cascade falls to T5/T4, whereas a
+        wandering one burns reach, distorts the falseticker logic, and
+        can be *selected* during a quiet interval — at which point a
+        wrong offset disciplines the host clock.
+
+        Measured on AC0G-B4 2026-08-16 under thunderstorm sferics:
+        pushes continued through DEGRADED and UNLOCKED windows with
+        per-push ``offset_to_chrony`` scattered over -37..+54 ms;
+        chrony sourcestats reported Std Dev 177 ms and marked HPPS a
+        falseticker.  See HamSCI/hf-timestd#14.
+
+        Transitions are logged once each way — never per push.
+        """
+        from hf_timestd.core.t6_anchor_authority import T6AuthorityState
+
+        reason = None
+        cal = getattr(self, '_t6_calibrator', None)
+        # ``None`` means the legacy (non-MF) calibrator, which has no
+        # Costas loop — stay permissive rather than silencing it.
+        if getattr(cal, 'costas_locked', None) is False:
+            reason = "costas unlocked (carrier-recovery excursion)"
+        else:
+            auth = getattr(self, '_t6_authority', None)
+            state = getattr(auth, 'state', None)
+            if (state is not None
+                    and state is not T6AuthorityState.AUTHORITATIVE):
+                reason = "anchor authority %s" % state.value
+
+        ok = reason is None
+        # Default True, not None: publishing is the healthy steady state,
+        # so a clean first call has nothing to "resume" and must stay
+        # silent.  A first call that is already faulted still says so.
+        if ok is not getattr(self, '_t6_hpps_publishing', True):
+            self._t6_hpps_publishing = ok
+            if ok:
+                logger.warning(
+                    "T6 HPPS: RESUMED — carrier locked and anchor "
+                    "authority AUTHORITATIVE; SHM pushes restart"
+                )
+            else:
+                logger.warning(
+                    "T6 HPPS: WITHDRAWN from chrony — %s. The T5/T4 "
+                    "cascade carries the station until this clears; a "
+                    "coasted chain delay is not a timing measurement "
+                    "(hf-timestd#14).",
+                    reason,
+                )
+        return ok
+
     def _t6_authority_status(self) -> Optional[dict]:
         """T6 authority block for the status JSON (spec §6 invariant 5:
         cross-tier disagreement is REPORTED here, never corrects the
@@ -4075,7 +4141,14 @@ class CoreRecorderV2:
             # infrastructure stays in place for diagnostic use while we
             # investigate the jitter.  See docs/TIMING-PIPELINE-WIRING.md
             # §10.3 for current status.
-            if self._t6_shm is not None and self._t6_native_anchor is not None:
+            # ``_t6_native_anchor is not None`` is NOT enough on its own:
+            # the UNLOCKED handler nulls the anchor, but the coarse
+            # cascade immediately re-captures one via T5 from the same
+            # MF edge, so the guard reopens while the carrier is still
+            # lost.  Ask the authority directly (hf-timestd#14).
+            if (self._t6_shm is not None
+                    and self._t6_native_anchor is not None
+                    and self._t6_hpps_publishable()):
                 try:
                     last_edge_rtp = getattr(self._t6_calibrator, '_last_edge_rtp', None)
                     edge_advanced = (

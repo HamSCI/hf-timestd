@@ -197,6 +197,37 @@ class BpskPpsProbe:
                 reason="not locked",
             )
 
+        # Carrier-recovery health.  ``locked`` is matched-filter
+        # ACQUISITION; it stays true right through a Costas phase
+        # excursion, during which the calibrator accepts no edges and
+        # coasts on the last-good chain delay.  A coasted chain delay is
+        # not a timing measurement, so T6 must not be offered as an
+        # authority while it holds.  The producer has published this key
+        # in the same block all along — it was simply never consumed.
+        # ``None`` = legacy non-MF calibrator with no Costas loop; stay
+        # permissive there (HamSCI/hf-timestd#14).
+        if t6.get("costas_locked") is False:
+            return ProbeResult(
+                self.t_level, available=False,
+                reason="costas unlocked — coasting, not measuring",
+            )
+
+        # Anchor-authority state (spec §4).  DEGRADED means the anchor is
+        # being held through a fault; UNLOCKED means it was withdrawn and
+        # re-derived by the coarse cascade from an edge detected during
+        # the outage.  Advertising T6 as the active tier in either state
+        # publishes a tier that T6's own state machine has disowned —
+        # observed live as ``t_level_active: "T6"`` alongside
+        # ``t6_authority_state: "DEGRADED"``.  Additive key: absent on
+        # older producers, so treat missing as "not reported" rather than
+        # unavailable, matching the mixed-version policy above.
+        authority_state = t6.get("authority_state")
+        if authority_state is not None and authority_state != "AUTHORITATIVE":
+            return ProbeResult(
+                self.t_level, available=False,
+                reason=f"anchor authority {authority_state}",
+            )
+
         consec = int(t6.get("pps_consecutive", 0))
         if consec < self.min_consecutive:
             return ProbeResult(

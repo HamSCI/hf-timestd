@@ -418,16 +418,186 @@ class TestAuthorityStateReachesTheProbe:
         return p
 
     def test_probe_forwards_authority_state_and_violations(self, tmp_path):
+        # NOTE: this used to assert available is True on a DEGRADED
+        # producer, which locked hf-timestd#14 in as correct.  The point
+        # of the test is that the keys are FORWARDED into detail, so it
+        # now exercises that on the state where T6 is genuinely usable;
+        # TestT6MustNotBeOfferedWhileUnlocked covers the rest.
         from hf_timestd.core.bpsk_pps_probe import BpskPpsProbe
-        p = self._status(tmp_path, authority_state="DEGRADED",
-                         authority_violations=["estimate_stale"])
+        p = self._status(tmp_path, authority_state="AUTHORITATIVE",
+                         authority_violations=[])
         r = BpskPpsProbe(status_path=p).poll()
         assert r.available is True
-        assert r.detail["authority_state"] == "DEGRADED"
-        assert r.detail["authority_violations"] == ["estimate_stale"]
+        assert r.detail["authority_state"] == "AUTHORITATIVE"
+        assert r.detail["authority_violations"] == []
 
     def test_probe_omits_the_keys_on_a_producer_without_them(self, tmp_path):
         from hf_timestd.core.bpsk_pps_probe import BpskPpsProbe
         r = BpskPpsProbe(status_path=self._status(tmp_path)).poll()
         assert "authority_state" not in r.detail
         assert "authority_violations" not in r.detail
+
+
+class TestT6MustNotBeOfferedWhileUnlocked:
+    """hf-timestd#14 — T6 coasted instead of withdrawing.
+
+    ``locked`` is matched-filter ACQUISITION and stays true straight
+    through a Costas phase excursion, so the probe kept offering T6 as
+    an authority while the calibrator was accepting no edges and coasting
+    on a stale chain delay.  Both signals it needed (``costas_locked``,
+    ``authority_state``) were already published in the same block and
+    simply never consumed.
+
+    Observed on AC0G-B4 2026-08-16 under thunderstorm sferics:
+    ``t_level_active: "T6"`` published alongside
+    ``t6_authority_state: "DEGRADED"``, while chrony marked HPPS a
+    falseticker at Std Dev 177 ms.
+    """
+
+    def _status(self, tmp_path, **extra):
+        import json
+        from datetime import datetime, timezone
+        p = tmp_path / "core-recorder-status.json"
+        block = {
+            'enabled': True, 'locked': True, 'pps_consecutive': 20,
+            'local_minus_source_ns': 2384,
+        }
+        block.update(extra)
+        p.write_text(json.dumps({
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            't6_pps': block,
+        }))
+        return p
+
+    def _poll(self, tmp_path, **extra):
+        from hf_timestd.core.bpsk_pps_probe import BpskPpsProbe
+        return BpskPpsProbe(status_path=self._status(tmp_path, **extra)).poll()
+
+    def test_costas_unlocked_is_not_available(self, tmp_path):
+        r = self._poll(tmp_path, costas_locked=False)
+        assert r.available is False
+        assert "costas" in r.reason.lower()
+
+    def test_costas_locked_is_available(self, tmp_path):
+        assert self._poll(tmp_path, costas_locked=True).available is True
+
+    def test_legacy_calibrator_without_a_costas_loop_stays_permissive(
+            self, tmp_path):
+        # None = non-MF calibrator, which has no Costas loop at all.
+        # Silencing it would be a regression, not a fix.
+        assert self._poll(tmp_path, costas_locked=None).available is True
+
+    @pytest.mark.parametrize("state", ["DEGRADED", "UNLOCKED", "ACQUIRING"])
+    def test_non_authoritative_anchor_is_not_available(self, tmp_path, state):
+        r = self._poll(tmp_path, authority_state=state)
+        assert r.available is False
+        assert state in r.reason
+
+    def test_authoritative_anchor_is_available(self, tmp_path):
+        assert self._poll(
+            tmp_path, authority_state="AUTHORITATIVE").available is True
+
+    def test_producer_without_the_authority_key_stays_permissive(
+            self, tmp_path):
+        # Additive key; older producers and a disabled fine stage omit
+        # it.  Absent means "not reported", not "unavailable".
+        assert self._poll(tmp_path).available is True
+
+    def test_costas_gate_fires_even_when_the_authority_looks_healthy(
+            self, tmp_path):
+        # The two gates are independent: the authority can still read
+        # AUTHORITATIVE for a dwell period after the carrier drops.
+        r = self._poll(tmp_path, costas_locked=False,
+                       authority_state="AUTHORITATIVE")
+        assert r.available is False
+
+
+class TestHppsWithdrawsInsteadOfCoasting:
+    """hf-timestd#14 — the SHM push gate.
+
+    ``_t6_native_anchor is not None`` was the only guard on feeding
+    chrony.  That is insufficient: the UNLOCKED handler nulls the anchor,
+    but the coarse cascade immediately re-captures one via T5 from the
+    same MF edge, so the guard reopens while the carrier is still lost.
+    Measured on AC0G-B4 2026-08-16: pushes continued through DEGRADED and
+    UNLOCKED windows with per-push offsets scattered over -37..+54 ms.
+    """
+
+    def _cr(self, costas_locked=True, state=T6AuthorityState.AUTHORITATIVE):
+        cr = CoreRecorderV2.__new__(CoreRecorderV2)
+        cr._t6_calibrator = SimpleNamespace(costas_locked=costas_locked)
+        cr._t6_authority = SimpleNamespace(state=state)
+        return cr
+
+    def test_publishes_when_authoritative_and_carrier_locked(self):
+        assert self._cr()._t6_hpps_publishable() is True
+
+    @pytest.mark.parametrize("state", [
+        T6AuthorityState.DEGRADED,
+        T6AuthorityState.UNLOCKED,
+        T6AuthorityState.ACQUIRING,
+    ])
+    def test_withdraws_while_the_anchor_is_not_authoritative(self, state):
+        assert self._cr(state=state)._t6_hpps_publishable() is False
+
+    def test_withdraws_while_the_costas_loop_is_unlocked(self):
+        assert self._cr(costas_locked=False)._t6_hpps_publishable() is False
+
+    def test_costas_gate_is_independent_of_the_authority_gate(self):
+        # The authority holds AUTHORITATIVE for a dwell period after the
+        # carrier drops; the push must stop at the first of the two.
+        cr = self._cr(costas_locked=False,
+                      state=T6AuthorityState.AUTHORITATIVE)
+        assert cr._t6_hpps_publishable() is False
+
+    def test_legacy_calibrator_without_a_costas_loop_still_publishes(self):
+        # costas_locked None = non-MF calibrator; only an explicit False
+        # is a carrier-recovery fault.
+        assert self._cr(costas_locked=None)._t6_hpps_publishable() is True
+
+    def test_missing_authority_object_does_not_silence_the_push(self):
+        cr = CoreRecorderV2.__new__(CoreRecorderV2)
+        cr._t6_calibrator = SimpleNamespace(costas_locked=True)
+        cr._t6_authority = None
+        assert cr._t6_hpps_publishable() is True
+
+    def test_transition_is_logged_once_each_way_not_per_push(self, caplog):
+        import logging
+        cr = self._cr()
+        with caplog.at_level(logging.WARNING):
+            for _ in range(5):
+                cr._t6_hpps_publishable()
+            cr._t6_calibrator.costas_locked = False
+            for _ in range(5):
+                cr._t6_hpps_publishable()
+            cr._t6_calibrator.costas_locked = True
+            for _ in range(5):
+                cr._t6_hpps_publishable()
+        msgs = [r.getMessage() for r in caplog.records]
+        withdrawn = [m for m in msgs if "WITHDRAWN" in m]
+        resumed = [m for m in msgs if "RESUMED" in m]
+        assert len(withdrawn) == 1, "withdrawal must not log per push"
+        assert len(resumed) == 1, "resumption must not log per push"
+
+    def test_a_healthy_first_call_logs_nothing(self, caplog):
+        # Publishing is the steady state — there is nothing to "resume"
+        # on the first call, and a spurious RESUMED at every startup
+        # would train operators to ignore the line that matters.
+        import logging
+        with caplog.at_level(logging.WARNING):
+            assert self._cr()._t6_hpps_publishable() is True
+        assert not [r for r in caplog.records if "HPPS" in r.getMessage()]
+
+    def test_a_faulted_first_call_still_reports(self, caplog):
+        import logging
+        cr = self._cr(state=T6AuthorityState.UNLOCKED)
+        with caplog.at_level(logging.WARNING):
+            cr._t6_hpps_publishable()
+        assert any("WITHDRAWN" in r.getMessage() for r in caplog.records)
+
+    def test_withdrawal_names_the_reason(self, caplog):
+        import logging
+        cr = self._cr(state=T6AuthorityState.UNLOCKED)
+        with caplog.at_level(logging.WARNING):
+            cr._t6_hpps_publishable()
+        assert any("UNLOCKED" in r.getMessage() for r in caplog.records)
