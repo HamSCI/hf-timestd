@@ -170,10 +170,19 @@ anchor pair   median 2.3 ms / p99 8.0 ms / max 47.7 ms one-shot inheritance
 
 1. **rob's agreement.** This narrows the cross-bench gate work deliberately, not by
    oversight.
-2. **Sign audit before wiring anything.** `d_clock_fused_ms` and `offset_to_chrony` were
-   verified to share the `true − host` convention, but chrony reports HPPS with the
-   opposite sign at the same magnitude — unresolved, and it must be settled before the
-   SHM feed is trusted, since an inverted push would steer the clock the wrong way.
+2. ~~**Sign audit before wiring anything.**~~ **RESOLVED 2026-08-16 — no sign bug.**
+   Traced end to end: `refclock_shm.c` calls
+   `RCL_AddSample(instance, &receive_ts, &clock_ts, …)`; `refclock.c` computes
+   `raw_offset = UTI_DiffTimespecsToDouble(ref_time, sample_time)`; `util.c` defines
+   `UTI_DiffTimespecsToDouble(a, b) → a - b`. So chrony computes
+   **clockTimeStamp − receiveTimeStamp**, the field assignment in `chrony_shm.py` is
+   correct, and a fast host clock yields a negative offset that slews it backwards.
+
+   The apparent contradiction was **`chronyc sources` displaying the negation** of
+   chrony's internal offset. Confirmed same-source, same-instant by reading the SHM
+   segment directly (SysV key `0x4e545032`): segment held
+   `clock − receive = −15.484 ms` while `chronyc sources` showed HPPS at `+14 ms`.
+   `chrony_shm.py`'s comment had the subtraction backwards and has been corrected.
 3. **Does T6 feed chrony at all?** Arguments both ways: valuable for GPS-denied holdover,
    lossy and the entry point for the 2026-08-16 error.
 4. **The no-GPSDO rate policy** (§4, row 3) — spec §11 / audit G7 would need amending for

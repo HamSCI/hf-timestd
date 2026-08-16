@@ -308,11 +308,33 @@ class ChronySHM:
             self.count += 1  # now odd: write in progress
 
             # Split timestamps into seconds and microseconds
-            # NOTE: Chrony SHM convention (opposite of NTP):
-            # clockTimeStamp = reference time (true UTC)
-            # receiveTimeStamp = system time (when measurement taken)
-            # Chrony calculates: offset = receiveTimeStamp - clockTimeStamp
-            # So: offset = system_time - reference_time = D_clock ✓
+            # clockTimeStamp   = reference time (true UTC)
+            # receiveTimeStamp = system time (when the measurement was taken)
+            #
+            # Chrony computes  offset = clockTimeStamp - receiveTimeStamp,
+            # i.e. reference_time - system_time.  Traced through chrony's
+            # source so nobody has to take it on trust:
+            #
+            #   refclock_shm.c  RCL_AddSample(instance, &receive_ts, &clock_ts, ...)
+            #   refclock.c      RCL_AddSample(..., sample_time, ref_time, ...)
+            #                   raw_offset = UTI_DiffTimespecsToDouble(ref_time,
+            #                                                          sample_time)
+            #   util.c          UTI_DiffTimespecsToDouble(a, b) -> a - b
+            #
+            # So a host clock running FAST (receive > clock) yields a NEGATIVE
+            # offset and chrony slews it backwards.  Correct.
+            #
+            # The field assignment below is what matters and it is right; this
+            # comment previously claimed the subtraction ran the other way
+            # (receive - clock).  Harmless to the code, which only assigns
+            # fields, but it cost real debugging time on 2026-08-16 — the
+            # audit is recorded here so the next reader does not repeat it.
+            #
+            # ⚠ `chronyc sources` DISPLAYS THE NEGATION of chrony's internal
+            # offset.  Verified same-source, same-instant on AC0G-B4:
+            # segment held clock-receive = -15.484 ms while `chronyc sources`
+            # showed HPPS at +14 ms.  Do not compare a log line against
+            # chronyc output and conclude there is a sign bug.
             clock_sec = int(reference_time)
             clock_usec = int((reference_time - clock_sec) * 1_000_000)
 
