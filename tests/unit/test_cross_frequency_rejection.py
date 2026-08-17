@@ -171,3 +171,53 @@ class TestRobustness:
 
     def test_empty_input(self):
         assert _reject([]) == ([], [])
+
+
+class TestGateHonoursTheRejection:
+    """The gate and the rejection must not re-derive scope independently.
+
+    Observed on B4 2026-08-17 12:38: the rejection dropped WWV 5.0 and
+    10.0 MHz, and the gate in the SAME fuse() call then reported
+    "[2.5MHz=+1.81, 5.0MHz=+18.34, 10.0MHz=+9.40]" and failed on a
+    16.52 ms spread — the very measurements just rejected.  The two
+    blocks apply different mode filters, so they disagree about which
+    measurements are in scope, and the gate can never clear.
+    """
+
+    def _fusion(self):
+        return MultiBroadcastFusion.__new__(MultiBroadcastFusion)
+
+    def test_gate_ignores_frequencies_the_rejection_dropped(self):
+        f = self._fusion()
+        ms = [
+            _m("WWV", 2.5, +1.81), _m("WWV", 5.0, +18.34),
+            _m("WWV", 10.0, +9.40), _m("WWV", 15.0, +1.9),
+            _m("WWV", 20.0, +2.0), _m("WWV", 25.0, +2.1),
+        ]
+        kept, rejected = f._reject_cross_frequency_outliers(ms)
+        assert {r.frequency_mhz for r in rejected} == {5.0, 10.0}
+        # The gate re-derives its own scope from the FULL list; it must
+        # still honour what was rejected.
+        valid, reason, _dev = f._validate_cross_frequency_d_clock(ms)
+        assert valid, reason
+
+    def test_gate_still_fails_on_a_genuine_unrejected_spread(self):
+        """Honouring the rejection must not make the gate toothless: a
+        spread among SURVIVING frequencies must still fail."""
+        f = self._fusion()
+        # Deviations of 3 ms survive rejection (<= 5 ms from the median)
+        # but the RANGE is 6 ms, which the gate must still fail on.
+        ms = [
+            _m("WWV", 2.5, -3.0), _m("WWV", 15.0, 0.0),
+            _m("WWV", 20.0, +3.0),
+        ]
+        _kept, rejected = f._reject_cross_frequency_outliers(ms)
+        assert rejected == []
+        valid, reason, _dev = f._validate_cross_frequency_d_clock(ms)
+        assert not valid
+
+    def test_a_fresh_instance_rejects_nothing_by_default(self):
+        f = self._fusion()
+        ms = [_m("WWV", 2.5, 0.0), _m("WWV", 5.0, +18.0), _m("WWV", 10.0, 0.0)]
+        valid, _reason, _dev = f._validate_cross_frequency_d_clock(ms)
+        assert not valid  # no rejection run yet — gate sees everything
