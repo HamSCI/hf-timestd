@@ -3064,6 +3064,33 @@ class CoreRecorderV2:
         # coast, and the state that got us here.
         return None, sigma_ns, "%s (%s)" % (reason, cause)
 
+    def _t6_hpps_publish_status(self) -> dict:
+        """What we BELIEVE about the HPPS feed, for external watchers.
+
+        ``hpps-watchdog`` restarts the recorder when chrony stops
+        sampling HPPS.  That is the correct cure for the failure it was
+        built for — the push gate stops firing while the calibrator
+        still reports ``acquired=1``, so everything looks fine in the
+        journal while chrony sees reach=0 — and the WRONG cure for an
+        honest withdrawal, because a restart destroys the anchor a coast
+        rests on and forces a fresh acquisition.
+
+        Only the recorder can tell those apart, so it says so here:
+
+        * ``publishing`` true + chrony dark  ⇒ WEDGE, restart is right
+        * ``publishing`` false               ⇒ we know we are not
+          feeding, and why; restarting fixes nothing and costs the anchor
+
+        Never raises: watchers call this on a status path.
+        """
+        mode = getattr(self, '_t6_publish_mode_last', None)
+        sigma = getattr(self, '_t6_holdover_sigma_ns', None)
+        return {
+            "mode": mode,
+            "publishing": mode is not None,
+            "sigma_ns": None if sigma is None else float(sigma),
+        }
+
     def _t6_push_holdover(self) -> None:
         """Feed chrony from the FROZEN anchor, with no edge at all.
 
@@ -5201,6 +5228,12 @@ class CoreRecorderV2:
                         _t6_auth_status['state'])
                     status['t6_pps']['authority_violations'] = (
                         _t6_auth_status['violations'])
+                # What we believe about the HPPS feed itself, so
+                # hpps-watchdog can tell a wedge from an honest
+                # withdrawal instead of restarting into both.
+                _hpps_pub = self._t6_hpps_publish_status()
+                status['t6_pps']['hpps_publish_mode'] = _hpps_pub['mode']
+                status['t6_pps']['hpps_publishing'] = _hpps_pub['publishing']
             else:
                 _t6_auth_status = self._t6_authority_status()
             status['t6_authority'] = _t6_auth_status

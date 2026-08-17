@@ -27,6 +27,9 @@
 #   HPPS_LASTRX_THRESHOLD_S   - dark-source restart threshold (default 120)
 #   HPPS_RESTART_COOLDOWN_S   - minimum gap between auto-restarts (default 300)
 #   HPPS_STATE_DIR            - cooldown state file directory
+#   HPPS_STATUS_FILE          - producer status surface (authority.json)
+#   HPPS_WITHDRAWN_GRACE_S    - how long to tolerate an HONEST withdrawal
+#                               before restarting anyway (default 3600)
 #
 # Exit codes:
 #   0 - HPPS healthy, OR restart attempted, OR cooldown active
@@ -39,6 +42,9 @@ LASTRX_THRESHOLD_S="${HPPS_LASTRX_THRESHOLD_S:-${TSL3_LASTRX_THRESHOLD_S:-120}}"
 COOLDOWN_S="${HPPS_RESTART_COOLDOWN_S:-${TSL3_RESTART_COOLDOWN_S:-300}}"
 STATE_DIR="${HPPS_STATE_DIR:-${TSL3_STATE_DIR:-/var/lib/hf-timestd}}"
 STATE_FILE="$STATE_DIR/hpps-watchdog-last-restart"
+STATUS_FILE="${HPPS_STATUS_FILE:-/run/hf-timestd/authority.json}"
+WITHDRAWN_GRACE_S="${HPPS_WITHDRAWN_GRACE_S:-3600}"
+WITHDRAWN_FILE="$STATE_DIR/hpps-watchdog-withdrawn-since"
 LOG_TAG="hpps-watchdog"
 TARGET_UNIT="timestd-core-recorder.service"
 
@@ -96,6 +102,33 @@ lastrx_seconds() {
     printf '%s\n' "$lastrx"
 }
 
+# Does the producer BELIEVE it is feeding HPPS right now?
+#
+# This is the distinction the watchdog lacked.  Restarting the recorder
+# is the right cure for the failure this script was built for -- the SHM
+# push gate wedges while the calibrator still reports acquired=1, so the
+# journal looks healthy and chrony silently sees reach=0.  It is the
+# WRONG cure for an honest withdrawal: since the holdover coast landed,
+# the producer says when it is deliberately not feeding, and a restart
+# then destroys the frozen anchor the coast rests on and forces a fresh
+# acquisition -- which guarantees another dark window and another
+# restart.  On AC0G-B4 overnight 2026-08-17 that loop bounced the
+# recorder 7 times.
+#
+# "unknown" (key absent) keeps the legacy behaviour, so an older
+# producer is unaffected.
+hpps_publishing() {
+    local raw
+    [ -r "$STATUS_FILE" ] || { printf 'unknown\n'; return 0; }
+    raw="$(grep -o '"t6_hpps_publishing"[[:space:]]*:[[:space:]]*\(true\|false\)' \
+           "$STATUS_FILE" 2>/dev/null | tail -1 || true)"
+    case "$raw" in
+        *true)  printf 'true\n' ;;
+        *false) printf 'false\n' ;;
+        *)      printf 'unknown\n' ;;
+    esac
+}
+
 cooldown_active() {
     [ -f "$STATE_FILE" ] || return 1
     local last_restart now elapsed
@@ -125,10 +158,31 @@ main() {
 
     if [ "$lastrx" -lt "$LASTRX_THRESHOLD_S" ]; then
         # Healthy — nothing to do.  Quiet exit (no log spam every minute).
+        rm -f "$WITHDRAWN_FILE" 2>/dev/null || true
         return 0
     fi
 
     log "HPPS LastRx=${lastrx}s exceeds threshold ${LASTRX_THRESHOLD_S}s"
+
+    local pub now first elapsed
+    pub="$(hpps_publishing)"
+    if [ "$pub" = "false" ]; then
+        now="$(date -u +%s)"
+        if [ -f "$WITHDRAWN_FILE" ]; then
+            first="$(cat "$WITHDRAWN_FILE" 2>/dev/null || echo "$now")"
+        else
+            first="$now"
+            printf '%s\n' "$now" > "$WITHDRAWN_FILE" 2>/dev/null || true
+        fi
+        elapsed=$(( now - first ))
+        if [ "$elapsed" -lt "$WITHDRAWN_GRACE_S" ]; then
+            log "HPPS withdrawn BY THE PRODUCER for ${elapsed}s (not a wedged push gate; see the recorder journal for the reason) — a restart would destroy the anchor, holding off until ${WITHDRAWN_GRACE_S}s"
+            return 0
+        fi
+        log "HPPS withdrawn for ${elapsed}s exceeds grace ${WITHDRAWN_GRACE_S}s — restarting as a last resort"
+    else
+        rm -f "$WITHDRAWN_FILE" 2>/dev/null || true
+    fi
 
     if cooldown_active; then
         log "restart cooldown active (last restart < ${COOLDOWN_S}s ago); skipping"

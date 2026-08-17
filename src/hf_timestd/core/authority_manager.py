@@ -227,6 +227,8 @@ class AuthorityManager:
         # BpskPpsProbe (spec §4 of the anchor-inversion design).  None
         # until a producer publishes it.
         self._t6_authority_state: Optional[str] = None
+        self._t6_hpps_publishing: Optional[bool] = None
+        self._t6_hpps_publish_mode: Optional[str] = None
         self._t6_authority_violations: Optional[List[str]] = None
 
     def tick(self) -> AuthorityState:
@@ -783,6 +785,15 @@ class AuthorityManager:
         self._t6_authority_violations = (
             [str(v) for v in viol] if isinstance(viol, list) else None
         )
+        # Whether the producer believes it is feeding HPPS.  Published
+        # so hpps-watchdog can distinguish a wedged push gate (believes
+        # it is pushing, chrony sees nothing) from an honest withdrawal,
+        # and stop restarting the recorder into the second case -- a
+        # restart destroys the anchor a coast rests on.
+        pub = d.get("hpps_publishing")
+        self._t6_hpps_publishing = pub if isinstance(pub, bool) else None
+        mode = d.get("hpps_publish_mode")
+        self._t6_hpps_publish_mode = mode if isinstance(mode, str) else None
 
     def _write_state(self, state: AuthorityState) -> None:
         payload: dict = {
@@ -811,6 +822,10 @@ class AuthorityManager:
             if self._t6_authority_violations is not None:
                 payload["t6_authority_violations"] = (
                     self._t6_authority_violations)
+        if getattr(self, "_t6_hpps_publishing", None) is not None:
+            payload["t6_hpps_publishing"] = self._t6_hpps_publishing
+            if getattr(self, "_t6_hpps_publish_mode", None) is not None:
+                payload["t6_hpps_publish_mode"] = self._t6_hpps_publish_mode
 
         # Additive v1 extension: governor_radiod names which radiod's
         # RTP timebase this Fusion offset is computed against (§4.5.1

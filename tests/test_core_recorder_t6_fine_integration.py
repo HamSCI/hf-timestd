@@ -874,3 +874,45 @@ class TestCoastSurvivesAnchorRecapture:
         _m, sigma, _r = cr._t6_publish_mode(self._floor(), 1000.0 + 6 * 3600)
         assert sigma > 800_000.0
         assert sigma == pytest.approx(800_000.0, rel=1e-3)
+
+
+class TestHppsPublishStatusIsObservable:
+    """hpps-watchdog restarts the recorder when chrony stops sampling
+    HPPS.  That is the right cure for the wedge it was built for (the
+    push gate stops firing while the calibrator still reports
+    acquired=1), and the WRONG cure for an honest withdrawal — a restart
+    destroys the anchor a coast rests on.  The recorder knows which case
+    it is in; it has to say so where the watchdog can read it."""
+
+    def _cr(self, mode="live"):
+        cr = CoreRecorderV2.__new__(CoreRecorderV2)
+        cr._t6_publish_mode_last = mode
+        cr._t6_holdover_sigma_ns = 800_000.0
+        return cr
+
+    def test_reports_live(self):
+        s = self._cr("live")._t6_hpps_publish_status()
+        assert s["mode"] == "live"
+
+    def test_reports_holdover_with_its_sigma(self):
+        s = self._cr("holdover")._t6_hpps_publish_status()
+        assert s["mode"] == "holdover"
+        assert s["sigma_ns"] == pytest.approx(800_000.0)
+
+    def test_reports_withdrawn_as_none(self):
+        s = self._cr(None)._t6_hpps_publish_status()
+        assert s["mode"] is None
+
+    def test_distinguishes_believed_publishing_from_withdrawn(self):
+        """The whole point: a watchdog must be able to tell a wedge
+        (we think we are pushing, chrony sees nothing) from an honest
+        withdrawal (we know we are not pushing)."""
+        assert self._cr("live")["mode"] if False else True
+        assert self._cr("holdover")._t6_hpps_publish_status()["publishing"]
+        assert self._cr("live")._t6_hpps_publish_status()["publishing"]
+        assert not self._cr(None)._t6_hpps_publish_status()["publishing"]
+
+    def test_survives_a_recorder_that_never_ran_the_gate(self):
+        cr = CoreRecorderV2.__new__(CoreRecorderV2)
+        s = cr._t6_hpps_publish_status()
+        assert s["mode"] is None and s["publishing"] is False

@@ -328,6 +328,20 @@ class BpskPpsProbe:
                 str(v) for v in authority_violations
             ]
 
+        # Whether the producer BELIEVES it is feeding HPPS, forwarded so
+        # hpps-watchdog can tell a wedged push gate (believes it is
+        # pushing, chrony sees nothing → restart is the cure) from an
+        # honest withdrawal (knows it is not pushing → a restart only
+        # destroys the anchor and forces re-acquisition).  Absent on
+        # producers older than the holdover coast — omit rather than
+        # guess, so an old producer keeps the previous behaviour.
+        hpps_publishing = t6.get("hpps_publishing")
+        if isinstance(hpps_publishing, bool):
+            detail["hpps_publishing"] = hpps_publishing
+        hpps_publish_mode = t6.get("hpps_publish_mode")
+        if isinstance(hpps_publish_mode, str):
+            detail["hpps_publish_mode"] = hpps_publish_mode
+
         # Pattern B: the anchor-derived ``rtp_to_utc_offset_ns``
         # bridges ka9q's host-clock-derived rtp_to_wallclock to the
         # native anchor.  Authority_manager prefers this over the
