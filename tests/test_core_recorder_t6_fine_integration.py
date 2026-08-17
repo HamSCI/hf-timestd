@@ -780,3 +780,15 @@ class TestCoastTransitionsAreLoud:
         with caplog.at_level(logging.WARNING):
             cr._t6_hpps_publishable()
         assert any("coast ended" in r.getMessage() for r in caplog.records)
+
+    def test_missing_floor_is_not_reported_as_an_rtp_rebase(self):
+        """Observed on B4 2026-08-17 02:28Z right after a deploy: the
+        coast was refused with "rtp counter discontinuity — the ruler
+        was re-based" when nothing had been re-based; there was simply
+        no arrival-floor estimate yet.  Refusing is right; blaming a
+        radiod restart sends the operator hunting a phantom."""
+        cr = self._cr()
+        mode, _s, reason = cr._t6_publish_mode(None, 1000.0)
+        assert mode is None
+        assert "re-based" not in reason
+        assert "floor" in reason

@@ -2999,18 +2999,24 @@ class CoreRecorderV2:
         sigma_ns = holdover_sigma_ns(
             sigma0 or 0.0, getattr(rate, 'sigma_ppm', None), elapsed
         )
-        intact = floor is not None and coast_ruler_intact(
-            floor.offset_s, floor0
-        )
-        ok, reason = may_coast(
-            anchor_frozen=getattr(self, '_t6_native_anchor', None) is not None,
-            rtp_continuous=intact,
-            sigma_ns=sigma_ns,
-            max_sigma_ns=self.T6_HOLDOVER_MAX_SIGMA_NS,
-        )
         cause = "authority %s, costas %s" % (
             "unknown" if state is None else state.value,
             "unlocked" if costas is False else "locked",
+        )
+        # Distinguish "no reference yet" from "the ruler moved".  Both
+        # refuse, but only one of them means a radiod restart, and
+        # reporting the wrong one sends an operator hunting a phantom
+        # (observed on B4 2026-08-17 right after a deploy).
+        if floor is None:
+            return None, sigma_ns, (
+                "no arrival-floor estimate yet — nothing to coast "
+                "against (%s)" % cause
+            )
+        ok, reason = may_coast(
+            anchor_frozen=getattr(self, '_t6_native_anchor', None) is not None,
+            rtp_continuous=coast_ruler_intact(floor.offset_s, floor0),
+            sigma_ns=sigma_ns,
+            max_sigma_ns=self.T6_HOLDOVER_MAX_SIGMA_NS,
         )
         if ok:
             # A permitted coast reports WHY it is coasting, not that the
