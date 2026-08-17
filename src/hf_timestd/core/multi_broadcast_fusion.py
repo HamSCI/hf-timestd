@@ -3086,6 +3086,21 @@ class MultiBroadcastFusion:
             # but mutual agreement can: two independent 9 dB detections
             # landing sub-ms apart is not noise.
             if len(anchors) < 2:
+                # Abstaining SILENTLY hides how often this fix is even
+                # able to act.  On B4 2026-08-17 it never fired in 41
+                # minutes across 205 gate failures, because 20 MHz was
+                # absent and 25 MHz alone is not cross-checkable —
+                # invisible until the counter below was added.
+                self._xf_no_anchor_count = getattr(
+                    self, '_xf_no_anchor_count', 0) + 1
+                if self._xf_no_anchor_count % 200 == 1:
+                    logger.info(
+                        "Cross-frequency rejection ABSTAINED for %s: %d "
+                        "exclusive channel(s) available, need 2 to "
+                        "cross-check (%d abstentions so far). "
+                        "hf-timestd#22",
+                        station, len(anchors), self._xf_no_anchor_count,
+                    )
                 continue  # no cross-checkable reference — refuse to judge
             if max(anchors) - min(anchors) > CROSS_FREQ_THRESHOLD_MS:
                 logger.warning(

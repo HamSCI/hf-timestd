@@ -1894,6 +1894,36 @@ class CoreRecorderV2:
                 self._wwvb_anchor_rtp = None
             else:
                 rtp0 = int(rtp0) & 0xFFFFFFFF
+                # ---- hf-timestd#23 probe ----
+                # Does RTP advance by the number of samples we were
+                # actually handed?  The continuity check below assumes
+                # so; on B4 it is short by a constant ~45% of the batch
+                # at every sample rate tried.  Rate-limited to 1/30 s --
+                # the failing path logs several times a second and the
+                # last run put ~365 lines/minute into the journal.
+                _prev = getattr(self, '_wwvb_prev_batch', None)
+                _rep = self._wwvb_rtp_advance_report(
+                    _prev[0] if _prev else None,
+                    _prev[1] if _prev else None,
+                    rtp0,
+                )
+                if _rep is not None:
+                    _now_m = time.monotonic()
+                    if (_now_m - getattr(
+                            self, '_wwvb_probe_last_log', 0.0)) > 30.0:
+                        self._wwvb_probe_last_log = _now_m
+                        logger.warning(
+                            "WWVB RTP advance probe: previous batch "
+                            "delivered %d samples but RTP advanced %d "
+                            "(deficit %d, ratio %.4f). Equal ⇒ the RTP "
+                            "clock is fine and buf_samples is "
+                            "over-counted; ~0.55 ⇒ RTP does not count "
+                            "delivered samples 1:1. hf-timestd#23",
+                            _rep["sample_len"], _rep["rtp_delta"],
+                            _rep["deficit"], _rep["ratio"],
+                        )
+                self._wwvb_prev_batch = (rtp0, int(len(samples)))
+                # ---- end probe ----
                 if self._wwvb_buf_samples == 0 or self._wwvb_anchor_rtp is None:
                     self._wwvb_anchor_rtp = rtp0
                 else:
@@ -3063,6 +3093,47 @@ class CoreRecorderV2:
         # A refused one carries both: the precondition that blocked the
         # coast, and the state that got us here.
         return None, sigma_ns, "%s (%s)" % (reason, cause)
+
+    @staticmethod
+    def _wwvb_rtp_advance_report(prev_rtp, prev_len, rtp0):
+        """Compare RTP advance between batches against samples delivered.
+
+        Diagnostic for hf-timestd#23.  The WWVB continuity check assumes
+        RTP advances one tick per delivered sample::
+
+            expected = anchor_rtp + buf_samples
+
+        On AC0G-B4 the arriving RTP falls short of that by a CONSTANT
+        fraction of the batch, at both rates tested -- 1620/3600 = 0.450
+        at 24 kHz, 1200/2640 = 0.455 at 12 kHz -- so the mismatch is
+        proportional, not a delivery boundary precessing against radiod's
+        block (changing the sample rate did not move it).
+
+        One of the two terms must therefore be wrong by a fixed factor.
+        Comparing consecutive batches separates the cases: if RTP
+        advances by exactly the PREVIOUS batch's length then the RTP
+        clock is fine and ``buf_samples`` is being over-counted (e.g.
+        duplicated or overlapping buffers); if it advances by ~0.55 of
+        it, RTP is not counting delivered samples 1:1 and the check
+        needs to be made rate-aware.
+
+        Returns None when they agree (the common case, nothing to say),
+        else a dict of the numbers that discriminate.  Pure; never
+        raises.
+        """
+        if prev_rtp is None or prev_len is None:
+            return None
+        rtp_delta = (int(rtp0) - int(prev_rtp)) & 0xFFFFFFFF
+        prev_len = int(prev_len)
+        if rtp_delta == prev_len:
+            return None
+        return {
+            "sample_len": prev_len,
+            "rtp_delta": rtp_delta,
+            # Positive => RTP advanced LESS than samples delivered.
+            "deficit": prev_len - rtp_delta,
+            "ratio": (rtp_delta / prev_len) if prev_len else float("nan"),
+        }
 
     def _t6_hpps_publish_status(self) -> dict:
         """What we BELIEVE about the HPPS feed, for external watchers.
