@@ -3077,14 +3077,6 @@ class MultiBroadcastFusion:
                         len(freq_means),
                     )
 
-        # Publish what was dropped so the validation gate does not
-        # re-derive scope independently.  The two apply different mode
-        # filters, so left to themselves they disagree about which
-        # measurements are in play: on B4 2026-08-17 12:38 the rejection
-        # dropped WWV 5.0 and 10.0 MHz and the gate in the SAME fuse()
-        # call still reported them and failed on a 16.52 ms spread.
-        self._xf_rejected_keys = set(drop_keys)
-
         if not drop_keys:
             return list(measurements), []
 
@@ -3143,12 +3135,6 @@ class MultiBroadcastFusion:
                 continue
             base_mode = (m.propagation_mode or '').split('+')[0].strip().lower()
             if base_mode in ('vacuum_fallback', 'fallback'):
-                continue
-            # Already dropped by the cross-frequency rejection: judging
-            # the model on a measurement we have established is another
-            # station's tick is what kept this gate permanently failed.
-            if (m.station, m.frequency_mhz) in getattr(
-                    self, '_xf_rejected_keys', ()):
                 continue
             if m.d_clock_ms is not None and not np.isnan(m.d_clock_ms):
                 station_freq_groups[m.station][m.frequency_mhz].append(m.d_clock_ms)
