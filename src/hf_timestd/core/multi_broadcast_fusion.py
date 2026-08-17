@@ -286,18 +286,6 @@ def broadcast_key(station: str, frequency_mhz: float) -> str:
     return f"{station}_{frequency_mhz:.2f}"
 
 
-# D_clock must be frequency-independent for a given station: the 1/f^2
-# ionospheric term cancels in d_clock = raw_toa - expected_delay, and one
-# station's frequencies share a transmitter, an instant and very nearly a
-# path.  Only hop geometry differs -- a millisecond or two.  Measured on
-# AC0G-B4, WWV's two EXCLUSIVE frequencies agree to under 1 ms.
-#
-# ONE definition, used by both the validation gate and the outlier
-# rejection: they must not be able to disagree about what
-# "frequency-independent" means.  hf-timestd#22.
-CROSS_FREQ_THRESHOLD_MS = 5.0
-
-
 @dataclass
 class BroadcastMeasurement:
     """Single D_clock measurement from one broadcast."""
@@ -3010,84 +2998,6 @@ class MultiBroadcastFusion:
         
         return True, reason, 0
     
-    # Modes with no real skywave prediction: d_clock is then whatever
-    # overhead the model could not account for, so it legitimately
-    # differs from properly-corrected frequencies.  The validation gate
-    # skips these for exactly this reason and so must the rejection.
-    _NO_MODEL_MODES = ('vacuum_fallback', 'fallback')
-
-    # Fewer than this many usable frequencies and a disagreement tells
-    # you one of them is wrong but not WHICH.  Refuse to guess.
-    _MIN_FREQS_TO_IDENTIFY_AN_OUTLIER = 3
-
-    def _reject_cross_frequency_outliers(self, measurements):
-        """Drop frequencies that disagree with their OWN station.
-
-        The tightest constraint available, and the one that catches
-        co-channel capture between WWV / WWVH / BPM on the shared
-        frequencies (hf-timestd#22).  A station's frequencies share a
-        transmitter, an instant and very nearly a path, so they must
-        agree to within hop-geometry differential -- a millisecond or
-        two.  A frequency sitting ~18 ms away from its own station's
-        others has locked onto a different station's tick, and saying so
-        needs NO propagation model: it is pure internal consistency.
-
-        This runs BEFORE the pooled MAD pass, which cannot do the job:
-        that pass mixes all stations into one distribution, so genuine
-        per-path model differences inflate its spread, and its threshold
-        is capped at 3.5 x 5 ms = 17.5 ms -- just BELOW the 18.7-19.6 ms
-        station separations it would need to catch.
-
-        Rejects the offending CHANNEL rather than discarding the whole
-        minute, which is what the validation gate does today.
-
-        Returns ``(kept, rejected)``.  Never raises.
-        """
-        if not measurements:
-            return [], []
-
-        by_station = defaultdict(lambda: defaultdict(list))
-        for m in measurements:
-            mode = (m.propagation_mode or '').split('+')[0].strip().lower()
-            if mode in self._NO_MODEL_MODES:
-                continue
-            d = m.d_clock_ms
-            if d is None or np.isnan(d):
-                continue
-            by_station[m.station][m.frequency_mhz].append(d)
-
-        drop_keys = set()
-        for station, freq_groups in by_station.items():
-            if len(freq_groups) < self._MIN_FREQS_TO_IDENTIFY_AN_OUTLIER:
-                continue
-            freq_means = {f: float(np.mean(v)) for f, v in freq_groups.items()}
-            # MEDIAN, not mean: an 18 ms outlier drags a mean far enough
-            # to reject a good channel instead of the bad one.
-            reference = float(np.median(list(freq_means.values())))
-            for freq, value in freq_means.items():
-                dev = abs(value - reference)
-                if dev > CROSS_FREQ_THRESHOLD_MS:
-                    drop_keys.add((station, freq))
-                    logger.warning(
-                        "Cross-frequency outlier REJECTED: %s %.1fMHz "
-                        "d_clock=%+.2fms is %.2fms from its own station's "
-                        "median (%+.2fms, %d frequencies) — a co-channel "
-                        "station's tick, not this one's. hf-timestd#22",
-                        station, freq, value, dev, reference,
-                        len(freq_means),
-                    )
-
-        if not drop_keys:
-            return list(measurements), []
-
-        kept, rejected = [], []
-        for m in measurements:
-            if (m.station, m.frequency_mhz) in drop_keys:
-                rejected.append(m)
-            else:
-                kept.append(m)
-        return kept, rejected
-
     def _validate_cross_frequency_d_clock(
         self,
         measurements: List[BroadcastMeasurement]
@@ -3164,6 +3074,7 @@ class MultiBroadcastFusion:
                 # Threshold: 5ms tolerance for frequency independence
                 # Physics says D_clock should be identical across frequencies
                 # after the 1/f² ionospheric correction
+                CROSS_FREQ_THRESHOLD_MS = 5.0
                 
                 if max_diff > CROSS_FREQ_THRESHOLD_MS:
                     all_valid = False
@@ -3268,34 +3179,13 @@ class MultiBroadcastFusion:
         # For now, we filter out NaN to maintain current behavior while the
         # stricter chrony feed criteria prevent discontinuities.
         measurements = [m for m in measurements if m.d_clock_ms is not None and not np.isnan(m.d_clock_ms)]
-
-        # HIERARCHICAL REJECTION, TIGHTEST CONSTRAINT FIRST (hf-timestd#22).
-        # Within a station, across ITS frequencies, d_clock must be
-        # frequency-independent -- same transmitter, same instant, very
-        # nearly the same path.  That is a far tighter constraint than
-        # agreement BETWEEN stations, which depends on two different path
-        # models being right, so it must be applied first and on its own
-        # terms.  It is also what catches co-channel capture between
-        # WWV / WWVH / BPM on the shared frequencies, and it needs no
-        # propagation model at all -- only internal consistency.
-        #
-        # The pooled MAD pass below cannot do this: it mixes every
-        # station into one distribution, so real per-path differences
-        # inflate its spread, and its threshold is capped at
-        # 3.5 x 5 ms = 17.5 ms -- just BELOW the 18.7-19.6 ms station
-        # separations it would have to catch.
-        n_cross_freq_rejected = 0
-        if measurements:
-            measurements, _xf_rejected = (
-                self._reject_cross_frequency_outliers(measurements))
-            n_cross_freq_rejected = len(_xf_rejected)
-
+        
         # OUTLIER REJECTION — single pre-fusion pass on CALIBRATED residuals
         # (M-H16). Raw d_clock_ms carries 30-60ms inter-broadcast offsets
         # (propagation-model error) that would swamp the MAD, so calibration is
         # applied first and detection sees only the residual scatter. A second,
         # raw-value pass (the old _reject_outliers call) was removed — M-H16.
-        n_rejected = n_cross_freq_rejected
+        n_rejected = 0
         if len(measurements) > 2:
             with self._phase("calibration_apply"):
                 cal_for_outlier = self._apply_calibration(measurements)
