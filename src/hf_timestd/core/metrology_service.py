@@ -61,6 +61,69 @@ class MetrologyService:
     Metrology Service: The "Instrument" layer.
     """
     
+    # A tick measurement is only admissible if the channel can show it
+    # actually received the station.  hf-timestd#24: WWV 20/25 MHz
+    # produce a confident measurement every minute of the day (1435 of
+    # 1440) at a constant ~9 dB SNR, including hours when those bands
+    # are closed over a 1,100 km path -- and nothing downstream could
+    # tell those minutes from real ones.
+    #
+    # Measured over ~8,780 minutes per channel on AC0G-B4, the other
+    # per-minute statistics CANNOT separate the cases:
+    #   * ensemble_n_edges is ~56.6 on every channel, signal or not;
+    #   * overall_confidence is INVERTED (0.93 on the suspect channels
+    #     against 0.56 on the well-received ones);
+    #   * doppler uncertainty is ~0.0022 Hz everywhere.
+    # SNR is the field that separates, because the bands really do open:
+    # 20 MHz reaches 37.4 dB and 25 MHz 33.3 dB when they work, against
+    # a ~9 dB floor when they do not.
+    #
+    # The default is CHOSEN FROM COVERAGE DATA, not borrowed.  Over
+    # 8,772 minutes on B4, requiring at least one admissible measurement
+    # somewhere in the fleet:
+    #
+    #   floor    coverage    mean measurements/min
+    #    0 dB     100.0%          15.09
+    #   10 dB      94.6%           6.05
+    #   12 dB      65.8%           5.24
+    #   16 dB      62.0%           4.08
+    #
+    # 10 dB discards ~60% of measurements as noise while keeping 94.6%
+    # of minutes covered.  12 dB (the bar already applied to BPM) buys
+    # almost no further quality and costs a THIRD of all minutes -- and
+    # a fusion input that goes silent for long stretches is the failure
+    # this project spent 2026-08-17 recovering from (hf-timestd#16).
+    #
+    # ⚠ A single global floor is a compromise: the per-channel noise
+    # floor spans ~7 dB (25 MHz sits at 9.4 dB mean, 10 MHz at 16.0), so
+    # 10 dB still admits some noise on 20/25 MHz -- the very channels
+    # that motivated this.  Per-channel floors, set from each channel's
+    # own observed floor, are the real answer; this is configurable via
+    # ``min_tick_snr_db`` in the meantime.
+    DEFAULT_MIN_TICK_SNR_DB = 10.0
+
+    @staticmethod
+    def tick_measurement_admissible(n_edges, mean_snr_db, min_snr_db):
+        """(admissible, reason) for a per-minute tick measurement.
+
+        Refusing is how a channel reports BLINDNESS: it publishes no
+        d_clock rather than a confident noise-floor value.  A source
+        that cannot say "I have nothing" cannot participate in a suite
+        of mutually-supporting discriminators -- it contributes
+        confident noise the other members must out-vote.
+
+        Missing inputs refuse rather than assume good.
+        """
+        if n_edges is None or int(n_edges) < 5:
+            return False, "too few edges (%s)" % (n_edges,)
+        if mean_snr_db is None:
+            return False, "no SNR reported"
+        if float(mean_snr_db) < float(min_snr_db):
+            return False, ("SNR %.1f dB below the %.1f dB floor — treating "
+                           "as BLIND, not as a measurement"
+                           % (float(mean_snr_db), float(min_snr_db)))
+        return True, "ok"
+
     def __init__(
         self,
         config: Dict[str, Any],
@@ -689,7 +752,39 @@ class MetrologyService:
                             logger.debug(f"Ignored exception: {e}")
                             pass
                     
-                    d_clock_ms = edge_result.ensemble_timing_error_ms if edge_result.ensemble_n_edges >= 5 else None
+                    # hf-timestd#24: publish NOTHING rather than a
+                    # confident noise-floor value.  Refusing here is how
+                    # this channel reports blindness.
+                    _min_snr = float(getattr(
+                        self, 'min_tick_snr_db',
+                        self.DEFAULT_MIN_TICK_SNR_DB))
+                    _ok, _why = self.tick_measurement_admissible(
+                        n_edges=edge_result.ensemble_n_edges,
+                        mean_snr_db=edge_result.mean_edge_snr_db,
+                        min_snr_db=_min_snr,
+                    )
+                    # Loud on TRANSITIONS only — this runs every minute
+                    # and a blind channel would otherwise log forever.
+                    _key = f"{self.channel_name}:{station_name}"
+                    _seen = getattr(self, '_tick_admissible_last', None)
+                    if _seen is None:
+                        _seen = self._tick_admissible_last = {}
+                    if _seen.get(_key) is not _ok:
+                        _seen[_key] = _ok
+                        if _ok:
+                            logger.info(
+                                f"{station_name} @ "
+                                f"{self.frequency_hz/1e6:.1f}MHz: "
+                                f"RECEIVING again "
+                                f"({edge_result.mean_edge_snr_db:.1f}dB)")
+                        else:
+                            logger.warning(
+                                f"{station_name} @ "
+                                f"{self.frequency_hz/1e6:.1f}MHz: BLIND — "
+                                f"{_why}; publishing no d_clock "
+                                f"(hf-timestd#24)")
+                    d_clock_ms = (
+                        edge_result.ensemble_timing_error_ms if _ok else None)
                     d_clock_uncertainty_ms = edge_result.ensemble_uncertainty_ms if d_clock_ms is not None else None
                     
                     tick_rec = {
