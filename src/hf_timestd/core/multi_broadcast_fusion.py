@@ -286,28 +286,6 @@ def broadcast_key(station: str, frequency_mhz: float) -> str:
     return f"{station}_{frequency_mhz:.2f}"
 
 
-# D_clock must be frequency-independent for a given station: the 1/f^2
-# ionospheric term cancels in d_clock = raw_toa - expected_delay, and one
-# station's frequencies share a transmitter, an instant and very nearly a
-# path.  Only hop geometry differs -- a millisecond or two.
-#
-# ONE definition, used by both the validation gate and the outlier
-# rejection, so they cannot disagree about what "frequency-independent"
-# means.  hf-timestd#22.
-CROSS_FREQ_THRESHOLD_MS = 5.0
-
-# Frequencies carrying MORE THAN ONE time station.  WWV, WWVH and BPM all
-# transmit on these, ~19 ms apart in arrival at AC0G-B4, and their tick
-# detectors capture one another there.
-#
-# Anything outside this set is EXCLUSIVE to its station and therefore
-# cannot be a co-channel capture -- which makes those channels the only
-# trustworthy reference available.  WWV's 20 and 25 MHz are the ones that
-# matter here; measured on B4 they agree to under 1 ms while the shared
-# channels scatter 8-19 ms.
-SHARED_FREQS_MHZ = frozenset({2.5, 5.0, 10.0, 15.0})
-
-
 @dataclass
 class BroadcastMeasurement:
     """Single D_clock measurement from one broadcast."""
@@ -3020,128 +2998,6 @@ class MultiBroadcastFusion:
         
         return True, reason, 0
     
-    # Modes with no real skywave prediction: d_clock is then whatever
-    # overhead the model could not account for, so it legitimately
-    # differs.  The validation gate skips these and so must the
-    # rejection.
-    _NO_MODEL_MODES = ('vacuum_fallback', 'fallback')
-
-    def _reject_cross_frequency_outliers(self, measurements):
-        """Drop SHARED-frequency channels that disagree with their own
-        station's EXCLUSIVE channels.
-
-        Co-channel capture between WWV / WWVH / BPM is what breaks the
-        cross-frequency gate (hf-timestd#22).  A station's frequencies
-        must agree to within hop-geometry differential, so a shared
-        channel sitting ~18 ms from its own station's uncontaminatable
-        channels has locked onto another station's tick -- and saying so
-        needs no propagation model, only internal consistency.
-
-        ⚠ THE REFERENCE MUST BE ANCHORED OUTSIDE THE CONTAMINABLE SET.
-        A previous attempt (36e6145, reverted) used the median of ALL a
-        station's frequencies.  A median is robust only below 50%
-        contamination: on B4 with three of WWV's six frequencies
-        captured it landed at +6.66 ms BETWEEN the clusters and rejected
-        20 and 25 MHz -- the ground truth -- degrading FUSE from 12 us to
-        265 us Std Dev.  So:
-
-        * only frequencies OUTSIDE ``SHARED_FREQS_MHZ`` may form the
-          reference, because only they cannot be captured;
-        * an exclusive channel is NEVER rejected -- it cannot be a
-          co-channel capture, so discarding it would be discarding the
-          evidence;
-        * a station with no exclusive frequency (WWVH, BPM: all four of
-          theirs are shared) gets no verdict at all.  Internal
-          consistency cannot identify the culprit there; that is the
-          arrival-time gate's job.
-
-        Returns ``(kept, rejected)``.  Never raises.
-        """
-        if not measurements:
-            return [], []
-
-        by_station = defaultdict(lambda: defaultdict(list))
-        for m in measurements:
-            mode = (m.propagation_mode or '').split('+')[0].strip().lower()
-            if mode in self._NO_MODEL_MODES:
-                continue
-            d = m.d_clock_ms
-            if d is None or np.isnan(d):
-                continue
-            by_station[m.station][m.frequency_mhz].append(d)
-
-        drop_keys = set()
-        for station, freq_groups in by_station.items():
-            freq_means = {f: float(np.mean(v)) for f, v in freq_groups.items()}
-            anchors = [v for f, v in freq_means.items()
-                       if f not in SHARED_FREQS_MHZ]
-            # TWO agreeing anchors, not one.  Measured on B4 the
-            # exclusive channels run at ~9 dB SNR -- the weakest signals
-            # available (20 MHz med 9.2 / max 10.2; 25 MHz med 9.2 /
-            # max 9.6) against 25.6 dB on 5 MHz.  A lone weak detection
-            # could be a false peak, and anchoring on it would reject
-            # the GOOD shared channels: the reverted failure again by
-            # another route.  An SNR threshold cannot separate them --
-            # they are uniformly ~9 dB, so any cut admits all or none --
-            # but mutual agreement can: two independent 9 dB detections
-            # landing sub-ms apart is not noise.
-            if len(anchors) < 2:
-                # Abstaining SILENTLY hides how often this fix is even
-                # able to act.  On B4 2026-08-17 it never fired in 41
-                # minutes across 205 gate failures, because 20 MHz was
-                # absent and 25 MHz alone is not cross-checkable —
-                # invisible until the counter below was added.
-                self._xf_no_anchor_count = getattr(
-                    self, '_xf_no_anchor_count', 0) + 1
-                if self._xf_no_anchor_count % 200 == 1:
-                    logger.info(
-                        "Cross-frequency rejection ABSTAINED for %s: %d "
-                        "exclusive channel(s) available, need 2 to "
-                        "cross-check (%d abstentions so far). "
-                        "hf-timestd#22",
-                        station, len(anchors), self._xf_no_anchor_count,
-                    )
-                continue  # no cross-checkable reference — refuse to judge
-            if max(anchors) - min(anchors) > CROSS_FREQ_THRESHOLD_MS:
-                logger.warning(
-                    "Cross-frequency anchors disagree for %s (%.2fms "
-                    "spread across its exclusive channels) — no "
-                    "trustworthy reference, rejecting nothing",
-                    station, max(anchors) - min(anchors),
-                )
-                continue
-            reference = float(np.median(anchors))
-            for freq, value in freq_means.items():
-                if freq not in SHARED_FREQS_MHZ:
-                    continue  # exclusive: never rejected
-                dev = abs(value - reference)
-                if dev > CROSS_FREQ_THRESHOLD_MS:
-                    drop_keys.add((station, freq))
-                    logger.warning(
-                        "Cross-frequency outlier REJECTED: %s %.1fMHz "
-                        "d_clock=%+.2fms is %.2fms from its own station's "
-                        "EXCLUSIVE channels (%+.2fms from %d anchor(s)) — "
-                        "a co-channel station's tick. hf-timestd#22",
-                        station, freq, value, dev, reference, len(anchors),
-                    )
-
-        # Publish what was dropped so the validation gate does not
-        # re-derive scope independently: the two apply different filters
-        # and would otherwise disagree about which measurements are in
-        # play, leaving the gate permanently failed.
-        self._xf_rejected_keys = set(drop_keys)
-
-        if not drop_keys:
-            return list(measurements), []
-
-        kept, rejected = [], []
-        for m in measurements:
-            if (m.station, m.frequency_mhz) in drop_keys:
-                rejected.append(m)
-            else:
-                kept.append(m)
-        return kept, rejected
-
     def _validate_cross_frequency_d_clock(
         self,
         measurements: List[BroadcastMeasurement]
@@ -3218,6 +3074,7 @@ class MultiBroadcastFusion:
                 # Threshold: 5ms tolerance for frequency independence
                 # Physics says D_clock should be identical across frequencies
                 # after the 1/f² ionospheric correction
+                CROSS_FREQ_THRESHOLD_MS = 5.0
                 
                 if max_diff > CROSS_FREQ_THRESHOLD_MS:
                     all_valid = False
