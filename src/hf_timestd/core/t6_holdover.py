@@ -152,3 +152,28 @@ def coast_ruler_intact(
     return abs(
         float(floor_offset_s) - float(floor_offset_at_freeze_s)
     ) <= float(tolerance_s)
+
+
+# What a coast on a NON-fine-stage anchor is worth.  The legacy coarse
+# cascade re-derives an anchor during a T6 outage (tier "T5"), and that
+# is a real anchor -- it asserts its chain delay from config rather than
+# measuring it per edge, so it deserves a far wider claim than the fine
+# stage's.  Same refuse-to-claim constant the bench uses with no floor
+# at all: honest, and wide enough that chrony will never prefer it to a
+# healthy FUSE.
+COARSE_ANCHOR_SIGMA_NS = 25_000_000.0
+
+
+def coast_sigma0_ns(
+    floor_sigma_ns: float, captured_via_tier: Optional[str]
+) -> float:
+    """Sigma to start a coast from, given what produced the anchor.
+
+    chrony adjudicates, so a coast stays AVAILABLE and states its worth
+    rather than going dark -- going dark is us doing chrony's job badly,
+    and it forces the watchdog to restart the recorder, which destroys
+    the very anchor the coast needs.
+    """
+    if captured_via_tier == "T6":
+        return float(floor_sigma_ns)
+    return max(float(floor_sigma_ns), COARSE_ANCHOR_SIGMA_NS)

@@ -618,7 +618,13 @@ class TestHoldoverCoastsInsteadOfWithdrawing:
             offset_s=offset_s, sigma_ns=sigma_ns, n=110, span_s=2.0)
 
     def _cr(self, costas_locked=True, state=T6AuthorityState.AUTHORITATIVE,
-            anchor=object(), rate_sigma_ppm=0.0004):
+            anchor=..., rate_sigma_ppm=0.0004):
+        # A fine-stage anchor: provenance decides the coast's starting
+        # sigma, so it has to be a real one, not a bare sentinel.
+        if anchor is ...:
+            anchor = SimpleNamespace(
+                anchor_rtp=1000, anchor_utc_ns=17869e11,
+                chain_delay_ns=0, captured_via_tier="T6")
         cr = CoreRecorderV2.__new__(CoreRecorderV2)
         cr._t6_calibrator = SimpleNamespace(costas_locked=costas_locked)
         cr._t6_authority = SimpleNamespace(state=state)
@@ -792,3 +798,79 @@ class TestCoastTransitionsAreLoud:
         assert mode is None
         assert "re-based" not in reason
         assert "floor" in reason
+
+
+class TestCoastSurvivesAnchorRecapture:
+    """The arrival-floor offset is expressed RELATIVE TO THE ANCHOR, and
+    _t6_rate_reset deliberately clears the floor on every recapture.  So
+    a freeze reference taken against one anchor is meaningless against
+    the next.  Observed on B4 overnight 2026-08-17: all 9 withdrawals
+    reported "rtp counter discontinuity" when nothing had been re-based —
+    the coast refused, HPPS went dark, and hpps-watchdog restarted the
+    recorder 7 times, each restart recapturing the anchor and
+    invalidating the reference again.
+    """
+
+    def _anchor(self, rtp=1000, tier="T6"):
+        return SimpleNamespace(
+            anchor_rtp=rtp, anchor_utc_ns=17869e11, chain_delay_ns=0,
+            captured_via_tier=tier)
+
+    def _floor(self, offset_s=100.0, sigma_ns=800_000.0):
+        return SimpleNamespace(
+            offset_s=offset_s, sigma_ns=sigma_ns, n=110, span_s=2.0)
+
+    def _cr(self, tier="T6"):
+        cr = CoreRecorderV2.__new__(CoreRecorderV2)
+        cr._t6_calibrator = SimpleNamespace(costas_locked=True)
+        cr._t6_authority = SimpleNamespace(
+            state=T6AuthorityState.DEGRADED)
+        cr._t6_native_anchor = self._anchor(tier=tier)
+        cr._t6_rate_est = SimpleNamespace(
+            current=SimpleNamespace(sigma_ppm=0.0004))
+        return cr
+
+    def test_recapture_refreezes_rather_than_refusing(self):
+        cr = self._cr()
+        cr._t6_publish_mode(self._floor(offset_s=100.0), 1000.0)
+        # New anchor generation: the floor frame legitimately moves.
+        cr._t6_native_anchor = self._anchor(rtp=2000)
+        mode, _s, reason = cr._t6_publish_mode(
+            self._floor(offset_s=3712.5), 1010.0)
+        assert mode == "holdover", reason
+        assert "re-based" not in reason
+
+    def test_recapture_restarts_the_elapsed_clock(self):
+        cr = self._cr()
+        cr._t6_publish_mode(self._floor(), 1000.0)
+        cr._t6_native_anchor = self._anchor(rtp=2000)
+        cr._t6_publish_mode(self._floor(offset_s=3712.5), 5000.0)
+        _m, sigma, _r = cr._t6_publish_mode(
+            self._floor(offset_s=3712.5), 5001.0)
+        # 1 s of coast, not 4001 s.
+        assert sigma == pytest.approx(800_000.0, rel=1e-6)
+
+    def test_a_coarse_anchor_keeps_publishing_but_widens_sigma(self):
+        """chrony decides — so stay available and be honest, rather than
+        going dark and forcing a watchdog restart."""
+        cr = self._cr(tier="T5")
+        mode, sigma, _r = cr._t6_publish_mode(self._floor(), 1000.0)
+        assert mode == "holdover"
+        assert sigma >= 25_000_000.0
+
+    def test_rtp_rebase_within_one_anchor_still_refuses(self):
+        """The check keeps its meaning where it has one: same anchor,
+        jumped floor, is a genuine re-base."""
+        cr = self._cr()
+        cr._t6_publish_mode(self._floor(offset_s=100.0), 1000.0)
+        mode, _s, reason = cr._t6_publish_mode(
+            self._floor(offset_s=3712.5), 1010.0)
+        assert mode is None
+        assert "re-based" in reason
+
+    def test_unchanged_anchor_accumulates_elapsed(self):
+        cr = self._cr()
+        cr._t6_publish_mode(self._floor(), 1000.0)
+        _m, sigma, _r = cr._t6_publish_mode(self._floor(), 1000.0 + 6 * 3600)
+        assert sigma > 800_000.0
+        assert sigma == pytest.approx(800_000.0, rel=1e-3)

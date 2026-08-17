@@ -55,6 +55,10 @@ from ..quota_manager import QuotaManager
 from .stream_recorder_v2 import StreamRecorderV2, StreamRecorderConfig
 from .quality_snapshot import QualitySnapshotWriter
 from .timing_calibrator import TimingCalibrator
+# Module scope: the coast bound is a class attribute, evaluated
+# at import time, and must stay tied to the precision field's
+# saturation point rather than drifting from it.
+from .t6_shm_pair import PRECISION_CEILING
 # NOTE (2026-02-03): Bootstrap functionality migrated into MetrologyEngine.
 # The recorder now always archives immediately. MetrologyEngine's fusion_state
 # handles timing lock internally using wider search windows until locked.
@@ -2911,11 +2915,23 @@ class CoreRecorderV2:
         # legacy cascade gate stays closed; coasting must not
         # re-trigger a fresh disambiguation walk.
 
-    # Coast until the claim is worth less than this.  5 ms sits far
-    # above the ~0.8 ms working sigma and matches the fine_coarse
-    # invariant's scale, so a coast ends because the claim degraded --
-    # not because a timer expired.
-    T6_HOLDOVER_MAX_SIGMA_NS = 5_000_000.0
+    # Coast for as long as we can honestly STATE how bad we are.
+    #
+    # chrony adjudicates, so the feed's obligation is to stay available
+    # and carry a truthful sigma -- not to go dark, which is us doing
+    # chrony's job badly and which forces hpps-watchdog to restart the
+    # recorder, destroying the very anchor the coast rests on.  The one
+    # thing we must never do is publish a claim we cannot express: the
+    # SHM precision field saturates at PRECISION_CEILING, so beyond
+    # 2**PRECISION_CEILING seconds the pushed precision would UNDERSTATE
+    # the uncertainty.  That, not a timer and not a quality target, is
+    # where a coast has to stop.
+    #
+    # An earlier 5 ms bound was wrong twice over: it ended coasts that
+    # were still perfectly honest, and it refused a coarse-cascade
+    # anchor (25 ms) outright — which is exactly the case where staying
+    # available matters most.
+    T6_HOLDOVER_MAX_SIGMA_NS = 2.0 ** PRECISION_CEILING * 1e9  # 62.5 ms
 
     def _t6_floor_snapshot(self):
         """(FloorEstimate|None, mono_now, wall_now) — never raises.
@@ -2965,7 +2981,8 @@ class CoreRecorderV2:
         """
         from hf_timestd.core.t6_anchor_authority import T6AuthorityState
         from hf_timestd.core.t6_holdover import (
-            coast_ruler_intact, holdover_sigma_ns, may_coast,
+            coast_ruler_intact, coast_sigma0_ns, holdover_sigma_ns,
+            may_coast,
         )
 
         cal = getattr(self, '_t6_calibrator', None)
@@ -2981,14 +2998,35 @@ class CoreRecorderV2:
             self._t6_holdover_since = None
             self._t6_holdover_sigma0_ns = None
             self._t6_holdover_floor0_s = None
+            self._t6_holdover_anchor_id = None
             return "live", None, "ok"
 
-        # Freeze the reference the coast is measured against, once.
-        if getattr(self, '_t6_holdover_since', None) is None \
-                and floor is not None:
+        # The freeze reference is ANCHOR-SCOPED.  Arrival-floor offsets
+        # are expressed relative to the anchor and ``_t6_rate_reset``
+        # deliberately clears the floor on every recapture, so a
+        # reference taken against one anchor says nothing about the
+        # next.  Comparing across generations reported every ordinary
+        # recapture as an RTP re-base: on B4 overnight 2026-08-17 all 9
+        # withdrawals said "the ruler was re-based" when nothing had
+        # been, the coast refused, HPPS went dark, and hpps-watchdog
+        # restarted the recorder 7 times -- each restart recapturing the
+        # anchor and invalidating the reference again.
+        anchor = getattr(self, '_t6_native_anchor', None)
+        anchor_id = None if anchor is None else (
+            getattr(anchor, 'anchor_rtp', None),
+            getattr(anchor, 'anchor_utc_ns', None),
+            getattr(anchor, 'captured_via_tier', None),
+        )
+        if floor is not None and (
+                getattr(self, '_t6_holdover_since', None) is None
+                or getattr(self, '_t6_holdover_anchor_id', None)
+                != anchor_id):
             self._t6_holdover_since = float(mono_now)
-            self._t6_holdover_sigma0_ns = float(floor.sigma_ns)
+            self._t6_holdover_sigma0_ns = coast_sigma0_ns(
+                floor.sigma_ns, getattr(anchor, 'captured_via_tier', None)
+            )
             self._t6_holdover_floor0_s = float(floor.offset_s)
+            self._t6_holdover_anchor_id = anchor_id
 
         since = getattr(self, '_t6_holdover_since', None)
         sigma0 = getattr(self, '_t6_holdover_sigma0_ns', None)
@@ -3013,7 +3051,7 @@ class CoreRecorderV2:
                 "against (%s)" % cause
             )
         ok, reason = may_coast(
-            anchor_frozen=getattr(self, '_t6_native_anchor', None) is not None,
+            anchor_frozen=anchor is not None,
             rtp_continuous=coast_ruler_intact(floor.offset_s, floor0),
             sigma_ns=sigma_ns,
             max_sigma_ns=self.T6_HOLDOVER_MAX_SIGMA_NS,

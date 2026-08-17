@@ -10,6 +10,7 @@ import pytest
 
 from hf_timestd.core.t6_holdover import (
     coast_ruler_intact,
+    coast_sigma0_ns,
     holdover_named_second,
     holdover_sigma_ns,
     may_coast,
@@ -210,3 +211,22 @@ class TestRulerIntact:
         """Without a recorded freeze point there is nothing to compare,
         so the coast cannot be shown to be sound."""
         assert coast_ruler_intact(100.0, None) is False
+
+
+class TestCoastSigmaByAnchorProvenance:
+    """chrony adjudicates, so a coast stays AVAILABLE and states its
+    worth rather than going dark.  A coarse cascade anchor is a real
+    anchor — it just deserves a much wider claim than the fine stage's."""
+
+    def test_fine_stage_anchor_carries_the_floor_sigma(self):
+        assert coast_sigma0_ns(800_000.0, "T6") == pytest.approx(800_000.0)
+
+    def test_coarse_anchor_is_widened_to_the_refuse_to_claim_bound(self):
+        assert coast_sigma0_ns(800_000.0, "T5") >= 25_000_000.0
+
+    def test_widening_never_narrows_an_already_worse_floor(self):
+        assert coast_sigma0_ns(50_000_000.0, "T5") == pytest.approx(
+            50_000_000.0)
+
+    def test_unknown_provenance_is_treated_as_coarse(self):
+        assert coast_sigma0_ns(800_000.0, None) >= 25_000_000.0
