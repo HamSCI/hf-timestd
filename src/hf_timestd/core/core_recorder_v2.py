@@ -4240,7 +4240,19 @@ class CoreRecorderV2:
                         # its arrival here, ~one batch (20 ms at 96 kHz).
                         # The structural half-second is the dominant term
                         # and is removed exactly.
-                        _sys_at_edge = _push_wall
+                        # ---- hf-timestd#18 ----
+                        # The RTP arithmetic below is exact (GPSDO-locked
+                        # counter), but it is anchored to _push_wall -- a wall
+                        # clock read at PUSH time -- while rtp_buf[-1] ARRIVED
+                        # earlier, with variable latency.  So it assumes
+                        # host_time(rtp_buf[-1]) == _push_wall, and the
+                        # difference went straight into system_time: measured
+                        # 13-45 ms on AC0G-B4 2026-08-16, tracking push
+                        # lateness with slope -1, while the SAME anchor read
+                        # through NativeAnchorBench was accurate to 0.8 ms.
+                        # Kept as the fallback, and as the before/after term
+                        # in the seam log.
+                        _legacy_sys_at_edge = _push_wall
                         _pair_fallback = None
                         try:
                             _rtp_buf = getattr(
@@ -4258,13 +4270,52 @@ class CoreRecorderV2:
                                 # not what we think -- fall back rather than
                                 # publish nonsense.
                                 if 0 <= _delta <= 5 * _sr:
-                                    _sys_at_edge = _push_wall - _delta / _sr
+                                    _legacy_sys_at_edge = (
+                                        _push_wall - _delta / _sr
+                                    )
                                 else:
                                     _pair_fallback = (
                                         "delta %d out of range" % _delta
                                     )
                         except Exception as _e:
                             _pair_fallback = "%s: %s" % (type(_e).__name__, _e)
+
+                        # The least-delayed arrival in a rolling window is the
+                        # honest monotonic->UTC map -- the same estimate
+                        # NativeAnchorBench consumes.  Inverting it says when,
+                        # on the host clock, the edge occurred, with no
+                        # dependence on when this push happens to run.
+                        # record=False: this path runs once per PPS edge, 10x
+                        # the judge's tick, and must not shorten the sigma
+                        # horizon the bench publishes.
+                        _floor = None
+                        _mono_now = 0.0
+                        _wall_now = _push_wall
+                        try:
+                            _tracker = getattr(self, '_t6_arrival_floor', None)
+                            _pairing = getattr(self, '_t5_pairing', None)
+                            if _tracker is not None and _pairing is not None:
+                                # Adjacent reads: this pair IS the
+                                # CLOCK_MONOTONIC->CLOCK_REALTIME offset.
+                                _mono_now = _pairing.now_mono()
+                                _wall_now = time.time()
+                                _floor = _tracker.estimate(
+                                    _mono_now, record=False
+                                )
+                        except Exception:  # noqa: BLE001 — never fatal
+                            _floor = None
+                        if _floor is None and _pair_fallback is None:
+                            _pair_fallback = "arrival floor has no estimate"
+
+                        from .t6_shm_pair import t6_shm_system_time
+                        _shm_pair = t6_shm_system_time(
+                            edge_label_utc_s=pps_firing_utc_ns / 1e9,
+                            floor=_floor,
+                            mono_now=_mono_now,
+                            wall_now=_wall_now,
+                            fallback_system_time=_legacy_sys_at_edge,
+                        )
+                        _sys_at_edge = _shm_pair.system_time
 
                         # Falling back means system_time is read at push
                         # again -- the ~0.5 s defect returns, silently, and
@@ -4277,19 +4328,34 @@ class CoreRecorderV2:
                                     ) > 300.0:
                                 self._t6_pair_fallback_last_warn = _now_m
                                 logger.warning(
-                                    "T6 SHM pair: could not recover the host "
-                                    "clock at the edge (%s) -- falling back "
-                                    "to push-time system_time, which "
-                                    "re-introduces the MF detection latency "
-                                    "(~0.5 s) as an apparent clock offset. "
-                                    "See hf-timestd#7.",
+                                    "T6 SHM pair: no arrival-floor estimate "
+                                    "(%s) -- falling back to the push-time "
+                                    "construction, which republishes stream "
+                                    "arrival latency (13-45 ms measured on "
+                                    "B4) as clock error; if the RTP interval "
+                                    "was also unavailable it re-introduces "
+                                    "the whole MF detection latency (~0.5 s). "
+                                    "Precision widened to the %.0f ms "
+                                    "transport bound so chrony weighs it "
+                                    "accordingly. See hf-timestd#18, #7.",
                                     _pair_fallback,
+                                    _shm_pair.sigma_ns / 1e6,
                                 )
                         # ---- end fix ----
+                        # precision is DERIVED from the floor's measured
+                        # sigma, never asserted.  This used to be a hardcoded
+                        # -14 (61 us) regardless of what the pair was worth;
+                        # against B4's measured 1.4 ms scatter that is a 26x
+                        # overclaim, and it is where the "+/- 55us" column in
+                        # `chronyc sources` comes from -- a number that has
+                        # now caused three separate misdiagnoses by looking
+                        # like a measurement.  Same derivation FUSE uses, so
+                        # chrony can weigh the two feeds against each other
+                        # honestly.  hf-timestd#18.
                         self._t6_shm.update(
                             reference_time=ref_time_ns / 1e9,
                             system_time=_sys_at_edge,
-                            precision=-14,
+                            precision=_shm_pair.precision,
                         )
                         # Structural health signal.  push_lag is the MF's
                         # detection latency (~N/sample_rate, ~455 ms at
@@ -4301,12 +4367,24 @@ class CoreRecorderV2:
                         if (_now_m - getattr(
                                 self, '_t6_seam_last_log', 0.0)) > 300.0:
                             self._t6_seam_last_log = _now_m
+                            # offset_legacy is what the pre-#18 construction
+                            # WOULD have published for this same edge.  Keep
+                            # both terms: the fix is only demonstrated by the
+                            # pair, and offset_legacy tracking push_lag while
+                            # offset_to_chrony does not IS the proof.
                             logger.info(
                                 "T6 SHM pair: push_lag=%.1f ms "
                                 "offset_to_chrony=%.3f ms "
+                                "offset_legacy=%.3f ms src=%s "
+                                "precision=%d sigma=%.3f ms "
                                 "chain_delay=%d ns residual=%d ns",
                                 (_push_wall - pps_firing_utc_ns / 1e9) * 1e3,
                                 (ref_time_ns / 1e9 - _sys_at_edge) * 1e3,
+                                (ref_time_ns / 1e9
+                                 - _legacy_sys_at_edge) * 1e3,
+                                _shm_pair.source,
+                                _shm_pair.precision,
+                                _shm_pair.sigma_ns / 1e6,
                                 int(effective_chain_delay),
                                 int(self._t6_last_local_minus_source_ns),
                             )

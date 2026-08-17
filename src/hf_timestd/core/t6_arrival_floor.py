@@ -88,15 +88,29 @@ class ArrivalFloorTracker:
         """Record one arrival's (label_utc - arrival_mono) offset."""
         self._window.append((float(mono), float(offset_s)))
 
-    def estimate(self, mono_now: float) -> Optional[FloorEstimate]:
-        """The least-delayed arrival still inside the window."""
+    def estimate(
+        self, mono_now: float, record: bool = True
+    ) -> Optional[FloorEstimate]:
+        """The least-delayed arrival still inside the window.
+
+        ``record=False`` returns the same estimate WITHOUT folding it
+        into the sigma history.  The history is a fixed-length window
+        (``HISTORY_LEN``), so its horizon is set by how often it is
+        appended to: at the judge's 10 s tick it spans ~5 minutes.  A
+        second consumer sampling faster — the HPPS SHM push runs once
+        per PPS edge, 10x the judge's rate — would silently shorten that
+        horizon to ~30 s and change the sigma the BENCH publishes.
+        Readers that are not the judge pass ``record=False`` so sigma
+        keeps measuring what it says it measures.
+        """
         while self._window and mono_now - self._window[0][0] > self.window_s:
             self._window.popleft()
         if not self._window:
             return None
         offsets = [o for _m, o in self._window]
         floor = max(offsets)
-        self._history.append(floor)
+        if record:
+            self._history.append(floor)
         return FloorEstimate(
             offset_s=floor,
             sigma_ns=self._sigma_ns(),

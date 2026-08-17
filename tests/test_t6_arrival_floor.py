@@ -271,3 +271,29 @@ def test_anchor_recapture_also_resets_the_arrival_floor():
     rec._t6_rate_reset("anchor recaptured")
 
     assert rec._t6_arrival_floor.estimate(100.0) is None
+
+
+def test_record_false_does_not_shorten_the_sigma_horizon():
+    """hf-timestd#18: the HPPS push reads the floor 10x more often than
+    the judge.  If those reads folded into the history the bench's
+    published sigma would quietly start measuring a ~30 s window instead
+    of ~5 minutes."""
+    t = ArrivalFloorTracker(window_s=10.0)
+    for i in range(5):
+        t.note(0.100 + i * 1e-4, 100.0 + i)
+        t.estimate(100.0 + i)                      # judge-rate, recorded
+    recorded = list(t._history)
+
+    for i in range(50):                            # push-rate, not recorded
+        assert t.estimate(104.0, record=False) is not None
+    assert list(t._history) == recorded
+
+
+def test_record_false_returns_the_same_estimate():
+    t = ArrivalFloorTracker(window_s=10.0)
+    t.note(0.100, 100.0)
+    t.note(0.102, 100.5)
+    peeked = t.estimate(101.0, record=False)
+    recorded = t.estimate(101.0)
+    assert peeked.offset_s == recorded.offset_s
+    assert peeked.n == recorded.n
