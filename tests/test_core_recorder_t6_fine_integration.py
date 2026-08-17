@@ -601,3 +601,182 @@ class TestHppsWithdrawsInsteadOfCoasting:
         with caplog.at_level(logging.WARNING):
             cr._t6_hpps_publishable()
         assert any("UNLOCKED" in r.getMessage() for r in caplog.records)
+
+
+class TestHoldoverCoastsInsteadOfWithdrawing:
+    """Growing-sigma coast (successor to the #14 abrupt withdraw).
+
+    Losing carrier lock stops us LEARNING; it does not invalidate the
+    anchor.  The RTP counter is GPSDO-disciplined, so a frozen anchor
+    keeps labelling correctly and only our uncertainty grows — measured
+    at 0.0004 ppm on AC0G-B4, i.e. 1.44 us/hour.  Going dark through a
+    six-hour storm throws away a clock that drifted 8.6 us.
+    """
+
+    def _floor(self, offset_s=100.0, sigma_ns=800_000.0):
+        return SimpleNamespace(
+            offset_s=offset_s, sigma_ns=sigma_ns, n=110, span_s=2.0)
+
+    def _cr(self, costas_locked=True, state=T6AuthorityState.AUTHORITATIVE,
+            anchor=object(), rate_sigma_ppm=0.0004):
+        cr = CoreRecorderV2.__new__(CoreRecorderV2)
+        cr._t6_calibrator = SimpleNamespace(costas_locked=costas_locked)
+        cr._t6_authority = SimpleNamespace(state=state)
+        cr._t6_native_anchor = anchor
+        cr._t6_rate_est = SimpleNamespace(
+            current=SimpleNamespace(sigma_ppm=rate_sigma_ppm))
+        return cr
+
+    def test_healthy_state_is_live(self):
+        cr = self._cr()
+        mode, _sigma, _r = cr._t6_publish_mode(self._floor(), 1000.0)
+        assert mode == "live"
+
+    def test_degraded_with_a_frozen_anchor_coasts(self):
+        cr = self._cr(state=T6AuthorityState.DEGRADED)
+        cr._t6_publish_mode(self._floor(), 1000.0)          # freeze point
+        mode, sigma, _r = cr._t6_publish_mode(self._floor(), 1060.0)
+        assert mode == "holdover"
+        assert sigma == pytest.approx(800_000.0, rel=1e-3)
+
+    def test_a_storm_length_coast_barely_widens_sigma(self):
+        """Six hours of sferics must not meaningfully degrade the claim."""
+        cr = self._cr(state=T6AuthorityState.DEGRADED)
+        cr._t6_publish_mode(self._floor(), 1000.0)
+        mode, sigma, _r = cr._t6_publish_mode(self._floor(), 1000.0 + 6 * 3600)
+        assert mode == "holdover"
+        assert sigma == pytest.approx(800_000.0, rel=1e-3)
+        assert sigma > 800_000.0
+
+    def test_carrier_loss_alone_coasts_rather_than_going_dark(self):
+        """The #14 case, now handled by coasting: the authority can read
+        AUTHORITATIVE for a dwell after the carrier drops."""
+        cr = self._cr(costas_locked=False)
+        cr._t6_publish_mode(self._floor(), 1000.0)
+        mode, _s, _r = cr._t6_publish_mode(self._floor(), 1030.0)
+        assert mode == "holdover"
+
+    def test_no_frozen_anchor_still_refuses(self):
+        cr = self._cr(state=T6AuthorityState.UNLOCKED, anchor=None)
+        mode, _s, reason = cr._t6_publish_mode(self._floor(), 1000.0)
+        assert mode is None
+        assert "anchor" in reason
+
+    def test_rtp_rebase_refuses_however_short_the_coast(self):
+        cr = self._cr(state=T6AuthorityState.DEGRADED)
+        cr._t6_publish_mode(self._floor(offset_s=100.0), 1000.0)
+        mode, _s, reason = cr._t6_publish_mode(
+            self._floor(offset_s=3712.5), 1001.0)
+        assert mode is None
+        assert "rtp" in reason.lower()
+
+    def test_returning_to_health_clears_the_freeze_point(self):
+        cr = self._cr(state=T6AuthorityState.DEGRADED)
+        cr._t6_publish_mode(self._floor(), 1000.0)
+        cr._t6_authority = SimpleNamespace(
+            state=T6AuthorityState.AUTHORITATIVE)
+        assert cr._t6_publish_mode(self._floor(), 1010.0)[0] == "live"
+        # A later coast must measure from the NEW freeze, not the old one.
+        cr._t6_authority = SimpleNamespace(state=T6AuthorityState.DEGRADED)
+        cr._t6_publish_mode(self._floor(), 1020.0)
+        _m, sigma, _r = cr._t6_publish_mode(self._floor(), 1021.0)
+        assert sigma == pytest.approx(800_000.0, rel=1e-6)
+
+    def test_publishable_stays_true_for_live_and_holdover(self):
+        assert self._cr()._t6_hpps_publishable() is True
+
+    def test_publishable_false_without_an_anchor(self):
+        cr = self._cr(state=T6AuthorityState.UNLOCKED, anchor=None)
+        assert cr._t6_hpps_publishable() is False
+
+
+class TestHoldoverPushNamesTheSecondFromTheAnchor:
+    """The coast must never build its pair from an edge detected during
+    the outage — that is precisely hf-timestd#14.  It names the second
+    from the frozen anchor via the arrival floor instead."""
+
+    def _cr(self, offset_s=100.0, mono=900.5, sigma_ns=800_000.0):
+        cr = CoreRecorderV2.__new__(CoreRecorderV2)
+        cr._t6_native_anchor = SimpleNamespace(chain_delay_ns=0)
+        cr._t6_arrival_floor = SimpleNamespace(
+            estimate=lambda m, record=True: SimpleNamespace(
+                offset_s=offset_s, sigma_ns=sigma_ns, n=110, span_s=2.0))
+        cr._t5_pairing = SimpleNamespace(now_mono=lambda: mono)
+        cr._t6_holdover_sigma_ns = sigma_ns
+        cr.pushes = []
+        cr._t6_shm = SimpleNamespace(
+            update=lambda **kw: cr.pushes.append(kw))
+        return cr
+
+    def test_reference_time_is_the_named_second_not_an_edge(self):
+        cr = self._cr(offset_s=100.0, mono=900.5)
+        cr._t6_push_holdover()
+        assert len(cr.pushes) == 1
+        assert cr.pushes[0]["reference_time"] == 1000.0
+
+    def test_pushes_once_per_second_of_coast(self):
+        cr = self._cr(offset_s=100.0, mono=900.5)
+        cr._t6_push_holdover()
+        cr._t6_push_holdover()
+        cr._t6_push_holdover()
+        assert len(cr.pushes) == 1
+
+    def test_advances_when_the_named_second_advances(self):
+        cr = self._cr(offset_s=100.0, mono=900.5)
+        cr._t6_push_holdover()
+        cr._t5_pairing = SimpleNamespace(now_mono=lambda: 901.5)
+        cr._t6_push_holdover()
+        assert [p["reference_time"] for p in cr.pushes] == [1000.0, 1001.0]
+
+    def test_precision_reflects_the_growing_holdover_sigma(self):
+        tight = self._cr(sigma_ns=800_000.0)
+        tight._t6_push_holdover()
+        wide = self._cr(sigma_ns=4_000_000.0)
+        wide._t6_push_holdover()
+        assert wide.pushes[0]["precision"] > tight.pushes[0]["precision"]
+
+    def test_silent_without_an_arrival_floor(self):
+        cr = self._cr()
+        cr._t6_arrival_floor = SimpleNamespace(
+            estimate=lambda m, record=True: None)
+        cr._t6_push_holdover()
+        assert cr.pushes == []
+
+
+class TestCoastTransitionsAreLoud:
+    """expose-don't-correct: dropping from a measured clock to an
+    extrapolated one is a state change an operator must see."""
+
+    def _cr(self, state=T6AuthorityState.DEGRADED):
+        cr = CoreRecorderV2.__new__(CoreRecorderV2)
+        cr._t6_calibrator = SimpleNamespace(costas_locked=True)
+        cr._t6_authority = SimpleNamespace(state=state)
+        cr._t6_native_anchor = SimpleNamespace(chain_delay_ns=0)
+        cr._t6_rate_est = SimpleNamespace(
+            current=SimpleNamespace(sigma_ppm=0.0004))
+        cr._t6_arrival_floor = SimpleNamespace(
+            estimate=lambda m, record=True: SimpleNamespace(
+                offset_s=100.0, sigma_ns=800_000.0, n=110, span_s=2.0))
+        cr._t5_pairing = SimpleNamespace(now_mono=lambda: 1000.0)
+        return cr
+
+    def test_entering_a_coast_says_so_once(self, caplog):
+        import logging
+        cr = self._cr()
+        with caplog.at_level(logging.WARNING):
+            cr._t6_hpps_publishable()
+            cr._t6_hpps_publishable()
+        coasting = [r for r in caplog.records
+                    if "COASTING" in r.getMessage()]
+        assert len(coasting) == 1
+        assert "sigma" in coasting[0].getMessage()
+
+    def test_leaving_a_coast_says_so(self, caplog):
+        import logging
+        cr = self._cr()
+        cr._t6_hpps_publishable()
+        cr._t6_authority = SimpleNamespace(
+            state=T6AuthorityState.AUTHORITATIVE)
+        with caplog.at_level(logging.WARNING):
+            cr._t6_hpps_publishable()
+        assert any("coast ended" in r.getMessage() for r in caplog.records)

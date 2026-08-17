@@ -84,7 +84,7 @@ class ShmPair:
     sigma_ns: float
 
 
-def _precision_from_sigma_ns(sigma_ns: float) -> int:
+def precision_from_sigma_ns(sigma_ns: float) -> int:
     """log2(seconds), clamped — the derivation FUSE uses.
 
     ``int()`` truncates toward zero, so a negative exponent rounds to
@@ -117,7 +117,7 @@ def t6_shm_system_time(
     if floor is None:
         return ShmPair(
             system_time=float(fallback_system_time),
-            precision=_precision_from_sigma_ns(FALLBACK_SIGMA_NS),
+            precision=precision_from_sigma_ns(FALLBACK_SIGMA_NS),
             source="pushwall",
             sigma_ns=FALLBACK_SIGMA_NS,
         )
@@ -125,7 +125,7 @@ def t6_shm_system_time(
     mono_at_edge = float(edge_label_utc_s) - float(floor.offset_s)
     return ShmPair(
         system_time=mono_at_edge + (float(wall_now) - float(mono_now)),
-        precision=_precision_from_sigma_ns(floor.sigma_ns),
+        precision=precision_from_sigma_ns(floor.sigma_ns),
         source="floor",
         sigma_ns=float(floor.sigma_ns),
     )

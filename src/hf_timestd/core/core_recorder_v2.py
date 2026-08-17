@@ -2911,6 +2911,170 @@ class CoreRecorderV2:
         # legacy cascade gate stays closed; coasting must not
         # re-trigger a fresh disambiguation walk.
 
+    # Coast until the claim is worth less than this.  5 ms sits far
+    # above the ~0.8 ms working sigma and matches the fine_coarse
+    # invariant's scale, so a coast ends because the claim degraded --
+    # not because a timer expired.
+    T6_HOLDOVER_MAX_SIGMA_NS = 5_000_000.0
+
+    def _t6_floor_snapshot(self):
+        """(FloorEstimate|None, mono_now, wall_now) — never raises.
+
+        ``mono_now`` and ``wall_now`` are read ADJACENTLY: that pair is
+        the CLOCK_MONOTONIC→CLOCK_REALTIME offset, and everything the
+        coast publishes is expressed through it.
+
+        ``record=False``: this is not the judge, and folding these
+        reads into the floor's fixed-length sigma history would shorten
+        the horizon the bench publishes.
+        """
+        pairing = getattr(self, '_t5_pairing', None)
+        tracker = getattr(self, '_t6_arrival_floor', None)
+        try:
+            mono_now = pairing.now_mono() if pairing is not None else 0.0
+            wall_now = time.time()
+        except Exception:  # noqa: BLE001 — gate must never die
+            return None, 0.0, time.time()
+        if tracker is None:
+            return None, mono_now, wall_now
+        try:
+            floor = tracker.estimate(mono_now, record=False)
+        except Exception:  # noqa: BLE001
+            floor = None
+        return floor, mono_now, wall_now
+
+    def _t6_publish_mode(self, floor, mono_now):
+        """(mode, sigma_ns, reason) — mode is "live", "holdover" or None.
+
+        Losing carrier lock stops us LEARNING; it does not invalidate
+        the anchor.  The anchor is a (rtp, utc) pair and the RTP counter
+        is GPSDO-disciplined, so a frozen anchor keeps labelling
+        correctly and only our uncertainty about the RATE grows —
+        measured on AC0G-B4 at 0.0004 ppm, i.e. 1.44 us/hour.  A
+        six-hour storm costs 8.6 us.  Going dark through that throws
+        away a good clock, so we coast and say what it is worth.
+
+        ⚠ This is NOT a return to hf-timestd#14.  That coast kept
+        deriving fresh chain delays from noise and publishing them, so
+        each re-lock landed somewhere new and chrony saw a 203 ms
+        standard deviation.  This one admits NO new measurement: the
+        anchor is frozen at the last validated edge, the second is
+        named from the anchor rather than from an edge detected during
+        the outage, and the coast is abandoned outright if the RTP
+        counter is re-based underneath it.
+        """
+        from hf_timestd.core.t6_anchor_authority import T6AuthorityState
+        from hf_timestd.core.t6_holdover import (
+            coast_ruler_intact, holdover_sigma_ns, may_coast,
+        )
+
+        cal = getattr(self, '_t6_calibrator', None)
+        costas = getattr(cal, 'costas_locked', None)
+        auth = getattr(self, '_t6_authority', None)
+        state = getattr(auth, 'state', None)
+        # ``costas_locked is None`` means the legacy (non-MF)
+        # calibrator, which has no Costas loop — stay permissive.
+        healthy = costas is not False and (
+            state is None or state is T6AuthorityState.AUTHORITATIVE
+        )
+        if healthy:
+            self._t6_holdover_since = None
+            self._t6_holdover_sigma0_ns = None
+            self._t6_holdover_floor0_s = None
+            return "live", None, "ok"
+
+        # Freeze the reference the coast is measured against, once.
+        if getattr(self, '_t6_holdover_since', None) is None \
+                and floor is not None:
+            self._t6_holdover_since = float(mono_now)
+            self._t6_holdover_sigma0_ns = float(floor.sigma_ns)
+            self._t6_holdover_floor0_s = float(floor.offset_s)
+
+        since = getattr(self, '_t6_holdover_since', None)
+        sigma0 = getattr(self, '_t6_holdover_sigma0_ns', None)
+        floor0 = getattr(self, '_t6_holdover_floor0_s', None)
+        rate = getattr(getattr(self, '_t6_rate_est', None), 'current', None)
+
+        elapsed = 0.0 if since is None else max(0.0, float(mono_now) - since)
+        sigma_ns = holdover_sigma_ns(
+            sigma0 or 0.0, getattr(rate, 'sigma_ppm', None), elapsed
+        )
+        intact = floor is not None and coast_ruler_intact(
+            floor.offset_s, floor0
+        )
+        ok, reason = may_coast(
+            anchor_frozen=getattr(self, '_t6_native_anchor', None) is not None,
+            rtp_continuous=intact,
+            sigma_ns=sigma_ns,
+            max_sigma_ns=self.T6_HOLDOVER_MAX_SIGMA_NS,
+        )
+        cause = "authority %s, costas %s" % (
+            "unknown" if state is None else state.value,
+            "unlocked" if costas is False else "locked",
+        )
+        if ok:
+            # A permitted coast reports WHY it is coasting, not that the
+            # preconditions passed ("ok" tells an operator nothing).
+            return "holdover", sigma_ns, cause
+        # A refused one carries both: the precondition that blocked the
+        # coast, and the state that got us here.
+        return None, sigma_ns, "%s (%s)" % (reason, cause)
+
+    def _t6_push_holdover(self) -> None:
+        """Feed chrony from the FROZEN anchor, with no edge at all.
+
+        A coast has no validated edge to name a second from, and must
+        not borrow an unvalidated one — accepting edges detected during
+        the outage is what made hf-timestd#14 a 203 ms falseticker.
+        The frozen anchor plus the arrival floor are sufficient: the
+        floor maps monotonic into the anchor's label space, so the most
+        recent second boundary can be named directly and located on the
+        host clock by the same inversion the live path uses.
+
+        Once per named second, so chrony sees a normal 1 Hz refclock
+        rather than a stalled one.  Never raises — the caller is the
+        sample hot path.
+        """
+        from hf_timestd.core.t6_holdover import holdover_named_second
+        from hf_timestd.core.t6_shm_pair import (
+            precision_from_sigma_ns, t6_shm_system_time,
+        )
+        try:
+            floor, mono_now, wall_now = self._t6_floor_snapshot()
+            anchor = getattr(self, '_t6_native_anchor', None)
+            if floor is None or anchor is None:
+                return
+            named = holdover_named_second(
+                floor.offset_s, mono_now, anchor.chain_delay_ns
+            )
+            if named == getattr(self, '_t6_holdover_last_second', None):
+                return
+            pair = t6_shm_system_time(
+                edge_label_utc_s=float(named),
+                floor=floor,
+                mono_now=mono_now,
+                wall_now=wall_now,
+                fallback_system_time=wall_now,
+            )
+            # The coast's own sigma, not the floor's: the floor cannot
+            # see how long we have been extrapolating.
+            sigma_ns = getattr(self, '_t6_holdover_sigma_ns', None)
+            precision = precision_from_sigma_ns(
+                pair.sigma_ns if sigma_ns is None else sigma_ns
+            )
+            self._t6_shm.update(
+                reference_time=float(named),
+                system_time=pair.system_time,
+                precision=precision,
+            )
+            self._t6_holdover_last_second = named
+            self._t6_shm_push_count = getattr(
+                self, '_t6_shm_push_count', 0) + 1
+        except Exception as e:  # noqa: BLE001 — hot path, never fatal
+            if not getattr(self, '_t6_holdover_warned', False):
+                self._t6_holdover_warned = True
+                logger.warning(f"T6 holdover push failed: {e}")
+
     def _t6_hpps_publishable(self) -> bool:
         """Whether the HPPS chrony-SHM refclock may be fed right now.
 
@@ -2941,22 +3105,32 @@ class CoreRecorderV2:
 
         Transitions are logged once each way — never per push.
         """
-        from hf_timestd.core.t6_anchor_authority import T6AuthorityState
-
-        reason = None
-        cal = getattr(self, '_t6_calibrator', None)
-        # ``None`` means the legacy (non-MF) calibrator, which has no
-        # Costas loop — stay permissive rather than silencing it.
-        if getattr(cal, 'costas_locked', None) is False:
-            reason = "costas unlocked (carrier-recovery excursion)"
-        else:
-            auth = getattr(self, '_t6_authority', None)
-            state = getattr(auth, 'state', None)
-            if (state is not None
-                    and state is not T6AuthorityState.AUTHORITATIVE):
-                reason = "anchor authority %s" % state.value
-
-        ok = reason is None
+        floor, mono_now, _wall = self._t6_floor_snapshot()
+        mode, sigma_ns, reason = self._t6_publish_mode(floor, mono_now)
+        # The push path reads these: which construction to use, and what
+        # the coast is currently worth.
+        prev_mode = getattr(self, '_t6_publish_mode_last', "live")
+        self._t6_publish_mode_last = mode
+        self._t6_holdover_sigma_ns = sigma_ns
+        # Entering or leaving a coast is a state change, not a detail:
+        # the station stops publishing a MEASURED time and starts
+        # publishing an EXTRAPOLATED one.  Say so, once per transition.
+        if mode != prev_mode:
+            if mode == "holdover":
+                logger.warning(
+                    "T6 HPPS: COASTING on the frozen anchor — %s. The "
+                    "RTP counter is GPSDO-disciplined, so the anchor "
+                    "still labels correctly; sigma %.3f ms and growing "
+                    "at the measured residual rate. This is holdover, "
+                    "not a measurement — no new edges are accepted.",
+                    reason, (sigma_ns or 0.0) / 1e6,
+                )
+            elif prev_mode == "holdover" and mode == "live":
+                logger.warning(
+                    "T6 HPPS: coast ended — carrier locked and anchor "
+                    "authority AUTHORITATIVE; measured edges again"
+                )
+        ok = mode is not None
         # Default True, not None: publishing is the healthy steady state,
         # so a clean first call has nothing to "resume" and must stay
         # silent.  A first call that is already faulted still says so.
@@ -4162,9 +4336,20 @@ class CoreRecorderV2:
                     and self._t6_native_anchor is not None
                     and self._t6_hpps_publishable()):
                 try:
+                    # A coast NEVER takes the edge-driven path below.
+                    # During DEGRADED with the carrier still locked the
+                    # calibrator keeps producing edges, and those are
+                    # exactly the unvalidated edges that made
+                    # hf-timestd#14 a falseticker.  Name the second from
+                    # the frozen anchor instead, and hold edge_advanced
+                    # False so the whole edge construction is skipped.
+                    _mode = getattr(self, '_t6_publish_mode_last', 'live')
+                    if _mode != 'live':
+                        self._t6_push_holdover()
                     last_edge_rtp = getattr(self._t6_calibrator, '_last_edge_rtp', None)
                     edge_advanced = (
-                        last_edge_rtp is not None
+                        _mode == 'live'
+                        and last_edge_rtp is not None
                         and last_edge_rtp != self._t6_last_pushed_rtp
                     )
                     if edge_advanced:
