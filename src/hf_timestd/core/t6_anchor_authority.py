@@ -113,6 +113,9 @@ class T6AnchorAuthority:
         self._now = now
         self._state = T6AuthorityState.ACQUIRING
         self._anchor: Optional[NativeAnchor] = None
+        # What the last invariant check MEASURED (see ``_check``).
+        # Public and read-only to callers; empty until the first check.
+        self.last_check_metrics: dict = {}
         # (edge_rtp, edge_subsample) of the last estimate used as the
         # periodicity reference — kept in raw counter form, NOT as a
         # mod-SR phase, so the check survives the 32-bit RTP wrap.
@@ -176,6 +179,14 @@ class T6AnchorAuthority:
         named_second_utc: Optional[int],
     ) -> tuple:
         v = []
+        # Every invariant records WHAT IT MEASURED, not just whether it
+        # tripped.  A violation name alone cannot distinguish a 5.1 ms
+        # breach from a 500 ms one, on the check that decides whether
+        # the station's highest timing tier may publish at all --
+        # 2026-08-17: `fine_coarse` fired five times in a day and the
+        # magnitude was unobtainable from any log or status surface.
+        # Read via ``last_check_metrics``; the transition log prints it.
+        metrics = {}
         phase = self.edge_phase_rtp(est)
         if self._prev_edge is not None:
             d_ns = (
@@ -183,6 +194,7 @@ class T6AnchorAuthority:
                 / self.sample_rate_hz
                 * 1e9
             )
+            metrics["edge_period_us"] = d_ns / 1e3
             if d_ns > self.edge_period_tolerance_ns:
                 v.append("edge_period")
         # fine_coarse stays a phase comparison: the MF coarse offset is
@@ -196,10 +208,13 @@ class T6AnchorAuthority:
                 / self.sample_rate_hz
                 * 1e3
             )
+            metrics["fine_coarse_ms"] = d_ms
+            metrics["fine_coarse_max_ms"] = self.fine_coarse_max_ms
             if d_ms > self.fine_coarse_max_ms:
                 v.append("fine_coarse")
         if named_second_utc is None:
             v.append("naming_unavailable")
+        self.last_check_metrics = metrics
         return tuple(v)
 
     def _build_anchor(

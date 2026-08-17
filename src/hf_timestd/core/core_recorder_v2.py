@@ -2849,11 +2849,23 @@ class CoreRecorderV2:
         from hf_timestd.core.t6_anchor_authority import T6AuthorityState
         prev = decision.previous_state
         if decision.state is not prev:
+            # Carry the MEASURED magnitudes, not just the violation
+            # names: a bare "fine_coarse" cannot tell a 5.1 ms breach
+            # from a 500 ms one, and this transition is what gates the
+            # station's highest timing tier.
+            _metrics = getattr(
+                getattr(self, '_t6_authority', None),
+                'last_check_metrics', None,
+            ) or {}
+            _measured = " ".join(
+                f"{k}={v:.3f}" for k, v in sorted(_metrics.items())
+            )
             logger.warning(
-                "T6 anchor authority: %s → %s%s",
+                "T6 anchor authority: %s → %s%s%s",
                 prev.value, decision.state.value,
                 (f" (violations: {', '.join(decision.violations)})"
                  if decision.violations else ""),
+                (f" [measured: {_measured}]" if _measured else ""),
             )
         self._t6_authority_last_decision = decision
         if decision.state is T6AuthorityState.AUTHORITATIVE:

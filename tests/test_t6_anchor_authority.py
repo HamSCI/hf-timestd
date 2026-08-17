@@ -332,3 +332,27 @@ class TestAcquiringVisibility:
             auth.on_fine_estimate(e, phase(e), None)
         warns = [m for m in caplog.messages if "ACQUIRING" in m]
         assert len(warns) == 2
+
+
+class TestCheckMetricsAreMeasured:
+    """A violation name alone cannot size the breach (2026-08-17):
+    `fine_coarse` gated the station's top tier five times in a day and
+    the magnitude was unobtainable from any log or status surface."""
+
+    def test_fine_coarse_magnitude_recorded_even_when_passing(self, auth):
+        e = est()
+        auth.on_fine_estimate(e, phase(e), SECOND)
+        m = auth.last_check_metrics
+        assert m["fine_coarse_ms"] == pytest.approx(0.0, abs=1e-6)
+        assert m["fine_coarse_max_ms"] == auth.fine_coarse_max_ms
+
+    def test_fine_coarse_magnitude_recorded_when_violated(self, auth):
+        e = est()
+        # 20 ms of coarse disagreement — 4x the 5 ms invariant.
+        d = auth.on_fine_estimate(e, phase(e) + 0.020 * SR, SECOND)
+        assert "fine_coarse" in d.violations
+        assert auth.last_check_metrics["fine_coarse_ms"] == pytest.approx(
+            20.0, abs=0.01)
+
+    def test_metrics_start_empty(self, auth):
+        assert auth.last_check_metrics == {}
