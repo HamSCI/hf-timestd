@@ -1,7 +1,12 @@
 [Unit]
 Description=GRAPE Daily Processing Timer
 Documentation=https://github.com/HamSCI/hf-timestd
-Requires=grape-daily.service
+# NO Requires=grape-daily.service here -- see hf-timestd#27.
+# Requires= is an ACTIVATION dependency: it would start the service whenever
+# this timer starts, i.e. at EVERY boot (timers.target), running the full ~3 h
+# pipeline on an already-completed day. It also propagates stop, so
+# `systemctl stop grape-daily` would silently disarm the schedule.
+# systemd already binds a .timer to its like-named .service; nothing is needed.
 
 [Timer]
 # Run daily at 01:00 UTC (after midnight, yesterday's data is complete)
