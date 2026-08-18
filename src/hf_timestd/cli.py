@@ -1099,6 +1099,33 @@ def cmd_shm_init(args) -> int:
     return 1 if failed else 0
 
 
+def _grape_sweep_retry(day: str, data_root, config_path) -> None:
+    """Re-invoke this CLI for one backfill day.  Never fatal.
+
+    Spawns ``sys.executable -m hf_timestd.cli`` rather than ``sys.argv[0]``:
+    grape-daily.service runs the CLI as ``python3 -m hf_timestd.cli``, so
+    ``sys.argv[0]`` is the module FILE, which is not executable and whose
+    ``#!/usr/bin/env python3`` shebang would resolve to system Python (no
+    hf_timestd).  Spawning it raised PermissionError, and ``check=False``
+    does not suppress a failure to spawn -- only a non-zero exit status --
+    so the sweep killed an otherwise successful run and never once ran.
+    See hf-timestd#26.
+    """
+    import os
+    import subprocess
+    cmd = [sys.executable, '-m', 'hf_timestd.cli', 'grape', 'daily',
+           '--date', day,
+           '--data-root', str(data_root),
+           '--config', str(config_path)]
+    try:
+        subprocess.run(cmd, env=dict(os.environ, GRAPE_SWEEP='1'),
+                       check=False)
+    except OSError as exc:
+        # Honour the documented contract: per-day failures are non-fatal.
+        print(f"   \u26a0\ufe0f  sweep for {day} could not start: {exc!r} "
+              f"(continuing)")
+
+
 def _grape_daily_summary(upload_attempted: bool, upload_ok: bool,
                          pipeline_status: dict) -> list:
     """Trailing upload lines for `grape daily`.
@@ -2104,12 +2131,7 @@ Per-service overrides in [services] take precedence over the profile.
                     if not has_src:
                         continue
                     print(f"\n🔁 sweep: retrying incomplete day {d}")
-                    subprocess.run(
-                        [sys.argv[0], 'grape', 'daily', '--date', d,
-                         '--data-root', str(data_root),
-                         '--config', str(config_path)],
-                        env=dict(os.environ, GRAPE_SWEEP='1'),
-                        check=False)
+                    _grape_sweep_retry(d, data_root, config_path)
 
         elif args.grape_command == 'decimate':
             from .grape.decimation_pipeline import DecimationPipeline
