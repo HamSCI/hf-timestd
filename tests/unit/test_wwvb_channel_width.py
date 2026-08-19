@@ -4,18 +4,24 @@ WWVB is a 60 kHz carrier whose time code is one bit per second. A few hundred
 Hz of bandwidth is ample; the channel width only sets how much noise is let in
 alongside it.
 
-The template shipped 24000 Hz -- six times wider than needed, roughly 7.8 dB of
-SNR discarded for nothing -- and that is the sole reason AC0G-B4 could not
-decode WWVB. Measured there on 2026-08-18/19, same antenna, same site, same
-code, changing only this value:
+The template shipped 24000 Hz -- six times wider than needed -- and that is why
+AC0G-B4 could not decode WWVB at all. Measured there over 2026-08-17..19, same
+antenna, same site, same code, changing only this value:
 
-    24 kHz : 2758 passes,  1 frame decoded (0.036%), 29.2 of 90 s detected
-     4 kHz : 1533 passes, 17 frames decoded (1.11%),  89.2 of 90 s detected
+    24 kHz : 2758 decode passes ->  0 real frames
+     4 kHz : 1605 decode passes -> 13 real frames (0.81%; 2.08% on the night
+                                   of 08-19, concentrated in a 35 min burst)
 
-A 30x improvement in decode rate, and the second-detector went from seeing a
-third of the seconds to essentially all of them. bee1 had been carrying a
-hand-edited 4000 for months, which is the only reason that host ever decoded --
-the difference was never the antenna.
+Zero to non-zero, not a ratio -- a 24 kHz channel decoded nothing real here.
+
+Caveat on the counts, recorded because it bit the first analysis: the ledger's
+`frames` field counts frames that cleared the parity==0 noise gate, and that
+gate admits garbage -- 5 of the 18 frames accepted across those nights carry
+minutes in 2053 or 2097. Any decode-rate claim must exclude those first, which
+an earlier reading of this data failed to do.
+
+bee1 carried a hand-edited 4000 for months, which is the only reason that host
+ever decoded -- the difference was never the antenna.
 
 These assertions exist so a future edit cannot quietly widen the channel again
 and silently stop every station from decoding, with no error anywhere.
