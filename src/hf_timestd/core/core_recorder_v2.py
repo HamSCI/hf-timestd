@@ -1965,7 +1965,11 @@ class CoreRecorderV2:
         samples (a minute frame plus a few seconds of headroom).
         """
         from .wwvb_demod import decode_iq
-        from .wwvb_fusion import build_l1_row, estimate_snr_db
+        from .wwvb_fusion import (
+            build_l1_row,
+            estimate_snr_db,
+            frame_minute_is_plausible,
+        )
 
         cfg = self._wwvb_config
         sample_rate = float(cfg.get('sample_rate', 24_000))
@@ -2003,14 +2007,31 @@ class CoreRecorderV2:
                 logger.warning(f"WWVB decode failed: {exc}")
                 continue
 
-            # Noise discrimination — empirical from the AC0G 2026-05-30
-            # dusk validation run: every false-positive frame had par >= 1
-            # (Hamming "corrected" a noise time word), every real frame
-            # had par == 0.  See project_wwvb_status_2026_05_29.md for
-            # the data.  Reject anything with non-zero parity errors so
-            # the ledger reflects accepted decodes only.
-            accepted = [f for f in result.frames if f.frame.parity_errors == 0]
+            # Noise discrimination, layer 1 — parity.  The premise from the
+            # AC0G 2026-05-30 dusk validation run was that every false-positive
+            # frame had par >= 1 (Hamming "corrected" a noise time word) and
+            # every real frame had par == 0.
+            #
+            # That premise is FALSIFIED.  Over 2026-08-17..19 on B4, 5 of the
+            # 18 frames this gate accepted decoded minutes in 2053 or 2097 —
+            # 28% garbage — and one of them had par == 0 AND sync == 0.  Parity
+            # alone is necessary, not sufficient.
+            parity_ok = [f for f in result.frames if f.frame.parity_errors == 0]
             rejected = [f for f in result.frames if f.frame.parity_errors != 0]
+
+            # Layer 2 — the decoded minute must be near the time this receiver
+            # thinks it is.  Cheap, and decisive against the failure above.  The
+            # ±500 ms gate in build_l1_row cannot serve here: it needs an RTP
+            # anchor, so it only runs when feed_fusion is on, which left the
+            # default ledger-only configuration undefended.
+            accepted, implausible = [], []
+            for _f in parity_ok:
+                target = (
+                    accepted
+                    if frame_minute_is_plausible(_f.frame.minute_of_frame, now=now)
+                    else implausible
+                )
+                target.append(_f)
 
             if self._wwvb_ledger is not None:
                 self._wwvb_ledger.record_pass(
@@ -2021,8 +2042,16 @@ class CoreRecorderV2:
                     seconds_detected=result.seconds_detected,
                     bits=int(result.bits.size),
                     frames=len(accepted),
+                    frames_implausible=len(implausible),
+                    # The one field that separates a blind pass from a working
+                    # one; every other field in this record reads the same
+                    # either way (see wwvb_ledger.record_pass).
+                    snr_db=estimate_snr_db(result.per_second_iq),
                 )
-                for f in accepted:
+                for f, _plausible in (
+                    [(x, True) for x in accepted]
+                    + [(x, False) for x in implausible]
+                ):
                     self._wwvb_ledger.record_frame(
                         ts=now,
                         minute_of_frame=f.frame.minute_of_frame,
@@ -2038,6 +2067,7 @@ class CoreRecorderV2:
                         sync_errors=f.sync_errors,
                         inverted_polarity=f.inverted_polarity,
                         mean_amp=mean_amp,
+                        plausible=_plausible,
                     )
 
             # --- Layer 4: feed accepted minutes into the Fusion source pool ---
@@ -2090,6 +2120,12 @@ class CoreRecorderV2:
                 logger.info(
                     f"WWVB noise frame rejected: par={f.frame.parity_errors} "
                     f"sync={f.sync_errors} minute={f.frame.minute_of_frame.isoformat()}"
+                )
+            for f in implausible:
+                logger.info(
+                    "WWVB frame rejected as implausible (cleared parity): "
+                    f"par={f.frame.parity_errors} sync={f.sync_errors} "
+                    f"minute={f.frame.minute_of_frame.isoformat()}"
                 )
 
             if accepted:

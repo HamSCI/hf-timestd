@@ -37,6 +37,14 @@ logger = logging.getLogger(__name__)
 UTC = _dt.timezone.utc
 
 
+def _jsonable(x: float) -> Optional[float]:
+    """NaN/inf -> None.  ``json.dumps`` emits a bare ``NaN``, which is not valid
+    JSON and breaks jq — the postprocessor this module's docstring recommends.
+    An unmeasurable SNR is honestly absent, not a number."""
+    x = float(x)
+    return None if (x != x or x in (float("inf"), float("-inf"))) else x
+
+
 class WwvbLedger:
     """Daily-rotated JSONL writer.
 
@@ -85,8 +93,18 @@ class WwvbLedger:
         seconds_detected: int,
         bits: int,
         frames: int,
+        frames_implausible: int = 0,
+        snr_db: float = float("nan"),
     ) -> None:
-        """One row per decode pass — success or not."""
+        """One row per decode pass — success or not.
+
+        ``snr_db`` is the field that lets a blind pass be told from a working
+        one.  Nothing else here does: measured over 432 passes on 2026-08-19,
+        ``carrier_offset_hz`` read 0.0 on all ten decodes and on 211 of the 422
+        blind passes, and ``seconds_detected`` read *higher* when blind (up to
+        95) than on any real decode (max 90).  A source that cannot report its
+        own blindness must not join the Fusion pool.
+        """
         self._write({
             "ts": ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "kind": "pass",
@@ -96,6 +114,8 @@ class WwvbLedger:
             "seconds_detected": int(seconds_detected),
             "bits": int(bits),
             "frames": int(frames),
+            "frames_implausible": int(frames_implausible),
+            "snr_db": _jsonable(snr_db),
         })
 
     def record_frame(
@@ -109,8 +129,14 @@ class WwvbLedger:
         sync_errors: int,
         inverted_polarity: bool,
         mean_amp: float,
+        plausible: bool = True,
     ) -> None:
-        """One row per detected frame."""
+        """One row per detected frame.
+
+        Implausible frames are recorded, not dropped — the garbage rate is
+        itself evidence about the decoder, and hiding it would make the ledger
+        look healthier than the receiver is.
+        """
         vs_wallclock_s = (minute_of_frame - ts).total_seconds()
         self._write({
             "ts": ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -123,6 +149,7 @@ class WwvbLedger:
             "inverted": bool(inverted_polarity),
             "vs_wallclock_s": round(vs_wallclock_s, 2),
             "mean_amp": float(mean_amp),
+            "plausible": bool(plausible),
         })
 
     def close(self) -> None:

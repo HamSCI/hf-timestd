@@ -56,6 +56,18 @@ WWVB_IDENTIFICATION_METHOD = "wwvb_decode"
 # (metrology_engine.py ~1157).
 WWVB_MAX_PLAUSIBLE_TIMING_ERROR_MS = 500.0
 
+# Coarse screen on the DECODED MINUTE ITSELF, applied before a frame is counted
+# at all.  Distinct from the gate above: that one needs an RTP anchor and so
+# only runs on the Fusion path, leaving the default ledger-only configuration
+# with no defence but parity.  On AC0G-B4 over 2026-08-17..19 that let 5 of 18
+# accepted frames through with minutes in 2053 and 2097, one of them with
+# parity_errors == 0 AND sync_errors == 0.
+#
+# 300 s is chosen to be useless as a correction and decisive against absurdity:
+# comfortably past the worst-case decode latency (90 s buffer + 30 s tick) yet
+# an order of magnitude under the 3600 s error a single flipped hour bit makes.
+WWVB_MAX_PLAUSIBLE_MINUTE_SKEW_S = 300.0
+
 # SNR floor (dB) below which even a clean-parity frame is graded MARGINAL.
 WWVB_GOOD_SNR_DB = 10.0
 
@@ -82,6 +94,29 @@ def estimate_snr_db(per_second_iq) -> float:
     snr = 10.0 * math.log10(coherent / noise)
     # Clamp to a sane display/weighting range.
     return float(max(-10.0, min(40.0, snr)))
+
+
+def frame_minute_is_plausible(
+    minute_of_frame: datetime,
+    *,
+    now: datetime,
+    max_skew_s: float = WWVB_MAX_PLAUSIBLE_MINUTE_SKEW_S,
+) -> bool:
+    """Is this decoded minute anywhere near the time the receiver thinks it is?
+
+    The host clock serves here strictly as a *sanity bench* -- an instrument for
+    detecting absurdity -- never as a correction, which keeps this clear of the
+    timing-authority invariant (the sanctioned judging role, cf. the Offset
+    Judge).  Nothing derived from this comparison ever reaches the chrony feed;
+    it only decides whether a frame is counted as a decode.
+
+    Naive datetimes are treated as UTC.
+    """
+    if minute_of_frame.tzinfo is None:
+        minute_of_frame = minute_of_frame.replace(tzinfo=timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return abs((minute_of_frame - now).total_seconds()) <= max_skew_s
 
 
 def compute_timing_error_ms(
