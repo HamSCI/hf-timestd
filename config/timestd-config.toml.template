@@ -140,7 +140,15 @@ description = "WWV_25000"
 [wwvb]
 enabled = false                 # master switch for the WWVB consumer + decode loop
 frequency_hz = 60000
-sample_rate = 24000
+sample_rate = 4000              # NARROW ON PURPOSE -- do not widen.  WWVB is a
+                                # 1 bit/s code on a 60 kHz carrier; extra
+                                # bandwidth admits only noise.  Measured on
+                                # AC0G-B4 2026-08-18/19, same antenna and site,
+                                # this value alone: 24 kHz -> 1 frame in 2758
+                                # passes; 4 kHz -> 17 in 1533 (30x), and
+                                # seconds-detected 29/90 -> 89/90.  A too-wide
+                                # channel fails silently -- no error, just no
+                                # decodes.  See tests/unit/test_wwvb_channel_width.py
 window_s = 90.0                 # rolling decode-buffer length (s)
 decode_interval_s = 30.0        # how often the decode worker runs (s)
 min_buffer_s = 65.0             # don't decode until the buffer holds >= this (s)

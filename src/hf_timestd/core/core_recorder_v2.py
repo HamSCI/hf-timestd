@@ -1814,7 +1814,10 @@ class CoreRecorderV2:
         # gate in build_l1_row rejects any residual counter-space mismatch.
         from .buffer_timing import resolve_buffer_timing
 
-        sr = int(self._wwvb_config.get('sample_rate', 24_000))
+        # Fallback must match the shipped template: a WWVB channel wider than
+        # a few kHz admits noise only and silently stops all decoding.
+        # See config/timestd-config.toml.template [wwvb].
+        sr = int(self._wwvb_config.get('sample_rate', 4_000))
 
         def _rtp_to_utc_s(rtp, _ci=channel_info, _sr=sr):
             gps_time = getattr(_ci, 'gps_time', None)
