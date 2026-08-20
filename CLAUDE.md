@@ -42,36 +42,6 @@ hf-timestd create-channels           # provision channels in radiod
 hf-timestd raytrace WWV 10.0         # PHaRLAP 2-D ray trace → propagation modes
 ```
 
-### Tests
-
-```bash
-uv run pytest tests/                          # full suite
-uv run pytest tests/test_<area>.py -v         # one file
-uv run pytest tests/test_<area>.py::TestClass::test_X  # one test
-uv run pytest -k authority -v                 # by keyword
-```
-
-## Project Structure
-
-```
-src/hf_timestd/          # Main package
-  core/                  # Signal processing, timing, physics (~80 modules)
-  stream/                # ka9q-radio RTP stream API
-  interfaces/            # Data contracts
-  io/                    # HDF5/Binary archive I/O
-  grape/                 # GRAPE daily processing + PSWS upload
-  models/                # Pydantic data models
-  cli.py                 # CLI entry point
-  paths.py               # Path management (production/test)
-  config_utils.py        # TOML config parsing
-web-api/                 # FastAPI dashboard (port 8000)
-tests/                   # Unit/integration tests
-config/                  # Config templates (TOML, chrony, systemd env)
-systemd/                 # ~25 unit files (8-service core pipeline + timers/housekeeping)
-scripts/                 # Utility/deployment scripts
-docs/                    # Technical docs, QEX paper draft
-```
-
 ## Key Conventions
 
 - **One class per file**, filename matches class (e.g., `tick_edge_detector.py` -> `TickEdgeDetector`)
