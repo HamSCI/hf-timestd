@@ -211,16 +211,18 @@ class TestWatchdog:
             assert hasattr(status, 'days_headroom')
             assert status.days_headroom > 0
 
-    def test_watchdog_emergency_when_over_95_percent(self, guardian):
-        """When disk > 95% and can't clean, should return EMERGENCY."""
-        with patch('shutil.disk_usage') as mock_du:
-            mock_du.return_value = type('', (), {
-                'total': 500 * GB,
-                'used': 480 * GB,   # 96%
-                'free': 20 * GB,
-            })()
-            status = guardian.watchdog_check(force=True)
-            assert status.state == ResourceState.EMERGENCY
+    def test_watchdog_pauses_on_first_crossing_then_emergency_after_grace(self, guardian):
+        """hf-timestd#31: a ≥95% crossing PAUSES (STOP) first — nothing to
+        evict here, so only after the grace window does it escalate to
+        EMERGENCY.  It must NOT go straight to EMERGENCY on the first tick
+        (that is what let a 2 s spike destroy a whole day)."""
+        guardian.evict_grace_sec = 600
+        guardian._clock = lambda: 1000.0
+        du = type('', (), {'total': 500 * GB, 'used': 480 * GB, 'free': 20 * GB})()  # 96%
+        with patch('shutil.disk_usage', return_value=du):
+            assert guardian.watchdog_check(force=True).state == ResourceState.STOP
+            guardian._clock = lambda: 2000.0   # +1000 s, past the grace window
+            assert guardian.watchdog_check(force=True).state == ResourceState.EMERGENCY
 
 
 # ======================================================================
@@ -336,3 +338,138 @@ class TestHelpers:
         f1.write_bytes(b'\x00' * 100)
         f2.write_bytes(b'\x00' * 200)
         assert ResourceGuardian._dir_size(tmp_path) == 300
+
+
+# ======================================================================
+# hf-timestd#31 — the guardian must not destroy a whole day within 2 s of
+# a transient ≥95% spike; hysteresis, pause-first, granularity, gate, event.
+# ======================================================================
+
+class _Clock:
+    def __init__(self): self.t = 1000.0
+    def __call__(self): return self.t
+    def advance(self, dt): self.t += dt
+
+
+def _du(total, used):
+    return type('', (), {'total': total, 'used': used, 'free': total - used})()
+
+
+def _live_du(root, fill_bytes, total_bytes):
+    """disk_usage fake whose `used` = fill + REAL bytes under root, so an
+    eviction actually moves the needle (small total so tiny fixtures count)."""
+    import pathlib
+    def f(_path):
+        present = 0
+        for pth in pathlib.Path(root).rglob('*'):
+            if pth.is_file():
+                try: present += pth.stat().st_size
+                except OSError: pass
+        used = fill_bytes + present
+        return type('', (), {'total': total_bytes, 'used': used, 'free': total_bytes - used})()
+    return f
+
+
+def _day(root, date, *, raw_bytes=0, phase2_bytes=0):
+    import pathlib
+    if raw_bytes:
+        d = pathlib.Path(root) / 'raw_buffer' / 'CH1' / date
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f'{date}T000000.bin.zst').write_bytes(b'\0' * raw_bytes)
+    if phase2_bytes:
+        d = pathlib.Path(root) / 'phase2' / 'CH1' / 'L1'
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f'L1_{date}.h5').write_bytes(b'\0' * phase2_bytes)
+
+
+class TestGuardianHysteresis:
+    def _guardian(self, root, clock, **kw):
+        g = ResourceGuardian(data_root=str(root), n_channels=1, sample_rate=24000,
+                             clock=clock, **kw)
+        return g
+
+    def test_first_crossing_pauses_and_does_not_evict(self, tmp_data_root):
+        """A ≥95% spike must PAUSE (STOP) and delete nothing until the
+        condition persists past the grace window."""
+        clk = _Clock()
+        _day(tmp_data_root, '20260101', raw_bytes=10000, phase2_bytes=5000)
+        g = self._guardian(tmp_data_root, clk, evict_grace_sec=600)
+        with patch('shutil.disk_usage', return_value=_du(500 * GB, 480 * GB)):  # 96%
+            s = g.watchdog_check(force=True)
+        assert s.state == ResourceState.STOP
+        assert s.bytes_cleaned == 0
+        assert (tmp_data_root / 'raw_buffer' / 'CH1' / '20260101').exists()
+        assert (tmp_data_root / 'phase2' / 'CH1' / 'L1' / 'L1_20260101.h5').exists()
+
+    def test_transient_spike_that_clears_never_evicts(self, tmp_data_root):
+        clk = _Clock()
+        _day(tmp_data_root, '20260101', raw_bytes=10000)
+        g = self._guardian(tmp_data_root, clk, evict_grace_sec=600)
+        with patch('shutil.disk_usage', return_value=_du(500 * GB, 480 * GB)):
+            g.watchdog_check(force=True)
+        clk.advance(120)                                   # 2 min later, disk recovered
+        with patch('shutil.disk_usage', return_value=_du(500 * GB, 300 * GB)):  # 60%
+            s = g.watchdog_check(force=True)
+        assert s.state == ResourceState.OK
+        assert (tmp_data_root / 'raw_buffer' / 'CH1' / '20260101').exists()
+
+    def test_sustained_pressure_evicts_after_grace(self, tmp_data_root):
+        clk = _Clock()
+        _day(tmp_data_root, '20260101', raw_bytes=10000, phase2_bytes=5000)
+        g = self._guardian(tmp_data_root, clk, evict_grace_sec=600,
+                           evict_low_water_percent=90.0)
+        fake = _live_du(tmp_data_root, fill_bytes=24000, total_bytes=40000)  # ~97.5% at start
+        with patch('shutil.disk_usage', side_effect=fake):
+            assert g.watchdog_check(force=True).state == ResourceState.STOP   # 1st crossing: pause
+            clk.advance(601)
+            s = g.watchdog_check(force=True)                                  # after grace: evict
+        assert s.bytes_cleaned > 0
+        assert s.state in (ResourceState.CLEANED, ResourceState.STOP)
+
+    def test_regenerable_data_evicted_before_raw(self, tmp_data_root):
+        """Same day: the phase2 HDF5 (regenerable) goes before the raw IQ."""
+        clk = _Clock()
+        _day(tmp_data_root, '20260101', raw_bytes=10000, phase2_bytes=5000)
+        g = self._guardian(tmp_data_root, clk, evict_grace_sec=0,
+                           evict_low_water_percent=90.0)
+        # total 40000, fill 24000: start 97.5%; deleting the 5000 phase2 file
+        # drops to 85% (< 90% low-water) so eviction stops before touching raw.
+        fake = _live_du(tmp_data_root, fill_bytes=24000, total_bytes=40000)
+        with patch('shutil.disk_usage', side_effect=fake):
+            g.watchdog_check(force=True)
+        assert not (tmp_data_root / 'phase2' / 'CH1' / 'L1' / 'L1_20260101.h5').exists()
+        assert (tmp_data_root / 'raw_buffer' / 'CH1' / '20260101').exists()   # raw survived
+
+    def test_alert_only_never_deletes(self, tmp_data_root):
+        clk = _Clock()
+        _day(tmp_data_root, '20260101', raw_bytes=10000)
+        g = self._guardian(tmp_data_root, clk, evict_policy='alert_only', evict_grace_sec=0)
+        with patch('shutil.disk_usage', return_value=_du(500 * GB, 490 * GB)):  # 98%
+            s = g.watchdog_check(force=True)
+        assert s.state in (ResourceState.STOP, ResourceState.EMERGENCY)
+        assert s.bytes_cleaned == 0
+        assert (tmp_data_root / 'raw_buffer' / 'CH1' / '20260101').exists()
+
+    def test_crossing_writes_a_guardian_event_the_board_can_read(self, tmp_data_root):
+        import json
+        clk = _Clock()
+        g = self._guardian(tmp_data_root, clk, evict_grace_sec=600)
+        with patch('shutil.disk_usage', return_value=_du(500 * GB, 480 * GB)):
+            g.watchdog_check(force=True)
+        ev = tmp_data_root / 'state' / 'guardian-event.json'
+        assert ev.exists()
+        d = json.loads(ev.read_text())
+        assert d['over_threshold'] is True
+        assert d['disk_used_percent'] >= 95.0
+        assert d['policy'] == 'auto'
+        assert 'evicting' not in d['action']         # paused, not evicting yet
+
+    def test_from_config_reads_the_new_knobs(self, tmp_path):
+        cfg = tmp_path / 'c.toml'
+        cfg.write_text('[recorder]\nproduction_data_root = "%s"\n'
+                       'evict_policy = "alert_only"\nevict_grace_sec = 300\n'
+                       'evict_low_water_percent = 88\n[[channels]]\nname="a"\n' % tmp_path)
+        g = ResourceGuardian.from_config(str(cfg))
+        assert g.evict_policy == 'alert_only'
+        assert g.evict_grace_sec == 300
+        assert g.evict_low_water_percent == 88.0

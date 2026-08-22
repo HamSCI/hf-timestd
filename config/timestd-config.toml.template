@@ -40,6 +40,17 @@ blocktime_ms = 20
 max_gap_seconds = 60
 storage_quota = "80%"
 
+# Resource guardian eviction policy (hf-timestd#31).  At >=95% disk the
+# guardian PAUSES writes and alerts immediately, but deletes nothing until the
+# pressure PERSISTS past evict_grace_sec — a transient spike costs no data.
+# Then it frees the smallest regenerable unit first (phase2 HDF5, products,
+# vtec, upload/data), oldest first, one at a time, down to evict_low_water_percent;
+# raw IQ is the last resort, a whole day at a time.  A guardian-event.json is
+# written under <data_root>/state for the fleet board to read.
+evict_policy = "auto"              # "auto" (evict after grace) | "alert_only" (never delete)
+evict_grace_sec = 600              # >=95% must persist this long before any eviction
+evict_low_water_percent = 90       # evict just enough to get back under this
+
 # Compression: 'none', 'zstd', or 'lz4' - reduces disk I/O by ~2-3x
 compression = "zstd"
 compression_level = 3

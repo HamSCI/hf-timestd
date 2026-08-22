@@ -78,6 +78,16 @@ HEADROOM_DAYS = 1   # always keep room for at least this many days
 DISK_WARN_PERCENT = 80.0       # log a warning
 DISK_HARD_STOP_PERCENT = 95.0  # stop all writes — something else filling disk
 
+# hf-timestd#31 — eviction must not destroy a whole day within 2 s of a
+# transient ≥95% spike.  A crossing PAUSES writes and alerts immediately, but
+# nothing is deleted until it has PERSISTED for the grace window; then data is
+# freed the smallest-regenerable-unit first, oldest-first, down to a low-water
+# mark — never a whole day in one rmtree unless raw IQ is all that is left.
+EVICT_GRACE_SEC = 600.0           # ≥95% must persist this long before any delete
+EVICT_LOW_WATER_PERCENT = 90.0    # evict just enough to get back under this
+EVICT_POLICY_AUTO = 'auto'        # DASI2 default (mjh 2026-08-22): auto with hysteresis
+EVICT_POLICY_ALERT_ONLY = 'alert_only'  # never delete; pause + alert only
+
 # Per-channel data budget (bytes per day) at 24 kHz complex IQ
 # IQ: 24000 samples/s × 4 bytes/sample × 2 (I+Q) × 86400 s/day ≈ 14.2 GB
 RAW_BYTES_PER_CHANNEL_PER_DAY = 24000 * 4 * 2 * 86400
@@ -149,6 +159,10 @@ class ResourceGuardian:
         tiered_storage: bool = False,
         archive_root: Optional[str] = None,
         archive_retention_days: Optional[int] = None,
+        evict_policy: str = EVICT_POLICY_AUTO,
+        evict_grace_sec: float = EVICT_GRACE_SEC,
+        evict_low_water_percent: float = EVICT_LOW_WATER_PERCENT,
+        clock=time.monotonic,
     ):
         self.data_root = Path(data_root)
         self.n_channels = n_channels
@@ -180,8 +194,15 @@ class ResourceGuardian:
         # Minimum RAM: per-channel workers + system headroom
         self.min_ram_bytes = n_channels * RAM_PER_CHANNEL + RAM_SYSTEM_HEADROOM
 
+        self.evict_policy = evict_policy
+        self.evict_grace_sec = float(evict_grace_sec)
+        self.evict_low_water_percent = float(evict_low_water_percent)
+        self._clock = clock
+
         self._last_watchdog_time = 0.0
         self._watchdog_interval = 60.0
+        # hf-timestd#31: monotonic time we FIRST saw >=95%, or None when clear.
+        self._over_since: Optional[float] = None
 
     # ------------------------------------------------------------------
     # 1. Preflight check
@@ -390,7 +411,7 @@ class ResourceGuardian:
         Call from the service main loop.  Returns quickly (no-op) if
         the check interval hasn't elapsed.
         """
-        now = time.monotonic()
+        now = self._clock()
         if not force and (now - self._last_watchdog_time) < self._watchdog_interval:
             return ResourceStatus(
                 state=ResourceState.OK,
@@ -421,35 +442,63 @@ class ResourceGuardian:
         n_days = 0
         headroom_days = 0.0
 
-        # --- Safety net: hard stop at 95% ---
+        # --- Safety net: hard stop at 95% (hf-timestd#31: hysteresis) ---
         if disk_used_pct >= DISK_HARD_STOP_PERCENT:
-            # Something outside hf-timestd is filling the disk.
-            # Do our best to free space, but if we can't, stop.
-            bytes_cleaned = self._ensure_headroom(headroom_bytes)
-            try:
-                stat2 = shutil.disk_usage(self.data_root)
-                disk_used_pct = (stat2.used / stat2.total) * 100
-                disk_free = stat2.free
-            except OSError:
-                pass
-            if disk_used_pct >= DISK_HARD_STOP_PERCENT:
-                state = ResourceState.EMERGENCY
-                message = (
-                    f"EMERGENCY: disk at {disk_used_pct:.1f}%% even after "
-                    f"evicting {bytes_cleaned / GB:.1f} GB — stopping all writes"
-                )
-                logger.critical(message)
-            else:
+            if self._over_since is None:
+                self._over_since = now
+            over_for = now - self._over_since
+            grace_left = self.evict_grace_sec - over_for
+            # ALWAYS pause + alert on a crossing; DELETE only after the
+            # pressure has persisted past the grace window, and never in
+            # alert_only mode.  A transient hog (the 2026-08-21 drill) clears
+            # inside the window and costs no data.
+            may_evict = (self.evict_policy == EVICT_POLICY_AUTO
+                         and over_for >= self.evict_grace_sec)
+            if not may_evict:
+                if self.evict_policy == EVICT_POLICY_ALERT_ONLY:
+                    reason = "alert_only policy — will not evict"
+                else:
+                    reason = f"grace {over_for:.0f}/{self.evict_grace_sec:.0f}s before evicting"
                 state = ResourceState.STOP
                 message = (
-                    f"Disk was ≥{DISK_HARD_STOP_PERCENT}%%, evicted "
-                    f"{bytes_cleaned / GB:.1f} GB, now {disk_used_pct:.1f}%% "
-                    f"— pausing to stabilize"
-                )
-                logger.error(message)
+                    f"Disk at {disk_used_pct:.1f}%% (>= {DISK_HARD_STOP_PERCENT}%%) "
+                    f"— PAUSING writes ({reason}); no data deleted")
+                logger.critical(message)
+                self._write_guardian_event(disk_used_pct, state, message,
+                                           action="paused", bytes_cleaned=0,
+                                           grace_left=max(0.0, grace_left))
+            else:
+                bytes_cleaned = self._evict_to_low_water(self.evict_low_water_percent)
+                try:
+                    stat2 = shutil.disk_usage(self.data_root)
+                    disk_used_pct = (stat2.used / stat2.total) * 100
+                    disk_free = stat2.free
+                except OSError:
+                    pass
+                if disk_used_pct >= DISK_HARD_STOP_PERCENT:
+                    state = ResourceState.EMERGENCY
+                    message = (
+                        f"EMERGENCY: disk at {disk_used_pct:.1f}%% even after "
+                        f"evicting {bytes_cleaned / GB:.1f} GB — stopping all writes")
+                    logger.critical(message)
+                else:
+                    state = ResourceState.STOP
+                    self._over_since = None
+                    message = (
+                        f"Disk was ≥{DISK_HARD_STOP_PERCENT}%%, evicted "
+                        f"{bytes_cleaned / GB:.1f} GB (regenerable first, oldest "
+                        f"first), now {disk_used_pct:.1f}%% — pausing to stabilize")
+                    logger.error(message)
+                self._write_guardian_event(disk_used_pct, state, message,
+                                           action="evicted", bytes_cleaned=bytes_cleaned,
+                                           grace_left=0.0)
+
+        # Back under the hard stop — clear the hysteresis timer.
+        else:
+            self._over_since = None
 
         # --- Primary mechanism: budget-based headroom ---
-        elif disk_free < headroom_bytes:
+        if state == ResourceState.OK and disk_free < headroom_bytes:
             n_days_before = len(self._collect_all_dates())
             bytes_cleaned = self._ensure_headroom(headroom_bytes)
             try:
@@ -471,7 +520,7 @@ class ResourceGuardian:
             logger.info(message)
 
         # --- Informational: warn at 80% even if headroom is OK ---
-        elif disk_used_pct >= DISK_WARN_PERCENT:
+        elif state == ResourceState.OK and disk_used_pct >= DISK_WARN_PERCENT:
             n_days = len(self._collect_all_dates())
             headroom_days = disk_free / self.daily_disk_budget if self.daily_disk_budget > 0 else 0
             message = (
@@ -501,6 +550,126 @@ class ResourceGuardian:
     # ------------------------------------------------------------------
     # 3. Storage eviction — oldest-day-first, across all directories
     # ------------------------------------------------------------------
+
+    def _evict_to_low_water(self, low_water_percent: float) -> int:
+        """Free the smallest REGENERABLE unit first, oldest first, one at a
+        time, re-checking disk after each, until usage is below
+        ``low_water_percent`` (hf-timestd#31).  Raw IQ is the last resort and
+        is removed a whole day at a time only when nothing regenerable is
+        left; everything else (phase2 HDF5, products, vtec, upload, data) is
+        removed one file at a time.  Never touches today."""
+        total_freed = 0
+        try:
+            total = shutil.disk_usage(self.data_root).total
+        except OSError:
+            return 0
+        target_used = total * (low_water_percent / 100.0)
+        for kind, unit in self._eviction_candidates():
+            try:
+                if shutil.disk_usage(self.data_root).used <= target_used:
+                    break
+            except OSError:
+                break
+            freed = self._evict_unit(kind, unit)
+            total_freed += freed
+            if freed > 0:
+                logger.info("Guardian eviction: freed %.2f GB (%s %s)",
+                            freed / GB, kind, getattr(unit, 'name', unit))
+        return total_freed
+
+    def _eviction_candidates(self):
+        """(kind, path) pairs in eviction PRIORITY order — regenerable before
+        raw, oldest before newest within each — excluding today.  kind is
+        'file' (delete the file) or 'raw_day' (rmtree the day dir)."""
+        today = time.strftime('%Y%m%d', time.gmtime())
+
+        def _date_key(path: Path):
+            m = DATE_RE.search(path.name)
+            return (m.group(1) if m else '99999999', path.name)
+
+        # 1..N regenerable file trees, oldest-first, today excluded
+        for sub in ('phase2', 'products', 'vtec', 'upload', 'data'):
+            d = self.data_root / sub
+            if not d.exists():
+                continue
+            files = []
+            try:
+                for root, _dirs, names in os.walk(d):
+                    for name in names:
+                        m = DATE_RE.search(name)
+                        if m and m.group(1) == today:
+                            continue
+                        files.append(Path(root) / name)
+            except OSError:
+                continue
+            for f in sorted(files, key=_date_key):
+                yield ('file', f)
+
+        # Last resort: raw IQ, oldest complete day at a time
+        raw = self.data_root / 'raw_buffer'
+        if raw.exists():
+            dates = sorted(d for d in self._collect_all_dates() if d != today)
+            seen = set()
+            for date_str in dates:
+                if date_str in seen:
+                    continue
+                seen.add(date_str)
+                yield ('raw_day', date_str)
+
+    def _evict_unit(self, kind: str, unit) -> int:
+        if kind == 'file':
+            try:
+                size = unit.stat().st_size
+                unit.unlink()
+                return size
+            except OSError:
+                return 0
+        if kind == 'raw_day':
+            freed = 0
+            raw = self.data_root / 'raw_buffer'
+            try:
+                for channel_dir in raw.iterdir():
+                    date_dir = channel_dir / unit
+                    if date_dir.is_dir():
+                        size = self._dir_size(date_dir)
+                        try:
+                            shutil.rmtree(date_dir)
+                            freed += size
+                        except OSError:
+                            pass
+            except OSError:
+                pass
+            logger.info("Eviction: deleted raw day %s (last-resort)", unit)
+            return freed
+        return 0
+
+    def _write_guardian_event(self, disk_used_pct, state, message, *,
+                              action, bytes_cleaned, grace_left) -> None:
+        """Write a structured event the fleet heartbeat can read — so a
+        guardian pause/eviction is VISIBLE on the board, not just in the
+        journal (hf-timestd#31, ties to sigmond#49)."""
+        import json
+        state_dir = self.data_root / 'state'
+        try:
+            state_dir.mkdir(parents=True, exist_ok=True)
+            payload = {
+                'ts': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                'disk_used_percent': round(disk_used_pct, 1),
+                'over_threshold': disk_used_pct >= DISK_HARD_STOP_PERCENT,
+                'hard_stop_percent': DISK_HARD_STOP_PERCENT,
+                'state': state.value if hasattr(state, 'value') else str(state),
+                'policy': self.evict_policy,
+                'action': action,
+                'grace_sec': self.evict_grace_sec,
+                'grace_remaining_sec': round(grace_left, 0),
+                'bytes_cleaned': int(bytes_cleaned),
+                'message': message,
+            }
+            tmp = state_dir / 'guardian-event.json.tmp'
+            tmp.write_text(json.dumps(payload))
+            tmp.replace(state_dir / 'guardian-event.json')
+        except OSError as exc:
+            logger.warning("Could not write guardian event: %s", exc)
 
     def _ensure_headroom(self, min_free_bytes: int) -> int:
         """Evict oldest complete days until free space >= *min_free_bytes*.
@@ -863,6 +1032,9 @@ class ResourceGuardian:
         tiered_storage = False
         archive_root = None
         archive_retention_days = None
+        evict_policy = EVICT_POLICY_AUTO
+        evict_grace_sec = EVICT_GRACE_SEC
+        evict_low_water_percent = EVICT_LOW_WATER_PERCENT
 
         try:
             section = None
@@ -891,6 +1063,12 @@ class ResourceGuardian:
                             archive_root = value if value else None
                         elif key == 'archive_retention_days':
                             archive_retention_days = int(value)
+                        elif key == 'evict_policy':
+                            evict_policy = value
+                        elif key == 'evict_grace_sec':
+                            evict_grace_sec = float(value)
+                        elif key == 'evict_low_water_percent':
+                            evict_low_water_percent = float(value)
         except (OSError, ValueError) as e:
             logger.warning(f"Could not parse {config_path}: {e}")
 
@@ -918,4 +1096,7 @@ class ResourceGuardian:
             tiered_storage=tiered_storage,
             archive_root=archive_root,
             archive_retention_days=archive_retention_days,
+            evict_policy=evict_policy,
+            evict_grace_sec=evict_grace_sec,
+            evict_low_water_percent=evict_low_water_percent,
         )
