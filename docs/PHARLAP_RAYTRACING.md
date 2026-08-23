@@ -133,7 +133,7 @@ geometry.
 
 The `hf-tec` client receives the Hysell PRN-coded HF beacons at **2.9 and
 3.4 MHz** from three Alaska transmit sites (see
-[`hf-tec/data/stations.toml`](../../hf-tec/data/stations.toml)). The
+[`hf-tec/data/stations.toml`](https://github.com/HamSCI/hf-tec/blob/main/data/stations.toml)). The
 great-circle geometry to the receiver at **EM38ww (≈38.94°N, 92.12°W,
 mid-Missouri)** is:
 
