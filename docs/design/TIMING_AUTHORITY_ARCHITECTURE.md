@@ -12,7 +12,7 @@
 
 This document describes a layered timing architecture that cleanly separates **recording** (immutable facts) from **interpretation** (timing and physics analysis). The key insight is that raw data recording needs only RTP timestamps—all timing interpretation can be done post-hoc.
 
-**Live Validation Dashboard**: [/timing-validation](/timing-validation) — Real-time comparison of HF fusion vs GPS ground truth.
+**Live Validation Dashboard**: `/timing-validation` — Real-time comparison of HF fusion vs GPS ground truth.
 
 The system supports two timing authority modes:
 - **RTP Authority (L4/L5)**: Trust radiod's GPS+PPS-derived timing
@@ -643,7 +643,7 @@ With GPS+PPS available, we can rigorously validate HF timing methodology:
 
 ### Live Validation Dashboard
 
-The validation dashboard at [/timing-validation](/timing-validation) provides real-time comparison:
+The validation dashboard at `/timing-validation` provides real-time comparison:
 
 | Metric | Description | API Endpoint |
 |--------|-------------|--------------|
@@ -913,7 +913,7 @@ timing_snapshot_rate_hz = 2.0
 | `GET /api/timing-validation/minute/{id}` | Per-minute detail |
 | `GET /api/timing-validation/recent` | Recent validation points |
 
-**Dashboard URL:** [/timing-validation](/timing-validation)
+**Dashboard URL:** `/timing-validation`
 
 ### Phase 5: Auto Mode (Future)
 
@@ -946,7 +946,7 @@ This document follows the Living Documentation methodology: documentation that i
 
 ### Validation Dashboard as Living Proof
 
-The [/timing-validation](/timing-validation) dashboard is the ultimate Living Documentation:
+The `/timing-validation` dashboard is the ultimate Living Documentation:
 - **Claim**: "Fusion achieves ±0.5 ms accuracy"
 - **Proof**: Real-time comparison against GPS ground truth
 - **Verdict**: Statistics show actual accuracy over time

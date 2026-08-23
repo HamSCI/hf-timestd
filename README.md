@@ -237,7 +237,7 @@ cookbook and stage-by-stage troubleshooting.
 
 > **First principles**: [docs/ARCHITECTURE-FIRST-PRINCIPLES.md](docs/ARCHITECTURE-FIRST-PRINCIPLES.md) — the RTP sample counter is the timeline; UTC labels are per-sample annotations graded by T-tier; chrony is one downstream consumer of the annotation, not the architectural design center. Read this before any deeper architecture doc.
 
-The system has an eight-service core pipeline plus a set of housekeeping units (timers, maintenance, monitoring, GRAPE subsystem). In total [systemd/](systemd/) carries ~25 unit files; [docs/SERVICES.md](docs/SERVICES.md) (when present — see also [systemd/](systemd/)) covers the full set. The eight core services:
+The system has an eight-service core pipeline plus a set of housekeeping units (timers, maintenance, monitoring, GRAPE subsystem). In total [systemd/](systemd/) carries ~25 unit files; `docs/SERVICES.md` (not yet written — see [systemd/](systemd/) for the unit files themselves) would cover the full set. The eight core services:
 
 ```text
 [ka9q-radio] (RTP Multicast)
