@@ -1,5 +1,7 @@
 # PSWS Authentication and Upload Setup Guide
 
+> **Operators:** the step-by-step narrative is [sigmond `operator/registration.md`](https://github.com/HamSCI/sigmond/blob/main/docs/operator/registration.md); this page is the per-transport reference.
+
 ## Overview
 
 The HamSCI PSWS (Personal Space Weather Station) network requires SSH key-based authentication for uploading GRAPE Digital RF data. This guide explains the complete setup process.
