@@ -128,12 +128,14 @@ SAMPLE_RATE_LEGACY = 16000  # Hz - Legacy 16 kHz mode (deprecated)
 # STATION BROADCAST SCHEDULES
 # =============================================================================
 
-# Valid station/frequency combinations (MHz)
-# These define which stations broadcast on which frequencies
-WWV_FREQUENCIES = [2.5, 5.0, 10.0, 15.0, 20.0, 25.0]
-WWVH_FREQUENCIES = [2.5, 5.0, 10.0, 15.0]  # NOT 20/25 MHz
-CHU_FREQUENCIES = [3.33, 7.85, 14.67]
-BPM_FREQUENCIES = [2.5, 5.0, 10.0, 15.0]
+# Valid station/frequency combinations (MHz) — re-exported from the
+# hamsci-dsp station catalog (import lives in the STATION COORDINATES
+# section below; module-level order keeps this a plain forward use).
+from hamsci_dsp.stations import BUILTIN_CATALOG as _CATALOG
+WWV_FREQUENCIES = list(_CATALOG.get('WWV').frequencies_mhz)
+WWVH_FREQUENCIES = list(_CATALOG.get('WWVH').frequencies_mhz)  # NOT 20/25 MHz
+CHU_FREQUENCIES = list(_CATALOG.get('CHU').frequencies_mhz)
+BPM_FREQUENCIES = list(_CATALOG.get('BPM').frequencies_mhz)
 
 # Shared frequencies requiring discrimination (WWV vs WWVH vs BPM)
 SHARED_FREQUENCIES = [2.5, 5.0, 10.0, 15.0]
@@ -263,53 +265,32 @@ STANDARD_CHANNELS = [
 #        canadas-official-time/nrc-shortwave-station-chu) states: 45° 17' 43" N, 75° 45' 16" W
 # =============================================================================
 
-# WWV - Fort Collins, Colorado, USA
-# NIST official: 40° 40' 50.5" N, 105° 02' 26.6" W
-# Decimal: 40 + 40/60 + 50.5/3600 = 40.68069, 105 + 2/60 + 26.6/3600 = 105.04072
-WWV_LAT = 40.6807
-WWV_LON = -105.0407
+# Station coordinates are RE-EXPORTED from the hamsci-dsp station catalog
+# (split design §5.2: pure station data lives in `hamsci_dsp.stations`;
+# this module keeps timing schedules/tones/thresholds).  The NIST/NRC
+# provenance notes and dd°mm'ss" derivations moved with the data — see
+# hamsci_dsp/stations.py and its tests, which pin the exact values.
+from hamsci_dsp.stations import BUILTIN_CATALOG as STATION_CATALOG
 
-# WWVH - Kekaha, Kauai, Hawaii, USA  
-# NIST official: 21° 59' 14" N, 159° 45' 49" W
-# Decimal: 21 + 59/60 + 14/3600 = 21.98722, 159 + 45/60 + 49/3600 = 159.76361
-WWVH_LAT = 21.9872
-WWVH_LON = -159.7636
+WWV_LAT = STATION_CATALOG.get('WWV').lat
+WWV_LON = STATION_CATALOG.get('WWV').lon
+WWVH_LAT = STATION_CATALOG.get('WWVH').lat
+WWVH_LON = STATION_CATALOG.get('WWVH').lon
+CHU_LAT = STATION_CATALOG.get('CHU').lat
+CHU_LON = STATION_CATALOG.get('CHU').lon
+BPM_LAT = STATION_CATALOG.get('BPM').lat
+BPM_LON = STATION_CATALOG.get('BPM').lon
+WWVB_LAT = STATION_CATALOG.get('WWVB').lat
+WWVB_LON = STATION_CATALOG.get('WWVB').lon
 
-# CHU - Ottawa, Ontario, Canada
-# NRC official: 45° 17' 43" N, 75° 45' 16" W
-# Decimal: 45 + 17/60 + 43/3600 = 45.29528, 75 + 45/60 + 16/3600 = 75.75444
-CHU_LAT = 45.2953
-CHU_LON = -75.7544
+# Convenience tuples for programmatic access
+WWV_COORDINATES = STATION_CATALOG.get('WWV').coordinates
+WWVH_COORDINATES = STATION_CATALOG.get('WWVH').coordinates
+CHU_COORDINATES = STATION_CATALOG.get('CHU').coordinates
+BPM_COORDINATES = STATION_CATALOG.get('BPM').coordinates
+WWVB_COORDINATES = STATION_CATALOG.get('WWVB').coordinates
 
-# BPM - Pucheng County, Shaanxi, China
-# 34°56′55.96″N 109°32′34.93″E
-# Decimal: 34 + 56/60 + 55.96/3600 = 34.94887...
-#          109 + 32/60 + 34.93/3600 = 109.54303...
-BPM_LAT = 34.9489
-BPM_LON = 109.5430
-
-# WWVB - NIST 60 kHz LF, Fort Collins, Colorado, USA
-# Co-located with WWV at the NIST radio station site (the two WWVB phased-array
-# antennas straddle the WWV site; a single representative point is used here, as
-# the ~km-scale separation is negligible against the >1000 km receive paths and
-# the propagation-delay model uncertainty).
-WWVB_LAT = 40.6776
-WWVB_LON = -105.0470
-
-# Convenience dictionary for programmatic access
-WWV_COORDINATES = (WWV_LAT, WWV_LON)
-WWVH_COORDINATES = (WWVH_LAT, WWVH_LON)
-CHU_COORDINATES = (CHU_LAT, CHU_LON)
-BPM_COORDINATES = (BPM_LAT, BPM_LON)
-WWVB_COORDINATES = (WWVB_LAT, WWVB_LON)
-
-STATION_LOCATIONS = {
-    'WWV': {'lat': WWV_LAT, 'lon': WWV_LON, 'name': 'Fort Collins, CO, USA'},
-    'WWVH': {'lat': WWVH_LAT, 'lon': WWVH_LON, 'name': 'Kekaha, Kauai, HI, USA'},
-    'CHU': {'lat': CHU_LAT, 'lon': CHU_LON, 'name': 'Ottawa, ON, Canada'},
-    'BPM': {'lat': BPM_LAT, 'lon': BPM_LON, 'name': 'Pucheng, Shaanxi, China'},
-    'WWVB': {'lat': WWVB_LAT, 'lon': WWVB_LON, 'name': 'Fort Collins, CO, USA (NIST 60 kHz LF)'},
-}
+STATION_LOCATIONS = STATION_CATALOG.locations()
 
 # =============================================================================
 # TONE FREQUENCIES (Hz)
