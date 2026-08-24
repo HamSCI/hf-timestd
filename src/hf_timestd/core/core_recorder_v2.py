@@ -547,6 +547,12 @@ class CoreRecorderV2:
         from .bpsk_chain_delay_store import ChainDelayStore
         self._t6_mf_chain_delay_store = None
         self._t6_diff_chain_delay_store = ChainDelayStore("diff")
+        # Durable anchor ledger (t6_anchor_ledger): every captured native
+        # anchor, with its raw components, so recalibrating the asserted
+        # chain-delay terms later is arithmetic over the ledger instead
+        # of a lost cause (journal lines rotate).
+        from .t6_anchor_ledger import T6AnchorLedger
+        self._t6_anchor_ledger = T6AnchorLedger()
         # Counters for save-cadence debouncing (write once per
         # PERSIST_EVERY_N_EDGES accepted edges, not on every cycle).
         self._t6_mf_saves_pending = 0
@@ -2920,6 +2926,27 @@ class CoreRecorderV2:
             feed, reported_ns / 1e6, asserted_ns / 1e6,
         )
 
+    def _t6_ledger_append(self, anchor, authority_state=None) -> None:
+        """Record a captured native anchor in the durable ledger.
+
+        The anchor tuple is the minimal durable record of T6: with the
+        raw components stored separately, any future recalibration of
+        the asserted chain-delay terms is pure arithmetic over the
+        ledger (see t6_anchor_ledger).  getattr-guarded like the
+        chain-delay stores — test harnesses build the recorder via
+        ``__new__`` — and the ledger itself never raises.
+        """
+        ledger = getattr(self, '_t6_anchor_ledger', None)
+        if ledger is None:
+            return
+        auth = getattr(self, '_t6_authority', None)
+        ledger.append(
+            anchor,
+            authority_state=authority_state,
+            delay_budget_ns=getattr(auth, 'delay_budget_ns', None),
+            filter_group_delay_ns=getattr(auth, 'filter_group_delay_ns', None),
+        )
+
     def _t6_apply_authority_decision(self, decision) -> None:
         """Install/invalidate the T6 anchor per the authority decision.
         Every state transition is loud (expose-don't-correct)."""
@@ -2947,6 +2974,8 @@ class CoreRecorderV2:
         self._t6_authority_last_decision = decision
         if decision.state is T6AuthorityState.AUTHORITATIVE:
             self._t6_native_anchor = decision.anchor
+            self._t6_ledger_append(
+                decision.anchor, authority_state=decision.state.value)
             if decision.state is not prev:
                 self._t6_rate_reset("native anchor captured via T6")
             # Log the anchor in the shape scripts/t6_origin_spread.py
@@ -3530,6 +3559,11 @@ class CoreRecorderV2:
                 captured_via_tier="T5",
             )
             self._t6_rate_reset("native anchor captured via T5")
+            # getattr'd: test harnesses borrow this method onto bare
+            # fakes that have neither the helper nor a ledger.
+            _led = getattr(self, '_t6_ledger_append', None)
+            if _led is not None:
+                _led(self._t6_native_anchor)
             logger.info(
                 f"T6 chain_delay disambiguated against T5 (LB-1421 NMEA): "
                 f"raw={result.chain_delay_ns} ns, "
@@ -3721,6 +3755,11 @@ class CoreRecorderV2:
                 captured_via_tier=str(ref_tier),
             )
             self._t6_rate_reset(f"native anchor captured via {ref_tier}")
+            # getattr'd: test harnesses borrow this method onto bare
+            # fakes that have neither the helper nor a ledger.
+            _led = getattr(self, '_t6_ledger_append', None)
+            if _led is not None:
+                _led(self._t6_native_anchor)
             if shift_samples != 0:
                 logger.info(
                     f"T6 chain_delay disambiguated against {ref_tier} "
