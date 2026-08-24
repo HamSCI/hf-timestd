@@ -234,6 +234,14 @@ realtime_iono = true
 authority = "rtp"
 rtp_expected_accuracy_ms = 0.001  # L4 accuracy (GPS+PPS via LAN)
 
+# === Authority manager ===
+# Declared here so the section is visible surface, not a hidden key
+# (split plan Phase 1: its historical absence kept T6 invisible on a
+# fresh install).  All keys are optional; the manager runs with sane
+# defaults when the section is empty.  Hosted by the fusion service —
+# writes /run/hf-timestd/authority.json (schema v1, frozen).
+[timing.authority_manager]
+
 # === Coarse-time producer (bootstrap input) ===
 # The authority manager's bootstrap coordinator consumes
 # /run/hf-timestd/coarse_time.json to detect a wildly-wrong system
