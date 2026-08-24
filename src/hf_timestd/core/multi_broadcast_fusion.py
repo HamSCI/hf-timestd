@@ -681,9 +681,10 @@ class MultiBroadcastFusion:
             receiver_lon=self.receiver_lon
         )
         
-        # Initialize TEC Estimator (Coherent Multi-Frequency Physics)
-        from .tec_estimator import TECEstimator
-        self.tec_estimator = TECEstimator()
+        # Split Phase 2 (2026-08-24): the in-loop HF TEC solver is gone.
+        # HF-derived TEC is a hamsci-physics science product, not a timing
+        # correction; the ionospheric inputs that remain are the GNSS-VTEC
+        # DB read and the guarded HFPropagationModel prediction.
         
         # ====================================================================
         # PER-BROADCAST KALMAN FILTERS (v6.0 Hierarchical Architecture)
@@ -3522,188 +3523,13 @@ class MultiBroadcastFusion:
                 logger.debug(f"GNSS VTEC stale (age: {time.time()-vtec_ts:.1f}s), skipping")
 
         # ====================================================================
-        # TEC ESTIMATION (Physics-Based Propagation Correction)
+        # TEC ESTIMATION — REMOVED (split Phase 2, 2026-08-24)
         # ====================================================================
-        # Only run the HF TEC solver if we DIDN'T use GNSS VTEC.
-        # GNSS VTEC is generally superior to HF-derived TEC.
-        
-        if not used_gnss_vtec:
-            # Group by station
-            by_station = defaultdict(list)
-            for m in measurements:
-                if m.station == 'GLOBAL_DIFF':
-                    continue
-                by_station[m.station].append(m)
-                
-            for station, station_meas in by_station.items():
-                if len(station_meas) >= 2:
-                    # Gate TEC inputs by dominant propagation mode to avoid
-                    # mixing incompatible path families (e.g., 1F and 2F).
-                    mode_groups = defaultdict(list)
-                    invalid_modes = {
-                        '', 'UNKNOWN', 'FALLBACK', 'TICK', 'FSK', 'CHU_FSK',
-                        'TEC_VALIDATED', 'TEC_UNREALISTIC', 'TEC_POOR_FIT'
-                    }
-                    for m in station_meas:
-                        base_mode = (m.propagation_mode or '').split('+')[0].strip().upper()
-                        if base_mode in invalid_modes:
-                            continue
-                        mode_groups[base_mode].append(m)
+        # The HF multi-frequency TEC solver no longer runs inside fusion.
+        # It mixed a science estimate into the timing path; it now lives in
+        # hamsci-dsp (engine) / hamsci-physics (product).  GNSS VTEC above
+        # remains the only ionospheric delay correction applied here.
 
-                    if mode_groups:
-                        dominant_mode, dominant_meas = max(
-                            mode_groups.items(),
-                            key=lambda kv: len(kv[1])
-                        )
-                        if len(dominant_meas) >= 2:
-                            station_meas = dominant_meas
-                            logger.debug(
-                                f"TEC mode gate for {station}: using {len(station_meas)} "
-                                f"measurements from dominant mode {dominant_mode}"
-                            )
-                        else:
-                            logger.info(
-                                f"Skipping TEC for {station}: no dominant propagation mode "
-                                f"with >=2 measurements"
-                            )
-                            continue
-
-                    # Prepare input for estimator
-                    tec_input = []
-                    for m in station_meas:
-                        # TEC FIX: Use raw_arrival_time_ms if available (schema v1.1.0+)
-                        # This is the uncalibrated ToA that includes ionospheric dispersion
-                        if m.raw_arrival_time_ms is not None:
-                            toa_ms = m.raw_arrival_time_ms
-                        else:
-                            # Fallback: reconstruct ToA from calibrated values (old schema)
-                            # This is less accurate but maintains backward compatibility
-                            toa_ms = m.d_clock_ms + m.propagation_delay_ms
-                        
-                        # Filter out NaN values (tone not detected) to prevent solver failure
-                        if toa_ms is not None and not np.isnan(toa_ms):
-                            tec_input.append({
-                                'frequency_hz': m.frequency_mhz * 1e6,
-                                'toa_ms': toa_ms,
-                                'uncertainty_ms': getattr(m, 'tof_uncertainty_ms', None) or max(0.1, 1.0 / max(0.001, m.confidence)),
-                                'mode_confidence': m.l2_model_confidence,
-                            })
-                    
-                    # DIAGNOSTIC: Log the raw inputs to the TEC estimator to trace "0.0 TEC" issue
-                    if logger.isEnabledFor(logging.DEBUG):
-                        input_summary = ", ".join([f"{x['frequency_hz']/1e6:.1f}MHz={x['toa_ms']:.3f}ms" for x in tec_input])
-                        logger.debug(f"TEC Solver Inputs for {station}: {input_summary}")
-                    
-                    # Run Solver
-                    tec_result = self.tec_estimator.estimate_tec(
-                        tec_input, station, measurements[0].timestamp
-                    )
-                    
-                    if tec_result:
-                        # ================================================================
-                        # v6.0 ARCHITECTURE: Use TEC to extract ionosphere-free D_clock
-                        # ================================================================
-                        # The TEC estimator fits: ToA(f) = T_vacuum + k/f²
-                        # t_vacuum_error_ms is the ionosphere-free geometric delay
-                        # This REMOVES ionospheric bias from timing measurements
-                        
-                        # Validate TEC result is not NaN
-                        if np.isnan(tec_result.tec_u) or np.isnan(tec_result.confidence):
-                            logger.warning(f"TEC solver produced NaN for {station} (tec={tec_result.tec_u}, conf={tec_result.confidence}) - skipping")
-                        elif tec_result.confidence > 0.5 and 1.0 <= tec_result.tec_u <= 200.0:
-                            # TEC is physically reasonable (1-200 TECU) and well-fit
-                            logger.info(
-                                f"TEC Solved for {station}: {tec_result.tec_u:.1f} TECU "
-                                f"(conf={tec_result.confidence:.2f}), "
-                                f"t_vacuum={tec_result.t_vacuum_error_ms:.3f}ms"
-                            )
-
-                            if not self.is_rtp_authority:
-                                # ============================================================
-                                # FUSION MODE: Apply ionosphere-free D_clock correction
-                                # ============================================================
-                                # In Fusion mode (no GPS+PPS) the propagation model's
-                                # ionospheric term is the dominant error source.  The TEC
-                                # fit solves:
-                                #
-                                #   D_clock(f) = t_vacuum + K·TEC/f²
-                                #
-                                # The intercept t_vacuum_error_ms IS the ionosphere-free
-                                # D_clock — independent of which propagation mode was used
-                                # and independent of what TEC value the model assumed.
-                                # Replacing each measurement's d_clock_ms with t_vacuum
-                                # removes the ionospheric dispersion entirely.
-                                #
-                                # Guard: only apply when fit confidence is high enough that
-                                # the intercept is well-determined.  With N=3 (CHU) and
-                                # R²>0.5 the intercept uncertainty is typically <1ms.
-                                # With N=2 the fit is exact (R²=1 always) so we require
-                                # a higher confidence threshold to avoid over-fitting noise.
-                                n_pts = tec_result.n_frequencies
-                                min_conf = 0.7 if n_pts >= 3 else 0.85
-                                if tec_result.confidence >= min_conf:
-                                    t_vac = tec_result.t_vacuum_error_ms
-                                    for m in station_meas:
-                                        old_d = m.d_clock_ms
-                                        m.d_clock_ms = t_vac
-                                        m.propagation_mode = 'TEC_CORRECTED'
-                                        m.confidence = min(1.0, m.confidence * 1.2)
-                                        logger.debug(
-                                            f"  TEC correction {station} {m.frequency_mhz}MHz: "
-                                            f"D_clock {old_d:+.3f}ms → {t_vac:+.3f}ms "
-                                            f"(Δ={t_vac - old_d:+.3f}ms, "
-                                            f"TEC={tec_result.tec_u:.1f} TECU)"
-                                        )
-                                    logger.info(
-                                        f"TEC correction applied to {len(station_meas)} "
-                                        f"{station} measurements: "
-                                        f"t_vacuum={t_vac:+.3f}ms, "
-                                        f"TEC={tec_result.tec_u:.1f} TECU, "
-                                        f"conf={tec_result.confidence:.2f}"
-                                    )
-                                else:
-                                    # Fit exists but intercept not well-determined — validate only
-                                    for m in station_meas:
-                                        m.propagation_mode = 'TEC_VALIDATED'
-                                        m.confidence = min(1.0, m.confidence * 1.1)
-                                    logger.info(
-                                        f"TEC fit for {station} below correction threshold "
-                                        f"(conf={tec_result.confidence:.2f} < {min_conf:.2f}): "
-                                        f"validated only"
-                                    )
-                            else:
-                                # ============================================================
-                                # RTP MODE: TEC is a science observable, not a correction
-                                # ============================================================
-                                # In RTP mode the GPS+PPS reference is ~50µs accurate.
-                                # D_clock is a direct measurement of the propagation path.
-                                # Applying TEC correction would remove the ionospheric signal
-                                # we want to measure.  Only boost confidence.
-                                for m in station_meas:
-                                    m.propagation_mode = 'TEC_VALIDATED'
-                                    m.confidence = min(1.0, m.confidence * 1.15)
-                                logger.debug(
-                                    f"  TEC validated {len(station_meas)} measurements from "
-                                    f"{station} (RTP mode — not correcting), "
-                                    f"t_vacuum={tec_result.t_vacuum_error_ms:.3f}ms, "
-                                    f"residuals={tec_result.residuals_ms:.3f}ms"
-                                )
-                        elif tec_result.confidence > 0.9:
-                            # TEC fit is good but value is unrealistic (e.g., 0.0 TECU)
-                            logger.warning(f"TEC unrealistic for {station}: {tec_result.tec_u:.1f} TECU (conf={tec_result.confidence:.2f}) - not applying correction")
-                            for m in station_meas:
-                                m.propagation_mode = 'TEC_UNREALISTIC'
-                        else:
-                            # TEC fit is poor - reduce confidence slightly
-                            logger.warning(f"TEC poor fit for {station}: conf={tec_result.confidence:.2f} (Needs >0.9)")
-                            for m in station_meas:
-                                m.confidence = max(0.5, m.confidence * 0.95)
-                                m.propagation_mode = 'TEC_POOR_FIT'
-                    else:
-                        logger.warning(f"TEC solver returned None for {station} (inputs: {len(tec_input)})")
-                else:
-                     logger.info(f"Skipping TEC for {station}: Only {len(station_meas)} measurements (Need >=2)")
-        
         # CRITICAL: Filter out any measurements with NaN values or unlocked GPSDO before fusion
         # This is a safety net to prevent NaN from propagating and to exclude unlocked measurements
         valid_measurements = []
@@ -3915,7 +3741,6 @@ class MultiBroadcastFusion:
             '2E': 1.0,    # Two-hop E-layer
             '2F': 2.0,    # Two-hop F-layer (variable)
             '3F': 3.0,    # Three-hop (highly variable)
-            'TEC_SOLVED': 0.2,  # Physics-derived (very good)
         }
         
         # Scale by ionospheric conditions (if VTEC available)
