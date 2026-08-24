@@ -207,3 +207,44 @@ class TestMeasuredPlaneTerm:
         assert pub["offset_ns"] == pytest.approx(-15_500_000.0, abs=100_000.0)
         assert pub["sigma_ns"] >= 20_000.0
         assert pub["n"] == 30
+
+
+class TestMeasurementIsGatedOnTheConvention:
+    """The term may only be measured when the planes actually differ.
+
+    Under the legacy convention the anchor already folds the pipeline
+    latency into the label, so the label plane and the host plane
+    coincide and the true offset is ~0.  Anything the tracker measures
+    there is not a plane difference — it is T6's own residual — and
+    feeding it into the cross-bench correction would subtract exactly the
+    disagreement the gate exists to detect.  Seen live on AC0G-B4: with
+    labels pinned legacy the judge measured a -3.77 ms "plane offset"
+    that was really T6 error plus a restart transient.
+    """
+
+    def _feed(self, j, n=30):
+        for i in range(n):
+            j.observe_label_plane(
+                label=reading("T6", 1_787_000_000.0 + i * 10 - 0.0155,
+                              mono=1_000.0 + i * 10, plane="label"),
+                host=reading("T4", 1_787_000_000.0 + i * 10,
+                             mono=1_000.0 + i * 10, sigma_ns=20_000.0))
+
+    def test_measuring_is_on_by_default(self, tmp_path):
+        j = make_judge(tmp_path)
+        self._feed(j)
+        assert j.label_plane_status()["source"] == "measured"
+
+    def test_disabled_never_measures(self, tmp_path):
+        j = make_judge(tmp_path, label_plane_measure=False,
+                       label_plane_offset_ns=0.0)
+        self._feed(j)
+        assert j.label_plane_status()["source"] == "config"
+        assert j.effective_label_plane_offset_ns() == 0.0
+
+    def test_disabled_still_honours_an_explicit_config_term(self, tmp_path):
+        """Turning the measurement off is not the same as forcing zero."""
+        j = make_judge(tmp_path, label_plane_measure=False,
+                       label_plane_offset_ns=-16_600_000.0)
+        self._feed(j)
+        assert j.effective_label_plane_offset_ns() == -16_600_000.0

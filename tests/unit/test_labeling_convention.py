@@ -81,3 +81,34 @@ def test_content_refuses_an_out_of_bound_value_too():
     """A nonsense constant is a config error whether or not it is applied."""
     with pytest.raises(ValueError, match="filter_group_delay_ns"):
         settings({"filter_group_delay_ns": 300_000_000})
+
+
+# ── the judge's plane measurement follows the convention ────────────────
+
+from hf_timestd.core.core_recorder_v2 import label_plane_measure_for
+
+
+def test_content_lets_the_judge_measure_the_plane():
+    assert label_plane_measure_for(
+        {"t6_pps": {"labeling_convention": "content"}}) is True
+
+
+def test_measuring_is_the_default_when_unspecified():
+    assert label_plane_measure_for({"t6_pps": {}}) is True
+    assert label_plane_measure_for({}) is True
+
+
+def test_legacy_stops_the_judge_measuring_the_plane():
+    """Under legacy the planes coincide, so a measured term would be T6's
+    own error — correcting by it would blind the cross-bench gate.  Seen
+    live on AC0G-B4: labels pinned legacy, tracker reporting a -3.77 ms
+    "plane offset" that was really T6 residual plus a restart transient."""
+    assert label_plane_measure_for(
+        {"t6_pps": {"labeling_convention": "legacy"}}) is False
+
+
+def test_the_recorder_uses_that_helper():
+    """Guard against the wiring being inlined and drifting."""
+    import inspect
+    from hf_timestd.core.core_recorder_v2 import CoreRecorderV2
+    assert "label_plane_measure_for(" in inspect.getsource(CoreRecorderV2.__init__)

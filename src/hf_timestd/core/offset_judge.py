@@ -857,6 +857,14 @@ class OffsetJudge:
         # gap is a pipeline latency that drifts with load, and a
         # hand-calibrated constant for exactly this quantity is what the
         # content-time convention proposal set out to retire.
+        # Measuring is only meaningful when the planes actually DIFFER,
+        # i.e. under content-time labels.  Under the legacy convention the
+        # anchor already folds the pipeline latency into the label, the two
+        # planes coincide, and anything measured here would be T6's own
+        # residual — subtracting which would cancel the disagreement the
+        # cross-bench gate exists to detect.  The recorder sets this from
+        # [timing.t6_pps].labeling_convention.
+        self.label_plane_measure = bool(cfg.get("label_plane_measure", True))
         from .label_plane import LabelPlaneTracker
         self._label_plane = LabelPlaneTracker(
             window_s=float(cfg.get("label_plane_window_s",
@@ -1380,6 +1388,8 @@ class OffsetJudge:
         Same-plane pairs carry no plane information and are ignored; the
         tracker itself refuses observations from an undisciplined host.
         """
+        if not self.label_plane_measure:
+            return
         if getattr(label, "plane", "host") != "label":
             return
         if getattr(host, "plane", "host") != "host":
@@ -1393,13 +1403,13 @@ class OffsetJudge:
 
     def effective_label_plane_offset_ns(self) -> float:
         """The plane term in force: measured when available, else config."""
-        est = self._label_plane.estimate()
+        est = self._label_plane.estimate() if self.label_plane_measure else None
         return float(est.offset_ns) if est is not None \
             else self.label_plane_offset_ns
 
     def label_plane_status(self) -> Dict:
         """Auditable view of the term — published in offset_judge.json."""
-        est = self._label_plane.estimate()
+        est = self._label_plane.estimate() if self.label_plane_measure else None
         if est is None:
             return {
                 "source": "config",

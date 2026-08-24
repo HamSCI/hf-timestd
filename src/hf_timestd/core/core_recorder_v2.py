@@ -220,6 +220,22 @@ def wrap_chain_delay_ns(effective_ns: int) -> int:
     return ((int(effective_ns) + half) % _T6_PPS_PERIOD_NS) - half
 
 
+def label_plane_measure_for(timing_section: dict) -> bool:
+    """May the judge MEASURE the label→host plane offset?
+
+    Only when the two planes actually differ — i.e. under content-time
+    labels.  Under the legacy convention the anchor folds the pipeline
+    latency into the label, so the planes coincide; whatever the tracker
+    measured there would be T6's own residual, and correcting by it would
+    cancel the disagreement the cross-bench gate exists to detect.
+    Derived from the labelling convention rather than configured
+    separately, so the two cannot drift apart.
+    """
+    t6 = (timing_section or {}).get('t6_pps', {}) or {}
+    convention = str(t6.get('labeling_convention', 'content')).strip().lower()
+    return convention != 'legacy'
+
+
 class CoreRecorderV2:
     """
     Core recorder V2: Uses ka9q-python RadiodStream and RadiodControl.
@@ -585,7 +601,18 @@ class CoreRecorderV2:
         # Failure to construct/start is NON-FATAL: recording continues
         # with raw radiod mappings (pre-judge behavior).
         self._offset_judge = None
-        _oj_cfg = _timing_section.get('offset_judge', {}) or {}
+        _oj_cfg = dict(_timing_section.get('offset_judge', {}) or {})
+        # The judge may only MEASURE the label→host plane offset when the
+        # two planes actually differ — i.e. under content-time labels.
+        # Under the legacy convention the anchor folds the pipeline latency
+        # into the label, the planes coincide, and whatever the tracker
+        # measured would be T6's own residual; correcting by it would
+        # cancel the disagreement the cross-bench gate exists to detect.
+        # Derived here rather than configured separately so the two cannot
+        # drift apart.
+        if 'label_plane_measure' not in _oj_cfg:
+            _oj_cfg['label_plane_measure'] = label_plane_measure_for(
+                _timing_section)
         if _oj_cfg.get('enabled', True):
             try:
                 from .offset_judge import OffsetJudge
