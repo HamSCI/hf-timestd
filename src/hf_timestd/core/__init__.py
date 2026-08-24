@@ -39,288 +39,232 @@ Six-service systemd pipeline:
 Note: Phase2AnalyticsService and PipelineOrchestrator archived 2026-01-22.
 """
 
-# RTP infrastructure
-# from .rtp_receiver import RTPReceiver  # DEPRECATED - using ka9q-python instead
-from .packet_resequencer import PacketResequencer, RTPPacket, GapInfo
-from .recording_session import (
-    RecordingSession,
-    SessionConfig,
-    SessionState,
-    SegmentInfo,
-    SessionMetrics,
-    SegmentWriter,
-)
+# Lazy facade (PEP 562) — split plan Phase 1: the eager imports
+# dragged the whole engine surface (and, shim-era, half of
+# hamsci-dsp) into every `import hf_timestd.core`.  Names resolve
+# on first attribute access; `import hf_timestd.core.X` paths are
+# unaffected.  Stale __all__ ghosts of archived modules
+# (Phase2AnalyticsService, GlobalStationVoter, ...) are dropped —
+# they had not been importable for months.
 
-# Re-export ka9q types for convenience
-from ka9q import RTPHeader
-
-# Tone detection and timing
-from .tone_detector import ToneDetector
-
-# Analytics and discrimination
-from .wwvh_discrimination import WWVHDiscriminator
-from .bpm_discriminator import BPMDiscriminator, BPMTimingMode, BPMDiscriminationResult
-from .physics_propagation import PhysicsPropagationModel, PropagationResult, PropagationModelTier  # deprecated — intentionally omitted from __all__ (P-H12)
-from .propagation_model import HFPropagationModel, PropagationPrediction, ModeArrival
-from .wwv_test_signal import WWVTestSignalDetector
-from .metrology_service import MetrologyService, MetrologyEngine
-from .decoder_config import DecoderConfig, DecoderVariant, ComparisonMetrics, get_decoder_config
-# Phase2AnalyticsService archived 2026-01-22 - replaced by MetrologyService
-
-# Supporting components
-from .wwv_geographic_predictor import WWVGeographicPredictor
-from .standard_signal_generator import StandardTimeSignalGenerator
-from .wwv_tone_schedule import schedule as wwv_tone_schedule
-from .wwv_bcd_encoder import WWVBCDEncoder
-from .quality_metrics import QualityMetricsTracker, MinuteQualityMetrics
-from .timing_metrics_writer import TimingMetricsWriter
-from .solar_zenith_calculator import calculate_solar_zenith_for_day
-from .core_recorder_v2 import CoreRecorderV2 as CoreRecorder  # V2 is active implementation
-
-# Phase 1 raw_buffer (binary archive)
-from .binary_archive_writer import (
-    BinaryArchiveWriter,
-    BinaryArchiveConfig,
-    BinaryArchiveReader,
-)
-
-# Tiered Storage (RAM hot buffer + disk cold storage)
-from .tiered_storage import (
-    TieredStorageManager,
-    TieredStorageConfig,
-    get_tiered_storage_manager,
-    init_tiered_storage,
-    calculate_hot_minutes,
-    get_available_ram_bytes,
-)
-
-# Multi-Station Detection (Physics-based approach)
-# Note: GlobalStationVoter and StationLockCoordinator archived 2026-01-16
-# Backward-compat aliases available in multi_station_detector.py
-from .multi_station_detector import (
-    MultiStationDetector,
-    StationDetection,
-    MinuteDetectionResult,
-    DetectionQuality,
-    create_detector,
-)
-
-# Clock Convergence Model ("Set, Monitor, Intervention" for GPSDO)
-from .clock_convergence import (
-    ClockConvergenceModel,
-    ConvergenceState,
-    ConvergenceResult,
-    StationAccumulator
-)
-
-# Primary Time Standard (HF Time Transfer)
-from .propagation_mode_solver import (
-    PropagationModeSolver, 
-    PropagationMode, 
-    ModeCandidate,
-    ModeIdentificationResult,
-    EmissionTimeResult
-)
-from .primary_time_standard import (
-    PrimaryTimeStandard,
-    ChannelTimeResult,
-    StationConsensus,
-    MinuteTimeStandardResult
-)
-
-# Pipeline
-# Note: PipelineRecorder archived 2026-01-16 (used deprecated RTPReceiver)
-# Note: PipelineOrchestrator archived 2026-01-22 (replaced by MetrologyService)
-# Use StreamRecorderV2 (stream_recorder_v2.py) with ka9q.RadiodStream instead
-
-# Transmission Time Solver (UTC back-calculation)
-from .transmission_time_solver import (
-    TransmissionTimeSolver,
-    MultiStationSolver,
-    SolverResult,
-    CombinedUTCResult,
-    PropagationMode,
-    ModeCandidate as TransmissionModeCandidate,
-    create_solver_from_grid,
-    create_multi_station_solver,
-    grid_to_latlon
-)
-
-# Phase 2: Temporal Analysis Engine
-# Note: Phase2TemporalEngine archived 2026-01-22 (replaced by MetrologyService)
-
-# GPSDO Monitoring
-from .gpsdo_monitor import (
-    GPSDOMonitor,
-    AnchorState,
-    GPSDOMonitorState
-)
-
-# Sliding Window Monitor (10-second real-time quality tracking)
-from .sliding_window_monitor import (
-    SlidingWindowMonitor,
-    WindowMetrics,
-    MinuteSummary,
-    SignalQuality
-)
-
-# Tick Matched Filter (per-second tick detection with overlapping windows)
-from .tick_matched_filter import (
-    TickMatchedFilter,
-    TickTemplate,
-    TickDetectionResult,
-    MinuteTickAnalysis,
-    create_tick_filter,
-    WWV_TEMPLATE,
-    WWVH_TEMPLATE,
-    CHU_TEMPLATE,
-    BPM_TEMPLATE,
-    STATION_TEMPLATES,
-)
-
-# Signal Templates (BCD, AFSK, BPM modulation patterns)
-from .signal_templates import (
-    BCDTemplateGenerator,
-    BCDCorrelationResult,
-    CHUAFSKTemplateGenerator,
-    AFSKCorrelationResult,
-    BPMTemplateGenerator,
-    BPMCorrelationResult,
-    SignalTemplateCorrelator,
-    create_bcd_generator,
-    create_afsk_generator,
-    create_bpm_generator,
-    create_correlator,
-)
+_LAZY = {
+    'AFSKCorrelationResult': ('.signal_templates', 'AFSKCorrelationResult'),
+    'AnchorState': ('.gpsdo_monitor', 'AnchorState'),
+    'BCDCorrelationResult': ('.signal_templates', 'BCDCorrelationResult'),
+    'BCDTemplateGenerator': ('.signal_templates', 'BCDTemplateGenerator'),
+    'BPMCorrelationResult': ('.signal_templates', 'BPMCorrelationResult'),
+    'BPMDiscriminationResult': ('.bpm_discriminator', 'BPMDiscriminationResult'),
+    'BPMDiscriminator': ('.bpm_discriminator', 'BPMDiscriminator'),
+    'BPMTemplateGenerator': ('.signal_templates', 'BPMTemplateGenerator'),
+    'BPMTimingMode': ('.bpm_discriminator', 'BPMTimingMode'),
+    'BPM_TEMPLATE': ('.tick_matched_filter', 'BPM_TEMPLATE'),
+    'BinaryArchiveConfig': ('.binary_archive_writer', 'BinaryArchiveConfig'),
+    'BinaryArchiveReader': ('.binary_archive_writer', 'BinaryArchiveReader'),
+    'BinaryArchiveWriter': ('.binary_archive_writer', 'BinaryArchiveWriter'),
+    'CHUAFSKTemplateGenerator': ('.signal_templates', 'CHUAFSKTemplateGenerator'),
+    'CHU_TEMPLATE': ('.tick_matched_filter', 'CHU_TEMPLATE'),
+    'ChannelTimeResult': ('.primary_time_standard', 'ChannelTimeResult'),
+    'ClockConvergenceModel': ('.clock_convergence', 'ClockConvergenceModel'),
+    'CombinedUTCResult': ('.transmission_time_solver', 'CombinedUTCResult'),
+    'ComparisonMetrics': ('.decoder_config', 'ComparisonMetrics'),
+    'ConvergenceResult': ('.clock_convergence', 'ConvergenceResult'),
+    'ConvergenceState': ('.clock_convergence', 'ConvergenceState'),
+    'CoreRecorder': ('.core_recorder_v2', 'CoreRecorderV2'),
+    'DecoderConfig': ('.decoder_config', 'DecoderConfig'),
+    'DecoderVariant': ('.decoder_config', 'DecoderVariant'),
+    'DetectionQuality': ('.multi_station_detector', 'DetectionQuality'),
+    'EmissionTimeResult': ('.propagation_mode_solver', 'EmissionTimeResult'),
+    'GPSDOMonitor': ('.gpsdo_monitor', 'GPSDOMonitor'),
+    'GPSDOMonitorState': ('.gpsdo_monitor', 'GPSDOMonitorState'),
+    'GapInfo': ('.packet_resequencer', 'GapInfo'),
+    'HFPropagationModel': ('.propagation_model', 'HFPropagationModel'),
+    'MetrologyEngine': ('.metrology_service', 'MetrologyEngine'),
+    'MetrologyService': ('.metrology_service', 'MetrologyService'),
+    'MinuteDetectionResult': ('.multi_station_detector', 'MinuteDetectionResult'),
+    'MinuteQualityMetrics': ('.quality_metrics', 'MinuteQualityMetrics'),
+    'MinuteSummary': ('.sliding_window_monitor', 'MinuteSummary'),
+    'MinuteTickAnalysis': ('.tick_matched_filter', 'MinuteTickAnalysis'),
+    'MinuteTimeStandardResult': ('.primary_time_standard', 'MinuteTimeStandardResult'),
+    'ModeArrival': ('.propagation_model', 'ModeArrival'),
+    'ModeCandidate': ('.propagation_mode_solver', 'ModeCandidate'),
+    'ModeIdentificationResult': ('.propagation_mode_solver', 'ModeIdentificationResult'),
+    'MultiStationDetector': ('.multi_station_detector', 'MultiStationDetector'),
+    'MultiStationSolver': ('.transmission_time_solver', 'MultiStationSolver'),
+    'PacketResequencer': ('.packet_resequencer', 'PacketResequencer'),
+    'PhysicsPropagationModel': ('.physics_propagation', 'PhysicsPropagationModel'),
+    'PrimaryTimeStandard': ('.primary_time_standard', 'PrimaryTimeStandard'),
+    'PropagationMode': ('.transmission_time_solver', 'PropagationMode'),
+    'PropagationModeSolver': ('.propagation_mode_solver', 'PropagationModeSolver'),
+    'PropagationModelTier': ('.physics_propagation', 'PropagationModelTier'),
+    'PropagationPrediction': ('.propagation_model', 'PropagationPrediction'),
+    'PropagationResult': ('.physics_propagation', 'PropagationResult'),
+    'QualityMetricsTracker': ('.quality_metrics', 'QualityMetricsTracker'),
+    'RTPHeader': ('ka9q', 'RTPHeader'),
+    'RTPPacket': ('.packet_resequencer', 'RTPPacket'),
+    'RecordingSession': ('.recording_session', 'RecordingSession'),
+    'STATION_TEMPLATES': ('.tick_matched_filter', 'STATION_TEMPLATES'),
+    'SegmentInfo': ('.recording_session', 'SegmentInfo'),
+    'SegmentWriter': ('.recording_session', 'SegmentWriter'),
+    'SessionConfig': ('.recording_session', 'SessionConfig'),
+    'SessionMetrics': ('.recording_session', 'SessionMetrics'),
+    'SessionState': ('.recording_session', 'SessionState'),
+    'SignalQuality': ('.sliding_window_monitor', 'SignalQuality'),
+    'SignalTemplateCorrelator': ('.signal_templates', 'SignalTemplateCorrelator'),
+    'SlidingWindowMonitor': ('.sliding_window_monitor', 'SlidingWindowMonitor'),
+    'SolverResult': ('.transmission_time_solver', 'SolverResult'),
+    'StandardTimeSignalGenerator': ('.standard_signal_generator', 'StandardTimeSignalGenerator'),
+    'StationAccumulator': ('.clock_convergence', 'StationAccumulator'),
+    'StationConsensus': ('.primary_time_standard', 'StationConsensus'),
+    'StationDetection': ('.multi_station_detector', 'StationDetection'),
+    'TickDetectionResult': ('.tick_matched_filter', 'TickDetectionResult'),
+    'TickMatchedFilter': ('.tick_matched_filter', 'TickMatchedFilter'),
+    'TickTemplate': ('.tick_matched_filter', 'TickTemplate'),
+    'TieredStorageConfig': ('.tiered_storage', 'TieredStorageConfig'),
+    'TieredStorageManager': ('.tiered_storage', 'TieredStorageManager'),
+    'TimingMetricsWriter': ('.timing_metrics_writer', 'TimingMetricsWriter'),
+    'ToneDetector': ('.tone_detector', 'ToneDetector'),
+    'TransmissionModeCandidate': ('.transmission_time_solver', 'ModeCandidate'),
+    'TransmissionTimeSolver': ('.transmission_time_solver', 'TransmissionTimeSolver'),
+    'WWVBCDEncoder': ('.wwv_bcd_encoder', 'WWVBCDEncoder'),
+    'WWVGeographicPredictor': ('.wwv_geographic_predictor', 'WWVGeographicPredictor'),
+    'WWVHDiscriminator': ('.wwvh_discrimination', 'WWVHDiscriminator'),
+    'WWVH_TEMPLATE': ('.tick_matched_filter', 'WWVH_TEMPLATE'),
+    'WWVTestSignalDetector': ('.wwv_test_signal', 'WWVTestSignalDetector'),
+    'WWV_TEMPLATE': ('.tick_matched_filter', 'WWV_TEMPLATE'),
+    'WindowMetrics': ('.sliding_window_monitor', 'WindowMetrics'),
+    'calculate_hot_minutes': ('.tiered_storage', 'calculate_hot_minutes'),
+    'calculate_solar_zenith_for_day': ('.solar_zenith_calculator', 'calculate_solar_zenith_for_day'),
+    'create_afsk_generator': ('.signal_templates', 'create_afsk_generator'),
+    'create_bcd_generator': ('.signal_templates', 'create_bcd_generator'),
+    'create_bpm_generator': ('.signal_templates', 'create_bpm_generator'),
+    'create_correlator': ('.signal_templates', 'create_correlator'),
+    'create_detector': ('.multi_station_detector', 'create_detector'),
+    'create_multi_station_solver': ('.transmission_time_solver', 'create_multi_station_solver'),
+    'create_solver_from_grid': ('.transmission_time_solver', 'create_solver_from_grid'),
+    'create_tick_filter': ('.tick_matched_filter', 'create_tick_filter'),
+    'get_available_ram_bytes': ('.tiered_storage', 'get_available_ram_bytes'),
+    'get_decoder_config': ('.decoder_config', 'get_decoder_config'),
+    'get_tiered_storage_manager': ('.tiered_storage', 'get_tiered_storage_manager'),
+    'grid_to_latlon': ('.transmission_time_solver', 'grid_to_latlon'),
+    'init_tiered_storage': ('.tiered_storage', 'init_tiered_storage'),
+    'wwv_tone_schedule': ('.wwv_tone_schedule', 'schedule'),
+}
 
 __all__ = [
-    # RTP infrastructure
-    # "RTPReceiver",  # DEPRECATED
-    "RTPHeader",
-    "PacketResequencer",
-    "RTPPacket",
-    "GapInfo",
-    "RecordingSession",
-    "SessionConfig",
-    "SessionState",
-    "SegmentInfo",
-    "SessionMetrics",
-    "SegmentWriter",
-    # Core recorder
-    "CoreRecorder",
-    # Tone detection
-    "ToneDetector",
-    # Analytics
-    "Phase2AnalyticsService",
-    "WWVHDiscriminator",
-    "WWVTestSignalDetector",
-    # Supporting
-    "WWVGeographicPredictor",
-    "StandardTimeSignalGenerator",
-    "wwv_tone_schedule",
-    "WWVBCDEncoder",
-    "QualityMetricsTracker",
-    "MinuteQualityMetrics",
-    "TimingMetricsWriter",
-    "calculate_solar_zenith_for_day",
-    # Cross-channel coordination
-    "GlobalStationVoter",
-    "StationAnchor",
-    "AnchorQuality",
-    "StationLockCoordinator",
-    "GuidedDetection",
-    "MinuteProcessingResult",
-    # Clock Convergence Model
-    "ClockConvergenceModel",
-    "ConvergenceState",
-    "ConvergenceResult",
-    "StationAccumulator",
-    # Primary Time Standard
-    "PropagationModeSolver",
-    "PropagationMode",
-    "ModeCandidate",
-    "ModeIdentificationResult",
-    "EmissionTimeResult",
-    "PrimaryTimeStandard",
-    "ChannelTimeResult",
-    "StationConsensus",
-    "MinuteTimeStandardResult",
-    "TimeStandardCSVWriter",
-    "TimeStandardSummaryWriter",
-    # BPM Discrimination
-    "BPMDiscriminator",
-    "BPMTimingMode",
-    "BPMDiscriminationResult",
-    # Metrology Service
-    "MetrologyService",
-    "MetrologyEngine",
-    # Decoder Config
-    "DecoderConfig",
-    "DecoderVariant",
-    "ComparisonMetrics",
-    "get_decoder_config",
-    # PhysicsPropagationModel / PropagationResult / PropagationModelTier are
-    # deprecated (P-H12) — importable but no longer part of the public API.
-    # Two-Phase Pipeline (PipelineRecorder archived 2026-01-16)
-    "BinaryArchiveWriter",
-    "BinaryArchiveConfig",
-    "BinaryArchiveReader",
-    # Tiered Storage
-    "TieredStorageManager",
-    "TieredStorageConfig",
-    "get_tiered_storage_manager",
-    "init_tiered_storage",
-    "calculate_hot_minutes",
-    "get_available_ram_bytes",
-    # ClockOffsetEngine removed - redundant legacy code
-    # PipelineOrchestrator archived 2026-01-22
-    "BatchReprocessor",
-    # Transmission Time Solver
-    "TransmissionTimeSolver",
-    "MultiStationSolver",
-    "SolverResult",
-    "CombinedUTCResult",
-    "TransmissionModeCandidate",
-    "create_solver_from_grid",
-    "create_multi_station_solver",
-    "grid_to_latlon",
-    # Phase 2: Temporal Analysis Engine - archived 2026-01-22
-    # GPSDO Monitoring
-    "GPSDOMonitor",
-    "AnchorState",
-    "GPSDOMonitorState",
-    # Sliding Window Monitor
-    "SlidingWindowMonitor",
-    "WindowMetrics",
-    "MinuteSummary",
-    "SignalQuality",
-    # Tick Matched Filter
-    "TickMatchedFilter",
-    "TickTemplate",
-    "TickDetectionResult",
-    "MinuteTickAnalysis",
-    "create_tick_filter",
-    "WWV_TEMPLATE",
-    "WWVH_TEMPLATE",
-    "CHU_TEMPLATE",
-    "BPM_TEMPLATE",
-    "STATION_TEMPLATES",
-    # Multi-Station Detection (Physics-based)
-    "MultiStationDetector",
-    "StationDetection",
-    "MinuteDetectionResult",
-    "DetectionQuality",
-    "create_detector",
-    # Signal Templates (BCD, AFSK, BPM)
-    "BCDTemplateGenerator",
-    "BCDCorrelationResult",
-    "CHUAFSKTemplateGenerator",
-    "AFSKCorrelationResult",
-    "BPMTemplateGenerator",
-    "BPMCorrelationResult",
-    "SignalTemplateCorrelator",
-    "create_bcd_generator",
-    "create_afsk_generator",
-    "create_bpm_generator",
-    "create_correlator",
+    'AFSKCorrelationResult',
+    'AnchorState',
+    'BCDCorrelationResult',
+    'BCDTemplateGenerator',
+    'BPMCorrelationResult',
+    'BPMDiscriminationResult',
+    'BPMDiscriminator',
+    'BPMTemplateGenerator',
+    'BPMTimingMode',
+    'BPM_TEMPLATE',
+    'BinaryArchiveConfig',
+    'BinaryArchiveReader',
+    'BinaryArchiveWriter',
+    'CHUAFSKTemplateGenerator',
+    'CHU_TEMPLATE',
+    'ChannelTimeResult',
+    'ClockConvergenceModel',
+    'CombinedUTCResult',
+    'ComparisonMetrics',
+    'ConvergenceResult',
+    'ConvergenceState',
+    'CoreRecorder',
+    'DecoderConfig',
+    'DecoderVariant',
+    'DetectionQuality',
+    'EmissionTimeResult',
+    'GPSDOMonitor',
+    'GPSDOMonitorState',
+    'GapInfo',
+    'HFPropagationModel',
+    'MetrologyEngine',
+    'MetrologyService',
+    'MinuteDetectionResult',
+    'MinuteQualityMetrics',
+    'MinuteSummary',
+    'MinuteTickAnalysis',
+    'MinuteTimeStandardResult',
+    'ModeArrival',
+    'ModeCandidate',
+    'ModeIdentificationResult',
+    'MultiStationDetector',
+    'MultiStationSolver',
+    'PacketResequencer',
+    'PrimaryTimeStandard',
+    'PropagationMode',
+    'PropagationModeSolver',
+    'PropagationPrediction',
+    'QualityMetricsTracker',
+    'RTPHeader',
+    'RTPPacket',
+    'RecordingSession',
+    'STATION_TEMPLATES',
+    'SegmentInfo',
+    'SegmentWriter',
+    'SessionConfig',
+    'SessionMetrics',
+    'SessionState',
+    'SignalQuality',
+    'SignalTemplateCorrelator',
+    'SlidingWindowMonitor',
+    'SolverResult',
+    'StandardTimeSignalGenerator',
+    'StationAccumulator',
+    'StationConsensus',
+    'StationDetection',
+    'TickDetectionResult',
+    'TickMatchedFilter',
+    'TickTemplate',
+    'TieredStorageConfig',
+    'TieredStorageManager',
+    'TimingMetricsWriter',
+    'ToneDetector',
+    'TransmissionModeCandidate',
+    'TransmissionTimeSolver',
+    'WWVBCDEncoder',
+    'WWVGeographicPredictor',
+    'WWVHDiscriminator',
+    'WWVH_TEMPLATE',
+    'WWVTestSignalDetector',
+    'WWV_TEMPLATE',
+    'WindowMetrics',
+    'calculate_hot_minutes',
+    'calculate_solar_zenith_for_day',
+    'create_afsk_generator',
+    'create_bcd_generator',
+    'create_bpm_generator',
+    'create_correlator',
+    'create_detector',
+    'create_multi_station_solver',
+    'create_solver_from_grid',
+    'create_tick_filter',
+    'get_available_ram_bytes',
+    'get_decoder_config',
+    'get_tiered_storage_manager',
+    'grid_to_latlon',
+    'init_tiered_storage',
+    'wwv_tone_schedule',
 ]
+
+
+
+def __getattr__(name):
+    try:
+        mod, attr = _LAZY[name]
+    except KeyError:
+        raise AttributeError(
+            f"module {__name__!r} has no attribute {name!r}") from None
+    import importlib
+    module = importlib.import_module(mod, __name__) if mod.startswith(".") \
+        else importlib.import_module(mod)
+    value = getattr(module, attr)
+    globals()[name] = value      # cache: next access skips __getattr__
+    return value
+
+
+def __dir__():
+    return sorted(set(globals()) | set(_LAZY))
