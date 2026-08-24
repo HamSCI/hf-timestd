@@ -50,6 +50,8 @@ from typing import Optional
 
 import numpy as np
 
+from hf_timestd.core.rtp_domain import RtpUnwrapper
+
 logger = logging.getLogger(__name__)
 
 _WRAP = 1 << 32
@@ -94,6 +96,13 @@ class BpskEdgeFineStage:
         # fold domain per block in _compute_estimate.
         self._coarse_offset_rtp: Optional[float] = None
         self._last_avg_for_test: Optional[np.ndarray] = None
+        # One continuous counter domain (see rtp_domain).  Deliberately
+        # NOT cleared by reset(): a re-lock after reset must land in the
+        # same domain as the lock it replaces, and the MF calibrator
+        # watching the same stream must agree on the epoch — the 2^32
+        # seam otherwise shifts every phase by 2^32 % sample_rate
+        # (23,296 samples = 242.667 ms at 96 kHz) once per ~12.4 h.
+        self._rtp_unwrapper = RtpUnwrapper()
         self.reset()
 
     def reset(self) -> None:
@@ -133,7 +142,7 @@ class BpskEdgeFineStage:
         n = len(iq_samples)
         if n == 0:
             return None
-        decl0 = int(rtp_timestamp) & 0xFFFFFFFF
+        decl0 = self._rtp_unwrapper.unwrap(rtp_timestamp)
         block_len = self.fold_seconds * self.sample_rate
         consumed = 0
         result: Optional[FineEdgeEstimate] = None
@@ -143,11 +152,11 @@ class BpskEdgeFineStage:
             # samples were already consumed into a prior block this
             # call (only >0 when this batch itself straddles a fold
             # boundary).
-            decl = (decl0 + consumed) & 0xFFFFFFFF
-            off = (decl - (self._cont & 0xFFFFFFFF)) & 0xFFFFFFFF
+            decl = decl0 + consumed
+            off = decl - self._cont
             if self._reg_base is None:
                 self._reg_base = off
-            rel = _wrapped_signed(off - self._reg_base)
+            rel = off - self._reg_base
             if abs(rel) > STREAM_RESTART_LIMIT_SEC * self.sample_rate:
                 logger.warning(
                     "T6 fine stage: declared RTP jumped %+d samples vs "
@@ -198,7 +207,7 @@ class BpskEdgeFineStage:
         # Return the current registration if we're accumulating,
         # or the last completed registration if we've reset.
         if self._reg_base is not None and self._reg_rel:
-            return (self._reg_base + int(np.median(self._reg_rel))) & 0xFFFFFFFF
+            return self._reg_base + int(np.median(self._reg_rel))
         return self._last_registration
 
     def _finish_block(self) -> Optional[FineEdgeEstimate]:
@@ -219,7 +228,7 @@ class BpskEdgeFineStage:
         cnt = np.maximum(self._cnt, 1)
         avg = self._acc / cnt
         self._last_avg_for_test = avg
-        registration = (self._reg_base + int(np.median(rels))) & 0xFFFFFFFF
+        registration = self._reg_base + int(np.median(rels))
         self._last_registration = registration
         return self._compute_estimate(avg, registration)
 
@@ -292,7 +301,9 @@ class BpskEdgeFineStage:
         subsample = float(edge_rtp_float - edge_rtp)
         return FineEdgeEstimate(
             edge_offset_samples=float(edge_offset),
-            edge_rtp=edge_rtp & 0xFFFFFFFF,
+            # Continuous (unwrapped) domain — consumers that hand this
+            # to 32-bit RTP interfaces mask at their own boundary.
+            edge_rtp=edge_rtp,
             edge_subsample=subsample,
             n_seconds_folded=self.fold_seconds,
             plateau_amplitude=A,

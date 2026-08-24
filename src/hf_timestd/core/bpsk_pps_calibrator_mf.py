@@ -57,6 +57,7 @@ from typing import List, Optional
 import numpy as np
 
 from hf_timestd.core.bpsk_pps_calibrator import PpsCalibrationResult
+from hf_timestd.core.rtp_domain import RtpUnwrapper
 
 
 logger = logging.getLogger(__name__)
@@ -272,6 +273,14 @@ class BpskPpsCalibratorMF:
         # consecutive off-position edges have agreed on that position.
         self._step_candidate_rtp: Optional[int] = None
         self._step_candidate_count: int = 0
+        # One continuous counter domain (see rtp_domain).  Deliberately
+        # NOT cleared by reset(): a re-lock after reset must land in
+        # the same domain as the lock it replaces, and the fine stage
+        # watching the same stream must agree on the epoch — the 2^32
+        # seam otherwise shifts every mod-SR phase by 2^32 % SR
+        # (23,296 samples = 242.667 ms at 96 kHz) once per ~12.4 h,
+        # which is what wedged T6 on AC0G-B4 2026-08-23/24.
+        self._rtp_unwrapper = RtpUnwrapper()
 
         # Diagnostic capture (opt-in via TOML).  When enabled, records
         # the matched-filter output ``y`` and every sub/above-threshold
@@ -365,6 +374,10 @@ class BpskPpsCalibratorMF:
     ) -> Optional[PpsCalibrationResult]:
         if len(iq_samples) == 0:
             return None
+        # Enter the continuous counter domain immediately: everything
+        # below (edge tracking, chain-delay phase, the buffers) does
+        # mod-SR arithmetic that breaks at the 32-bit wrap otherwise.
+        rtp_timestamp = self._rtp_unwrapper.unwrap(rtp_timestamp)
         s = iq_samples.astype(np.complex64)
         batch_size = len(s)
 
@@ -470,7 +483,7 @@ class BpskPpsCalibratorMF:
         self._update_costas_lock(phase_increment)
 
         rtp_batch = (np.arange(batch_size, dtype=np.int64)
-                     + np.int64(rtp_timestamp)) & 0xFFFFFFFF
+                     + np.int64(rtp_timestamp))
         self._rtp_buf = np.concatenate([self._rtp_buf, rtp_batch])
 
         if self._use_magnitude_correlation:
