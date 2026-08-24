@@ -443,9 +443,24 @@ description = "BPSK_PPS"
 #                                  # timestamp error being absorbed here, so do
 #                                  # NOT widen it; the radiod filter group delay
 #                                  # has its own term below.
-# filter_group_delay_ns = 0        # radiod channel-filter group delay — the
-#                                  # DOMINANT term, milliseconds not µs.  Was
-#                                  # "0 pending fleet characterisation"; AC0G-B4
+# labeling_convention = "content"  # What a T6 label MEANS.
+#                                  #   "content" (default) — the antenna
+#                                  #     instant.  Only the µs-class analog
+#                                  #     path (delay_budget_ns) is part of the
+#                                  #     label; USB transfer, the FFT,
+#                                  #     filtering and scheduling are pipeline
+#                                  #     LATENCY measured live by the judge,
+#                                  #     not folded into the anchor.
+#                                  #   "legacy" — the pre-2026-08-24
+#                                  #     arithmetic, which applied
+#                                  #     filter_group_delay_ns below.  Kept so
+#                                  #     a site can revert in one line.
+#                                  # See docs/design/CONTENT_TIME_LABELING_CONVENTION.md
+# filter_group_delay_ns = 0        # RETIRED under the content convention —
+#                                  # not applied, and validate warns if set.
+#                                  # Applies only with labeling_convention =
+#                                  # "legacy", where it is the DOMINANT term,
+#                                  # milliseconds not µs.  AC0G-B4
 #                                  # measured 16_618_000 (16.618 ms) at 96 kHz /
 #                                  # ±25 kHz edges on 2026-08-15.  HARD BOUND
 #                                  # ±250 ms (reaches ~150 ms at the narrowest

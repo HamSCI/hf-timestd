@@ -13,6 +13,7 @@ Mechanism now, activation later: ``label_plane_offset_ns`` defaults to
 0.0, which is byte-identical to today's behavior; it becomes the
 floor-measured transport when the convention is adopted.
 """
+import pytest
 from pathlib import Path
 
 from hf_timestd.core.offset_judge import BenchReading, OffsetJudge
@@ -123,3 +124,86 @@ class TestGateUsesCorrectedDelta:
         j = make_judge(tmp_path, label_plane_offset_ns=-16_500_000.0)
         label, host = self._pair()
         assert j._cross_gate_ok_locked(label, host, mono_now=1.0) is True
+
+
+class TestMeasuredPlaneTerm:
+    """The term is measured from live readings, not asserted in config.
+
+    Adopting content-time labels makes the label plane sit one pipeline
+    latency earlier than the host plane.  That gap is a physical property
+    that drifts with load, so the judge learns it from paired
+    label/host readings instead of carrying another hand-calibrated
+    constant — the exact failure mode the 16.618 ms constant represented.
+    """
+
+    def test_falls_back_to_config_until_measured(self, tmp_path):
+        j = make_judge(tmp_path, label_plane_offset_ns=-16_600_000.0)
+        assert j.effective_label_plane_offset_ns() == -16_600_000.0
+
+    def test_measurement_supersedes_the_configured_value(self, tmp_path):
+        j = make_judge(tmp_path, label_plane_offset_ns=-16_600_000.0)
+        for i in range(30):
+            j.observe_label_plane(
+                label=reading("T6", 1_787_000_000.0 + i * 10 - 0.0155,
+                              mono=1_000.0 + i * 10, plane="label"),
+                host=reading("T4", 1_787_000_000.0 + i * 10,
+                             mono=1_000.0 + i * 10, sigma_ns=20_000.0),
+            )
+        eff = j.effective_label_plane_offset_ns()
+        assert eff == pytest.approx(-15_500_000.0, abs=100_000.0)
+
+    def test_an_undisciplined_host_never_feeds_the_term(self, tmp_path):
+        """A 50 ms host says nothing useful about a 16 ms pipeline."""
+        j = make_judge(tmp_path, label_plane_offset_ns=-16_600_000.0)
+        for i in range(30):
+            j.observe_label_plane(
+                label=reading("T6", 1_787_000_000.0 + i * 10 - 0.0155,
+                              mono=1_000.0 + i * 10, plane="label"),
+                host=reading("T4", 1_787_000_000.0 + i * 10,
+                             mono=1_000.0 + i * 10, sigma_ns=50e6),
+            )
+        assert j.effective_label_plane_offset_ns() == -16_600_000.0
+
+    def test_same_plane_pairs_are_not_observed(self, tmp_path):
+        """Two host-plane benches carry no plane information."""
+        j = make_judge(tmp_path, label_plane_offset_ns=-16_600_000.0)
+        for i in range(30):
+            j.observe_label_plane(
+                label=reading("T3", 1_787_000_000.0 + i * 10 - 0.0155,
+                              mono=1_000.0 + i * 10),          # plane="host"
+                host=reading("T4", 1_787_000_000.0 + i * 10,
+                             mono=1_000.0 + i * 10, sigma_ns=20_000.0),
+            )
+        assert j.effective_label_plane_offset_ns() == -16_600_000.0
+
+    def test_the_correction_uses_the_measured_term(self, tmp_path):
+        j = make_judge(tmp_path, label_plane_offset_ns=0.0)
+        for i in range(30):
+            j.observe_label_plane(
+                label=reading("T6", 1_787_000_000.0 + i * 10 - 0.0155,
+                              mono=1_000.0 + i * 10, plane="label"),
+                host=reading("T4", 1_787_000_000.0 + i * 10,
+                             mono=1_000.0 + i * 10, sigma_ns=20_000.0),
+            )
+        label = reading("T6", 1_787_000_100.0 - 0.0155, mono=1_100.0,
+                        plane="label")
+        host = reading("T4", 1_787_000_100.0, mono=1_100.0, sigma_ns=20_000.0)
+        # The plane gap is removed; what is left is the genuine (zero)
+        # disagreement, not the 15.5 ms of pipeline.
+        d = j._cross_bench_delta_ns(label, host, mono_now=1_100.0)
+        assert abs(d) < 100_000.0
+
+    def test_the_term_is_published_for_audit(self, tmp_path):
+        j = make_judge(tmp_path, label_plane_offset_ns=0.0)
+        for i in range(30):
+            j.observe_label_plane(
+                label=reading("T6", 1_787_000_000.0 + i * 10 - 0.0155,
+                              mono=1_000.0 + i * 10, plane="label"),
+                host=reading("T4", 1_787_000_000.0 + i * 10,
+                             mono=1_000.0 + i * 10, sigma_ns=20_000.0),
+            )
+        pub = j.label_plane_status()
+        assert pub["source"] == "measured"
+        assert pub["offset_ns"] == pytest.approx(-15_500_000.0, abs=100_000.0)
+        assert pub["sigma_ns"] >= 20_000.0
+        assert pub["n"] == 30

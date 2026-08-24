@@ -852,6 +852,21 @@ class OffsetJudge:
         # ``_cross_bench_delta_ns``, never to any bench's own sigma.
         self.label_plane_offset_ns = float(
             cfg.get("label_plane_offset_ns", 0.0))
+        # ...and the live measurement that supersedes it once it exists.
+        # The configured value is the fallback, not the answer: the plane
+        # gap is a pipeline latency that drifts with load, and a
+        # hand-calibrated constant for exactly this quantity is what the
+        # content-time convention proposal set out to retire.
+        from .label_plane import LabelPlaneTracker
+        self._label_plane = LabelPlaneTracker(
+            window_s=float(cfg.get("label_plane_window_s",
+                                   LabelPlaneTracker.DEFAULT_WINDOW_S)),
+            min_n=int(cfg.get("label_plane_min_n",
+                              LabelPlaneTracker.DEFAULT_MIN_N)),
+            max_host_sigma_ns=float(cfg.get(
+                "label_plane_max_host_sigma_ns",
+                LabelPlaneTracker.DEFAULT_MAX_HOST_SIGMA_NS)),
+        )
         # Precision non-regression clause (gate amendment, cont'd): a
         # VOLUNTARY upgrade is additionally refused when the candidate
         # bench's reported sigma is materially worse than the
@@ -1201,6 +1216,7 @@ class OffsetJudge:
                     self._measure_source_locked(st, best, mono_now)
             # Shadow-mode residuals: every non-adopted bench vs the
             # adopted one, refreshed each tick (gate doc).
+            self._observe_label_plane_locked(readings)
             self._update_shadow_locked(readings, self._best, mono_now)
             # Violation + rate evaluation run every tick even in
             # holdover so sustained windows keep counting / clearing.
@@ -1354,6 +1370,52 @@ class OffsetJudge:
                 break
         return trusted
 
+    # ── measured label-plane term ───────────────────────────────────────
+
+    def observe_label_plane(
+        self, label: BenchReading, host: BenchReading
+    ) -> None:
+        """Feed one (label-plane, host-plane) pair to the plane tracker.
+
+        Same-plane pairs carry no plane information and are ignored; the
+        tracker itself refuses observations from an undisciplined host.
+        """
+        if getattr(label, "plane", "host") != "label":
+            return
+        if getattr(host, "plane", "host") != "host":
+            return
+        self._label_plane.observe(
+            label_utc=float(label.utc),
+            host_utc=float(host.utc),
+            host_sigma_ns=float(host.sigma_ns),
+            mono=float(host.mono),
+        )
+
+    def effective_label_plane_offset_ns(self) -> float:
+        """The plane term in force: measured when available, else config."""
+        est = self._label_plane.estimate()
+        return float(est.offset_ns) if est is not None \
+            else self.label_plane_offset_ns
+
+    def label_plane_status(self) -> Dict:
+        """Auditable view of the term — published in offset_judge.json."""
+        est = self._label_plane.estimate()
+        if est is None:
+            return {
+                "source": "config",
+                "offset_ns": round(self.label_plane_offset_ns, 1),
+                "sigma_ns": None,
+                "n": 0,
+                "span_s": 0.0,
+            }
+        return {
+            "source": "measured",
+            "offset_ns": round(float(est.offset_ns), 1),
+            "sigma_ns": round(float(est.sigma_ns), 1),
+            "n": int(est.n),
+            "span_s": round(float(est.span_s), 1),
+        }
+
     def _cross_bench_delta_ns(
         self, cand: BenchReading, ref: BenchReading, mono_now: float
     ) -> float:
@@ -1367,7 +1429,7 @@ class OffsetJudge:
         shadow residuals share.
         """
         raw_ns = (cand.utc_at(mono_now) - ref.utc_at(mono_now)) * 1e9
-        expected_ns = self.label_plane_offset_ns * (
+        expected_ns = self.effective_label_plane_offset_ns() * (
             (1 if getattr(cand, "plane", "host") == "label" else 0)
             - (1 if getattr(ref, "plane", "host") == "label" else 0)
         )
@@ -1488,6 +1550,27 @@ class OffsetJudge:
         if (self._precision_hold is not None
                 and self._precision_hold.get("candidate") == adopted_tier):
             self._precision_hold = None
+
+    def _observe_label_plane_locked(
+        self, readings: List[BenchReading]
+    ) -> None:
+        """Pair this tick's label-plane bench with the tightest
+        host-plane one and feed the plane tracker.
+
+        The tightest host bench is chosen deliberately: the measurement
+        can only be as good as the clock it is referenced to, and the
+        tracker refuses anything looser than its host-sigma bound.
+        """
+        labels = [r for r in readings
+                  if getattr(r, "plane", "host") == "label"]
+        hosts = [r for r in readings
+                 if getattr(r, "plane", "host") == "host"]
+        if not labels or not hosts:
+            return
+        host = min(hosts, key=lambda r: float(r.sigma_ns))
+        for label in labels:
+            self.observe_label_plane(label, host)
+
 
     def _update_shadow_locked(
         self,
@@ -2136,6 +2219,11 @@ class OffsetJudge:
             # per-tick shadow residual of every non-adopted bench vs
             # the adopted one.
             "cross_bench_conflict": self._cross_conflict,
+            # The (label − host) plane term in force this tick, and
+            # where it came from ("measured" | "config").  Published so
+            # the correction applied to every cross-plane comparison is
+            # auditable rather than implicit.
+            "label_plane": self.label_plane_status(),
             # Precision non-regression clause: a voluntary upgrade
             # currently refused because the candidate's sigma would
             # materially regress the judge's precision (None when

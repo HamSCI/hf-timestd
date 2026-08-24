@@ -254,7 +254,7 @@ Ranked from highest authority (most accurate, most independent of external state
 
 | T-level | Source | Hard prereq | (A1, T) uncertainty | (A0, T) uncertainty |
 |---|---|---|---|---|
-| **T6** | hf-timestd detects TS-1 HF-injected BPSK-PPS in the RX path (sample-precise from the IQ stream) | TS-1 injector present + detection lock + §8 chain-delay calibrated | ~ns (post-§8) | ~tens of μs (per-tick; drifts between ticks at TCXO rate) |
+| **T6** | hf-timestd detects TS-1 HF-injected BPSK-PPS in the RX path (sample-precise from the IQ stream) | TS-1 injector present + detection lock; anchor = named second + µs-class `delay_budget_ns` (**content-time convention**, 2026-08-24: the label is the antenna instant, so pipeline latency is *not* folded in — see [CONTENT_TIME_LABELING_CONVENTION.md](design/CONTENT_TIME_LABELING_CONVENTION.md)) | ~ns *precision*; accuracy bounded by the analog term ε and the cross-bench gate | ~tens of μs (per-tick; drifts between ticks at TCXO rate) |
 | **T5** | GPS+PPS delivered over USB to the radiod host (LBE-1421 USB-NMEA, optionally USB-PPS on the same channel); consumed for second-of-day disambig under T6, or as the standalone source when T6 is unavailable | A1 + LBE-1421 USB connected to host | ~µs–few ms (USB-bus-jitter floored) | *not available* |
 | **T4** | system clock chronyed to LAN GPS+PPS timeserver via NTP | reachable GPS-backed peer | ~100 μs – few ms | ~1–5 ms (adds TCXO drift between syncs) |
 | **T3** | hf-timestd recovers UTC from WWV/WWVH/CHU tick Fusion | ≥2 stations detected + ionospheric model | ~0.5–2 ms | ~5–10 ms |

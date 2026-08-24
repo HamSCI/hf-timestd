@@ -148,6 +148,40 @@ degenerate residual.
 transport, not physics; content-true labels are consistent, stable, and make
 the transport itself observable.**
 
+## 6b · Adoption status (2026-08-24)
+
+**Approved and implemented.** What shipped:
+
+| §5 item | How it landed |
+|---|---|
+| 5.1 Retire the constant | `[timing.t6_pps].labeling_convention` — `"content"` (default) does not apply `filter_group_delay_ns`; `"legacy"` is the pre-convention arithmetic, kept so a site reverts in one key. The configured value is preserved as `filter_group_delay_ns_configured` so nothing is lost silently. |
+| 5.2 Bench transport term | `core/label_plane.py` — `LabelPlaneTracker` measures the (label − host) plane offset from paired bench readings; the judge uses it in `_cross_bench_delta_ns` and publishes it as `label_plane` in `offset_judge.json`. |
+| 5.3 HPPS feed | `t6_shm_system_time(..., transport_ns=, transport_sigma_ns=)` — subtracts the measured transport and widens sigma accordingly. Opt-in; absent term is byte-identical to the old arithmetic. |
+| 5.5 Docs | This section, `ARCHITECTURE-FIRST-PRINCIPLES` (analog-only definition restored), `METROLOGY` §4.5 tier row, `STATION_SETUP_GUIDE` (resolves #38). |
+
+Two properties are load-bearing and are pinned by tests:
+
+* **The plane term is measured, never asserted.** Replacing one
+  hand-calibrated constant with another would have missed the point.
+* **The term is slow; the gate is instantaneous.** A term that tracked
+  the live T6−T4 delta would cancel exactly the disagreement the
+  cross-bench gate exists to detect, making the gate quietly vacuous. It
+  is a long-window median, so a T6 epoch step still reaches the gate at
+  full amplitude (`test_a_t6_step_is_not_absorbed_immediately`).
+
+It is also only honest while the host clock is independently disciplined
+— chrony on FUSE holds ~20 µs, three orders below the ~16 ms term — so
+observations from a host looser than 1 ms are refused, and every estimate
+carries the host's sigma.
+
+> ⚠ **Upgrading an existing site.** The default is `"content"`, so a host
+> that carries a measured `filter_group_delay_ns` will shift its labels
+> EARLIER by that amount (−16.618 ms on AC0G-B4) at the first restart
+> after this release. To decouple the convention change from the upgrade,
+> set `labeling_convention = "legacy"` before deploying and flip it as its
+> own step. The anchor ledger makes either order re-labelable by
+> arithmetic.
+
 ## 7 · What this does NOT change
 
 The RTP-primacy invariant (labels still never derive from the host clock);

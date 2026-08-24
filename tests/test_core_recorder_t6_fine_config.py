@@ -8,12 +8,17 @@ class TestFineSettings:
     def test_defaults(self):
         s = CoreRecorderV2._t6_fine_settings({})
         assert s == {
+            # A label is the antenna instant (content-time convention,
+            # 2026-08-24): the radiod channel-filter group delay is
+            # pipeline latency downstream of the ADC and is not applied.
+            'labeling_convention': 'content',
             'fine_stage_enabled': True,
             'fine_fold_seconds': 30,
             'delay_budget_ns': 10_000,
-            # radiod channel-filter group delay: its own term, defaulting
-            # to 0 so existing sites are unchanged until measured.
             'filter_group_delay_ns': 0,
+            # What the site configured, applied or not — so a retired
+            # value is visible rather than silently dropped.
+            'filter_group_delay_ns_configured': 0,
             'edge_period_tolerance_ns': 5_000,
             'fine_coarse_max_ms': 5.0,
             'degraded_unlock_after_sec': 600.0,

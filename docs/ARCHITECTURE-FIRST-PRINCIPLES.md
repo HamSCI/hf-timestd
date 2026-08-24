@@ -75,6 +75,19 @@ historical `chain_delay` fit (32–106 ms) violated the microsecond-class
 analog-path definition above by three to four orders of magnitude —
 exactly the failure mode the inversion removes.
 
+**Under the content-time labelling convention**
+(`docs/design/CONTENT_TIME_LABELING_CONVENTION.md`, adopted 2026-08-24)
+the analog-only definition is restored in full. A label answers *when
+did this energy reach the antenna*, so the only delay between antenna
+and sample is the µs-class analog path carried by `delay_budget_ns`.
+Everything downstream of the ADC — USB transfer, the 3.24 M-point FFT,
+filtering, scheduling — is **pipeline latency**, not part of the label.
+The 16.618 ms `filter_group_delay_ns` constant that was calibrated once
+against T4 is retired: it was a varying quantity (an analytic 2.5 ms DSP
+term plus a load-dependent Λ ≈ 14 ms) frozen into a constant. The judge
+now *measures* that latency live as the label→host plane offset
+(`label_plane` in `offset_judge.json`) instead of asserting it.
+
 **T5 sits below T6 because the same GPSDO's PPS, delivered over USB
 (LBE-1421 USB-NMEA, possibly USB-PPS on the same channel), is
 software-mediated.**  USB scheduling jitter floors the deliverable

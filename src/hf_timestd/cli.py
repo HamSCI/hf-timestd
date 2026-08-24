@@ -222,42 +222,72 @@ def _handle_inventory(args):
 
 
 def t6_group_delay_issue(cfg):
-    """Contract issue when the T6 fine stage is armed with no measured
-    radiod filter group delay, else None.
+    """Contract issue about ``[timing.t6_pps].filter_group_delay_ns``.
 
-    ``filter_group_delay_ns`` defaults to 0, which asserts that radiod's
-    channel filter has no group delay.  It has milliseconds of it —
-    16.618 ms measured on AC0G-B4 at 96 kHz / ±25 kHz.
+    What it means depends on the labelling convention
+    (docs/design/CONTENT_TIME_LABELING_CONVENTION.md):
 
-    Zero is SAFE: with an honest bench sigma the cross-bench gate
-    catches the resulting disagreement and refuses to promote T6, so the
-    site degrades to T4 loudly rather than publishing a wrong time.  It
-    simply never gets T6.  That is worth saying on the surface a fresh
-    install reads, because nothing else will mention it.
+    * ``content`` (default since 2026-08-24) — a label is the antenna
+      instant, so the radiod channel-filter group delay is pipeline
+      LATENCY and is not part of the anchor.  Unset is correct.  A value
+      still configured is inert but worth flagging: the site is one key
+      away from re-applying ~16.6 ms to every label, and an operator who
+      set it deserves to know it did nothing.
+    * ``legacy`` — the pre-convention arithmetic, which needs the
+      constant.  Zero there is SAFE but useless: with an honest bench
+      sigma the cross-bench gate refuses to promote T6, so the site
+      degrades to T4 loudly rather than publishing a wrong time.  It
+      simply never gets T6, and nothing else on a fresh install says so.
 
-    Deliberately NOT shipped as a fleet default: the value follows the
-    channel filter, and a default that happened to land within the gate
-    bound of a site's true value would promote T6 with milliseconds of
-    error — quietly.  Zero fails loudly; a plausible wrong number does
-    not.
+    Deliberately NOT shipped as a fleet default in either convention: the
+    value follows the channel filter, and a default that happened to land
+    within the gate bound of a site's true value would promote T6 with
+    milliseconds of error — quietly.
     """
     t6 = ((cfg.get('timing', {}) or {}).get('t6_pps', {}) or {})
     if not t6.get('enabled', False):
         return None
     if not t6.get('fine_stage_enabled', True):
         return None
-    if float(t6.get('filter_group_delay_ns', 0)) != 0.0:
+
+    convention = str(
+        t6.get('labeling_convention', 'content')).strip().lower()
+    configured = float(t6.get('filter_group_delay_ns', 0))
+
+    if convention != 'legacy':
+        if configured == 0.0:
+            return None
+        return {
+            'severity': 'warn',
+            'instance': 'default',
+            'message': (
+                '[timing.t6_pps].filter_group_delay_ns is set to '
+                f'{int(configured)} but is NOT applied under the content '
+                'labelling convention: a T6 label is the antenna instant, '
+                'and radiod\'s channel-filter group delay is pipeline '
+                'latency downstream of the ADC, not part of the label. '
+                'Remove the key (the µs-class analog path stays in '
+                'delay_budget_ns). Keeping it means the site is one '
+                'labeling_convention = "legacy" away from re-applying '
+                f'{configured/1e6:.3f} ms to every label. See '
+                'docs/design/CONTENT_TIME_LABELING_CONVENTION.md.'
+            ),
+        }
+
+    if configured != 0.0:
         return None
     return {
         'severity': 'warn',
         'instance': 'default',
         'message': (
-            '[timing.t6_pps].filter_group_delay_ns is unset (0): radiod\'s '
-            'channel-filter group delay is milliseconds, so the T6 anchor '
-            'is early by that much and the cross-bench gate will refuse to '
-            'promote T6 (the site stays on T4 and logs CRITICAL). Measure '
-            'it: leave 0, let T6 lock, then read '
-            'shadow_residuals.T6.shadow_residual_ns from '
+            '[timing.t6_pps].filter_group_delay_ns is unset (0) under '
+            'labeling_convention = "legacy": radiod\'s channel-filter '
+            'group delay is milliseconds, so the T6 anchor is early by '
+            'that much and the cross-bench gate will refuse to promote T6 '
+            '(the site stays on T4 and logs CRITICAL). Either switch to '
+            'the content convention (recommended — the constant is '
+            'retired there) or measure it: leave 0, let T6 lock, then '
+            'read shadow_residuals.T6.shadow_residual_ns from '
             '/run/hf-timestd/offset_judge.json over ~15 min — its '
             'magnitude in ns IS the value. Site-specific: follows the '
             'channel filter, so re-measure if low_edge_hz / high_edge_hz '

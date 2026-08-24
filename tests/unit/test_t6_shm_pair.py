@@ -174,3 +174,67 @@ class TestPrecision:
                 min(PRECISION_CEILING, int(math.log2(sigma_ns / 1e9))),
             )
             assert pair.precision == fuse_style
+
+
+# ── content-time convention: the transport term ──────────────────────────
+#
+# Under content-time labels the anchor's edge label is the antenna
+# instant, so `mono_at_edge` (label minus the floor) lands one pipeline
+# latency LATE and the pair hands chrony a system_time that is too large
+# by exactly that.  Feeding chrony an honest sample means subtracting the
+# measured transport.  It is opt-in: passing nothing keeps today's
+# arithmetic byte-identical, and the caller only supplies a term while
+# the judge has one measured against a host clock that HPPS is not
+# itself disciplining (otherwise the correction is self-referential).
+
+class TestTransportCorrection:
+    def test_absent_term_is_todays_arithmetic(self):
+        floor = FloorEstimate(offset_s=-1000.0, sigma_ns=1e6, n=10, span_s=2.0)
+        a = t6_shm_system_time(
+            edge_label_utc_s=1_787_000_000.0, floor=floor,
+            mono_now=500.0, wall_now=1_787_000_500.0,
+            fallback_system_time=0.0)
+        b = t6_shm_system_time(
+            edge_label_utc_s=1_787_000_000.0, floor=floor,
+            mono_now=500.0, wall_now=1_787_000_500.0,
+            fallback_system_time=0.0, transport_ns=0.0)
+        assert a.system_time == b.system_time
+
+    def test_transport_is_subtracted_from_system_time(self):
+        floor = FloorEstimate(offset_s=-1000.0, sigma_ns=1e6, n=10, span_s=2.0)
+        kw = dict(edge_label_utc_s=1_787_000_000.0, floor=floor,
+                  mono_now=500.0, wall_now=1_787_000_500.0,
+                  fallback_system_time=0.0)
+        plain = t6_shm_system_time(**kw)
+        corrected = t6_shm_system_time(**kw, transport_ns=16_500_000.0)
+        assert corrected.system_time == pytest.approx(
+            plain.system_time - 0.0165, abs=1e-9)
+
+    def test_correction_is_recorded_in_the_source_tag(self):
+        floor = FloorEstimate(offset_s=-1000.0, sigma_ns=1e6, n=10, span_s=2.0)
+        p = t6_shm_system_time(
+            edge_label_utc_s=1_787_000_000.0, floor=floor,
+            mono_now=500.0, wall_now=1_787_000_500.0,
+            fallback_system_time=0.0, transport_ns=16_500_000.0)
+        assert p.source == "floor+transport"
+
+    def test_transport_widens_sigma_by_its_own_uncertainty(self):
+        """A corrected sample may not claim the uncorrected precision."""
+        floor = FloorEstimate(offset_s=-1000.0, sigma_ns=1e6, n=10, span_s=2.0)
+        p = t6_shm_system_time(
+            edge_label_utc_s=1_787_000_000.0, floor=floor,
+            mono_now=500.0, wall_now=1_787_000_500.0,
+            fallback_system_time=0.0,
+            transport_ns=16_500_000.0, transport_sigma_ns=300_000.0)
+        assert p.sigma_ns > 1e6
+        assert p.sigma_ns == pytest.approx((1e6**2 + 300_000.0**2) ** 0.5, rel=1e-6)
+
+    def test_the_fallback_path_is_never_corrected(self):
+        """No floor means no measured plane; correcting would be a guess."""
+        p = t6_shm_system_time(
+            edge_label_utc_s=1_787_000_000.0, floor=None,
+            mono_now=500.0, wall_now=1_787_000_500.0,
+            fallback_system_time=1_787_000_000.0,
+            transport_ns=16_500_000.0)
+        assert p.system_time == 1_787_000_000.0
+        assert p.source == "pushwall"

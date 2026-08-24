@@ -224,11 +224,26 @@ edge_tolerance_samples = 10      # Edge position tolerance (default is fine)
 filter_500hz_notch = false       # Enable if local 500 Hz interference present
 ```
 
-When enabled, core-recorder creates a dedicated IQ channel for the injected signal (no data archived to disk) and runs a BPSK phase-edge detector. After 10 consecutive valid PPS edges, the measured chain delay is applied to all other channels' RTP-to-UTC mapping automatically.
+When enabled, core-recorder creates a dedicated IQ channel for the injected signal (no data archived to disk) and runs a BPSK phase-edge detector. After 10 consecutive valid PPS edges, T6 can take timing authority.
+
+> **The measured chain delay is NOT applied as a correction** (this
+> supersedes older descriptions of this page — see issue #38). Under the
+> T6 anchor inversion the detected edge *defines* the RTP→UTC anchor and
+> the coarse cascade only names the integer second:
+> `anchor_utc_ns = named_second + delay_budget_ns`, where
+> `delay_budget_ns` is a bounded (±1 ms), configured, µs-class constant
+> for the analog path. The measured `chain_delay` survives as a reported
+> diagnostic for cross-checking that budget, never as a subtraction.
+> Since 2026-08-24 the **content-time labelling convention** makes the
+> scope explicit: a label is the antenna instant, so pipeline latency
+> (USB, FFT, filtering, scheduling — ~16 ms on AC0G-B4) is measured live
+> by the offset judge rather than folded into the label. See
+> [ARCHITECTURE-FIRST-PRINCIPLES.md](ARCHITECTURE-FIRST-PRINCIPLES.md)
+> and [design/CONTENT_TIME_LABELING_CONVENTION.md](design/CONTENT_TIME_LABELING_CONVENTION.md).
 
 ### How it works
 
-The injector produces a BPSK signal whose phase flips 180 degrees on each UTC second boundary. The `BpskPpsCalibrator` (in ka9q-python) detects these phase transitions in the IQ stream and measures where they fall relative to the RTP timestamp grid. The difference is the chain delay — typically a few milliseconds at 24 kHz sample rate.
+The injector produces a BPSK signal whose phase flips 180 degrees on each UTC second boundary. The `BpskPpsCalibrator` (in ka9q-python) detects these phase transitions in the IQ stream and measures where they fall relative to the RTP timestamp grid. The difference is the chain delay — historically fitted at 32–106 ms, which is three to four orders of magnitude above the µs-class analog path it was supposed to describe. That mismatch is why it is reported, not applied.
 
 ### Verification
 

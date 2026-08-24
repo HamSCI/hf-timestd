@@ -96,9 +96,20 @@ def test_group_delay_has_its_own_physical_bound():
 # ────────────────────────────────────────────────────────────────────
 
 def test_fine_settings_parses_the_group_delay():
-    s = CoreRecorderV2._t6_fine_settings({"filter_group_delay_ns": GROUP})
+    """Parsed under both conventions — applied only under legacy.
 
-    assert s["filter_group_delay_ns"] == GROUP
+    Since 2026-08-24 a T6 label is the antenna instant, so the channel-
+    filter group delay is pipeline latency and is NOT folded into the
+    anchor.  The configured number is still read and kept, so an operator
+    can see what the site carries.
+    """
+    s = CoreRecorderV2._t6_fine_settings({"filter_group_delay_ns": GROUP})
+    assert s["filter_group_delay_ns"] == 0            # content: not applied
+    assert s["filter_group_delay_ns_configured"] == GROUP
+
+    legacy = CoreRecorderV2._t6_fine_settings(
+        {"filter_group_delay_ns": GROUP, "labeling_convention": "legacy"})
+    assert legacy["filter_group_delay_ns"] == GROUP   # legacy: applied
 
 
 def test_fine_settings_defaults_the_group_delay_to_zero():

@@ -3911,12 +3911,35 @@ class CoreRecorderV2:
         from hf_timestd.core.t6_anchor_authority import (
             DELAY_BUDGET_BOUND_NS, FILTER_GROUP_DELAY_BOUND_NS,
         )
+        # What a T6 label MEANS (docs/design/CONTENT_TIME_LABELING_CONVENTION.md):
+        #   content — the antenna instant.  Only the µs-class analog path
+        #     (delay_budget_ns) sits between the antenna and the sample;
+        #     everything after the ADC (USB, the 3.24 M-point FFT, filtering,
+        #     scheduling) is pipeline LATENCY, not part of the label, so
+        #     filter_group_delay_ns is not applied.
+        #   legacy — the pre-2026-08-24 arithmetic, which folded a 16.618 ms
+        #     constant (calibrated once against T4) into every anchor.
+        # Kept as a key so a site can revert in one line, independently of
+        # the release that ships the change.
+        convention = str(
+            t6_cfg.get('labeling_convention', 'content')).strip().lower()
+        if convention not in ('content', 'legacy'):
+            raise ValueError(
+                f"[timing.t6_pps].labeling_convention={convention!r} is not "
+                f"one of 'content' | 'legacy' (see "
+                f"docs/design/CONTENT_TIME_LABELING_CONVENTION.md)"
+            )
+        configured_group_delay = int(t6_cfg.get('filter_group_delay_ns', 0))
         s = {
+            'labeling_convention': convention,
             'fine_stage_enabled': bool(t6_cfg.get('fine_stage_enabled', True)),
             'fine_fold_seconds': int(t6_cfg.get('fine_fold_seconds', 30)),
             'delay_budget_ns': int(t6_cfg.get('delay_budget_ns', 10_000)),
-            'filter_group_delay_ns': int(
-                t6_cfg.get('filter_group_delay_ns', 0)),
+            # Applied only under the legacy convention; the configured value
+            # is kept beside it so the operator can see what was retired.
+            'filter_group_delay_ns': (
+                configured_group_delay if convention == 'legacy' else 0),
+            'filter_group_delay_ns_configured': configured_group_delay,
             'edge_period_tolerance_ns': int(
                 t6_cfg.get('edge_period_tolerance_ns', 5_000)),
             'fine_coarse_max_ms': float(t6_cfg.get('fine_coarse_max_ms', 5.0)),
@@ -3930,10 +3953,10 @@ class CoreRecorderV2:
                 f"filter group delay is µs to sub-ms; see "
                 f"docs/design/T6_ANCHOR_INVERSION_DESIGN.md §5)"
             )
-        if abs(s['filter_group_delay_ns']) > FILTER_GROUP_DELAY_BOUND_NS:
+        if abs(s['filter_group_delay_ns_configured']) > FILTER_GROUP_DELAY_BOUND_NS:
             raise ValueError(
                 f"[timing.t6_pps].filter_group_delay_ns="
-                f"{s['filter_group_delay_ns']} exceeds the ±250 ms "
+                f"{s['filter_group_delay_ns_configured']} exceeds the ±250 ms "
                 f"physical bound (radiod channel-filter group delay "
                 f"reaches ~150 ms only at the narrowest widths)"
             )

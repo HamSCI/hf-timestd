@@ -102,6 +102,8 @@ def t6_shm_system_time(
     mono_now: float,
     wall_now: float,
     fallback_system_time: float,
+    transport_ns: float = 0.0,
+    transport_sigma_ns: float = 0.0,
 ) -> ShmPair:
     """Host-clock reading at the TS-1 edge, with an honest precision.
 
@@ -123,9 +125,32 @@ def t6_shm_system_time(
         )
 
     mono_at_edge = float(edge_label_utc_s) - float(floor.offset_s)
+    system_time = mono_at_edge + (float(wall_now) - float(mono_now))
+
+    # Content-time convention: the edge label is the ANTENNA instant, so
+    # inverting it through the floor lands one pipeline latency late and
+    # this sample would hand chrony an offset of exactly +transport.
+    # Subtracting the measured term restores an honest feed.
+    #
+    # The caller supplies the term only while it is measured against a
+    # clock HPPS is not itself disciplining — a transport measured
+    # against a host that HPPS steers would be self-referential, and
+    # this module cannot see that from here.  Default 0.0 keeps the
+    # pre-convention arithmetic byte-identical.
+    transport_s = float(transport_ns) / 1e9
+    sigma_ns = float(floor.sigma_ns)
+    source = "floor"
+    if transport_s:
+        system_time -= transport_s
+        source = "floor+transport"
+        # A corrected sample cannot claim the uncorrected precision.
+        ts = float(transport_sigma_ns)
+        if ts:
+            sigma_ns = math.hypot(sigma_ns, ts)
+
     return ShmPair(
-        system_time=mono_at_edge + (float(wall_now) - float(mono_now)),
-        precision=precision_from_sigma_ns(floor.sigma_ns),
-        source="floor",
-        sigma_ns=float(floor.sigma_ns),
+        system_time=system_time,
+        precision=precision_from_sigma_ns(sigma_ns),
+        source=source,
+        sigma_ns=sigma_ns,
     )

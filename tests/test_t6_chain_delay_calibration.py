@@ -64,14 +64,45 @@ def test_validate_flags_an_armed_t6_with_no_measured_group_delay():
     """
     issue = t6_group_delay_issue({"timing": {"t6_pps": {"enabled": True}}})
 
+    # Under the content-time convention (the default since 2026-08-24) an
+    # unset group delay is CORRECT: the constant is retired, and only the
+    # µs-class analog term (delay_budget_ns) belongs in the anchor.
+    assert issue is None
+
+
+def test_validate_warns_when_a_retired_group_delay_is_still_configured():
+    """A leftover 16.618 ms constant is now the thing worth saying.
+
+    It is inert under the content convention, but a site that still
+    carries it is one `labeling_convention = "legacy"` away from
+    re-applying 16.6 ms to every label, and the operator should be told
+    the key did nothing rather than assume it did.
+    """
+    issue = t6_group_delay_issue(
+        {"timing": {"t6_pps": {"enabled": True,
+                               "filter_group_delay_ns": 16_618_000}}})
+
+    assert issue is not None
+    assert issue["severity"] == "warn"
+    assert "filter_group_delay_ns" in issue["message"]
+    assert "content" in issue["message"]
+
+
+def test_legacy_convention_keeps_the_original_measure_it_warning():
+    """A site that opted back into legacy still needs the constant."""
+    issue = t6_group_delay_issue(
+        {"timing": {"t6_pps": {"enabled": True,
+                               "labeling_convention": "legacy"}}})
+
     assert issue is not None
     assert issue["severity"] == "warn"
     assert "filter_group_delay_ns" in issue["message"]
 
 
-def test_validate_is_quiet_once_the_group_delay_is_measured():
+def test_legacy_convention_is_quiet_once_measured():
     issue = t6_group_delay_issue(
         {"timing": {"t6_pps": {"enabled": True,
+                               "labeling_convention": "legacy",
                                "filter_group_delay_ns": 16_618_000}}})
 
     assert issue is None
