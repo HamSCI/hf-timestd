@@ -88,7 +88,6 @@ timestd = "hf_timestd.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"hf_timestd.schemas" = ["*.json"]
 "hf_timestd.data" = ["*.tsv"]
 
 [tool.pytest.ini_options]

@@ -19,6 +19,8 @@ from typing import Optional, Dict, List, Any, Tuple
 import time
 import re
 
+from .wwv_constants import WWVH_FREQUENCIES
+
 logger = logging.getLogger(__name__)
 
 
@@ -707,8 +709,7 @@ class TimingMetricsWriter:
             
             # Add WWVH alternate for shared frequencies (2.5, 5, 10, 15 MHz)
             # WWV and WWVH share these frequencies; discrimination determines which is received
-            wwvh_shared_freqs = [2.5, 5.0, 10.0, 15.0]
-            if self.station == 'WWV' and self.frequency_mhz in wwvh_shared_freqs:
+            if self.station == 'WWV' and self.frequency_mhz in WWVH_FREQUENCIES:
                 try:
                     wwvh_distance = self.prop_solver.get_station_distance_km('WWVH')
                     wwvh_delay_range = self.prop_solver.get_expected_delay_range_ms(

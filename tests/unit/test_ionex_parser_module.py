@@ -1,35 +1,21 @@
-"""Regression tests for P-H18: IONEXParser ownership and cache handling.
+"""Regression tests for IONEXParser ownership (P-H18, split §5.2).
 
 IONEXParser used to live in scripts/ionex_integration.py and was loaded into
 ionospheric_model via importlib.exec_module on *every* cache miss — slow, with
 an unchecked spec.loader, and broken under a wheel install (scripts/ is not
-packaged). _ionex_cache_max_age was defined but never honoured, so a stale
-parser was served indefinitely.
+packaged).
 
-IONEXParser now lives in the package (hf_timestd.core.ionex_parser), is
-imported once at module load, and the cache honours _ionex_cache_max_age.
+The canonical class now lives in hamsci_dsp.ionosphere.ionex; hf-timestd's
+hf_timestd.core.ionex_parser is a re-export shim.  These tests pin that
+ownership and check that every import path (the package, ionospheric_model,
+and the standalone ionex_* scripts) resolves to the same class object.
+The cache-behaviour tests moved with the engine to hamsci-dsp.
 """
 
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 from hf_timestd.core.ionex_parser import IONEXParser
-
-_TS = datetime(2026, 3, 15, 12, 0, 0, tzinfo=timezone.utc)  # day-of-year 074
-_IONEX_NAME = "IGS0OPSFIN_20260740000_01D_02H_GIM.INX.gz"
-
-
-class _StubParser:
-    """Stand-in for IONEXParser that counts how often it is constructed."""
-    instances = 0
-
-    def __init__(self, path):
-        type(self).instances += 1
-        self.path = path
-
-    def interpolate(self, lat, lon, timestamp):
-        return 17.5
 
 
 def test_ionex_parser_is_owned_by_hamsci_dsp():

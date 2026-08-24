@@ -129,25 +129,27 @@ SAMPLE_RATE_LEGACY = 16000  # Hz - Legacy 16 kHz mode (deprecated)
 # =============================================================================
 
 # Valid station/frequency combinations (MHz) — re-exported from the
-# hamsci-dsp station catalog (import lives in the STATION COORDINATES
-# section below; module-level order keeps this a plain forward use).
-from hamsci_dsp.stations import BUILTIN_CATALOG as _CATALOG
-WWV_FREQUENCIES = list(_CATALOG.get('WWV').frequencies_mhz)
-WWVH_FREQUENCIES = list(_CATALOG.get('WWVH').frequencies_mhz)  # NOT 20/25 MHz
-CHU_FREQUENCIES = list(_CATALOG.get('CHU').frequencies_mhz)
-BPM_FREQUENCIES = list(_CATALOG.get('BPM').frequencies_mhz)
+# hamsci-dsp station catalog (split design §5.2: pure station data lives in
+# `hamsci_dsp.stations`; this module keeps timing schedules/tones/thresholds).
+# STATION_CATALOG is also the source for the STATION COORDINATES section below.
+from hamsci_dsp.stations import BUILTIN_CATALOG as STATION_CATALOG
+WWV_FREQUENCIES = list(STATION_CATALOG.get('WWV').frequencies_mhz)
+WWVH_FREQUENCIES = list(STATION_CATALOG.get('WWVH').frequencies_mhz)  # NOT 20/25 MHz
+CHU_FREQUENCIES = list(STATION_CATALOG.get('CHU').frequencies_mhz)
+BPM_FREQUENCIES = list(STATION_CATALOG.get('BPM').frequencies_mhz)
 
-# Shared frequencies requiring discrimination (WWV vs WWVH vs BPM)
-SHARED_FREQUENCIES = [2.5, 5.0, 10.0, 15.0]
+# Shared frequencies requiring discrimination (WWV vs WWVH vs BPM) — derived
+# from the per-station lists so they cannot drift from the catalog.
+SHARED_FREQUENCIES = sorted(
+    set(WWV_FREQUENCIES) & set(WWVH_FREQUENCIES) & set(BPM_FREQUENCIES)
+)
 
 # Station-specific frequencies (no discrimination needed)
-# Maps frequency (MHz) to station name
+# Maps frequency (MHz) to station name.  CHU shares no frequency with the
+# other stations, so all of its channels are station-specific.
 STATION_SPECIFIC_FREQ = {
-    20.0: 'WWV',
-    25.0: 'WWV',
-    3.33: 'CHU',
-    7.85: 'CHU',
-    14.67: 'CHU'
+    **{f: 'WWV' for f in WWV_FREQUENCIES if f not in SHARED_FREQUENCIES},
+    **{f: 'CHU' for f in CHU_FREQUENCIES},
 }
 
 # Minutes where only one station broadcasts 500/600 Hz tones (ground truth)
@@ -270,7 +272,8 @@ STANDARD_CHANNELS = [
 # this module keeps timing schedules/tones/thresholds).  The NIST/NRC
 # provenance notes and dd°mm'ss" derivations moved with the data — see
 # hamsci_dsp/stations.py and its tests, which pin the exact values.
-from hamsci_dsp.stations import BUILTIN_CATALOG as STATION_CATALOG
+# (STATION_CATALOG is imported once, in the STATION BROADCAST SCHEDULES
+# section above.)
 
 WWV_LAT = STATION_CATALOG.get('WWV').lat
 WWV_LON = STATION_CATALOG.get('WWV').lon

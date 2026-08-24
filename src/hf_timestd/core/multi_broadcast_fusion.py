@@ -3410,7 +3410,6 @@ class MultiBroadcastFusion:
         logger.info(">>> VTEC INTEGRATION: Starting VTEC check <<<")
         
         gnss_vtec_data = self._read_gnss_vtec()
-        used_gnss_vtec = False
         
         logger.debug(f"VTEC check: data={gnss_vtec_data is not None}, physics_model={self.physics_model is not None}")
         
@@ -3423,7 +3422,6 @@ class MultiBroadcastFusion:
             
             if age_seconds < 300:
                 logger.info(f"GNSS VTEC available: {vtec_tecu:.2f} TECU (age: {age_seconds:.1f}s)")
-                used_gnss_vtec = True
                 
                 # ================================================================
                 # GNSS VTEC IONOSPHERIC CORRECTION (v6.1 - 2026-01-24)

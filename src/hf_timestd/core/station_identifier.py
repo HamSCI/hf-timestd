@@ -51,22 +51,17 @@ from .wwv_constants import (
     WWV_COORDINATES,
     WWVH_COORDINATES,
     BPM_COORDINATES,
-    CHU_COORDINATES
+    CHU_COORDINATES,
+    SHARED_FREQUENCIES,
+    STATION_SPECIFIC_FREQ,
 )
 
 logger = logging.getLogger(__name__)
 
-# Anchor frequencies (unambiguous by frequency alone)
-ANCHOR_FREQUENCIES = {
-    3.33: 'CHU',
-    7.85: 'CHU',
-    14.67: 'CHU',
-    20.0: 'WWV',
-    25.0: 'WWV'
-}
-
-# Shared frequencies (require discrimination)
-SHARED_FREQUENCIES = [2.5, 5.0, 10.0, 15.0]
+# Anchor frequencies (unambiguous by frequency alone) and shared frequencies
+# (require discrimination) both come from the hamsci-dsp station catalog via
+# wwv_constants — never hardcode them here (split §5.2).
+ANCHOR_FREQUENCIES = STATION_SPECIFIC_FREQ
 
 
 @dataclass

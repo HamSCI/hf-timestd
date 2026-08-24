@@ -255,6 +255,7 @@ from ..interfaces.data_models import ToneDetectionResult, StationType
 from .wwv_constants import (
     WWV_ONLY_TONE_MINUTES,
     WWVH_ONLY_TONE_MINUTES,
+    WWVH_FREQUENCIES,
     PROPAGATION_BOUNDS_MS,
     DEFAULT_PROPAGATION_BOUNDS_MS
 )
@@ -331,8 +332,7 @@ class MultiStationToneDetector(IMultiStationToneDetector):
             # that "BPM" detections on shared frequencies are misattributed
             # WWV signals.  BPM discrimination would require tick-duration
             # measurement (10ms BPM vs 5ms WWV) below our time resolution.
-            shared_frequencies = [2.5, 5.0, 10.0, 15.0]
-            if self.channel_frequency_mhz in shared_frequencies:
+            if self.channel_frequency_mhz in WWVH_FREQUENCIES:
                 self.templates[StationType.WWVH] = self._create_template(1200, 0.8)
                 logger.info(f"{channel_name}: WWVH detection enabled (shared frequency, BPM excluded — same 1000 Hz tone as WWV)")
             else:

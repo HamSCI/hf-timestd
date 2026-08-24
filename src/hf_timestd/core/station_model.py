@@ -72,6 +72,7 @@ from .wwv_constants import (
     WWV_TEST_SIGNAL_MINUTE, WWVH_TEST_SIGNAL_MINUTE,
     SPEED_OF_LIGHT_KM_S, EARTH_RADIUS_KM,
     PROPAGATION_BOUNDS_MS,
+    SHARED_FREQUENCIES,
 )
 
 logger = logging.getLogger(__name__)
@@ -502,7 +503,7 @@ class StationModelFactory:
         exclusion_zones = []
         
         # Only relevant on shared frequencies (2.5, 5, 10, 15 MHz)
-        if any(abs(frequency_mhz - f) < 0.1 for f in [2.5, 5.0, 10.0, 15.0]):
+        if any(abs(frequency_mhz - f) < 0.1 for f in SHARED_FREQUENCIES):
             wwv_delay = self._estimate_propagation_delay(StationID.WWV)
             bpm_delay = delay # Currently estimated BPM delay
             
