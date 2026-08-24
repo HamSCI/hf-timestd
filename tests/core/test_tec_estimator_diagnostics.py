@@ -35,7 +35,7 @@ class TestTECEstimatorDiagnostics(unittest.TestCase):
             {'frequency_hz': 5e6, 'toa_ms': 1000.0, 'uncertainty_ms': 0.1},
             {'frequency_hz': 10e6, 'toa_ms': 1010.0, 'uncertainty_ms': 0.1},
         ]
-        with self.assertLogs('hf_timestd.core.tec_estimator', level='WARNING'):
+        with self.assertLogs('hamsci_dsp.propagation.tec_estimator', level='WARNING'):
             result = self.estimator.estimate_tec(measurements, "TEST", 0.0)
         self.assertIsNotNone(result, "Negative slope must be retained, not discarded")
         self.assertLess(result.tec_u, 0.0, "Negative slope should yield negative tec_u")
