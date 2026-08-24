@@ -10,7 +10,7 @@ gracefully — the system runs without them but loses specific capabilities.
 > For the **suite-wide** view of every per-installation input across all
 > sigmond/dasi2 clients (station identity, reporter ids, credentials, hardware)
 > and the image-vs-clone provisioning plan, see
-> [`sigmond/docs/PROVISIONING-INPUTS.md`](../../sigmond/docs/PROVISIONING-INPUTS.md).
+> [`sigmond/docs/PROVISIONING-INPUTS.md`](https://github.com/HamSCI/sigmond/blob/main/docs/PROVISIONING-INPUTS.md).
 
 ---
 
