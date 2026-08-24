@@ -32,8 +32,10 @@ class _StubParser:
         return 17.5
 
 
-def test_ionex_parser_is_owned_by_the_package():
-    assert IONEXParser.__module__ == 'hf_timestd.core.ionex_parser'
+def test_ionex_parser_is_owned_by_hamsci_dsp():
+    # Split §5.2: the canonical home moved to hamsci-dsp; hf-timestd's
+    # module is a re-export shim, so every importer shares one class.
+    assert IONEXParser.__module__ == 'hamsci_dsp.ionosphere.ionex'
 
 
 def test_ionospheric_model_imports_parser_directly():
