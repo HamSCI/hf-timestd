@@ -54,30 +54,6 @@ def test_script_reexports_the_same_parser():
     assert ionex_integration.IONEXParser is IONEXParser
 
 
-def test_cache_hit_avoids_reparsing(monkeypatch, tmp_path):
-    import hf_timestd.core.ionospheric_model as im
-    _StubParser.instances = 0
-    monkeypatch.setattr(im, 'IONEXParser', _StubParser)
-    (tmp_path / _IONEX_NAME).write_text('')
-    model = im.IonosphericModel(enable_iri=False, enable_calibration=False,
-                                ionex_dir=tmp_path)
-
-    first = model.get_ionex_vtec(40.0, -95.0, _TS)
-    second = model.get_ionex_vtec(40.0, -95.0, _TS)
-    assert first == second
-    assert first[0] == 17.5
-    assert _StubParser.instances == 1  # second call was a cache hit
-
-
-def test_stale_cache_is_reparsed(monkeypatch, tmp_path):
-    import hf_timestd.core.ionospheric_model as im
-    _StubParser.instances = 0
-    monkeypatch.setattr(im, 'IONEXParser', _StubParser)
-    (tmp_path / _IONEX_NAME).write_text('')
-    model = im.IonosphericModel(enable_iri=False, enable_calibration=False,
-                                ionex_dir=tmp_path)
-    model._ionex_cache_max_age = 0  # everything is immediately stale
-
-    model.get_ionex_vtec(40.0, -95.0, _TS)
-    model.get_ionex_vtec(40.0, -95.0, _TS)
-    assert _StubParser.instances == 2  # max_age honoured -> re-parsed
+# The cache-behavior tests moved with the engine to hamsci-dsp
+# (tests/test_ionosphere_model_ionex_cache.py): monkeypatching the shim
+# module's IONEXParser can no longer reach the engine's own binding.
