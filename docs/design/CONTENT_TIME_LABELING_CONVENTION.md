@@ -1,0 +1,171 @@
+# Content-time labels: the anchor asserts physics, the benches own transport
+
+**Status:** PROPOSAL — for discussion, not approved.  Changes the meaning of
+the T6 anchor's chain-delay terms, resolves #12 and #38, amends
+`T6_ANCHOR_INVERSION_DESIGN.md` §5 and `METROLOGY.md` §4.5, and needs rob's
+agreement before anything is built on it.
+
+**Authors:** mjh + Claude, 2026-08-24.
+**Evidence base:** radiod source derivation (ka9q-radio @ cd44bbdd), the
+2026-08-24 bandwidth re-sweep and Λ decomposition on AC0G-B4, and the
+same-day labeling-convention A/B (§6).
+
+---
+
+## 1 · The question
+
+What UTC should a sample's label mean?  Two candidate conventions have been
+living in the codebase unnamed:
+
+* **Content time** — the instant the field crossed the antenna (to within the
+  µs-class analog chain).  This is the only convention the science can use:
+  time-of-flight, phase, and every absolute ionospheric observable are defined
+  at the antenna.
+* **Transport-consistent time** — labels offset so that they agree with
+  arrival-based witnesses (chrony benches, T4/T5 comparisons), which measure
+  when samples *reached the software*, not when the field existed.
+
+Today's labels are transport-consistent **by accident of calibration**: the
+`filter_group_delay_ns = 16 618 000` constant was fitted on 2026-08-15 to zero
+the T6-vs-T4 shadow residual, and T4 is measured through the transport.
+
+## 2 · The physics already settles it
+
+The TS-1 flips its carrier on the GPS second: ±~100 ns of GPS plus a
+documented ~10 µs modulator delay (Paul Elliott, TimeSync-1).  That flip
+travels the same coax → RX888 → ADC path as the science signal, and the fine
+stage locates it in the sample stream to nanoseconds (5 ns repeatability;
+1.9 µs origin spread over 4.5 h, 2026-08-24).  **This is an a-priori absolute
+time transfer.**  There is no physical mechanism by which the wavefront
+reached the antenna 16.6 ms after the second — so the content-true assertion
+for the edge-sample is
+
+    anchor_utc(edge) = named_second + ε,     ε ≈ 10 µs (analog + modulator)
+
+i.e. `delay_budget_ns ≈ 10 000` and `filter_group_delay_ns = 0` — **which is
+the shipped default**.  The ±1 ms `DELAY_BUDGET_BOUND_NS` guard and the
+original §5 "analog path is µs to sub-ms" statement were right all along;
+issue #12 resolves in their favor, not the 250 ms guard's.
+
+## 3 · Where the 16.618 ms actually comes from
+
+Derived from radiod source and measured on B4 (2026-08-24):
+
+| term | value | nature |
+|---|---|---|
+| label-grid displacement `T_M/2 = blocktime/(2·(Overlap−1))` | 2.500 ms | deterministic filter geometry — but it **cancels inside the anchor construction** (the edge's label is itself displaced by the same amount), so it never belongs in the anchor constant |
+| front-end FFT compute | 10.2–11.9 ms | measured two ways: live `fft` thread duty 50.9–51.9 % × 20 ms; on-box fftwf bench of the exact 3.24 M-point transform with radiod's wisdom (11.93 ms min) |
+| USB transfer granularity | 0–2.02 ms (mean ≈ 1) | 32 × 16 384 B ÷ 2 B ÷ 129.6 MHz |
+| demod/scheduling remainder | ~1–2 ms | residual |
+| **total Λ + grid term** | **≈ 16.6 ms** | matches the fitted constant to ~1 ms |
+
+Λ is **compute latency**, absorbed into the fitted constant because radiod's
+`(GPS_TIME, RTP_TIMESNAP)` status anchor snapshots a wall clock after the
+pipeline has run, and every on-station witness (T4/T5 benches, arrival floor,
+chrony) measures through the same pipeline — they are transport-degenerate
+and cannot distinguish a late label from a slow transport.  Λ also **scales
+with machine load and CPU**: it is not a constant of the design, and a
+calibration that moves when Phil parallelizes the FFT is not a physical
+calibration.
+
+Confirmation that the old picture was an artifact: the 2026-08-10 bandwidth
+sweep (31.8 / 45.8 / 108.9 ms at 96 k/24 k/12 k) reproduced on the honest
+post-fix stream reads **flat**: +16.55 / +14.13 / +16.80 / +15.89 ms derived
+residual at 96 k/±25 k → 24 k/±11 k → 12 k/±5.5 k → 96 k restore, with zero
+refusals, zero Costas unlocks, zero step adoptions.  The scaling story is
+dead; the derivation's bandwidth-independence prediction held.
+
+## 4 · The corollary that makes this fleet-grade
+
+`T_M/2` is `blocktime/(2·(Overlap−1))` — **identical for every channel on the
+front end, at any bandwidth and any sample rate**.  So a single content-true
+T6 anchor labels *all* channels' content correctly, not just its own.  And
+because the content-true constant is the shipped default (`0` + a µs
+`delay_budget`), **a fresh DASI install needs no per-site chain-delay
+calibration at all** — the "loudly uncalibrated until measured" workflow
+dissolves.  Per-site ε differences are µs-class (cable lengths) and can ride
+one fleet constant plus an optional site trim.
+
+## 5 · What adopting the convention changes
+
+1. **Config:** `filter_group_delay_ns` retired (key, bound, validator warning
+   and template text); `delay_budget_ns` stays as the µs-class ε term with its
+   ±1 ms guard.  `chain_delay_calib_s` on the coarse path gets the same
+   treatment.
+2. **Benches own the transport — and the convention makes it self-measuring.**
+   The T4/T3 benches ground in host-now, T5 in sample arrival, T6 in the
+   label plane (`offset_judge.py:420-425, :509-511, :647-651, :604-608`), so
+   cross-bench deltas and shadow residuals expose a label-plane shift at full
+   amplitude.  The fix is a plane-correction term in the cross-bench
+   comparison only (never in any bench's own sigma).  The decisive detail:
+   under content-true labels, `arrival − label` **is** the total pipeline
+   latency — so the ArrivalFloorTracker, unchanged, becomes a continuous
+   live measurement of the transport term (≈15–16 ms on B4) that was
+   *unmeasurable by construction* under the old convention
+   (`t6_arrival_floor.py:57-63`).  The term is measured, never asserted.
+3. **HPPS pair: no push-side change needed.**  `t6_shm_pair.py:125-131`
+   already builds `system_time` from the floor so a constant label shift
+   cancels out of it; `reference_time` is the integer second.  What chrony
+   displays is therefore exactly the label-plane error — today's standing
+   −1.5…−3 ms HPPS offset *is* `pipeline_min − 16.628 ms`, a live residual
+   of the old constant (consistent with the 2026-08-14 transport capture's
+   min lag of −3.78 ms).  Under the new convention chrony would read
+   ≈ −(pipeline_min); restoring an honest near-zero feed is one line —
+   subtract the floor-measured transport from `system_time` — using the
+   self-measuring term from §5.2.
+4. **Science products:** labels step −16.6 ms at adoption.  The anchor
+   ledger (2026-08-24, `state/t6-anchor-ledger/`) makes every anchor since
+   08-24 re-labelable retroactively by arithmetic; pre-ledger data gets the
+   constant documented in metadata.  Absolute ToF (T6 − T3) becomes real at
+   the µs-to-ms level; all differential science is unaffected.
+5. **Docs:** `METROLOGY.md` §4.5 tier table, `ARCHITECTURE-FIRST-PRINCIPLES`
+   chain-delay definition (restored to its original analog-only meaning),
+   `T6_ANCHOR_INVERSION_DESIGN` §5; resolves #12 and #38.
+
+## 6 · The A/B validation (AC0G-B4, 2026-08-24, reverted)
+
+`filter_group_delay_ns` was flipped 16 618 000 → 0 for a bounded window with
+the LBE-1421's DCD PPS as a chrony-independent host-second marker (host clock
+FUSE-disciplined, independently agreeing with a LAN stratum-1 to ~10 µs).
+
+| observable | prediction | measured (window 13:31–14:09Z) |
+|---|---|---|
+| ledger anchor sub-second | 16.628 ms → ~0.010 ms | **0.0113 ms** (10 µs budget − ~1.3 µs subsample), every fold |
+| T6 vs the other benches | steps ≈ −16.6 ms; others unmoved | **T6 shadow −16.481 ms vs T4; T3 +0.001, T5 +0.003** — only the label plane moved |
+| judge | cross-bench conflict; tier falls for the window | **conflict {upper T6, lower T4, Δ −16.48 ms} at 13:32:09; judge on T4, σ 0.65 ms** |
+| chrony HPPS | pair shifts by −16.6 ms, rejected; FUSE unaffected | **pair (ref−sys) −16.3 ms; `chronyc` displays +16 ms (its sign negation); FUSE +2.4 µs throughout** |
+| DCD host-second marker | ±2 ms bound, both phases | **A: n=146 p50 +0.749 σ 0.33 ms · B: n=143 p50 +0.731 σ 0.28 ms — marker unmoved while everything label-side stepped 16.6 ms** |
+| stability | lock held; no refusals | **AUTHORITATIVE 20 s after the flip restart (fine_coarse 0.003 ms), held all window; revert clean, AUTHORITATIVE at 14:12** |
+
+**Bonus, the §5.2 self-measurement observed live:** under convention B the
+floor-referenced `offset_to_chrony` read a steady **−15.6…−18.3 ms** — the
+total pipeline latency, measured continuously for the first time, agreeing
+with the independent decomposition (FFT 10.2–11.9 + USB ~1 + grid 2.5 +
+UDP/sched).  Under convention A the same channel read −0.5…+2.6 ms — the
+degenerate residual.
+
+**Verdict: all six predictions confirmed.  The 16.618 ms constant is
+transport, not physics; content-true labels are consistent, stable, and make
+the transport itself observable.**
+
+## 7 · What this does NOT change
+
+The RTP-primacy invariant (labels still never derive from the host clock);
+chrony as the host-clock adjudicator (#21); honest per-feed sigma;
+detect-and-alarm-never-correct.  The anchor inversion is unchanged — this
+proposal only fixes what its asserted constant *means*.
+
+## 8 · Open questions for rob
+
+1. Verify ε at the µs level: scope TS-1 PPS OUT against the RF flip (bench
+   task, with Paul).  Until then ε carries the documented ~10 µs with a
+   conservative uncertainty.
+2. Order of operations: implement the bench transport terms (§5.2–5.3)
+   *before* flipping the default, so the judge doesn't sit in cross-bench
+   conflict through the transition.
+3. Multi-host DASI2 (remote radiod): the HF-PPS travels the same chain as the
+   data, so radiod-side latency stays common-mode and cancels — rob's
+   original corollary — but the bench transport terms are per-host and need
+   the same treatment there.
+4. Historical products: annotate or re-emit?  (Operator ruling to date:
+   forward-only.)
