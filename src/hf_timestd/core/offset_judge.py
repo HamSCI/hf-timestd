@@ -314,6 +314,15 @@ class BenchReading:
     sigma_ns: float    # bench's own empirical 1-sigma (ns)
     mono: float        # monotonic clock at capture (for extrapolation)
     detail: Dict = field(default_factory=dict)
+    # Which reference plane ``utc`` is grounded in.  T4/T3/T2 read the
+    # host clock now ("host"); T6 reads the anchor label plane
+    # ("label"), which under the content-time labeling convention sits
+    # one transport latency earlier than the host plane.  Cross-plane
+    # comparisons correct for the EXPECTED plane difference
+    # (``label_plane_offset_ns``) so a labeling convention is never
+    # misread as a bench fault.  See
+    # docs/design/CONTENT_TIME_LABELING_CONVENTION.md §5.2.
+    plane: str = "host"   # "host" | "label"
 
     def utc_at(self, mono_now: float) -> float:
         """Extrapolate the reading to a later monotonic instant."""
@@ -591,6 +600,7 @@ class NativeAnchorBench:
                 sigma_ns=self.LATENCY_SIGMA_FLOOR_NS,
                 mono=float(arrival_mono),
                 detail=detail,
+                plane="label",
             )
         # The least-delayed arrival in the window sets the mono->UTC
         # map; the latest arrival only proves the stream is alive.
@@ -607,6 +617,7 @@ class NativeAnchorBench:
             sigma_ns=float(floor.sigma_ns),
             mono=float(arrival_mono),
             detail=detail,
+            plane="label",
         )
 
 
@@ -832,6 +843,15 @@ class OffsetJudge:
         # over a healthy T5 because its honest wide sigma kept k*sigma
         # quiet).
         self.cross_bench_k = float(cfg.get("cross_bench_k", 5.0))
+        # Expected (label − host) plane offset, ns.  0.0 (the default)
+        # is byte-identical to the historical behavior and is correct
+        # while labels carry the fitted transport constant; under the
+        # content-time labeling convention this becomes the measured
+        # transport (≈ −16.6 ms on AC0G-B4 — the label plane reads
+        # EARLIER than the host plane).  Applied only inside
+        # ``_cross_bench_delta_ns``, never to any bench's own sigma.
+        self.label_plane_offset_ns = float(
+            cfg.get("label_plane_offset_ns", 0.0))
         # Precision non-regression clause (gate amendment, cont'd): a
         # VOLUNTARY upgrade is additionally refused when the candidate
         # bench's reported sigma is materially worse than the
@@ -1338,8 +1358,20 @@ class OffsetJudge:
         self, cand: BenchReading, ref: BenchReading, mono_now: float
     ) -> float:
         """Candidate-minus-reference UTC disagreement (ns), both
-        readings extrapolated to the same monotonic instant."""
-        return (cand.utc_at(mono_now) - ref.utc_at(mono_now)) * 1e9
+        readings extrapolated to the same monotonic instant.
+
+        Cross-plane pairs are corrected by the EXPECTED plane
+        difference (``label_plane_offset_ns``) so only the genuine
+        disagreement remains; same-plane pairs are never touched.
+        This is the single choke point the adoption gate and the
+        shadow residuals share.
+        """
+        raw_ns = (cand.utc_at(mono_now) - ref.utc_at(mono_now)) * 1e9
+        expected_ns = self.label_plane_offset_ns * (
+            (1 if getattr(cand, "plane", "host") == "label" else 0)
+            - (1 if getattr(ref, "plane", "host") == "label" else 0)
+        )
+        return raw_ns - expected_ns
 
     def _cross_gate_ok_locked(
         self, cand: BenchReading, ref: BenchReading, mono_now: float
