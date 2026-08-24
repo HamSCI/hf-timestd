@@ -97,7 +97,7 @@ if [[ "$MODE" == "production" ]]; then
         "timestd-metrology.target"
         "timestd-l2-calibration.service"
         "timestd-fusion.service"
-        "timestd-physics.service"
+        "hamsci-physics-fusion.service"
         "timestd-web-api.service"
     )
     
@@ -636,17 +636,17 @@ if [[ -d "$SCIENCE_DIR" ]]; then
                 check_warn "TEC HDF5 stale (${AGE_STR}, expected ~5min updates)"
                 echo "  → Possible cause: No multi-frequency detections available"
                 echo "  → Check: Metrology producing measurements on multiple bands"
-                echo "  → Diagnose: sudo journalctl -u timestd-physics -n 50"
+                echo "  → Diagnose: sudo journalctl -u hamsci-physics-fusion -n 50"
             else
                 # >30 min is a failure
                 check_fail "TEC HDF5 very stale (${AGE_STR})"
                 echo "  → Cause: Physics service stuck or no multi-frequency data"
-                echo "  → Diagnose: sudo systemctl status timestd-physics"
-                echo "  → Check logs: sudo journalctl -u timestd-physics -n 100"
-                echo "  → Fix: sudo systemctl restart timestd-physics"
+                echo "  → Diagnose: sudo systemctl status hamsci-physics-fusion"
+                echo "  → Check logs: sudo journalctl -u hamsci-physics-fusion -n 100"
+                echo "  → Fix: sudo systemctl restart hamsci-physics-fusion"
             fi
         else
-            check_warn "No TEC HDF5 files found - Check timestd-physics"
+            check_warn "No TEC HDF5 files found - Check hamsci-physics-fusion"
         fi
         
         # Note: TEC CSV files no longer primary (HDF5-only as of 2026-01-02)

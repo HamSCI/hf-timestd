@@ -332,7 +332,7 @@ Expected: `pylap available: True` and `engine.is_available(): True`.
 
 ### Setup
 
-See **[NASA_EARTHDATA_SETUP.md](NASA_EARTHDATA_SETUP.md)** for full
+See **[NASA_EARTHDATA_SETUP.md](https://github.com/HamSCI/hamsci-physics/blob/main/docs/NASA_EARTHDATA_SETUP.md)** (hamsci-physics) for full
 step-by-step instructions.
 
 **Summary:**
@@ -363,7 +363,7 @@ password YOUR_PASSWORD
 
 ### Setup
 
-See **[PSWS_SETUP_GUIDE.md](PSWS_SETUP_GUIDE.md)** for full step-by-step
+See **[PSWS_SETUP_GUIDE.md](https://github.com/HamSCI/hamsci-physics/blob/main/docs/PSWS_SETUP_GUIDE.md)** (hamsci-physics) for full step-by-step
 instructions.
 
 **Summary:**
@@ -440,7 +440,7 @@ Each adds capability without disrupting running services.
 ## Related Documentation
 
 - [STATION_SETUP_GUIDE.md](STATION_SETUP_GUIDE.md) — Site-specific config (`timestd-config.toml`)
-- [NASA_EARTHDATA_SETUP.md](NASA_EARTHDATA_SETUP.md) — IONEX/DCB credential setup
-- [PSWS_SETUP_GUIDE.md](PSWS_SETUP_GUIDE.md) — PSWS registration and SSH key setup
+- [NASA_EARTHDATA_SETUP.md](https://github.com/HamSCI/hamsci-physics/blob/main/docs/NASA_EARTHDATA_SETUP.md) — IONEX/DCB credential setup (hamsci-physics)
+- [PSWS_SETUP_GUIDE.md](https://github.com/HamSCI/hamsci-physics/blob/main/docs/PSWS_SETUP_GUIDE.md) — PSWS registration and SSH key setup (hamsci-physics)
 - [ZED_F9P_TEC_CONFIGURATION.md](ZED_F9P_TEC_CONFIGURATION.md) — GNSS receiver configuration
 - [GPS_TEC_OPTIONAL.md](GPS_TEC_OPTIONAL.md) — VTEC architecture and optional capabilities

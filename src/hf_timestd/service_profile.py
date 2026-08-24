@@ -30,14 +30,14 @@ SERVICE_UNIT_MAP: Dict[str, str] = {
     'metrology':         'timestd-metrology.target',
     'l2_calibration':    'timestd-l2-calibration.service',
     'fusion':            'timestd-fusion.service',
-    'physics':           'timestd-physics.service',
     'vtec':              'timestd-vtec.service',
+    # physics / grape_daily / ionex_download / iono_reanalysis moved to
+    # hamsci-physics in the 2026-08-24 split.  A profile may only name a
+    # unit this repo ships — enabling an absent unit fails the whole
+    # `profile set` (pinned by TestProfilesOnlyReferenceShippedUnits).
     'web_api':           'timestd-web-api.service',
     'radiod_monitor':    'timestd-radiod-monitor.service',
-    'grape_daily':       'grape-daily.timer',
     'chrony_monitor':    'timestd-chrony-monitor.timer',
-    'ionex_download':    'timestd-ionex-download.timer',
-    'iono_reanalysis':   'timestd-iono-reanalysis.timer',
     'pipeline_watchdog': 'timestd-pipeline-watchdog.timer',
     'prune':             'timestd-prune.timer',
 }
@@ -57,7 +57,7 @@ PROFILES: Dict[str, Set[str]] = {
 
     'rtp': _ALWAYS_ON | {
         'web_api', 'radiod_monitor', 'pipeline_watchdog',
-        'grape_daily', 'prune',
+        'prune',
     },
 
     'fusion': _ALWAYS_ON | {
@@ -68,16 +68,15 @@ PROFILES: Dict[str, Set[str]] = {
                  # multi_broadcast_fusion._read_gnss_vtec() when present,
                  # so this is a natural augmentation of timing production.
         'web_api', 'radiod_monitor', 'pipeline_watchdog',
-        'chrony_monitor', 'grape_daily', 'prune',
+        'chrony_monitor', 'prune',
     },
 
     'full': _ALWAYS_ON | {
         'metrology', 'l2_calibration', 'fusion',
-        'physics', 'ionex_download', 'iono_reanalysis',
         'vtec',  # gated by [gnss_vtec].enabled — suppressed on hosts
                  # without a GNSS receiver (see active_services())
         'web_api', 'radiod_monitor', 'pipeline_watchdog',
-        'chrony_monitor', 'grape_daily', 'prune',
+        'chrony_monitor', 'prune',
     },
 }
 
@@ -90,7 +89,10 @@ PROFILE_DESCRIPTIONS: Dict[str, str] = {
     'archive': 'Core recorder only — raw IQ preservation, minimal resources',
     'rtp':     'Archive + web-api + monitoring — standard RTP/GPSDO mode',
     'fusion':  'RTP + metrology + fusion — GPS-denied timing from HF broadcasts',
-    'full':    'Fusion + physics + ionospheric — full science and timing',
+    # Since the 2026-08-24 split the physics/ionospheric stages belong to
+    # hamsci-physics; 'full' is now the complete TIMING stack plus the
+    # optional GNSS-VTEC augmentation.
+    'full':    'Fusion + VTEC + monitoring — the complete timing stack',
 }
 
 

@@ -34,8 +34,6 @@ hf-timestd service status            # per-service config + systemd state
 hf-timestd daemon                    # recorder daemon
 hf-timestd data summary              # storage usage
 hf-timestd data clean-{data,analytics,uploads,all}
-hf-timestd grape daily               # full GRAPE pipeline (decimate → spec → package → upload)
-hf-timestd grape {decimate,spectrogram,package,upload,test-upload,status}
 hf-timestd calibrate                 # BPSK-PPS calibration utilities
 hf-timestd discover                  # available radiod channels
 hf-timestd create-channels           # provision channels in radiod
@@ -125,7 +123,10 @@ The load-bearing ones:
 - `docs/ARCHITECTURE.md` — pipeline + service layering (SQLite backend).
 - `docs/DEBUGGING.md` — journald-only logging patterns + triage recipes.
 - `docs/TIMING-PIPELINE-WIRING.md` — RTP / chrony / fusion wiring.
-- `docs/GRAPE_DAILY_PROCESSING.md` — daily PSWS upload pipeline.
+- GRAPE/PSWS moved out: the daily pipeline, its docs and its units now
+  live in **hamsci-physics** (2026-08-24 split). This repo keeps the
+  timing core; hamsci-physics reads its products under the unchanged
+  `/var/lib/timestd` root.
 - `docs/PHARLAP_RAYTRACING.md` — PHaRLAP/pyLAP ray tracing (advisory physics
   overlay): 2-D/3-D capabilities, the `raytrace` CLI, worked
   Alaska→EM38ww examples. Engine: `core/raytrace_engine.py`.

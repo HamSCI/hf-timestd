@@ -528,4 +528,4 @@ port = 8000
 - [INSTALLATION.md](../INSTALLATION.md) — Full installation guide
 - [ZED_F9P_TEC_CONFIGURATION.md](ZED_F9P_TEC_CONFIGURATION.md) — GNSS receiver setup
 - [GPS_TEC_OPTIONAL.md](GPS_TEC_OPTIONAL.md) — Optional GPS TEC capabilities and VTEC architecture
-- [NASA_EARTHDATA_SETUP.md](NASA_EARTHDATA_SETUP.md) — IONEX data access setup
+- [NASA_EARTHDATA_SETUP.md](https://github.com/HamSCI/hamsci-physics/blob/main/docs/NASA_EARTHDATA_SETUP.md) — IONEX data access setup (hamsci-physics)

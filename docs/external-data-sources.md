@@ -63,7 +63,7 @@ parametric ionosphere tier for any caller that doesn't supply one.
 Downloads IGS Global Ionosphere Maps (Final, then Rapid, walking back up to
 7 days) for GPS VTEC, via NASA Earthdata Login. **Optional enrichment**: if
 `/etc/hf-timestd/earthdata-netrc` is not configured the daily timer skips
-cleanly (see `docs/NASA_EARTHDATA_SETUP.md`).
+cleanly (see hamsci-physics `docs/NASA_EARTHDATA_SETUP.md`).
 
 ### GIRO / DIDBase — `core/iono_data_service.py`
 - **Station list**: parsed from the `DIDBFastStationList` HTML page (URSI

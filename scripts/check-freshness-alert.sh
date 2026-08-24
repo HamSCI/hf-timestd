@@ -54,7 +54,8 @@ check_output_freshness() {
     if [ "$age" -gt "$max_age" ]; then
         local fusion_status physics_status
         fusion_status=$(systemctl is-active timestd-fusion 2>/dev/null || echo "unknown")
-        physics_status=$(systemctl is-active timestd-physics 2>/dev/null || echo "unknown")
+        # The physics stage lives in hamsci-physics since the 2026-08-24 split.
+        physics_status=$(systemctl is-active hamsci-physics-fusion 2>/dev/null || echo "unknown")
 
         send_alert "$label output stale - ${age}s" \
             "$label output is stale (${age}s old, threshold ${max_age}s).

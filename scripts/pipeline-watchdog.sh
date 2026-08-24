@@ -296,7 +296,7 @@ check_fusion() {
 # Check 4: Physics (TEC)
 # ==========================================================================
 check_physics() {
-    local unit="timestd-physics.service"
+    local unit="hamsci-physics-fusion.service"   # moved out in the 2026-08-24 split
     if ! is_enabled "$unit"; then return; fi
 
     if ! is_active "$unit"; then

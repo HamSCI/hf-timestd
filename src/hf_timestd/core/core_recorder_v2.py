@@ -1771,7 +1771,7 @@ class CoreRecorderV2:
         # exception here as "stay ledger-only", so a relative import made feed_fusion
         # impossible to enable while logging only a warning (AC0G-B4, 2026-08-19).
         from hf_timestd.data_product_registry import DataProductRegistry
-        from .solar_zenith_calculator import grid_to_latlon
+        from hamsci_dsp.geometry import grid_to_latlon
 
         # Receiver location: explicit lat/lon wins, else Maidenhead grid.
         lat = self.station_config.get('latitude')

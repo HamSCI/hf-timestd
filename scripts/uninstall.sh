@@ -102,6 +102,9 @@ SERVICES=(
     "timestd-metrology.target"
     "timestd-l2-calibration.service"
     "timestd-fusion.service"
+    # Retired hf-timestd unit names (pre-2026-08-24-split installs).
+    # grape-daily.* is deliberately absent: hamsci-physics owns that
+    # name now, and uninstalling hf-timestd must not disable it.
     "timestd-physics.service"
     "timestd-web-api.service"
     "timestd-vtec.service"
@@ -109,7 +112,6 @@ SERVICES=(
     "timestd-chrony-monitor.service"
     "timestd-ionex-download.service"
     "timestd-iono-reanalysis.service"
-    "grape-daily.service"
     # Legacy services
     "timestd-analytics.service"
     "timestd-web-ui.service"
@@ -138,7 +140,6 @@ TIMERS=(
     "timestd-ionex-download.timer"
     "timestd-chrony-monitor.timer"
     "timestd-iono-reanalysis.timer"
-    "grape-daily.timer"
 )
 
 for timer in "${TIMERS[@]}"; do
@@ -176,8 +177,6 @@ SERVICE_FILES=(
     "/etc/systemd/system/timestd-alert@.service"
     "/etc/systemd/system/timestd-iono-reanalysis.service"
     "/etc/systemd/system/timestd-iono-reanalysis.timer"
-    "/etc/systemd/system/grape-daily.service"
-    "/etc/systemd/system/grape-daily.timer"
     # Legacy services (no longer used)
     "/etc/systemd/system/timestd-analytics.service"
     "/etc/systemd/system/timestd-web-ui.service"

@@ -156,20 +156,16 @@ units = [
     "timestd-metrology.target",
     "timestd-fusion.service",
     "timestd-l2-calibration.service",
-    # timestd-physics.service — DISABLED 2026-08-10 (standing decision), and
-    # re-listed here by mistake: a deploy kept re-enabling it.  The physics
-    # stage still carries 2 HDF5 assumptions that the wwv-h-iono Phase-3 port
-    # resolves; until that lands it produces nothing trustworthy.  Note
-    # l2-calibration DOES produce L2_timing_measurements, so the product is not
-    # orphaned — only the physics stage is held.  Unit file retained
-    # (disable-not-delete); re-add this line when Phase-3 lands.
+    # The physics stage (timestd-physics.service) MOVED to hamsci-physics in
+    # the 2026-08-24 split, where it ships as hamsci-physics-fusion.service —
+    # still held for the same reason (HDF5-era freshness scan / channel
+    # discovery).  l2-calibration stays here and still produces
+    # L2_timing_measurements, so no product is orphaned.
     "timestd-radiod-monitor.service",
     "timestd-web-api.service",
     "timestd-vtec.service",
     # Timers — listed here so `smd start/stop` toggles them too.
     "timestd-chrony-monitor.timer",
-    "timestd-ionex-download.timer",
-    "timestd-iono-reanalysis.timer",
     "timestd-pipeline-watchdog.timer",
     # timestd-hfps-watchdog.timer — DEPRECATED 2026-06-28: the HFPS (Method-5
     # diff-detector) SHM feed is disabled (off-air / not in the chrony config),
@@ -178,11 +174,9 @@ units = [
     # and re-enable the timer if HFPS is brought back.
     "timestd-hpps-watchdog.timer",
     "timestd-prune.timer",
-    "grape-daily.timer",
-    # grape-upload-retry.timer — RETIRED 2026-06-30 (single-host uploader):
-    # hs-uploader.service owns GRAPE upload retries now; the in-process
-    # retry timer is superseded.  Unit files retained (disable-not-delete);
-    # re-add this line only if a host reverts to in-process GRAPE upload.
+    # GRAPE (grape-daily.timer, grape-upload-retry.timer) MOVED to
+    # hamsci-physics in the 2026-08-24 split, along with its upload pipeline
+    # block; grape-daily keeps its operator-facing unit name there.
 ]
 templated_units = [
     "timestd-metrology@.service",
@@ -232,37 +226,12 @@ parser_file     = "src/hf_timestd/sigmond_tui.py"
 parser_attr     = "parse_receiver_channels"
 
 # ---------------------------------------------------------------------------
-# Single-host uploader pipeline (Stage 6).  `smd admin uploader manifest`
-# reads this [[hs_uploader.pipeline]] block from every enabled client,
-# substitutes per-site identity ({station_id}/{instrument_id} resolved from
-# this client's own [station] config), and renders /etc/hs-uploader/
-# pipelines.toml for the single-host daemon.  The block shape IS the
-# [[pipeline]] shape hs_uploader.pipeline_factory consumes.
+# No [[hs_uploader.pipeline]] block here.
 #
-# The transport `name` and source `source_id` are PINNED verbatim: they are
-# the watermark keys the running daemon uses for the grape cursor.  Changing
-# them would re-scan the KEEP-retention spool and re-ship already-shipped
-# OBS* datasets.
+# The GRAPE→PSWS pipeline moved to hamsci-physics/deploy.toml in the
+# 2026-08-24 split, verbatim: its source_id ("grape-datasets:/var/lib/
+# timestd/upload") and transport name are the hs-uploader watermark keys for
+# a keep-retention spool, so they must not change AND must not be declared
+# twice — sigmond's manifest renderer would then emit the same pipeline from
+# two clients.
 # ---------------------------------------------------------------------------
-
-# GRAPE Digital RF datasets -> PSWS (daily)
-[[hs_uploader.pipeline]]
-name = "grape-psws"
-max_records_per_pump = 64
-[hs_uploader.pipeline.source]
-type = "filetree"
-root = "/var/lib/timestd/upload"
-patterns = ["OBS*"]
-retention = "keep"
-match_dirs = true
-table = "grape.dataset"
-source_id = "grape-datasets:/var/lib/timestd/upload"
-[hs_uploader.pipeline.transport]
-type = "psws_dataset"
-instrument_id = "{instrument_id}"
-host = "pswsnetwork.eng.ua.edu"
-table = "grape.dataset"
-sftp_user = "{station_id}"
-name = "psws-grape-sftp:pswsnetwork.eng.ua.edu:{station_id}"
-[hs_uploader.pipeline.identity]
-station_id = "{station_id}"

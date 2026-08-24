@@ -3,6 +3,8 @@
 #
 # Usage: sudo ./scripts/stop-services.sh
 
+# NOTE: the physics/GRAPE/IONEX units moved to hamsci-physics in the
+# 2026-08-24 split; stop or start them with `smd stop|start hamsci-physics`.
 set -e
 
 # Colors for output
@@ -26,7 +28,6 @@ SERVICES=(
     "timestd-vtec"
     "timestd-radiod-monitor"
     "timestd-web-api"
-    "timestd-physics"
     "timestd-fusion"
     "timestd-l2-calibration"
     "timestd-metrology.target"
@@ -35,10 +36,7 @@ SERVICES=(
 
 TIMERS=(
     "timestd-pipeline-watchdog.timer"
-    "timestd-ionex-download.timer"
     "timestd-chrony-monitor.timer"
-    "timestd-iono-reanalysis.timer"
-    "grape-daily.timer"
 )
 
 echo ""

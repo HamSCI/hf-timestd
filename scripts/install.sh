@@ -489,7 +489,7 @@ fi
 # (ka9q-python editable from ../ka9q-python), installs hf-timestd
 # editable + every locked dep into $VENV_DIR.  --no-dev skips dev
 # extras (pytest, black, flake8, mypy); --extra lz4/gnss/iono pulls
-# in deps required by timestd-iono-reanalysis.service +
+# in deps required by hamsci-physics' reanalysis service +
 # timestd-vtec.service (the lz4 transport, pyserial/pyubx2 for GNSS
 # UBX framing, netCDF4/boto3 for IRI ionosphere reanalysis).
 # --frozen requires uv.lock to be current; regenerate locally with
@@ -610,7 +610,7 @@ copy_unit() {
 }
 
 # ── Core service files ──
-CORE_UNITS=("timestd-core-recorder" "timestd-l2-calibration" "timestd-fusion" "timestd-physics" "timestd-web-api" "timestd-radiod-monitor")
+CORE_UNITS=("timestd-core-recorder" "timestd-l2-calibration" "timestd-fusion" "timestd-web-api" "timestd-radiod-monitor")
 
 UPDATED_COUNT=0
 for svc in "${CORE_UNITS[@]}"; do
@@ -631,18 +631,16 @@ if [[ -f "$SYSTEMD_DIR/timestd-metrology.service" ]]; then
 fi
 
 # ── Timer files and optional services ──
+# The GRAPE, IONEX, IRI and space-weather units moved to hamsci-physics in
+# the 2026-08-24 split; `smd install hamsci-physics` ships them now.  The
+# data directories below stay here: /var/lib/timestd is hf-timestd's root
+# and a frozen contract of the split — hamsci-physics writes into grape/,
+# upload/ and phase2/ rather than owning a root of its own.
 for tf in \
-    timestd-ionex-download.service timestd-ionex-download.timer \
     timestd-chrony-monitor.service timestd-chrony-monitor.timer \
-    timestd-iono-reanalysis.service timestd-iono-reanalysis.timer \
-    timestd-iri-healthcheck.service timestd-iri-healthcheck.timer \
-    timestd-iri-update.service timestd-iri-update.timer \
-    timestd-spaceweather-healthcheck.service timestd-spaceweather-healthcheck.timer \
     timestd-pipeline-watchdog.service timestd-pipeline-watchdog.timer \
     timestd-prune.service timestd-prune.timer \
     timestd-vtec.service \
-    grape-daily.service grape-daily.timer \
-    grape-upload-retry.service grape-upload-retry.timer \
     timestd-alert@.service
 do
     copy_unit "$PROJECT_DIR/systemd/$tf" && ((UPDATED_COUNT++)) || true
@@ -958,7 +956,6 @@ if [[ "$DO_RESTART" == "true" ]]; then
             for service in \
                 timestd-l2-calibration \
                 timestd-fusion \
-                timestd-physics \
                 timestd-web-api \
                 timestd-radiod-monitor \
                 timestd-vtec ; do
@@ -983,14 +980,12 @@ if [[ "$DO_RESTART" == "true" ]]; then
         # rare case where the timer file was just added by Phase 4 and the
         # enable in apply_profile would have run before daemon-reload saw
         # the new file.
-        for timer in timestd-ionex-download timestd-chrony-monitor timestd-pipeline-watchdog; do
+        for timer in timestd-chrony-monitor timestd-pipeline-watchdog; do
             systemctl start "${timer}.timer" 2>/dev/null || true
         done
-        [[ -f "$SYSTEMD_DIR/timestd-iono-reanalysis.timer" ]] && systemctl start timestd-iono-reanalysis.timer 2>/dev/null || true
-        if [[ -f "$SYSTEMD_DIR/timestd-spaceweather-healthcheck.timer" ]]; then
-            systemctl enable --now timestd-spaceweather-healthcheck.timer 2>/dev/null || true
-        fi
-        [[ -f "$SYSTEMD_DIR/grape-daily.timer" ]] && systemctl start grape-daily.timer 2>/dev/null || true
+        # ionex-download, iono-reanalysis, spaceweather-healthcheck and
+        # grape-daily moved to hamsci-physics (2026-08-24 split); its own
+        # install starts them.
     fi
 else
     log_step "Phase 7: Restart (skipped — --no-restart)"
@@ -1020,7 +1015,7 @@ fi
 if [[ "$DO_RESTART" == "true" ]]; then
     sleep 2
     FAILED_SVCS=()
-    for svc in timestd-core-recorder timestd-metrology.target timestd-l2-calibration timestd-fusion timestd-physics timestd-web-api; do
+    for svc in timestd-core-recorder timestd-metrology.target timestd-l2-calibration timestd-fusion timestd-web-api; do
         if systemctl is-enabled --quiet "$svc" 2>/dev/null && ! systemctl is-active --quiet "$svc" 2>/dev/null; then
             FAILED_SVCS+=("$svc")
         fi

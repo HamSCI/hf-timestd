@@ -52,11 +52,11 @@ are marked ★ — when two docs disagree, the canonical one wins.
 
 | Doc | What it gives you |
 |-----|-------------------|
-| [GRAPE_DAILY_PROCESSING.md](GRAPE_DAILY_PROCESSING.md) | The daily PSWS pipeline (decimate → spectrogram → package → upload + verify). |
+| GRAPE_DAILY_PROCESSING.md → **[hamsci-physics](https://github.com/HamSCI/hamsci-physics/blob/main/docs/GRAPE_DAILY_PROCESSING.md)** | The daily PSWS pipeline moved out in the 2026-08-24 split. |
 | [INTEGRATION.md](INTEGRATION.md) | Client API for wsprdaemon v4 and external consumers (SQLite store, authority snapshot). |
 | [external-data-sources.md](external-data-sources.md) | Live external data sources + health-check commands. |
 | [HAMSCI_QUALITY_METADATA_PROPOSAL.md](HAMSCI_QUALITY_METADATA_PROPOSAL.md) | Proposed HamSCI quality/uncertainty metadata standard. |
-| [DRF_UPLOAD_SYSTEM.md](DRF_UPLOAD_SYSTEM.md) | Pointer: Digital RF output is handled by the separate grape-recorder project. |
+| DRF_UPLOAD_SYSTEM.md → **[hamsci-physics](https://github.com/HamSCI/hamsci-physics/blob/main/docs/DRF_UPLOAD_SYSTEM.md)** | Digital RF output; moved with the GRAPE pipeline. |
 
 ## 6. Operations, setup & deployment
 
@@ -64,7 +64,7 @@ are marked ★ — when two docs disagree, the canonical one wins.
 |-----|-------------------|
 | [DEBUGGING.md](DEBUGGING.md) ★ | Journald-only logging, triage recipes (incl. clock free-run / makestep), deploy footguns. |
 | [EXTERNAL_PREREQUISITES.md](EXTERNAL_PREREQUISITES.md) | The six external dependencies and how to stage them. |
-| [STATION_SETUP_GUIDE.md](STATION_SETUP_GUIDE.md) · [PSWS_SETUP_GUIDE.md](PSWS_SETUP_GUIDE.md) · [NASA_EARTHDATA_SETUP.md](NASA_EARTHDATA_SETUP.md) | First-time site, PSWS upload, and NASA Earthdata setup. |
+| [STATION_SETUP_GUIDE.md](STATION_SETUP_GUIDE.md) · PSWS_SETUP_GUIDE.md and NASA_EARTHDATA_SETUP.md → **[hamsci-physics](https://github.com/HamSCI/hamsci-physics/tree/main/docs)** | First-time site setup here; PSWS upload and NASA Earthdata setup moved with the science products. |
 | [PIPELINE_VERIFICATION.md](PIPELINE_VERIFICATION.md) | Pipeline verification procedure. |
 | [WWVB-INTEGRATION.md](WWVB-INTEGRATION.md) | WWVB 60 kHz fusion source (Layer 4 — currently gated off, awaiting validation). |
 

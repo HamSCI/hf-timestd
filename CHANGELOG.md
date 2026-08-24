@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — the hf-timestd/hamsci-physics split (2026-08-24)
+
+Phase 3 of the split moves the ionospheric science out of this repo into
+**hamsci-physics**: `physics_fusion_service`, `ionospheric_reanalysis`,
+`tid_detector`, `propagation_stats`, the `grape/` daily pipeline and its CLI
+subcommands, the IONEX/CDDIS acquisition stack, and their units, scripts,
+tests and docs.  hf-timestd keeps the timing core.
+
+What did NOT change, deliberately:
+
+* `/var/lib/timestd` — the data root is a frozen contract; hamsci-physics
+  reads this repo's products in place.
+* the GRAPE upload pipeline's `source_id` and transport name — they moved
+  verbatim to hamsci-physics' `deploy.toml` (and were removed from this
+  one, so the pipeline is declared exactly once).
+* `grape-daily`'s unit name.
+
+Consumers of `hf_timestd.core.solar_zenith_calculator` should use
+`hamsci_dsp.geometry` / `hamsci_dsp.ionosphere.solar`; the day-series helper
+`calculate_solar_zenith_for_day` lives in `hamsci_physics.solar_zenith`.
+
+
 ### 2026-06-22 — PHaRLAP ray-tracing doc + `raytrace` CLI
 
 - **New doc `docs/PHARLAP_RAYTRACING.md`** — describes how PHaRLAP/pyLAP

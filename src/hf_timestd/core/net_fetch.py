@@ -17,7 +17,8 @@ fetcher gets the same behaviour:
 * a descriptive User-Agent so upstreams can identify (and contact) us.
 
 It deliberately does NOT handle authentication — CDDIS/Earthdata
-downloads keep their own credentialed session in ``cddis_auth`` because
+downloads keep their own credentialed session in hamsci-physics'
+``cddis_auth`` because
 that flow needs netrc-based basic auth and redirect handling.
 """
 

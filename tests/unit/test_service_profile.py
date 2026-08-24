@@ -80,13 +80,13 @@ class TestFromConfig:
         profile = ServiceProfile.from_config({
             'services': {
                 'profile': 'rtp',
-                'physics': True,         # override-on
+                'vtec': True,            # override-on
                 'web_api': False,        # override-off
                 'metrology': 'sometimes',  # not bool — ignored
                 'unknown_service': True,   # not in registry — ignored
             }
         })
-        assert profile.overrides == {'physics': True, 'web_api': False}
+        assert profile.overrides == {'vtec': True, 'web_api': False}
 
     def test_vtec_flag_picked_up_from_gnss_vtec_section(self):
         profile = ServiceProfile.from_config({
@@ -109,9 +109,9 @@ class TestActiveServices:
         profile = ServiceProfile(profile_name='full')
         active = profile.active_services()
         # Spot-check a few characteristic members
-        assert 'physics' in active
         assert 'fusion' in active
-        assert 'iono_reanalysis' in active
+        assert 'metrology' in active
+        assert 'l2_calibration' in active
         assert 'core_recorder' in active
 
     def test_override_can_enable_extra_service(self):
@@ -126,9 +126,9 @@ class TestActiveServices:
     def test_override_can_disable_profile_service(self):
         profile = ServiceProfile(
             profile_name='full',
-            overrides={'physics': False},
+            overrides={'vtec': False},
         )
-        assert 'physics' not in profile.active_services()
+        assert 'vtec' not in profile.active_services()
 
     def test_core_recorder_cannot_be_overridden_off(self):
         profile = ServiceProfile(
@@ -196,7 +196,7 @@ class TestSummary:
     def test_shape_and_source_attribution(self):
         profile = ServiceProfile(
             profile_name='rtp',
-            overrides={'physics': True},
+            overrides={'chrony_monitor': True},
             vtec_available=False,
         )
         summary = profile.summary()
@@ -211,15 +211,15 @@ class TestSummary:
         assert summary['services']['core_recorder']['enabled'] is True
 
         # An overridden service is sourced from 'override'
-        assert summary['services']['physics']['source'] == 'override'
-        assert summary['services']['physics']['enabled'] is True
+        assert summary['services']['chrony_monitor']['source'] == 'override'
+        assert summary['services']['chrony_monitor']['enabled'] is True
 
         # A profile-baseline service is sourced from 'profile'
         assert summary['services']['web_api']['source'] == 'profile'
         assert summary['services']['web_api']['enabled'] is True
 
         # A non-active service is reported as enabled=False
-        assert summary['services']['iono_reanalysis']['enabled'] is False
+        assert summary['services']['metrology']['enabled'] is False
 
 
 # =============================================================================
@@ -342,3 +342,33 @@ class TestApplyProfile:
         for unit in active_units:
             assert actions[unit].startswith('error:')
             assert 'permission denied' in actions[unit]
+
+
+class TestProfilesOnlyReferenceShippedUnits:
+    """A profile may only name a unit this repo actually ships.
+
+    `hf-timestd profile set` enables every unit in the profile; naming one
+    that isn't installed makes systemctl fail the whole switch.  This is
+    what the 2026-08-24 split would otherwise have broken: the physics and
+    GRAPE units moved to hamsci-physics while the profiles still listed
+    them.
+    """
+
+    def _shipped(self):
+        from pathlib import Path
+        systemd = Path(__file__).resolve().parents[2] / 'systemd'
+        return {p.name for p in systemd.iterdir() if p.is_file()}
+
+    def test_every_mapped_unit_is_shipped(self):
+        from hf_timestd.service_profile import SERVICE_UNIT_MAP as SERVICE_UNITS
+        shipped = self._shipped()
+        missing = {k: u for k, u in SERVICE_UNITS.items()
+                   if u.endswith(('.service', '.timer', '.target'))
+                   and u not in shipped}
+        assert not missing, f"profile keys naming units this repo does not ship: {missing}"
+
+    def test_every_profile_member_is_a_known_key(self):
+        from hf_timestd.service_profile import PROFILES, SERVICE_UNIT_MAP as SERVICE_UNITS
+        unknown = {name: sorted(keys - set(SERVICE_UNITS))
+                   for name, keys in PROFILES.items() if keys - set(SERVICE_UNITS)}
+        assert not unknown, unknown

@@ -6,6 +6,8 @@
 # This script starts services in dependency order and waits for each
 # to be ready before starting the next.
 
+# NOTE: the physics/GRAPE/IONEX units moved to hamsci-physics in the
+# 2026-08-24 split; stop or start them with `smd stop|start hamsci-physics`.
 set -e
 
 # Colors for output
@@ -59,10 +61,7 @@ except Exception as e:
     for u in [
         'timestd-core-recorder.service', 'timestd-metrology.target',
         'timestd-l2-calibration.service', 'timestd-fusion.service',
-        'timestd-physics.service', 'timestd-web-api.service',
         'timestd-radiod-monitor.service', 'timestd-pipeline-watchdog.timer',
-        'timestd-ionex-download.timer', 'timestd-chrony-monitor.timer',
-        'timestd-iono-reanalysis.timer', 'grape-daily.timer',
     ]:
         print(u)
 " 2>/dev/null)
@@ -85,7 +84,6 @@ STARTUP_ORDER=(
     "timestd-metrology.target"
     "timestd-l2-calibration.service"
     "timestd-fusion.service"
-    "timestd-physics.service"
     "timestd-vtec.service"
     "timestd-web-api.service"
     "timestd-radiod-monitor.service"
@@ -104,10 +102,7 @@ OPTIONAL_SERVICES=()
 # Timers — only those in the active profile
 ALL_TIMERS=(
     "timestd-pipeline-watchdog.timer"
-    "timestd-ionex-download.timer"
     "timestd-chrony-monitor.timer"
-    "timestd-iono-reanalysis.timer"
-    "grape-daily.timer"
     "timestd-prune.timer"
 )
 TIMERS=()
@@ -256,7 +251,7 @@ log_step "Phase 3: Starting fusion and physics..."
 # SHM segments.
 
 start_service "timestd-fusion" "Fusion → Chrony SHM"
-start_service "timestd-physics" "TEC Estimation"
+# TEC estimation moved to hamsci-physics (2026-08-24 split): `smd start hamsci-physics`.
 
 # Restart chronyd to pick up SHM (fusion creates SHM segments with correct permissions)
 if systemctl is-active --quiet chronyd; then
@@ -282,7 +277,7 @@ fi
 # Start timers
 log_step "Starting periodic timers..."
 for timer in "${TIMERS[@]}"; do
-    # Enable timer if not already enabled (e.g. grape-daily on fresh install)
+    # Enable timer if not already enabled (e.g. timestd-prune on fresh install)
     if ! systemctl is-enabled --quiet "$timer" 2>/dev/null; then
         systemctl enable "$timer" 2>/dev/null || true
         log_info "  Enabled: $timer"
