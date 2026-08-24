@@ -14,15 +14,27 @@ shared data layer), per `docs/design/HF_TIMESTD_SPLIT_DESIGN.md`.
 
 ## Gate
 
-- [ ] T6 stage-1 acceptance met: origin spread < 10.4 µs across a night's
+- [x] T6 stage-1 acceptance met: origin spread < 10.4 µs across a night's
       re-locks within one channel lifetime (`scripts/t6_origin_spread.py`
-      against the live segment). Currently ~80 ms, block-quantised — NOT met.
+      against the live segment). **MET 2026-08-24: 1.9 µs over 4.5 h incl.
+      re-locks and a restart (63 ledger anchors, AC0G-B4)** — see the spec's
+      §2 gate stamp for the enabling fixes.
 - [ ] rob co-review of the spec's §11 open items (hamsci-dsp charter, names,
-      quota contract, org repo creation).
-- [ ] E1 — WWVB utility evaluation complete, disposition decided
-      (spec §12: contributor / witness-only / retire).
-- [ ] E2 — FUSION-sans-VTEC characterization complete, Phase-2 fallback
-      chosen (spec §12: nothing vs climatological IONEX).
+      quota contract, org repo creation).  **Partially open 2026-08-24:**
+      rob approved the content-time labeling convention (a §5.1-adjacent
+      change the split must carry); §11 items proper — charter, names,
+      wwv-h-iono org repo creation — still need his eyes.  Repo creation is
+      not needed until Phase 3, so Phases 0–2 proceed.
+- [x] E1 — WWVB utility evaluation complete, disposition decided
+      (spec §12: contributor / witness-only / retire).  **Waived (deferred)
+      by mjh 2026-08-24**: `wwvb_*` is on the §5.1 stay-list under every
+      disposition, so E1 cannot change the cut; evaluation continues on its
+      own track (#23/#25).
+- [x] E2 — FUSION-sans-VTEC characterization complete, Phase-2 fallback
+      chosen (spec §12: nothing vs climatological IONEX).  **Closed by mjh
+      2026-08-24** on §12's interim findings ("gnss-vtec's absence costs only
+      the cross-check, not accuracy"): fallback = graceful degradation,
+      gnss-vtec stays install-optional; Phases 4–5 deferred by decision.
 
 ## Global constraints
 

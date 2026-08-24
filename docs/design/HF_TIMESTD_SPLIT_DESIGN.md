@@ -35,6 +35,28 @@ channel lifetime (see `T6_ORIGIN_ASSERTION_DESIGN.md`). As of 2026-08-10 the
 post-fix spread is ~80 ms and block-quantised — not met. Do not refactor
 around a timing core that still re-derives its origin at every re-lock.
 
+**GATE MET — 2026-08-24.** Measured on AC0G-B4: origin spread **1.9 µs over
+4.5 h within one channel lifetime, across re-locks and a process restart**
+(63 ledger anchors; sub-second span 016628347–016630220 ns), a factor of five
+inside the criterion.  Held through the same day's labeling-convention A/B
+(two further re-locks, `fine_coarse` 0.003 ms at re-acquisition).  The
+enablers, all landed on main and all inside the §5.1 stay-list: the honest
+stream (ka9q-radio 55d9048d), the RTP counter-domain fix (`core/rtp_domain`,
+f795cbe), the durable anchor ledger (`core/t6_anchor_ledger`, 6e37b42), and
+the judge plane-correction mechanism (746c7e6).  Note for the phase work: the
+content-time labeling convention (CONTENT_TIME_LABELING_CONVENTION.md,
+approved by rob 2026-08-24) retires `filter_group_delay_ns` — config
+templates and `_t6_fine_settings` touched by the split must carry that
+change, not resurrect the key.
+
+**E1/E2 gate disposition — mjh, 2026-08-24:** E2 (FUSION-sans-VTEC) is
+recorded as answered by §12's interim findings ("gnss-vtec's absence costs
+only the cross-check, not accuracy") — Phase-2 fallback: fusion degrades
+gracefully, gnss-vtec stays install-optional.  E1 (WWVB disposition) is
+deferred: `wwvb_*` is on the §5.1 stay-list either way, so it does not block
+the cut.  Phases 4 (gnss-vtec) and 5 (station-web) are deferred by decision;
+Phases 0–3 proceed.
+
 ## 3. Decisions
 
 | Decision | Choice | Rationale |
