@@ -13,6 +13,9 @@ from hf_timestd.core.t6_holdover import (
     coast_sigma0_ns,
     coast_ruler_intact_by_drift,
     RULER_DRIFT_TOLERANCE_S,
+    UNMEASURED_RATE_SIGMA_PPM,
+    UNMEASURED_RATE_SIGMA_PPM_A0,
+    unmeasured_rate_sigma_ppm,
     holdover_named_second,
     holdover_sigma_ns,
     may_coast,
@@ -299,3 +302,83 @@ class TestRulerFromLabelAudit:
         half = int(RULER_DRIFT_TOLERANCE_S * self.SR) // 2
         assert coast_ruler_intact_by_drift(half, 0, self.SR) is True
         assert coast_ruler_intact_by_drift(half, 0, self.SR // 4) is False
+
+
+class TestUnmeasuredRateIsAxisAware:
+    """hf-timestd#41.  UNMEASURED_RATE_SIGMA_PPM = 0.01 is documented as
+    "25x the value measured on B4" -- i.e. calibrated against a GPSDO
+    (1.44 us/hour = 0.0004 ppm).  A free-running TCXO is 0.5-2 ppm, so on
+    an A0 station that supposedly-pessimistic stand-in understates the
+    real drift by 50-200x and the coast claims far more than it has.
+
+    The A-axis (docs/design/TIMING_AUTHORITY_TWO_AXIS.md) decides which
+    stand-in applies.
+    """
+
+    def test_a1_keeps_the_gpsdo_calibrated_value(self):
+        assert unmeasured_rate_sigma_ppm("A1") == UNMEASURED_RATE_SIGMA_PPM
+
+    def test_a0_uses_the_tcxo_bound(self):
+        assert unmeasured_rate_sigma_ppm("A0") == UNMEASURED_RATE_SIGMA_PPM_A0
+        assert UNMEASURED_RATE_SIGMA_PPM_A0 >= 100 * UNMEASURED_RATE_SIGMA_PPM
+
+    def test_unknown_is_treated_as_undisciplined(self):
+        """Refuse-to-claim: an unstated ruler is not a disciplined one."""
+        for v in (None, "", "unknown", "A2", "a0"):
+            assert unmeasured_rate_sigma_ppm(v) == UNMEASURED_RATE_SIGMA_PPM_A0
+
+    def test_a1_is_case_insensitive(self):
+        assert unmeasured_rate_sigma_ppm("a1") == UNMEASURED_RATE_SIGMA_PPM
+
+    def test_the_drift_term_scales_with_the_stand_in(self):
+        """Isolated (zero base sigma), one hour of coast: the drift terms
+        differ by the full 200x ratio of the two stand-ins."""
+        a1 = holdover_sigma_ns(
+            0.0, None, 3600.0, unmeasured_ppm=unmeasured_rate_sigma_ppm("A1"))
+        a0 = holdover_sigma_ns(
+            0.0, None, 3600.0, unmeasured_ppm=unmeasured_rate_sigma_ppm("A0"))
+        assert a1 == pytest.approx(36_000.0)        # 36 us
+        assert a0 == pytest.approx(7_200_000.0)     # 7.2 ms
+        assert a0 == pytest.approx(200 * a1)
+
+    def test_a_realistic_coast_widens_meaningfully(self):
+        """In quadrature with a real 800 us freeze sigma the ratio is
+        damped to ~9x -- still the difference between a coast chrony can
+        use and one it cannot."""
+        a1 = holdover_sigma_ns(
+            800_000.0, None, 3600.0,
+            unmeasured_ppm=unmeasured_rate_sigma_ppm("A1"))
+        a0 = holdover_sigma_ns(
+            800_000.0, None, 3600.0,
+            unmeasured_ppm=unmeasured_rate_sigma_ppm("A0"))
+        assert a1 == pytest.approx(800_810, rel=1e-3)
+        assert a0 == pytest.approx(7_244_308, rel=1e-3)
+        assert a0 > 5 * a1
+
+    def test_a0_hits_the_coast_ceiling_in_hours_not_months(self):
+        """T6_HOLDOVER_MAX_SIGMA_NS is 62.5 ms.  A1 reaches it in ~72
+        days; A0 must give up in hours instead of pretending."""
+        ceiling = 62.5e6
+        a0_at_9h = holdover_sigma_ns(
+            800_000.0, None, 9 * 3600.0,
+            unmeasured_ppm=unmeasured_rate_sigma_ppm("A0"))
+        a1_at_9h = holdover_sigma_ns(
+            800_000.0, None, 9 * 3600.0,
+            unmeasured_ppm=unmeasured_rate_sigma_ppm("A1"))
+        assert a0_at_9h > ceiling
+        assert a1_at_9h < ceiling
+
+    def test_a_measured_rate_still_wins_over_the_stand_in(self):
+        """The stand-in is only for the unmeasured case; a station that
+        HAS characterised its oscillator uses its own number."""
+        measured = holdover_sigma_ns(
+            800_000.0, 0.0004, 3600.0,
+            unmeasured_ppm=unmeasured_rate_sigma_ppm("A0"))
+        assert measured == pytest.approx(
+            holdover_sigma_ns(800_000.0, 0.0004, 3600.0))
+
+    def test_default_stays_backward_compatible(self):
+        """Existing callers that pass no stand-in keep today's behaviour."""
+        assert holdover_sigma_ns(800_000.0, None, 3600.0) == pytest.approx(
+            holdover_sigma_ns(800_000.0, None, 3600.0,
+                              unmeasured_ppm=UNMEASURED_RATE_SIGMA_PPM))

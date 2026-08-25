@@ -41,27 +41,62 @@ from typing import Optional, Tuple
 # Stand-in when the residual rate has not been measured yet.  This is a
 # refuse-to-claim bound, not a measurement: the estimator needs ~900 s
 # of anchor lifetime, and it resets on every recapture, so a fresh or
-# just-restarted station is genuinely in this state.  25x the value
-# measured on B4 -- deliberately pessimistic, because an unmeasured
-# oscillator must never be indistinguishable from a characterised one.
+# just-restarted station is genuinely in this state.
+#
+# ⚠ It depends on the A-AXIS (docs/design/TIMING_AUTHORITY_TWO_AXIS.md):
+# whether a GPSDO disciplines the ADC clock.  Until hf-timestd#41 there
+# was one constant, calibrated for A1, silently applied to both.
+#
+# A1 -- 25x the 0.0004 ppm (1.44 us/hour) measured on AC0G-B4.
+# Deliberately pessimistic, because an unmeasured oscillator must never
+# be indistinguishable from a characterised one.
 UNMEASURED_RATE_SIGMA_PPM = 0.01
+
+# A0 -- no GPSDO.  The ADC runs on the RX-888's internal TCXO, spec
+# 0.5-2 ppm over temperature, i.e. 1.8-7.2 ms/hour: 50-200x the A1
+# stand-in and ~1250-5000x the disciplined residual.  Take the top of
+# the spec range; this is a bound from the datasheet, not a measurement,
+# and a station that wants better should characterise its own rate (the
+# measured value always wins over this).
+UNMEASURED_RATE_SIGMA_PPM_A0 = 2.0
+
+
+def unmeasured_rate_sigma_ppm(a_level: Optional[str]) -> float:
+    """The stand-in appropriate to this station's ruler.
+
+    Anything that is not an explicit ``"A1"`` -- including ``None``,
+    ``"unknown"``, and a malformed value -- is treated as undisciplined.
+    That is the refuse-to-claim direction: an unstated ruler is not a
+    disciplined one, and the failure mode of guessing A1 (coasting for
+    days on an oscillator drifting milliseconds per hour) is far worse
+    than the failure mode of guessing A0 (refusing a coast sooner than
+    strictly necessary).
+    """
+    if str(a_level).strip().upper() == "A1":
+        return UNMEASURED_RATE_SIGMA_PPM
+    return UNMEASURED_RATE_SIGMA_PPM_A0
 
 
 def holdover_sigma_ns(
     sigma_at_freeze_ns: float,
     rate_sigma_ppm: Optional[float],
     elapsed_s: float,
+    unmeasured_ppm: float = UNMEASURED_RATE_SIGMA_PPM,
 ) -> float:
     """1-sigma uncertainty of a frozen anchor ``elapsed_s`` into a coast.
 
     Two independent terms in quadrature: what the anchor was worth at
     the moment it froze, and the rate uncertainty integrated over the
-    coast.  ``rate_sigma_ppm=None`` means unmeasured, which widens
-    rather than narrows (see ``UNMEASURED_RATE_SIGMA_PPM``).
+    coast.  ``rate_sigma_ppm=None`` means unmeasured, in which case
+    ``unmeasured_ppm`` stands in and widens rather than narrows.
+
+    Callers that know the A-level should pass
+    ``unmeasured_ppm=unmeasured_rate_sigma_ppm(a_level)``.  The default
+    is the A1 value, which keeps pre-#41 callers unchanged.
     """
     elapsed = max(0.0, float(elapsed_s))
     ppm = (
-        UNMEASURED_RATE_SIGMA_PPM
+        float(unmeasured_ppm)
         if rate_sigma_ppm is None
         else abs(float(rate_sigma_ppm))
     )

@@ -288,6 +288,8 @@ class CoreRecorderV2:
                 - status_address: Radiod status address
         """
         self.config = config
+        # A-axis observer; see attach_a_level_provider (#41).
+        self._a_level_provider = None
         self.output_dir = Path(config['output_dir'])
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
@@ -2487,6 +2489,38 @@ class CoreRecorderV2:
 
         return None
 
+    def attach_a_level_provider(self, provider) -> None:
+        """Inject a callable returning the A-level ("A1" / "A0").
+
+        The A-axis (docs/design/TIMING_AUTHORITY_TWO_AXIS.md) is whether a
+        GPSDO disciplines the ADC clock.  It governs *rate*, so it decides
+        how fast a frozen anchor goes stale — see hf-timestd#41.
+
+        ``GpsdoProbe.poll`` has exactly this signature and is the intended
+        provider: it reads gpsdo-monitor's published JSON, freshness-gates
+        it, and returns "A0" on its own when the device goes away.  Not
+        attaching one leaves the A-level UNKNOWN, which is deliberately
+        treated as undisciplined rather than assumed disciplined.
+        """
+        self._a_level_provider = provider
+
+    def _t6_a_level(self):
+        """Current A-level, or None when nothing observes it.
+
+        Never falls back to a configured value: a config assertion is not
+        an observation, and the whole point of #41 is that quoting an
+        A1-grade uncertainty on an unobserved ruler is how a station
+        claims precision it does not have.  `hf-timestd validate` warns
+        separately when the A-level is asserted rather than probed.
+        """
+        provider = getattr(self, '_a_level_provider', None)
+        if provider is None:
+            return None
+        try:
+            return provider()
+        except Exception:  # noqa: BLE001 — a probe fault is not a coast fault
+            return None
+
     def attach_lb1421_probe(self, probe) -> None:
         """Inject an Lb1421T5Probe for use by T5 disambiguation.
 
@@ -3234,6 +3268,7 @@ class CoreRecorderV2:
         from hf_timestd.core.t6_holdover import (
             coast_ruler_intact, coast_ruler_intact_by_drift,
             coast_sigma0_ns, holdover_sigma_ns,
+            unmeasured_rate_sigma_ppm,
             may_coast,
         )
 
@@ -3288,8 +3323,12 @@ class CoreRecorderV2:
         rate = getattr(getattr(self, '_t6_rate_est', None), 'current', None)
 
         elapsed = 0.0 if since is None else max(0.0, float(mono_now) - since)
+        # hf-timestd#41: the unmeasured-rate stand-in depends on the
+        # A-axis.  Guessing A1 on a free-running TCXO would coast for
+        # days on an oscillator drifting milliseconds per hour.
         sigma_ns = holdover_sigma_ns(
-            sigma0 or 0.0, getattr(rate, 'sigma_ppm', None), elapsed
+            sigma0 or 0.0, getattr(rate, 'sigma_ppm', None), elapsed,
+            unmeasured_ppm=unmeasured_rate_sigma_ppm(self._t6_a_level()),
         )
         cause = "authority %s, costas %s" % (
             "unknown" if state is None else state.value,
@@ -6128,6 +6167,47 @@ def main():
     # The legacy lb1421_nmea_device key is accepted as an enable-signal
     # only; the device path itself is no longer used.
     timing_section = config.get('timing', {})
+
+    # A-axis observer (hf-timestd#41).  Same published JSON the T5 probe
+    # reads, but consumed for its `a_level_hint`: does a GPSDO discipline
+    # the ADC clock?  GpsdoProbe freshness-gates and degrades to "A0" on
+    # its own, so a GPSDO that dies mid-run stops being claimed.
+    # Unattached, the A-level stays UNKNOWN and the coast uses the
+    # undisciplined stand-in -- deliberately, see attach_a_level_provider.
+    _auth_cfg = timing_section.get('authority_manager', None)
+    if not isinstance(_auth_cfg, dict):
+        _legacy_auth = timing_section.get('authority', None)
+        _auth_cfg = _legacy_auth if isinstance(_legacy_auth, dict) else {}
+    _gpsdo_cfg = (_auth_cfg.get('gpsdo', {}) or {})
+    from .t6_holdover import (
+        UNMEASURED_RATE_SIGMA_PPM as _UNMEAS_A1,
+        UNMEASURED_RATE_SIGMA_PPM_A0 as _UNMEAS_A0,
+    )
+    if _gpsdo_cfg.get('enabled'):
+        from .gpsdo_probe import GpsdoProbe
+        _a_probe = GpsdoProbe(
+            run_dir=Path(_gpsdo_cfg.get('run_dir', '/run/gpsdo')),
+            serial=_gpsdo_cfg.get('serial'),
+        )
+        recorder.attach_a_level_provider(_a_probe.poll)
+        logger.info(
+            f"A-level observer attached (gpsdo run_dir="
+            f"{_gpsdo_cfg.get('run_dir', '/run/gpsdo')}, "
+            f"serial={_gpsdo_cfg.get('serial') or '*'}); holdover sigma "
+            f"now follows the observed A-axis (#41)."
+        )
+    else:
+        logger.warning(
+            "A-level NOT observed: [timing.authority_manager.gpsdo].enabled "
+            "is unset, so the T6 holdover uses the undisciplined "
+            "stand-in (%.2f ppm) rather than the GPSDO-calibrated one "
+            "(%.3f ppm). If this station has a GPSDO, enable the probe -- "
+            "coasts are being refused far sooner than they need to be. If "
+            "it does not, this is correct. See "
+            "docs/design/TIMING_AUTHORITY_TWO_AXIS.md and hf-timestd#41.",
+            _UNMEAS_A0, _UNMEAS_A1,
+        )
+
     lb1421_enabled = bool(timing_section.get('lb1421_enabled', False)) or bool(
         str(timing_section.get('lb1421_nmea_device', '')).strip()
     )
