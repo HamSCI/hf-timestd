@@ -195,6 +195,49 @@ class TestT6StepRecoveryT5Sanity(unittest.TestCase):
         self.assertEqual(cr._t6_disambiguation_ns, 0)
         self.assertEqual(len(cr._t6_recent_raw), 0)
 
+    def test_rejection_states_the_candidate_not_just_the_lock(self):
+        """AC0G-B4 2026-08-25: the REJECTED line prints ``t5_implied`` and
+        the old lock, but never the candidate the cluster actually
+        implies — so the journal cannot distinguish the two ways this
+        branch is reached:
+
+          * the raw is a boxcar sidelobe (candidate sits ~±0.5 s from
+            GPS) — the 2026-05-23 phantom, and holding is CORRECT; or
+          * the raw is genuine and the LOCK is the stale one (candidate
+            agrees with GPS) — holding is then wrong, and nothing in
+            this state machine ever re-validates the lock itself.
+
+        B4 sat in this branch at ~1 Hz for hours (raw pinned at
+        546,963,700 ns, lock 225,754,278 ns, GPS ~149 ms) with no way to
+        tell which case it was.  Diagnostic only — no branch changes.
+        """
+        locked = 32_000_000
+        raw = 418_000_000
+        cr = self._make_recorder_with_t5(
+            locked_ns=locked, t5_implied_ns=120_000_000.0
+        )
+        with self.assertLogs(
+            'hf_timestd.core.core_recorder_v2', level='WARNING'
+        ) as cm:
+            for i in range(CoreRecorderV2.T6_STEP_RECOVERY_WINDOW):
+                cr._t6_calibrator.process_samples.return_value = (
+                    _calibrator_result(raw + (i % 5) * 50)
+                )
+                samples, quality = _samples_quality()
+                cr._t6_on_samples(samples, quality)
+
+        line = next(
+            (m for m in cm.output if 'step-recovery candidate' in m), None)
+        self.assertIsNotNone(
+            line, f"no candidate diagnostic emitted; got {cm.output}")
+        # The candidate effective and the GPS gap that discriminates
+        # "sidelobe phantom" from "stale lock" must both be stated.
+        self.assertIn('candidate_effective=', line)
+        self.assertIn('t5_implied=', line)
+        self.assertIn('candidate_minus_t5=', line)
+        # Lock must still be held — this is observability, not behaviour.
+        self.assertEqual(cr._t6_last_chain_delay_ns, locked)
+
     def test_t5_phantom_detection_holds_lock_through_packet_loss(self):
         # The 2026-05-23 bee1 incident exactly: 60-edge cluster ~216 ms
         # away from old lock, T5 (had it been available) would have

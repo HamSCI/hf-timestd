@@ -4477,6 +4477,39 @@ class CoreRecorderV2:
                     # new operating point against GPS truth before
                     # accepting it.
                     t5_implied = self._t5_implied_effective_chain_delay()
+                    # Diagnostic only (AC0G-B4 2026-08-25) — no branch
+                    # change.  The REJECTED line below states t5_implied
+                    # and the old lock but never the candidate the
+                    # cluster implies, so the journal cannot separate the
+                    # two ways this branch is reached: a boxcar sidelobe
+                    # (candidate ~±0.5 s from GPS — the 2026-05-23
+                    # phantom, holding is CORRECT) from a stale lock
+                    # (candidate AGREES with GPS — holding is wrong, and
+                    # nothing in this state machine re-validates the lock
+                    # itself).  B4 sat here at ~1 Hz for hours with raw
+                    # pinned at 546,963,700 ns against a 225,754,278 ns
+                    # lock and no way to tell which.
+                    candidate_effective = wrap_chain_delay_ns(
+                        median_raw + self._t6_disambiguation_ns
+                    )
+                    logger.warning(
+                        "T6 step-recovery candidate: raw_median=%d ns, "
+                        "disamb=%d ns, candidate_effective=%d ns, "
+                        "t5_implied=%s ns, locked=%s ns, "
+                        "candidate_minus_t5=%s ns, spread=%d ns "
+                        "(candidate agreeing with T5 ⇒ the LOCK is the "
+                        "stale one; candidate ~±0.5 s from T5 ⇒ sidelobe "
+                        "phantom and holding is correct)",
+                        median_raw,
+                        self._t6_disambiguation_ns,
+                        candidate_effective,
+                        "None" if t5_implied is None else "%.0f" % t5_implied,
+                        self._t6_last_chain_delay_ns,
+                        "None" if t5_implied is None
+                        else "%+d" % wrap_chain_delay_ns(
+                            int(candidate_effective - t5_implied)),
+                        spread_ns,
+                    )
                     if (t5_implied is not None
                             and self._t6_last_chain_delay_ns is not None
                             and abs(wrap_chain_delay_ns(
