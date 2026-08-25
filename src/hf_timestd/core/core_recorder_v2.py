@@ -290,6 +290,14 @@ class CoreRecorderV2:
         self.config = config
         # A-axis observer; see attach_a_level_provider (#41).
         self._a_level_provider = None
+        # Cross-channel counter calibration for ledger v2 (#42/#43).
+        self._t6_epoch = None
+        self._peer_epoch = None
+        self._peer_rate_hz = None
+        self._t6_epoch_last_obs = None
+        self._t6_last_fine_est = None
+        # Pre-trigger IQ ring; off unless configured (#43).
+        self._t6_anomaly = None
         self.output_dir = Path(config['output_dir'])
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
@@ -828,6 +836,11 @@ class CoreRecorderV2:
                     # per-sample-Δφ calibrator has no fold buffer to
                     # localise against.
                     fine_cfg = self._t6_fine_settings(self._t6_config)
+                    # Recorded in every ledger row: its absence is
+                    # exactly what made the 2026-08-25 15:00-15:07
+                    # content window indistinguishable afterwards.
+                    self._t6_labeling_convention = fine_cfg.get(
+                        'labeling_convention')
                     self._t6_fine_stage = None
                     self._t6_authority = None
                     self._t6_authority_last_decision = None
@@ -2830,6 +2843,7 @@ class CoreRecorderV2:
             "hours with no way out.)",
             self._t6_last_chain_delay_ns, int(delta), STALE_LOCK_DWELL_S,
         )
+        self._t6_capture_anomaly("stale-lock-abandoned")
         if getattr(self, '_t6_authority', None) is not None:
             self._t6_apply_authority_decision(
                 self._t6_authority.on_mf_unlock())
@@ -3109,6 +3123,98 @@ class CoreRecorderV2:
             feed, reported_ns / 1e6, asserted_ns / 1e6,
         )
 
+    def _t6_capture_anomaly(self, reason: str) -> None:
+        """Dump the pre-trigger T6 IQ window, budget permitting.
+
+        A ledger row is the matched filter's OUTPUT; raw samples are the
+        only way to re-run the filter on an event where it may have been
+        wrong.  Rate limiting lives inside ``AnomalyCapture`` and is not
+        optional — the 2026-08-25 livelock re-entered its failure branch
+        at ~1 Hz for hours.
+        """
+        cap = getattr(self, '_t6_anomaly', None)
+        if cap is None:
+            return
+        try:
+            cap.trigger(reason)
+        except Exception:  # noqa: BLE001 — diagnostics never break capture
+            pass
+
+    def _t6_observe_channel_epochs(self, mono_now=None) -> None:
+        """Feed one (GPS_TIME, RTP_TIMESNAP) pair per channel to the
+        least-late epoch estimators (see ``cross_channel_rtp``).
+
+        Throttled to ~1 Hz.  The offset being estimated is CONSTANT within
+        a radiod session — both counters come off the same ADC clock — so
+        this only ever sharpens, and the minimum converges within minutes
+        despite ms-class pair noise.  Cheap enough for the sample path:
+        two attribute reads and a comparison.
+        """
+        now = time.monotonic() if mono_now is None else float(mono_now)
+        last = getattr(self, '_t6_epoch_last_obs', None)
+        if last is not None and (now - last) < 1.0:
+            return
+        self._t6_epoch_last_obs = now
+        from .cross_channel_rtp import ChannelEpoch, PairObservation
+
+        def _obs(ci):
+            try:
+                gps = int(getattr(ci, 'gps_time', None))
+                snap = int(getattr(ci, 'rtp_timesnap', None))
+                sr = int(getattr(ci, 'sample_rate', None))
+            except (TypeError, ValueError):
+                return None
+            if not sr or not gps or not snap:
+                return None
+            return PairObservation(gps_time_ns=gps, rtp_timesnap=snap,
+                                   sample_rate_hz=sr)
+
+        o6 = _obs(getattr(self, '_t6_channel_info', None))
+        if o6 is not None:
+            if getattr(self, '_t6_epoch', None) is None:
+                self._t6_epoch = ChannelEpoch()
+            self._t6_epoch.observe(o6)
+
+        # Any metrology channel will do: B4 measured the six 24 kHz
+        # channels sharing ONE counter space to 1.937 ms, which is the
+        # pair non-atomicity rather than an origin difference.
+        for rec in (getattr(self, 'recorders', {}) or {}).values():
+            ci = getattr(rec, 'channel_info', None)
+            op = _obs(ci)
+            if op is None or op.sample_rate_hz == getattr(
+                    o6, 'sample_rate_hz', None):
+                continue
+            if getattr(self, '_peer_epoch', None) is None:
+                self._peer_epoch = ChannelEpoch()
+                self._peer_rate_hz = op.sample_rate_hz
+            if op.sample_rate_hz == self._peer_rate_hz:
+                self._peer_epoch.observe(op)
+            break
+
+    def _t6_peer_rtp(self, anchor):
+        """The anchor's instant in the metrology channels' counter space.
+
+        Returns ``(peer_rtp, peer_rate_hz)`` or ``(None, None)``.  Without
+        this a reader holding the ledger and the metrology IQ cannot
+        connect them: the T6 channel's 96 kHz space does not relate to the
+        24 kHz channels by scaling (B4: 362,095,021 samples ≈ 3772 s).
+        """
+        e6 = getattr(self, '_t6_epoch', None)
+        ep = getattr(self, '_peer_epoch', None)
+        rate = getattr(self, '_peer_rate_hz', None)
+        if (e6 is None or ep is None or not rate
+                or e6.epoch_s is None or ep.epoch_s is None):
+            return None, None
+        try:
+            from .cross_channel_rtp import rtp_in_other_channel
+            return rtp_in_other_channel(
+                int(anchor.anchor_rtp), e6.epoch_s,
+                int(anchor.sample_rate_hz), ep.epoch_s, int(rate),
+                float(anchor.anchor_utc_ns) / 1e9,
+            ), int(rate)
+        except Exception:  # noqa: BLE001 — provenance must not break capture
+            return None, None
+
     def _t6_ledger_append(self, anchor, authority_state=None) -> None:
         """Record a captured native anchor in the durable ledger.
 
@@ -3123,11 +3229,28 @@ class CoreRecorderV2:
         if ledger is None:
             return
         auth = getattr(self, '_t6_authority', None)
+        cal = getattr(self, '_t6_calibrator', None)
+        est = getattr(self, '_t6_last_fine_est', None)
+        quality = None
+        if est is not None:
+            quality = {
+                "plateau_amplitude": getattr(est, 'plateau_amplitude', None),
+                "fit_rms": getattr(est, 'fit_rms', None),
+                "n_seconds_folded": getattr(est, 'n_seconds_folded', None),
+                "edge_subsample": getattr(est, 'edge_subsample', None),
+            }
+        peer_rtp, peer_rate = self._t6_peer_rtp(anchor)
         ledger.append(
             anchor,
             authority_state=authority_state,
             delay_budget_ns=getattr(auth, 'delay_budget_ns', None),
             filter_group_delay_ns=getattr(auth, 'filter_group_delay_ns', None),
+            labeling_convention=getattr(
+                self, '_t6_labeling_convention', None),
+            peer_rtp=peer_rtp,
+            peer_rate_hz=peer_rate,
+            quality=quality,
+            label_drift_samples=getattr(cal, '_lbl_drift', None),
         )
 
     def _t6_apply_authority_decision(self, decision) -> None:
@@ -3155,6 +3278,11 @@ class CoreRecorderV2:
                 (f" [measured: {_measured}]" if _measured else ""),
             )
         self._t6_authority_last_decision = decision
+        if (decision.state is not T6AuthorityState.AUTHORITATIVE
+                and prev is T6AuthorityState.AUTHORITATIVE):
+            # Losing authority is the event whose cause is in the past —
+            # exactly what the pre-trigger ring holds.
+            self._t6_capture_anomaly(f"authority-{decision.state.value}")
         if decision.state is T6AuthorityState.AUTHORITATIVE:
             self._t6_native_anchor = decision.anchor
             self._t6_ledger_append(
@@ -4218,6 +4346,15 @@ class CoreRecorderV2:
         # paired against the substrate.  Single tuple assignment — safe
         # on the hot path.
         self._t6_note_arrival(quality)
+        # Cross-channel counter calibration for the ledger (#42/#43);
+        # self-throttled to ~1 Hz.
+        self._t6_observe_channel_epochs()
+        _cap = getattr(self, '_t6_anomaly', None)
+        if _cap is not None:
+            try:
+                _cap.add(samples)
+            except Exception:  # noqa: BLE001
+                pass
         # Defensive lazy-init for unit tests that bypass __init__ via
         # ``CoreRecorderV2.__new__(CoreRecorderV2)``.  In production
         # __init__ has already set these; in tests they are absent and
@@ -4327,6 +4464,8 @@ class CoreRecorderV2:
                     fine_stage.set_coarse_offset_samples(coarse)
                 fine = fine_stage.process_samples(
                     samples, resolve_batch_rtp(quality))
+                if fine is not None:
+                    self._t6_last_fine_est = fine
                 # Gate on a live coarse offset (Finding 3): after an MF
                 # reset/unlock, _chain_delay_samples goes None but the
                 # fine stage's own internal _coarse_offset_rtp is not
@@ -4691,6 +4830,7 @@ class CoreRecorderV2:
                         self._t6_recent_raw.clear()
                         self._t6_wrap_rejections = 0
                         effective_chain_delay = self._t6_last_chain_delay_ns
+                        self._t6_capture_anomaly("step-recovery-refused")
                     else:
                         if t5_implied is None:
                             sanity_msg = "T5 unavailable"
@@ -6167,6 +6307,31 @@ def main():
     # The legacy lb1421_nmea_device key is accepted as an enable-signal
     # only; the device path itself is no longer used.
     timing_section = config.get('timing', {})
+
+    # Anomaly IQ capture (#43).  Default OFF: the budget is bounded
+    # (20/day x ~46 MB < 1 GB) but a station with a small disk should opt
+    # in deliberately -- the fleet board is blind to disk-full.
+    _t6_cfg_cap = (timing_section.get('t6_pps', {}) or {})
+    if _t6_cfg_cap.get('anomaly_capture_enabled', False):
+        from .t6_anomaly_capture import AnomalyCapture, DEFAULT_DIR as _ACD
+        recorder._t6_anomaly = AnomalyCapture(
+            Path(_t6_cfg_cap.get('anomaly_capture_dir', str(_ACD))),
+            sample_rate_hz=int(_t6_cfg_cap.get('sample_rate', 96_000)),
+            window_s=float(_t6_cfg_cap.get('anomaly_capture_window_s', 60.0)),
+            min_interval_s=float(
+                _t6_cfg_cap.get('anomaly_capture_min_interval_s', 900.0)),
+            max_per_day=int(
+                _t6_cfg_cap.get('anomaly_capture_max_per_day', 20)),
+        )
+        logger.info(
+            "T6 anomaly IQ capture ENABLED (window %.0f s, >= %.0f s apart, "
+            "max %d/day). A ledger row is the matched filter's OUTPUT; raw "
+            "samples are the only way to re-run it on a bad event.",
+            recorder._t6_anomaly.window_samples
+            / float(recorder._t6_anomaly.sample_rate_hz),
+            recorder._t6_anomaly.min_interval_s,
+            recorder._t6_anomaly.max_per_day,
+        )
 
     # A-axis observer (hf-timestd#41).  Same published JSON the T5 probe
     # reads, but consumed for its `a_level_hint`: does a GPSDO discipline
