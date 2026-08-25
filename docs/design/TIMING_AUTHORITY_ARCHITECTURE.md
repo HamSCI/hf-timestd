@@ -1,8 +1,31 @@
 # Timing Authority Architecture
 
-**Status**: LIVING DOCUMENTATION  
+**Status**: LIVING DOCUMENTATION — **PARTIALLY SUPERSEDED 2026-08-25**  
 **Date**: 2026-01-31  
 **Version**: 2.0
+
+> ⛔ **SUPERSEDED SECTIONS.**  `docs/design/TIMING_AUTHORITY_TWO_AXIS.md`
+> (ADOPTED 2026-08-25) replaces two things below:
+>
+> 1. **"Timing Accuracy Hierarchy" (L1–L6)** — the single ranked ladder
+>    conflates two incommensurable classes: *system-clock* timing (L2/L4/L5,
+>    assigned from `CLOCK_REALTIME` at RTP status-emission, so it must account
+>    for pipeline latency) and *payload* timing (L1/L3/L6, evident in the
+>    received samples, indifferent to processing time).  Authority is a 2-D
+>    matrix — an **A-axis** (is the ADC clock GPSDO-disciplined?) and a
+>    **T-axis** (what names and places the second?).  A ladder cannot express
+>    a real deployment such as *undisciplined ADC + local GPS+PPS* (A0 + T5).
+> 2. **"L6: BPSK PPS Chain-Delay Calibration"** — L6/T6 is **not** a
+>    calibration layer that refines a system-clock authority.  It is a
+>    first-class payload authority that *sets* the RTP→UTC mapping
+>    (`T6_ANCHOR_INVERSION_DESIGN.md`).  In particular the chain delay must
+>    **NOT** include "DSP pipeline, and RTP packetization" as stated below:
+>    that specification is the origin of the fitted 16.618 ms constant, which
+>    is compute latency, varies with CPU load, and does not belong in a label
+>    (`CONTENT_TIME_LABELING_CONVENTION.md`).
+>
+> The rest of this document — the two-mode architecture, bootstrap behaviour,
+> and the live-evidence directives — still stands.
 
 > **Living Documentation**: This document is directly connected to the running system.
 > Claims are backed by live evidence from logs and data. Directives like 
@@ -114,16 +137,38 @@ The quality of this mapping depends entirely on radiod's system clock (`CLOCK_RE
 
 ## Timing Accuracy Hierarchy
 
+> ⛔ **SUPERSEDED** by `TIMING_AUTHORITY_TWO_AXIS.md` §3.  Kept for
+> provenance.  The `Source` column mixes system-clock and payload
+> classes on one rank; read it as two axes instead.  The class of each
+> row is annotated below.
+
 | Level | Source | Typical Accuracy | RTP-to-UTC Mapping |
 |-------|--------|------------------|-------------------|
-| **L6** | BPSK PPS RF injector (WB6CXC) | ±5-10 μs | Measured end-to-end chain delay correction |
-| **L5** | GPS+PPS on radiod machine | ±100 ns | Direct PPS edge timestamps |
-| **L4** | GPS+PPS on LAN | ±1 μs | PPS via NTP/PTP, network jitter |
-| **L3** | HF-timestd fusion (GPSDO + 17 broadcasts) | ±0.5 ms | Multi-broadcast Kalman fusion |
-| **L2** | NTP-sync (stratum 1-2) | ±1-10 ms | Network time, variable latency |
-| **L1** | HF bootstrap only | ±5-50 ms | BCD/FSK decoded time, raw ionospheric delay |
+| _(payload)_ **L6** | BPSK PPS RF injector (WB6CXC) | ±5-10 μs | Measured end-to-end chain delay correction |
+| _(system clock)_ **L5** | GPS+PPS on radiod machine | ±100 ns | Direct PPS edge timestamps |
+| _(system clock)_ **L4** | GPS+PPS on LAN | ±1 μs | PPS via NTP/PTP, network jitter |
+| _(payload)_ **L3** | HF-timestd fusion (GPSDO + 17 broadcasts) | ±0.5 ms | Multi-broadcast Kalman fusion |
+| _(system clock)_ **L2** | NTP-sync (stratum 1-2) | ±1-10 ms | Network time, variable latency |
+| _(payload)_ **L1** | HF bootstrap only | ±5-50 ms | BCD/FSK decoded time, raw ionospheric delay |
 
 ### L6: BPSK PPS Chain-Delay Calibration
+
+> ⛔ **SUPERSEDED 2026-08-25** — see `TIMING_AUTHORITY_TWO_AXIS.md` §1–2.
+> The paragraph below is retained for provenance and is **wrong** in two ways.
+>
+> **It is a timing authority, and the highest-pedigree one.** The GPS edge
+> reaches the ADC through the same coax → RX-888 path as the science signal
+> and is located in the sample stream to ~150 ns, with no host clock in the
+> loop. It *sets* the RTP→UTC mapping rather than refining one
+> (`T6_ANCHOR_INVERSION_DESIGN.md`).
+>
+> **The chain delay must not include "DSP pipeline, and RTP packetization".**
+> Those are compute latency downstream of the ADC; they delay when a packet
+> is *emitted*, not which sample the energy occupies. Including them is the
+> origin of the fitted 16.618 ms constant — measured on B4 as FFT compute
+> 10.2–11.9 ms + USB granularity 0–2 ms + scheduling ~1–2 ms — which varies
+> with machine load and is therefore not a constant of the design. Only the
+> µs-class analog path (`delay_budget_ns` ≈ 10 µs) belongs in a label.
 
 L6 is not a timing authority in the same sense as L1-L5. It is a **calibration layer** that refines whichever authority is in use (typically L4 or L5) by measuring the end-to-end latency through the RF front-end, ADC, DSP pipeline, and RTP packetization.
 

@@ -1,9 +1,34 @@
 # Content-time labels: the anchor asserts physics, the benches own transport
 
-**Status:** PROPOSAL — for discussion, not approved.  Changes the meaning of
-the T6 anchor's chain-delay terms, resolves #12 and #38, amends
-`T6_ANCHOR_INVERSION_DESIGN.md` §5 and `METROLOGY.md` §4.5, and needs rob's
-agreement before anything is built on it.
+**Status:** APPROVED (rob, after the 2026-08-24 A/B confirmed all six
+predictions).  Code SHIPPED — `cd57586` (fine stage) + `0274439` (coarse
+`chain_delay_calib_s`).  **ADOPTION BLOCKED** — see the box below.  Changes
+the meaning of the T6 anchor's chain-delay terms, resolves #12 and #38, and
+amends `T6_ANCHOR_INVERSION_DESIGN.md` §5 and `METROLOGY.md` §4.5.  Generalised
+by `TIMING_AUTHORITY_TWO_AXIS.md` (2026-08-25), whose §1 is this document's
+argument stated for every timing source rather than just T6.
+
+> ⛔ **ADOPTION BLOCKED 2026-08-25 — whole-second regression.**
+> The flip was attempted on AC0G-B4 at 15:00:31Z and rolled back at 15:07Z.
+> `chain_delay_ns` correctly became 10 000 (the µs ε) and chrony read the
+> predicted `+16 ms`, but **shadow residuals went to −1007.7 ms**: the labels
+> were a full second out, not −16.618 ms.  All three benches agreed to 0.2 ms,
+> so the error was T6's.  `label_plane` activated but reported
+> `offset_ns −25 846 958` with `sigma_ns 197 134 152` (197 ms).
+>
+> ⚠ **chrony could not see it** — HPPS feeds `reference_time` = the integer
+> second and builds `system_time` from the floor, so a whole-second error
+> cancels out of what chrony displays.  Judge a convention change by
+> `shadow_residuals`, never by chrony.
+>
+> **Lead:** the 2026-08-24 A/B tested `cd57586` only.  `0274439` — which
+> retires `chain_delay_calib_s` on the **coarse** path, the path that NAMES
+> THE SECOND — was authored 2026-08-25 11:47Z, after the A/B.  Suspects, in
+> order: the coarse path's `ref_time = round(raw_wall_time_sec −
+> chain_delay_calib_s)`; `t6_holdover.holdover_named_second()`'s
+> `floor(label_space_now − chain_delay_ns/1e9)`; the initial-accept
+> disambiguation walk binding the edge to the neighbouring second.
+> Reproduce in unit tests at both boundaries before retrying on a station.
 
 **Authors:** mjh + Claude, 2026-08-24.
 **Evidence base:** radiod source derivation (ka9q-radio @ cd44bbdd), the

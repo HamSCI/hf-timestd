@@ -296,6 +296,125 @@ def t6_group_delay_issue(cfg):
     }
 
 
+def resolve_a_level(cfg):
+    """Resolve the A-axis (ruler) level AND how we came to know it.
+
+    Three provenances, and the difference matters downstream — an
+    uncertainty quoted off an observed A1 is a measurement; the same
+    number quoted off an assumed A1 is a guess:
+
+    * ``observed``  — the gpsdo probe is enabled.  It reads
+      ``/run/gpsdo/<serial>.json``, freshness-gates it, and degrades to
+      A0 on its own.  Only possible when the receiver's GPSDO is visible
+      to THIS host.
+    * ``attested``  — an operator asserts it, with a reason.  The
+      legitimate case is a **remote RX-888**: it may well be
+      GPSDO-disciplined, but its ``/run/gpsdo`` is on another machine and
+      we have no way to see it.  Attestation is as good as the operator
+      and is recorded as such, never laundered into "observed".
+    * ``assumed``   — nothing said.  ``authority_runner`` falls back to
+      the configured ``a_level``, which DEFAULTS TO "A1", so a station
+      with no GPSDO at all claims a disciplined ruler.  This is the
+      hazard the validator exists to catch.
+
+    Returns ``(level, provenance, detail)``; ``detail`` is the operator's
+    attestation text when there is one.  See
+    docs/design/TIMING_AUTHORITY_TWO_AXIS.md §3.
+    """
+    timing = (cfg.get('timing', {}) or {})
+    auth = timing.get('authority_manager', None)
+    if not isinstance(auth, dict):
+        _legacy = timing.get('authority', None)
+        auth = _legacy if isinstance(_legacy, dict) else {}
+    gpsdo = (auth.get('gpsdo', {}) or {})
+    level = str(auth.get('a_level', 'A1')).strip().upper()
+    if gpsdo.get('enabled'):
+        return ('observed', 'observed', None)
+    attested = auth.get('a_level_attested_by', None)
+    if isinstance(attested, str) and attested.strip():
+        return (level, 'attested', attested.strip())
+    return (level, 'assumed', None)
+
+
+def timing_axis_issues(cfg):
+    """Contract issues for the two-axis timing model.
+
+    ``docs/design/TIMING_AUTHORITY_TWO_AXIS.md``: authority is a matrix, not
+    a rank.  The **A-axis** asks whether a GPSDO disciplines the ADC clock
+    (the ruler: how long any origin stays good); the **T-axis** asks what
+    names and places the second.  They are independent — a real deployment
+    can have a good origin and a bad ruler (local GPS+PPS into an
+    undisciplined ADC).
+
+    These checks exist because the A-axis can be *asserted* rather than
+    observed, and everything downstream that quotes an uncertainty assumes
+    it was observed.
+    """
+    issues = []
+    timing = (cfg.get('timing', {}) or {})
+    t6 = (timing.get('t6_pps', {}) or {})
+
+    a_cfg, provenance, _detail = resolve_a_level(cfg)
+    probe_on = provenance == 'observed'
+
+    # An attested A-level is legitimate and deliberately NOT warned about:
+    # a remote RX-888's GPSDO is invisible to this host, so the operator
+    # saying so is the only evidence obtainable.  It is carried as
+    # `attested` into the sidecar, never as `observed`.
+    if provenance == 'assumed':
+        # authority_runner.py: without the probe the A-level is a constant
+        # lambda over the configured value, which DEFAULTS to "A1".
+        if a_cfg == 'A1':
+            issues.append({
+                'severity': 'warn',
+                'instance': 'default',
+                'message': (
+                    'A-level is ASSERTED as A1 (GPSDO-disciplined ADC) but '
+                    'not observed: [timing.authority_manager.gpsdo].enabled '
+                    'is unset, so authority_runner falls back to the '
+                    'configured a_level, which defaults to "A1". The station '
+                    'will claim a disciplined ruler whether or not one is '
+                    'present, and nothing downstream can tell. Enable the '
+                    'gpsdo probe (it freshness-gates and degrades to A0 on '
+                    'its own) or set a_level = "A0" explicitly. See '
+                    'docs/design/TIMING_AUTHORITY_TWO_AXIS.md §3.'
+                ),
+            })
+    if a_cfg == 'A0' and provenance != 'observed':
+        issues.append({
+            'severity': 'warn',
+            'instance': 'default',
+            'message': (
+                'A-level is A0 (no GPSDO disciplining the ADC): the T6 '
+                'holdover uncertainty is calibrated for a DISCIPLINED '
+                'ruler and will understate yours. '
+                't6_holdover.UNMEASURED_RATE_SIGMA_PPM = 0.01 ppm is '
+                '"25x the value measured on B4" (1.44 us/hour, GPSDO); a '
+                'free-running TCXO is 0.5-2 ppm = 1.8-7.2 ms/hour, '
+                '50-200x larger. Any coast on this station is far less '
+                'certain than its stated sigma. See '
+                'docs/design/TIMING_AUTHORITY_TWO_AXIS.md §7.'
+            ),
+        })
+
+    if t6.get('enabled', False) and not probe_on and a_cfg == 'A0':
+        issues.append({
+            'severity': 'warn',
+            'instance': 'default',
+            'message': (
+                'T6 (TimeSync-1 payload timing) is enabled without a '
+                'disciplined ruler on the A-axis. T6 places the second to '
+                'ns, but the RTP counter carries that placement forward at '
+                'whatever rate the ADC clock runs; undisciplined, the anchor '
+                'goes stale between edges orders of magnitude faster. T6 '
+                'still works — it is simply worth much less than its sigma '
+                'claims. See docs/design/TIMING_AUTHORITY_TWO_AXIS.md §3.'
+            ),
+        })
+
+    return issues
+
+
 def _handle_validate_contract(args):
     """`hf-timestd validate --json` — sigmond client-contract surface.
 
@@ -346,6 +465,7 @@ def _handle_validate_contract(args):
             _gd = t6_group_delay_issue(cfg)
             if _gd is not None:
                 issues.append(_gd)
+            issues.extend(timing_axis_issues(cfg))
 
             recorder = cfg.get('recorder', {}) or {}
             channels_count = sum(
