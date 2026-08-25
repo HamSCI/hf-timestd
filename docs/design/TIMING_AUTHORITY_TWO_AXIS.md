@@ -1,8 +1,8 @@
 # Two axes of timing authority: the ruler and the origin
 
-**Status:** ADOPTED 2026-08-25.  **Supersedes** the L1–L6 single ladder and
-the "L6 is a calibration layer" definition in
-`TIMING_AUTHORITY_ARCHITECTURE.md` §"Timing Accuracy Hierarchy".  Consistent
+**Status:** ADOPTED 2026-08-25.  **Replaces** the L1–L6 single ladder and
+the "L6 is a calibration layer" definition, both **excised** from
+`TIMING_AUTHORITY_ARCHITECTURE.md` on 2026-08-25 (recoverable via `git log`).  Consistent
 with `T6_ANCHOR_INVERSION_DESIGN.md` and
 `CONTENT_TIME_LABELING_CONVENTION.md`, which it generalises.
 
@@ -239,7 +239,7 @@ class, silently applied to another.
 
 | document | status |
 |---|---|
-| `TIMING_AUTHORITY_ARCHITECTURE.md` §"Timing Accuracy Hierarchy" (L1–L6) | **SUPERSEDED** by §3 here — single ladder cannot express A0+T5 |
-| same, §"L6: BPSK PPS Chain-Delay Calibration" | **SUPERSEDED** by §1–2 — T6 is a first-class Class B authority, not a calibration layer for Class A, and chain delay must NOT include "DSP pipeline, and RTP packetization" |
+| `TIMING_AUTHORITY_ARCHITECTURE.md` §"Timing Accuracy Hierarchy" (L1–L6) | **EXCISED** 2026-08-25 (recover via `git log`) — a single ladder cannot express A0+T5, and it conflated the two classes on one rank |
+| same, §"L6: BPSK PPS Chain-Delay Calibration" | **EXCISED** 2026-08-25 — T6 is a first-class Class B authority, not a calibration layer for Class A; and its chain delay must NOT include "DSP pipeline, and RTP packetization", which is where the fitted 16.618 ms came from |
 | `T6_ANCHOR_INVERSION_DESIGN.md` | consistent; generalised by §2 |
 | `CONTENT_TIME_LABELING_CONVENTION.md` | consistent; §1 is its general case |

@@ -1,31 +1,14 @@
 # Timing Authority Architecture
 
-**Status**: LIVING DOCUMENTATION — **PARTIALLY SUPERSEDED 2026-08-25**  
-**Date**: 2026-01-31  
-**Version**: 2.0
+**Status**: LIVING DOCUMENTATION  
+**Date**: 2026-01-31 (timing-authority model excised 2026-08-25)  
+**Version**: 2.1
 
-> ⛔ **SUPERSEDED SECTIONS.**  `docs/design/TIMING_AUTHORITY_TWO_AXIS.md`
-> (ADOPTED 2026-08-25) replaces two things below:
->
-> 1. **"Timing Accuracy Hierarchy" (L1–L6)** — the single ranked ladder
->    conflates two incommensurable classes: *system-clock* timing (L2/L4/L5,
->    assigned from `CLOCK_REALTIME` at RTP status-emission, so it must account
->    for pipeline latency) and *payload* timing (L1/L3/L6, evident in the
->    received samples, indifferent to processing time).  Authority is a 2-D
->    matrix — an **A-axis** (is the ADC clock GPSDO-disciplined?) and a
->    **T-axis** (what names and places the second?).  A ladder cannot express
->    a real deployment such as *undisciplined ADC + local GPS+PPS* (A0 + T5).
-> 2. **"L6: BPSK PPS Chain-Delay Calibration"** — L6/T6 is **not** a
->    calibration layer that refines a system-clock authority.  It is a
->    first-class payload authority that *sets* the RTP→UTC mapping
->    (`T6_ANCHOR_INVERSION_DESIGN.md`).  In particular the chain delay must
->    **NOT** include "DSP pipeline, and RTP packetization" as stated below:
->    that specification is the origin of the fitted 16.618 ms constant, which
->    is compute latency, varies with CPU load, and does not belong in a label
->    (`CONTENT_TIME_LABELING_CONVENTION.md`).
->
-> The rest of this document — the two-mode architecture, bootstrap behaviour,
-> and the live-evidence directives — still stands.
+> **Scope.**  This document covers the two-mode architecture, bootstrap
+> behaviour, and the live-evidence directives.  The **timing authority model**
+> lives in `docs/design/TIMING_AUTHORITY_TWO_AXIS.md` (ADOPTED 2026-08-25);
+> the L1–L6 ladder that used to be here has been excised because it conflated
+> system-clock and payload timing on a single rank.
 
 > **Living Documentation**: This document is directly connected to the running system.
 > Claims are backed by live evidence from logs and data. Directives like 
@@ -135,55 +118,27 @@ The quality of this mapping depends entirely on radiod's system clock (`CLOCK_RE
 
 ---
 
-## Timing Accuracy Hierarchy
+## Timing authority model
 
-> ⛔ **SUPERSEDED** by `TIMING_AUTHORITY_TWO_AXIS.md` §3.  Kept for
-> provenance.  The `Source` column mixes system-clock and payload
-> classes on one rank; read it as two axes instead.  The class of each
-> row is annotated below.
+> Moved to **`docs/design/TIMING_AUTHORITY_TWO_AXIS.md`** (ADOPTED
+> 2026-08-25).  The L1–L6 accuracy ladder and the "L6 is a calibration
+> layer" definition that stood here were wrong and have been excised;
+> `git log -- docs/design/TIMING_AUTHORITY_ARCHITECTURE.md` recovers them.
 
-| Level | Source | Typical Accuracy | RTP-to-UTC Mapping |
-|-------|--------|------------------|-------------------|
-| _(payload)_ **L6** | BPSK PPS RF injector (WB6CXC) | ±5-10 μs | Measured end-to-end chain delay correction |
-| _(system clock)_ **L5** | GPS+PPS on radiod machine | ±100 ns | Direct PPS edge timestamps |
-| _(system clock)_ **L4** | GPS+PPS on LAN | ±1 μs | PPS via NTP/PTP, network jitter |
-| _(payload)_ **L3** | HF-timestd fusion (GPSDO + 17 broadcasts) | ±0.5 ms | Multi-broadcast Kalman fusion |
-| _(system clock)_ **L2** | NTP-sync (stratum 1-2) | ±1-10 ms | Network time, variable latency |
-| _(payload)_ **L1** | HF bootstrap only | ±5-50 ms | BCD/FSK decoded time, raw ionospheric delay |
+**Decoder for the `L`-labels still used below.**  They are legacy
+shorthand, not a ranking.  Their meaning is now given by two independent
+axes — see the document above:
 
-### L6: BPSK PPS Chain-Delay Calibration
+* **Class A, system-clock** (`L5`, `L4`, `L2`) — timing derived from the
+  host clock and published by radiod as the `(GPS_TIME, RTP_TIMESNAP)`
+  pair.  Read at status *emission*, so it carries pipeline latency.
+* **Class B, payload** (`L6`/T6, `L3`/T3, `L1`) — timing evident in the
+  received samples themselves, indifferent to processing time.
 
-> ⛔ **SUPERSEDED 2026-08-25** — see `TIMING_AUTHORITY_TWO_AXIS.md` §1–2.
-> The paragraph below is retained for provenance and is **wrong** in two ways.
->
-> **It is a timing authority, and the highest-pedigree one.** The GPS edge
-> reaches the ADC through the same coax → RX-888 path as the science signal
-> and is located in the sample stream to ~150 ns, with no host clock in the
-> loop. It *sets* the RTP→UTC mapping rather than refining one
-> (`T6_ANCHOR_INVERSION_DESIGN.md`).
->
-> **The chain delay must not include "DSP pipeline, and RTP packetization".**
-> Those are compute latency downstream of the ADC; they delay when a packet
-> is *emitted*, not which sample the energy occupies. Including them is the
-> origin of the fitted 16.618 ms constant — measured on B4 as FFT compute
-> 10.2–11.9 ms + USB granularity 0–2 ms + scheduling ~1–2 ms — which varies
-> with machine load and is therefore not a constant of the design. Only the
-> µs-class analog path (`delay_budget_ns` ≈ 10 µs) belongs in a label.
-
-L6 is not a timing authority in the same sense as L1-L5. It is a **calibration layer** that refines whichever authority is in use (typically L4 or L5) by measuring the end-to-end latency through the RF front-end, ADC, DSP pipeline, and RTP packetization.
-
-**How it works:** A local GPS-disciplined transmitter (the WB6CXC PPS injector) injects a BPSK signal into the antenna feed. The signal's phase flips 180 degrees on each UTC second boundary. The `BpskPpsCalibrator` in ka9q-python detects these phase transitions in the IQ sample stream and measures where the PPS edge lands relative to the RTP timestamp grid. The offset is the chain delay.
-
-**Integration:** The measured delay is stored in `ChannelInfo.chain_delay_correction_ns` and automatically applied by `rtp_to_wallclock()` to every channel on the same radiod instance. This correction propagates through the entire pipeline — metrology, fusion, and Chrony SHM feeds all benefit without any awareness of L6.
-
-**Requirements:** GPS+PPS on radiod (L4 or L5), WB6CXC BPSK PPS injector hardware.
-
-**Configuration:**
-```toml
-[timing.l6_pps]
-enabled = true
-frequency_hz = 3500000    # RF frequency of injector (Hz)
-```
+`L6`/T6 is a first-class payload authority that *sets* the RTP→UTC
+mapping, not a correction applied to a system-clock one.  Whether the ADC
+clock is GPSDO-disciplined is a **separate axis** (`A1`/`A0`) from which
+source names the second, which is why these labels cannot be ordered.
 
 ---
 
