@@ -154,6 +154,69 @@ def coast_ruler_intact(
     ) <= float(tolerance_s)
 
 
+# Drift tolerance for the MEASURED ruler.  Nothing like
+# ``RULER_TOLERANCE_S`` above, which is sized for arrival-latency noise:
+# this quantity has no noise.  radiod zero-fills dropped blocks, so the
+# counter advances through a gap and ``declared == previous declared +
+# previous length`` holds THROUGH packet loss.  The expected value is
+# exactly 0, and AC0G-B4 measures exactly 0 over 1,620,545 batches.
+#
+# So why tolerate anything?  Because non-zero has been seen and was not
+# a re-base: 2026-08-08 captured 18.2% of batches mislabelled by ±60
+# samples with the accumulation bounded at −240 samples (−2.5 ms).  That
+# predates the zero-fill and core-0 fixes and no longer reproduces, but
+# a bounded labelling wobble is still not a re-based ruler and must not
+# take HPPS dark.
+#
+# 1 ms is where drift stops being negligible against the tightest thing
+# a coast ever claims (the fine-stage floor sigma, ~0.8 ms on B4).  Past
+# that the frozen anchor's labels are worth less than its stated sigma,
+# and continuing to coast would be dishonest whatever caused it.
+RULER_DRIFT_TOLERANCE_S = 0.001
+
+
+def coast_ruler_intact_by_drift(
+    drift_samples: Optional[int],
+    drift_at_freeze_samples: Optional[int],
+    sample_rate_hz: float,
+    tolerance_s: float = RULER_DRIFT_TOLERANCE_S,
+) -> Optional[bool]:
+    """Whether the counter is intact, per the calibrator's own audit.
+
+    ``coast_ruler_intact`` above reads the arrival-floor offset, which
+    is an ARRIVAL-LATENCY estimate standing in for counter continuity
+    because, when it was written, nothing better was reachable here.
+    Something better is: the matched-filter calibrator audits every
+    batch's declared RTP against ``previous declared + previous length``
+    and accumulates the discrepancy (``_lbl_drift``).  That IS counter
+    continuity, measured, not inferred.
+
+    The proxy was demonstrably wrong.  AC0G-B4 2026-08-25, 7.8 s apart:
+
+        12:15:01.969  WITHDRAWN ... "rtp counter discontinuity --
+                      the ruler was re-based"
+        12:15:09.746  LABEL AUDIT: batches=1620545 mismatched=0 (0.00%)
+                      cumulative_drift=+0 samples (+0.000 ms)
+
+    Refusing a coast takes HPPS dark, which invites the watchdog to
+    restart the recorder and destroy the very anchor the coast exists
+    to preserve (7 such restarts overnight 2026-08-17).  Doing that on
+    latency noise is expensive.
+
+    Returns None when the audit is unavailable, so the caller can fall
+    back rather than read "unknown" as "the ruler moved".  Tolerance is
+    applied in TIME, and is deliberately TIGHT -- see
+    ``RULER_DRIFT_TOLERANCE_S``: the expected value here is exactly zero.
+    """
+    if (drift_samples is None or drift_at_freeze_samples is None
+            or not sample_rate_hz):
+        return None
+    moved_s = abs(
+        float(drift_samples) - float(drift_at_freeze_samples)
+    ) / float(sample_rate_hz)
+    return moved_s <= float(tolerance_s)
+
+
 # What a coast on a NON-fine-stage anchor is worth.  The legacy coarse
 # cascade re-derives an anchor during a T6 outage (tier "T5"), and that
 # is a real anchor -- it asserts its chain delay from config rather than

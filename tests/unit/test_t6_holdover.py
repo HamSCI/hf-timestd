@@ -11,6 +11,8 @@ import pytest
 from hf_timestd.core.t6_holdover import (
     coast_ruler_intact,
     coast_sigma0_ns,
+    coast_ruler_intact_by_drift,
+    RULER_DRIFT_TOLERANCE_S,
     holdover_named_second,
     holdover_sigma_ns,
     may_coast,
@@ -230,3 +232,70 @@ class TestCoastSigmaByAnchorProvenance:
 
     def test_unknown_provenance_is_treated_as_coarse(self):
         assert coast_sigma0_ns(800_000.0, None) >= 25_000_000.0
+
+
+class TestRulerFromLabelAudit:
+    """The arrival-floor proxy answered the wrong question.
+
+    AC0G-B4 2026-08-25, 7.8 s apart in one journal:
+
+      12:15:01.969  WITHDRAWN ... "rtp counter discontinuity --
+                    the ruler was re-based"
+      12:15:09.746  LABEL AUDIT: batches=1620545 mismatched=0 (0.00%)
+                    cumulative_drift=+0 samples (+0.000 ms)
+
+    Zero mismatched batches out of 1.62 million: the ruler had not been
+    re-based at all.  ``coast_ruler_intact`` was reading the
+    arrival-floor offset -- an ARRIVAL-LATENCY estimate -- as a proxy
+    for counter continuity, and refusing the coast (which then takes
+    HPPS dark and invites a watchdog restart that destroys the anchor)
+    on latency noise.  The calibrator already measures the real thing
+    per batch.
+    """
+
+    SR = 96000
+
+    def test_no_drift_means_the_ruler_is_intact(self):
+        assert coast_ruler_intact_by_drift(0, 0, self.SR) is True
+
+    def test_zero_is_the_expected_value_not_merely_a_pass(self):
+        """radiod zero-fills dropped blocks, so the counter advances
+        through a gap and declared == expected holds THROUGH packet
+        loss.  B4: 0 mismatched of 1,620,545 batches."""
+        assert coast_ruler_intact_by_drift(0, 0, self.SR) is True
+        # one sample of slip is already not-zero, but far inside the
+        # bound -- it must not take HPPS dark on its own
+        assert coast_ruler_intact_by_drift(1, 0, self.SR) is True
+
+    def test_a_bounded_labelling_wobble_is_tolerated(self):
+        """2026-08-08 saw ±60-sample mislabelling; that is not a
+        re-based ruler and must not refuse the coast."""
+        assert coast_ruler_intact_by_drift(-60, 0, self.SR) is True
+
+    def test_drift_past_the_fine_stage_claim_is_refused(self):
+        """-240 samples is -2.5 ms at 96 kHz.  The old 50 ms tolerance
+        waved this through, but it is three times the tightest sigma a
+        coast ever claims (~0.8 ms), so the anchor is by then worth less
+        than it says it is."""
+        assert coast_ruler_intact_by_drift(-240, 0, self.SR) is False
+
+    def test_a_real_rebase_is_caught(self):
+        """A re-base moves the counter by orders more than a gap -- and
+        would have been silently swallowed by a 50 ms tolerance."""
+        assert coast_ruler_intact_by_drift(
+            -4_800_000, 0, self.SR) is False
+        assert coast_ruler_intact_by_drift(
+            int(0.050 * self.SR), 0, self.SR) is False
+
+    def test_unknown_drift_is_unknown_not_false(self):
+        """No audit available must not be read as 'the ruler moved' --
+        the caller falls back rather than refusing the coast."""
+        assert coast_ruler_intact_by_drift(None, 0, self.SR) is None
+        assert coast_ruler_intact_by_drift(0, None, self.SR) is None
+        assert coast_ruler_intact_by_drift(0, 0, 0) is None
+
+    def test_tolerance_is_applied_in_time_not_samples(self):
+        """Same sample count, different rate => different verdict."""
+        half = int(RULER_DRIFT_TOLERANCE_S * self.SR) // 2
+        assert coast_ruler_intact_by_drift(half, 0, self.SR) is True
+        assert coast_ruler_intact_by_drift(half, 0, self.SR // 4) is False
