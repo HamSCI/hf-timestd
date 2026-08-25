@@ -378,7 +378,11 @@ use_magnitude_correlation = false # Method 2 Re-projection; Method 4 magnitude
                                   # METHODS.md §4-5) — do not enable
 description = "BPSK_PPS"
 #
-# chain_delay_calib_s = 0.0       # REQUIRED per site when enabled=true.
+# chain_delay_calib_s = 0.0       # RETIRED under labeling_convention =
+#                                 # "content" (the default): not applied,
+#                                 # and validate stays quiet when unset.
+#                                 # REQUIRED per site only with
+#                                 # labeling_convention = "legacy".
 #                                 # End-to-end RF delay: TS-1 BPSK modulator ->
 #                                 # coax -> RX-888 ADC -> radiod DSP -> RTP.
 #                                 # ASSERTED from this value and never derived

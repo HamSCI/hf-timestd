@@ -182,6 +182,28 @@ def newest_sample_rtp(quality) -> Optional[int]:
     return (int(start) + int(n)) & 0xFFFFFFFF
 
 
+def resolve_chain_delay_calib_s(t6_config) -> float:
+    """The coarse-path chain delay actually asserted, per the convention.
+
+    ``chain_delay_calib_s`` is the fine stage's ``filter_group_delay_ns``
+    in seconds, on the NMEA-named coarse path — the same millisecond-class
+    constant, asserted from configuration.  Under CONTENT-time labels the
+    only delay between antenna and sample is the µs-class analog path
+    (``delay_budget_ns``), so this is not applied; under ``legacy`` it is,
+    unchanged.
+
+    Retiring one without the other would be worse than retiring neither:
+    the fine stage would label content-true while the coarse stage kept
+    labelling 16.6 ms later, so the two planes would disagree by exactly
+    the constant the convention exists to remove.
+    """
+    configured = float((t6_config or {}).get("chain_delay_calib_s", 0.0))
+    convention = str(
+        (t6_config or {}).get("labeling_convention", "content")
+    ).strip().lower()
+    return configured if convention == "legacy" else 0.0
+
+
 def t6_chain_delay_uncalibrated(t6_config) -> bool:
     """True when T6 is enabled but asserts a zero RF chain delay.
 
@@ -197,6 +219,12 @@ def t6_chain_delay_uncalibrated(t6_config) -> bool:
     assertion design removed.
     """
     if not t6_config.get("enabled", False):
+        return False
+    convention = str(
+        t6_config.get("labeling_convention", "content")).strip().lower()
+    if convention != "legacy":
+        # Under content labels an unset chain delay is CORRECT — warning
+        # about it would train operators to set the retired constant.
         return False
     return float(t6_config.get("chain_delay_calib_s", 0.0)) == 0.0
 
@@ -723,9 +751,8 @@ class CoreRecorderV2:
             self._t6_config = {}
         # Apply chain_delay calibration knob now that _t6_config is set
         # (referenced by HFPS NMEA-anchored SHM push).
-        self._t6_chain_delay_calib_s = float(
-            self._t6_config.get('chain_delay_calib_s', 0.0)
-        )
+        self._t6_chain_delay_calib_s = resolve_chain_delay_calib_s(
+            self._t6_config)
         if t6_chain_delay_uncalibrated(self._t6_config):
             logger.warning(
                 "T6 enabled with chain_delay_calib_s unset (0.000 ms): the "

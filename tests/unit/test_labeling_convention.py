@@ -112,3 +112,48 @@ def test_the_recorder_uses_that_helper():
     import inspect
     from hf_timestd.core.core_recorder_v2 import CoreRecorderV2
     assert "label_plane_measure_for(" in inspect.getsource(CoreRecorderV2.__init__)
+
+
+# ── the coarse path's twin constant ─────────────────────────────────────
+#
+# `chain_delay_calib_s` is the same 16.618 ms asserted from configuration,
+# in seconds, on the coarse (NMEA-named) path.  §5.1 of the convention
+# proposal gives it the same treatment as filter_group_delay_ns: under
+# content-time labels the only delay between antenna and sample is the
+# µs-class analog path, so a millisecond-class asserted chain delay is
+# not applied.  Leaving it live would flip the fine stage to content
+# labels while the coarse stage kept labelling 16.6 ms later — the two
+# planes would disagree by exactly the constant we set out to retire.
+
+from hf_timestd.core.core_recorder_v2 import resolve_chain_delay_calib_s
+
+CALIB = 0.016618
+
+
+def test_content_does_not_assert_the_coarse_chain_delay():
+    assert resolve_chain_delay_calib_s(
+        {"chain_delay_calib_s": CALIB}) == 0.0
+
+
+def test_legacy_still_asserts_it():
+    assert resolve_chain_delay_calib_s(
+        {"chain_delay_calib_s": CALIB,
+         "labeling_convention": "legacy"}) == CALIB
+
+
+def test_unset_is_zero_under_both():
+    for conv in ("content", "legacy"):
+        assert resolve_chain_delay_calib_s(
+            {"labeling_convention": conv}) == 0.0
+
+
+def test_the_uncalibrated_warning_is_silent_under_content():
+    """The warning says every label will be EARLY by the chain delay.
+    Under content labels that is the intended state, not a misconfiguration,
+    so warning about it would train operators to set the retired constant."""
+    from hf_timestd.core.core_recorder_v2 import t6_chain_delay_uncalibrated
+    assert t6_chain_delay_uncalibrated(
+        {"enabled": True}) is False
+    # ...but a legacy site with it unset still needs telling.
+    assert t6_chain_delay_uncalibrated(
+        {"enabled": True, "labeling_convention": "legacy"}) is True

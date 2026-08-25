@@ -27,15 +27,25 @@ from hf_timestd.cli import t6_group_delay_issue
 from hf_timestd.core.core_recorder_v2 import t6_chain_delay_uncalibrated
 
 
-def test_enabled_t6_without_a_calibration_is_flagged():
-    assert t6_chain_delay_uncalibrated({"enabled": True}) is True
-
-
-def test_enabled_t6_with_an_explicit_zero_is_still_flagged():
-    """Zero is the silent default; an operator who means it should say so
-    in the log rather than have it pass unnoticed."""
+def test_enabled_t6_without_a_calibration_is_flagged_under_legacy():
+    """Only under the legacy convention, where the constant is applied."""
     assert t6_chain_delay_uncalibrated(
-        {"enabled": True, "chain_delay_calib_s": 0.0}) is True
+        {"enabled": True, "labeling_convention": "legacy"}) is True
+
+
+def test_content_convention_does_not_flag_an_unset_calibration():
+    """Under content-time labels an unset chain delay is CORRECT — the
+    constant is retired, so warning about it would train operators to set
+    the very value the convention removed."""
+    assert t6_chain_delay_uncalibrated({"enabled": True}) is False
+
+
+def test_enabled_t6_with_an_explicit_zero_is_still_flagged_under_legacy():
+    """Zero is the silent default; a legacy operator who means it should
+    say so in the log rather than have it pass unnoticed."""
+    assert t6_chain_delay_uncalibrated(
+        {"enabled": True, "chain_delay_calib_s": 0.0,
+         "labeling_convention": "legacy"}) is True
 
 
 def test_calibrated_t6_is_not_flagged():
