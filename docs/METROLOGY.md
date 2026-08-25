@@ -188,7 +188,15 @@ Phase 3: Fusion (Multi-Broadcast Synthesis)
 utc = gps_time_unix + (rtp_ts - rtp_timesnap) / sample_rate
 ```
 
-radiod's `GPS_TIME` and `RTP_TIMESNAP` are both derived from `input_sample_index / decimation` — they are in the same counter space. No pipeline offset correction is needed. The timestamps are authoritative, providing ~50 μs accuracy to UTC via GPS+PPS.
+radiod's `GPS_TIME` and `RTP_TIMESNAP` are **not** in the same counter space, and the pair is **not** sample-precise (hf-timestd#37).
+
+* `GPS_TIME` is `gps_time_ns()` evaluated as the status packet is built (`ka9q-radio/src/radio_status.c:718-719`), and `gps_time_ns()` is `clock_gettime(CLOCK_TAI)` offset to the GPS epoch (`src/misc.c:546-563`) — **the host system clock**, not a sample index.
+* `RTP_TIMESNAP` is `chan->output.rtp.timestamp` (`radio_status.c:859`) — the next RTP timestamp to be sent, advanced by the frame count as each block is emitted (`src/audio.c:49-51, 177-179`), so it is quantised to the 20 ms block grid plus that emission's lateness.
+* The field this claim was reaching for is `INPUT_SAMPLES` = `chan->filter.out.sample_index` (`radio_status.c:720`), which genuinely *is* a sample index.
+
+Measured on AC0G-B4 2026-08-25: 20,813,617 pair updates, **max disagreement +816.4 ms**, with only ~37 % landing at exactly 0. The error is one-sided lateness, because `GPS_TIME` is read live while `RTP_TIMESNAP` reflects the last emission.
+
+So a pipeline offset correction **is** needed — or better, do not use the pair for precision at all. T6 sets the RTP→UTC mapping and the host clock stays out of it (`docs/design/T6_ANCHOR_INVERSION_DESIGN.md`, `docs/design/TIMING_AUTHORITY_TWO_AXIS.md` §2).
 
 **Why this matters:**
 

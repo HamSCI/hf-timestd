@@ -14,14 +14,40 @@ The answer comes from the RTP timestamp chain — the sole timing authority:
 
 Every buffer's metadata contains:
   - start_rtp_timestamp: RTP timestamp of sample 0
-  - gps_time_ns: GPS_TIME (ns since GPS epoch) — authoritative, from the writer
-  - rtp_timesnap: RTP counter at GPS_TIME — authoritative, from the writer
+  - gps_time_ns: GPS_TIME (ns since GPS epoch) — from the writer.  ⚠ On
+    AC0G-B4 2026-08-25 this field and rtp_timesnap were FROZEN across
+    five consecutive sidecars while start_rtp_timestamp advanced by
+    exactly 7,200,000 samples each: the writer captures the pair once and
+    never refreshes it, so a reader mapping RTP→UTC from these two fields
+    can be hours out.  Prefer the anchor ledger.
+  - rtp_timesnap: RTP counter at GPS_TIME — from the writer; see above
   - timing_snapshots[]: GPS_TIME / RTP_TIMESNAP pairs (legacy, used as fallback)
 
-GPS_TIME is the GPSDO-disciplined ground truth.  RTP_TIMESNAP is the
-RTP counter value at the moment GPS_TIME was sampled.  Both are in the
-same counter space (input_sample_index / decimation).  The formula above
-gives the exact UTC of any RTP timestamp.
+⚠ GPS_TIME is NOT GPSDO-disciplined ground truth, RTP_TIMESNAP is NOT
+"the RTP counter at the moment GPS_TIME was sampled", and the two are NOT
+in the same counter space (hf-timestd#37).  Per ka9q-radio source:
+
+  * GPS_TIME is ``gps_time_ns()`` evaluated as the status packet is built
+    (radio_status.c:718-719); ``gps_time_ns()`` is
+    ``clock_gettime(CLOCK_TAI)`` offset to the GPS epoch (misc.c:546-563)
+    — the HOST SYSTEM CLOCK, not a sample index.
+  * RTP_TIMESNAP is ``chan->output.rtp.timestamp`` (radio_status.c:859),
+    the next RTP timestamp to be sent, advanced per emitted block
+    (audio.c:49-51, 177-179) — quantised to the 20 ms block grid plus
+    that emission's lateness.
+  * The sample index the old claim was reaching for is INPUT_SAMPLES =
+    ``chan->filter.out.sample_index`` (radio_status.c:720).
+
+Measured on AC0G-B4 2026-08-25: 20,813,617 pair updates, max
+disagreement +816.4 ms, only ~37 % at exactly 0.  The error is one-sided
+lateness — GPS_TIME is read live, RTP_TIMESNAP reflects the last
+emission.  So the formula below does NOT give the exact UTC of an RTP
+timestamp; it gives it to within that pair error.
+
+⛔ Do not use this mapping where precision matters.  T6 sets the RTP→UTC
+mapping and keeps the host clock out of it
+(docs/design/T6_ANCHOR_INVERSION_DESIGN.md,
+docs/design/TIMING_AUTHORITY_TWO_AXIS.md §2).
 
 start_system_time is NEVER used for timing.  It is logged for diagnostics
 only.  The writer computes it from its own (possibly stale) GPS/RTP
