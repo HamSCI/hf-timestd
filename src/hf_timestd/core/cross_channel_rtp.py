@@ -91,19 +91,26 @@ def rtp_in_other_channel(
     src_rate_hz: int,
     dst_epoch_s: float,
     dst_rate_hz: int,
-    near_utc_s: float,
+    near_utc_s: Optional[float] = None,
 ) -> int:
     """Map ``rtp`` from the source channel's counter into the target's.
 
     ``near_utc_s`` resolves the 2**32 ambiguity: a counter only fixes UTC
-    modulo ``2**32 / fs`` (49.7 h at 24 kHz, 12.4 h at 96 kHz), so the
-    caller must say roughly when the sample was — seconds of accuracy is
-    ample against a window of hours.
+    modulo ``2**32 / fs`` (49.7 h at 24 kHz, 12.4 h at 96 kHz).  Omit it
+    to take the source counter at face value, which is what a caller
+    mapping a CURRENT sample wants — there is no ambiguity to resolve.
+
+    ⚠ **``near_utc_s`` must be in the SAME EPOCH BASE as the channel
+    epochs.**  Those come from radiod's ``GPS_TIME``, which is GPS-epoch;
+    an anchor's ``anchor_utc_ns`` is UNIX-epoch, and the two differ by
+    ~315,964,685 s.  Mixing them sent the wrap lift haywire and put the
+    first live B4 row 19 hours out.  The epoch base itself cancels in the
+    src/dst subtraction, so it never matters anywhere else — only here.
     """
-    period_s = _TWO32 / float(src_rate_hz)
     utc = src_epoch_s + (int(rtp) & 0xFFFFFFFF) / float(src_rate_hz)
-    # lift into the wrap epoch containing near_utc_s
-    utc += round((float(near_utc_s) - utc) / period_s) * period_s
+    if near_utc_s is not None:
+        period_s = _TWO32 / float(src_rate_hz)
+        utc += round((float(near_utc_s) - utc) / period_s) * period_s
     return int(round((utc - dst_epoch_s) * float(dst_rate_hz))) & 0xFFFFFFFF
 
 

@@ -121,3 +121,46 @@ class TestMappingBetweenChannels:
         b = rtp_in_other_channel(rtp24, src_epoch, 24000,
                                  src_epoch, 24000, true_utc + 30.0)
         assert a == b == rtp24
+
+
+class TestEpochBaseIsAFootgun:
+    """radiod's GPS_TIME is in the GPS epoch; an anchor's utc_ns is UNIX.
+
+    They differ by ~315,964,685 s.  Feeding a UNIX-epoch `near_utc_s`
+    against GPS-epoch channel epochs sent the wrap lift haywire and put
+    the first live B4 row 68,779 s (19 h) out.  `near_utc_s` MUST be in
+    the same base as the channel epochs, and omitting it means "take the
+    source counter at face value" -- which is what a caller mapping a
+    CURRENT anchor wants, since there is no ambiguity to resolve.
+    """
+
+    def test_omitting_the_hint_takes_the_counter_at_face_value(self):
+        src_epoch = epoch_offset_s(_obs(B4[4]))
+        dst_epoch = src_epoch - 3772.0
+        rtp24 = B4[4][3]
+
+        no_hint = rtp_in_other_channel(rtp24, src_epoch, 24000,
+                                       dst_epoch, 96000)
+        same_base = rtp_in_other_channel(
+            rtp24, src_epoch, 24000, dst_epoch, 96000,
+            src_epoch + rtp24 / 24000)
+        assert no_hint == same_base
+
+    def test_an_integer_rate_ratio_absorbs_a_bad_lift(self):
+        """Measured, and the reason a base mix-up did NOT corrupt the
+        first live row: the lift adds k*(2**32/src_rate) seconds, which
+        at dst_rate = 4*src_rate is k*4*2**32 destination samples -- an
+        exact multiple of 2**32, so the mask removes it.
+
+        This is luck, not design.  It does not hold for a non-integer
+        ratio, which is why the base requirement is documented rather
+        than relied upon."""
+        src_epoch = epoch_offset_s(_obs(B4[4]))
+        dst_epoch = src_epoch - 3772.0
+        rtp24 = B4[4][3]
+        right = rtp_in_other_channel(rtp24, src_epoch, 24000,
+                                     dst_epoch, 96000)
+        bad_base = rtp_in_other_channel(
+            rtp24, src_epoch, 24000, dst_epoch, 96000,
+            src_epoch + rtp24 / 24000 + 315_964_685.0)   # UNIX-vs-GPS
+        assert right == bad_base

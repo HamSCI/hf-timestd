@@ -3239,7 +3239,16 @@ class CoreRecorderV2:
                 "n_seconds_folded": getattr(est, 'n_seconds_folded', None),
                 "edge_subsample": getattr(est, 'edge_subsample', None),
             }
-        peer_rtp, peer_rate = self._t6_peer_rtp(anchor)
+        # peer_rtp is WITHHELD pending hf-timestd#37.  It was derived
+        # from channel_info.rtp_timesnap, and B4 2026-08-25 shows that
+        # counter is NOT the stream's: one WWV_20000 sidecar carries
+        # start_rtp_timestamp=2,189,978,643 beside rtp_timesnap=
+        # 1,931,544,192 -- 258 M samples (3 h) apart for the same
+        # channel at the same moment.  An offline reader holds STREAM
+        # rtp, so the mapped value would be unusable, and a wrong number
+        # here is worse than an absent one: the whole point of this
+        # schema is that a field means what it says.
+        peer_rtp, peer_rate = None, None
         ledger.append(
             anchor,
             authority_state=authority_state,
@@ -3250,7 +3259,13 @@ class CoreRecorderV2:
             peer_rtp=peer_rtp,
             peer_rate_hz=peer_rate,
             quality=quality,
-            label_drift_samples=getattr(cal, '_lbl_drift', None),
+            # An audit that has run and seen no mismatch has MEASURED
+            # zero; only an audit that has not run is unknown.  _lbl_drift
+            # is created lazily on the first mismatch, so its absence
+            # alone cannot distinguish the two -- _lbl_batches can.
+            label_drift_samples=(
+                int(getattr(cal, '_lbl_drift', 0) or 0)
+                if getattr(cal, '_lbl_batches', 0) else None),
         )
 
     def _t6_apply_authority_decision(self, decision) -> None:
