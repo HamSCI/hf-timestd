@@ -91,7 +91,7 @@ profile. We:
   ionosphere it actually crosses.
 - Use `R12 = -1` so IRI reads its own date-indexed 12-month-smoothed sunspot
   files (`ig_rz.dat`, `apf107.dat`, refreshed weekly by
-  [`update-iri-indices.sh`](../scripts/update-iri-indices.sh)) — the model
+  [`update-iri-indices.sh`](https://github.com/HamSCI/hamsci-physics/blob/main/scripts/update-iri-indices.sh)) — the model
   tracks the real solar cycle rather than a frozen index.
 - Linearly interpolate those profiles across a 50-km range grid spanning
   ≥10,000 km (covering the full multi-hop ray extent, not just the receiver
