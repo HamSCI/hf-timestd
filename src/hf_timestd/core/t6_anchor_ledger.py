@@ -35,6 +35,11 @@ from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
+# Bumped when a row gains or changes meaning, so a reader can tell
+# generations apart (hf-timestd#39: a sidecar with no version makes a
+# corrected file indistinguishable from an uncorrected one).
+SCHEMA = "t6-anchor/2"
+
 DEFAULT_DIR = Path("/var/lib/timestd/state/t6-anchor-ledger")
 
 
@@ -56,12 +61,46 @@ class T6AnchorLedger:
         authority_state: Optional[str] = None,
         delay_budget_ns: Optional[int] = None,
         filter_group_delay_ns: Optional[int] = None,
+        labeling_convention: Optional[str] = None,
+        peer_rtp: Optional[int] = None,
+        peer_rate_hz: Optional[int] = None,
+        quality: Optional[dict] = None,
+        label_drift_samples: Optional[int] = None,
     ) -> bool:
         """Append one anchor row.  Returns True when a line was written.
 
         Consecutive duplicates (same ``anchor_rtp``/``anchor_utc_ns``)
         are suppressed — the authority re-delivers the same anchor on
         repeated decisions between fold blocks.
+
+        Schema v2 fields (all optional, all OMITTED when unknown — a
+        missing measurement must never read as a measured zero):
+
+        ``peer_rtp`` / ``peer_rate_hz``
+            The same instant expressed in the METROLOGY channels' counter
+            space.  ``anchor_rtp`` is in the T6 channel's own 96 kHz
+            space, which does NOT relate to the 24 kHz channels by
+            scaling — B4 measured a 362,095,021-sample (~3772 s) offset —
+            so without this a reader holding the ledger and the metrology
+            IQ cannot connect them.  Computed at record time, where
+            millions of pair observations make the least-late floor
+            converge (see ``cross_channel_rtp``).
+        ``quality``
+            The matched filter's own metrics (plateau amplitude, fit rms,
+            seconds folded, subsample).  This is what archiving the IQ
+            would have bought and the ledger cannot: you cannot re-run
+            the MF later.  Both the 2026-05-23 sidelobe phantom and the
+            2026-08-25 livelock were precise-looking anchors that were
+            wrong; these fields let a reader JUDGE an anchor instead of
+            inheriting it.
+        ``label_drift_samples``
+            Counter continuity since capture (the calibrator's
+            ``_lbl_drift``).  An anchor only labels correctly if the
+            ruler did not move underneath it.
+        ``labeling_convention``
+            ``"legacy"`` or ``"content"``.  Its absence is exactly what
+            made the 2026-08-25 15:00–15:07 content window
+            indistinguishable from its neighbours afterwards.
         """
         if anchor is None:
             return False
@@ -80,14 +119,26 @@ class T6AnchorLedger:
             "authority_state": authority_state,
             "delay_budget_ns": delay_budget_ns,
             "filter_group_delay_ns": filter_group_delay_ns,
+            "schema": SCHEMA,
         }
+        # Omitted, never defaulted: see the docstring.
+        for k, v in (
+            ("labeling_convention", labeling_convention),
+            ("peer_rtp", peer_rtp),
+            ("peer_rate_hz", peer_rate_hz),
+            ("quality", quality),
+            ("label_drift_samples", label_drift_samples),
+        ):
+            if v is not None:
+                row[k] = v
         day = datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y%m%d")
         path = self.dir_path / f"t6-anchors-{day}.jsonl"
         try:
+            line = json.dumps(row, separators=(",", ":")) + "\n"
             self.dir_path.mkdir(parents=True, exist_ok=True)
             with open(path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(row, separators=(",", ":")) + "\n")
-        except OSError as exc:
+                f.write(line)
+        except (OSError, TypeError, ValueError) as exc:
             if not self._warned:
                 self._warned = True
                 logger.warning(

@@ -163,3 +163,85 @@ class TestRecorderWiring:
         d = r._t6_authority.on_fine_estimate(
             e, (e.edge_rtp + e.edge_subsample) % 96_000, SECOND)
         r._t6_apply_authority_decision(d)  # must not raise
+
+
+class TestSchemaV2:
+    """The ledger is the archival substitute for the T6 IQ stream.
+
+    Archiving the 96 kHz T6 channel costs ~60 GB/day (measured on B4: a
+    24 kHz channel-day is 15 GB); the ledger costs 0.37 MB/day -- five
+    orders of magnitude less.  So the alignment record stands in for the
+    samples (mjh, 2026-08-25).  For that to be honest a row must carry
+    three things it did not:
+
+    1. a position in the METROLOGY counter space.  ``anchor_rtp`` is in
+       the T6 channel's own 96 kHz space, and that space does NOT relate
+       to the 24 kHz metrology channels by scaling -- measured offset
+       362,095,021 samples (~3772 s).  A reader holding the ledger and
+       the metrology IQ could not connect them.
+    2. the matched filter's quality metrics, so a later reader can JUDGE
+       an anchor rather than inherit it.  This is what archiving IQ would
+       have bought and the ledger cannot: you cannot re-run the MF.  Both
+       the 2026-05-23 sidelobe phantom and the 2026-08-25 livelock were
+       precise-looking anchors that were wrong.
+    3. continuity evidence -- an anchor only labels correctly if the
+       counter stayed continuous since capture.
+
+    Plus ``labeling_convention``, whose absence is exactly what made the
+    2026-08-25 15:00-15:07 content window indistinguishable afterwards,
+    and a ``schema`` field so generations can be told apart at all
+    (hf-timestd#39).
+    """
+
+    def _write(self, tmp_path, **kw):
+        led = T6AnchorLedger(dir_path=tmp_path, now_fn=lambda: 1_700_000_000.0)
+        assert led.append(make_anchor(), **kw)
+        return read_rows(tmp_path)[0]
+
+    def test_row_declares_its_schema(self, tmp_path):
+        assert self._write(tmp_path)["schema"] == "t6-anchor/2"
+
+    def test_labeling_convention_is_recorded(self, tmp_path):
+        row = self._write(tmp_path, labeling_convention="content")
+        assert row["labeling_convention"] == "content"
+
+    def test_peer_space_position_is_recorded(self, tmp_path):
+        """The number that lets an offline reader use the metrology IQ."""
+        row = self._write(
+            tmp_path, peer_rtp=1_701_842_846, peer_rate_hz=24_000)
+        assert row["peer_rtp"] == 1_701_842_846
+        assert row["peer_rate_hz"] == 24_000
+
+    def test_quality_metrics_are_recorded(self, tmp_path):
+        row = self._write(tmp_path, quality={
+            "plateau_amplitude": 30.0, "fit_rms": 0.05,
+            "n_seconds_folded": 30, "edge_subsample": 0.25})
+        assert row["quality"]["fit_rms"] == 0.05
+        assert row["quality"]["n_seconds_folded"] == 30
+
+    def test_continuity_drift_is_recorded(self, tmp_path):
+        assert self._write(tmp_path, label_drift_samples=0)[
+            "label_drift_samples"] == 0
+
+    def test_absent_optionals_stay_absent_not_falsely_zero(self, tmp_path):
+        """A missing measurement must not read as a measured zero -- that
+        is the whole failure mode this schema exists to prevent."""
+        row = self._write(tmp_path)
+        for k in ("peer_rtp", "peer_rate_hz", "quality",
+                  "label_drift_samples", "labeling_convention"):
+            assert k not in row, f"{k} should be omitted, not defaulted"
+
+    def test_v1_fields_are_unchanged(self, tmp_path):
+        """Readers of the old shape keep working."""
+        row = self._write(tmp_path)
+        for k in ("logged_at_unix", "anchor_rtp", "anchor_utc_ns",
+                  "named_second_utc_ns", "sample_rate_hz",
+                  "chain_delay_ns", "captured_via_tier"):
+            assert k in row
+
+    def test_append_still_never_raises(self, tmp_path):
+        """Hot-path discipline survives the extra fields."""
+        led = T6AnchorLedger(dir_path=tmp_path / "nope" / "deeper",
+                             now_fn=lambda: 1_700_000_000.0)
+        bad = object()   # unserialisable
+        assert led.append(make_anchor(), quality=bad) is False
