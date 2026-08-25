@@ -124,17 +124,44 @@ def check_units(units, cwd=REPO):
     return dict(line.split() for line in r.stdout.split("\n") if line.strip())
 
 
+def _an_installed_unit(suffix):
+    """Name a unit systemd really has, or skip.
+
+    Hard-coding one (this file used apt-daily.timer and cron.service)
+    tests the host's package list as much as the parser: cron is absent
+    from a minimal Debian image, so the service case failed everywhere
+    except a machine that happened to have it.  Ask systemd instead.
+    """
+    import shutil
+    import subprocess
+
+    if not shutil.which("systemctl"):
+        pytest.skip("no systemctl on this host")
+    out = subprocess.run(
+        ["systemctl", "list-unit-files", "--no-pager", "--no-legend"],
+        capture_output=True, text=True, timeout=30,
+    )
+    for line in out.stdout.splitlines():
+        name = line.split()[0] if line.split() else ""
+        # templates (foo@.service) and aliases are not instantiable units
+        if name.endswith(suffix) and "@" not in name:
+            return name
+    pytest.skip(f"no installed {suffix} unit on this host")
+
+
 def test_a_timer_is_recognised_as_installed():
     """`--type=service,target` EXCLUDES timers, so the guard exited 1 for
     every .timer and deploy.sh skipped all seven in deploy.toml as "not
     installed" — while they were installed and active.  A restart that
     silently covers only part of the manifest.
     """
-    assert check_units(["apt-daily.timer"])["apt-daily.timer"] == "installed"
+    unit = _an_installed_unit(".timer")
+    assert check_units([unit])[unit] == "installed"
 
 
 def test_a_service_is_recognised_as_installed():
-    assert check_units(["cron.service"])["cron.service"] == "installed"
+    unit = _an_installed_unit(".service")
+    assert check_units([unit])[unit] == "installed"
 
 
 def test_a_missing_unit_is_recognised_as_missing():

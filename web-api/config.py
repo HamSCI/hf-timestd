@@ -13,31 +13,79 @@ except ImportError:
 from pathlib import Path
 from typing import Dict, Any, List
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
 # Default paths
-DEFAULT_CONFIG_PATH = Path(__file__).parent.parent / "config" / "timestd-config.toml"
 DEFAULT_DATA_ROOT = Path("/var/lib/timestd")
+
+# Repo-relative config, kept LAST: it exists only if someone created it
+# inside the checkout, and the repo ships just the .template.  A deployed
+# web-api reads /etc like every other component.
+_REPO_CONFIG_PATH = Path(__file__).parent.parent / "config" / "timestd-config.toml"
+
+
+def candidate_config_paths():
+    """Where to look for the station config, in order.
+
+    Mirrors ``hf_timestd.cli``: $TIMESTD_CONFIG, then the production
+    location under /etc, then the repo copy for development.
+    """
+    paths = []
+    env = os.environ.get("TIMESTD_CONFIG")
+    if env:
+        paths.append(Path(env))
+    paths.append(Path("/etc/hf-timestd/timestd-config.toml"))
+    paths.append(_REPO_CONFIG_PATH)
+    return paths
+
+
+def resolve_config_path():
+    """First candidate that exists; else the first candidate (for the message)."""
+    candidates = candidate_config_paths()
+    for c in candidates:
+        if c.exists():
+            return c
+    return candidates[0]
+
+
+DEFAULT_CONFIG_PATH = _REPO_CONFIG_PATH   # back-compat for explicit callers
 
 
 class Config:
     """Application configuration."""
     
-    def __init__(self, config_path: Path = DEFAULT_CONFIG_PATH):
+    def __init__(self, config_path: Path = None):
         """
         Load configuration from TOML file.
         
         Args:
             config_path: Path to timestd-config.toml
         """
-        self.config_path = config_path
+        self.config_path = Path(config_path) if config_path is not None \
+            else resolve_config_path()
         self._load_config()
     
     def _load_config(self):
-        """Load configuration from TOML file."""
+        """Load configuration from TOML file.
+
+        A missing file is NOT fatal at import: this module builds a
+        singleton on import, and raising there means a clean checkout (or
+        an unconfigured host) cannot even import the web API to ask it
+        what is wrong.  Missing config yields an empty one and a warning;
+        callers that need a value still fail where the value is used.
+        """
         if not self.config_path.exists():
-            raise FileNotFoundError(f"Config file not found: {self.config_path}")
+            logger.warning(
+                "No station config found at %s (looked in: %s) — continuing "
+                "with empty configuration",
+                self.config_path,
+                ", ".join(str(p) for p in candidate_config_paths()),
+            )
+            self.config = {}
+            self._apply_config()
+            return
         
         try:
             with open(self.config_path, 'rb') as f:
@@ -46,7 +94,15 @@ class Config:
         except Exception as e:
             logger.error(f"Failed to load config: {e}")
             raise
-        
+        self._apply_config()
+
+    def _apply_config(self):
+        """Derive the fields the app reads from ``self.config``.
+
+        Split out of :meth:`_load_config` so the no-config path produces a
+        usable object with empty sections and default paths, instead of a
+        half-built one.
+        """
         # Extract key configuration
         self.station = self.config.get('station', {})
         self.recorder = self.config.get('recorder', {})

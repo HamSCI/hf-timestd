@@ -186,7 +186,12 @@ class AuthorityManager:
     ):
         self.probes = list(probes)
         self.output_path = Path(output_path)
-        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        # NOT created here.  Construction must be side-effect free: building
+        # a manager to inspect it (which probes registered, what a config
+        # resolves to) should never require write access to a production
+        # runtime directory.  The directory is created by the write, which
+        # already degrades an OSError to a logged warning — a station that
+        # cannot write its authority file should say so and keep running.
         self.a_level_provider = a_level_provider
         self.upgrade_hysteresis = upgrade_hysteresis
         self.pair_thresholds_ms = (
@@ -854,6 +859,7 @@ class AuthorityManager:
                 "coarse_station": bs.coarse.station if bs.coarse else None,
             }
         try:
+            self.output_path.parent.mkdir(parents=True, exist_ok=True)
             with tempfile.NamedTemporaryFile(
                 mode="w",
                 dir=str(self.output_path.parent),

@@ -5707,16 +5707,36 @@ class CoreRecorderV2:
             logger.error(f"Quota enforcement error: {e}")
     
     def _shutdown(self):
-        """Graceful shutdown."""
+        """Graceful shutdown.
+
+        Teardown runs in the failure path: something stopped start-up and a
+        caller is releasing whatever was acquired.  So every OPTIONAL
+        subsystem is read through ``getattr`` with a default here — a
+        recorder whose ``__init__`` never reached the line that sets an
+        attribute must still tear down.  Raising AttributeError from
+        cleanup would bury the exception that actually stopped start-up
+        under one from the cleanup itself.
+        """
+        # Hoisted once, so the body below reads normally and no later edit
+        # can reintroduce a bare self._x that a half-built object lacks.
+        _multi = getattr(self, '_multi', None)
+        _offset_judge = getattr(self, '_offset_judge', None)
+        _t6_channel_info = getattr(self, '_t6_channel_info', None)
+        _t6_stream = getattr(self, '_t6_stream', None)
+        _wwvb_decode_stop = getattr(self, '_wwvb_decode_stop', None)
+        _wwvb_decode_thread = getattr(self, '_wwvb_decode_thread', None)
+        _wwvb_l1_writer = getattr(self, '_wwvb_l1_writer', None)
+        _wwvb_ledger = getattr(self, '_wwvb_ledger', None)
+        _wwvb_stream = getattr(self, '_wwvb_stream', None)
         logger.info("Shutting down core recorder...")
 
         # Stop the shared MultiStream FIRST so its receive loop and
         # health-monitor thread aren't dispatching callbacks into
         # recorders that are mid-teardown below.  (Legacy mode stops
         # per-channel RadiodStreams inside recorder.stop().)
-        if self._multi is not None:
+        if _multi is not None:
             try:
-                self._multi.stop()
+                _multi.stop()
                 logger.info("Shared MultiStream stopped")
             except Exception as e:
                 logger.error(f"Error stopping shared MultiStream: {e}", exc_info=True)
@@ -5747,42 +5767,43 @@ class CoreRecorderV2:
         
 
         # Stop the Offset Judge publication thread
-        if self._offset_judge is not None:
+        if _offset_judge is not None:
             try:
-                self._offset_judge.stop()
+                _offset_judge.stop()
                 logger.info("OffsetJudge stopped")
             except Exception as e:
                 logger.debug(f"OffsetJudge stop: {e}")
 
         # Stop T6 BPSK PPS stream
-        if self._t6_stream is not None:
+        if _t6_stream is not None:
             try:
-                self._t6_stream.stop()
+                _t6_stream.stop()
                 logger.info("T6 BPSK PPS stream stopped")
             except Exception as e:
                 logger.debug(f"T6 stream stop: {e}")
 
         # Stop WWVB decode loop and stream
-        self._wwvb_decode_stop.set()
-        if self._wwvb_decode_thread is not None:
+        if _wwvb_decode_stop is not None:
+            _wwvb_decode_stop.set()
+        if _wwvb_decode_thread is not None:
             try:
-                self._wwvb_decode_thread.join(timeout=5.0)
+                _wwvb_decode_thread.join(timeout=5.0)
             except Exception as e:
                 logger.debug(f"WWVB decode thread join: {e}")
-        if self._wwvb_stream is not None:
+        if _wwvb_stream is not None:
             try:
-                self._wwvb_stream.stop()
+                _wwvb_stream.stop()
                 logger.info("WWVB stream stopped")
             except Exception as e:
                 logger.debug(f"WWVB stream stop: {e}")
-        if self._wwvb_ledger is not None:
+        if _wwvb_ledger is not None:
             try:
-                self._wwvb_ledger.close()
+                _wwvb_ledger.close()
             except Exception as e:
                 logger.debug(f"WWVB ledger close: {e}")
-        if self._wwvb_l1_writer is not None:
+        if _wwvb_l1_writer is not None:
             try:
-                self._wwvb_l1_writer.close()
+                _wwvb_l1_writer.close()
                 logger.info("WWVB Fusion L1 writer closed")
             except Exception as e:
                 logger.debug(f"WWVB L1 writer close: {e}")
@@ -5795,7 +5816,7 @@ class CoreRecorderV2:
         # remove the previous one.  RadiodControl.remove_channel sets
         # frequency to 0 and radiod cleans it up on the next polling
         # cycle.  This is best-effort; failure is logged but non-fatal.
-        if self._t6_channel_info is not None:
+        if _t6_channel_info is not None:
             ssrc = getattr(self._t6_channel_info, 'ssrc', None)
             if ssrc is not None and ssrc != 0:
                 try:

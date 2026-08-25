@@ -82,6 +82,14 @@ def _make_core_recorder(
     # __init__ initialises it to []; the __new__ fast-path has to too.
     cr._lifetime_entries = []
     cr._radiod_lifetime_frames = 0  # 0 = opt-out, no keep-alive thread
+    # _initialize_channels passes this straight into every StreamRecorderV2
+    # it builds (core_recorder_v2 ~:1504).  Real __init__ sets it to None
+    # before the judge is constructed, so None is the faithful stand-in for
+    # "no judge configured".
+    cr._offset_judge = None
+    # Passed to every StreamRecorderV2 as its status stream
+    # (core_recorder_v2 ~:1505).
+    cr.status_address = None
     return cr
 
 
@@ -223,3 +231,47 @@ class TestSharedMultiStreamInit(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestFastPathStaysComplete(unittest.TestCase):
+    """The __new__ fast path must cover what _initialize_channels reads.
+
+    These tests bypass __init__ and set "only the attributes
+    _initialize_channels consumes" — which silently rots every time
+    production reads one more.  The history is in this file: _lifetime_entries
+    added 2026-05-08, then _offset_judge, then status_address, each found by
+    a failure that named an attribute rather than a behaviour.
+
+    This compares the two sets directly, so the next one is a clear message
+    at the point of change instead of an AttributeError buried in a mock.
+    """
+
+    def test_no_attribute_is_missing_from_the_fast_path(self):
+        import ast
+        import re
+
+        root = Path(__file__).resolve().parent.parent
+        src = (root / "src" / "hf_timestd" / "core" / "core_recorder_v2.py").read_text()
+        tree = ast.parse(src)
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef)
+                  and n.name == "_initialize_channels")
+
+        reads, writes = set(), set()
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Attribute)
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id == "self"):
+                (writes if isinstance(node.ctx, ast.Store) else reads).add(node.attr)
+        methods = {n.name for n in ast.walk(tree)
+                   if isinstance(n, ast.FunctionDef)}
+        needed = {a for a in reads - writes - methods if not a.startswith("__")}
+
+        provided = set(re.findall(r"cr\.([A-Za-z_][A-Za-z_0-9]*)\s*=",
+                                  Path(__file__).read_text()))
+        missing = sorted(needed - provided)
+        self.assertEqual(
+            missing, [],
+            f"_initialize_channels reads {missing} but _make_core_recorder "
+            f"does not set them — add them to the fast path (the value real "
+            f"__init__ would have given) rather than deleting the assertion")

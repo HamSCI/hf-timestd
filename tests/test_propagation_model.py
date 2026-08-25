@@ -21,6 +21,35 @@ import numpy as np
 # HFPropagationModel Tests
 # =============================================================================
 
+def _iri_really_works():
+    """True only if IRI-2020 actually PRODUCES a profile.
+
+    ``import iri2020`` is not the test: the package installs fine and then
+    builds its Fortran on first call, so on a host without a Fortran
+    compiler the import succeeds, the build fails, and IonosphericModel
+    logs a warning and silently returns its internal ``parametric`` tier
+    (see CLAUDE.md — "gfortran + build-essential are apt prerequisites").
+    Anything asserting real ionospheric behaviour has to call it and look.
+    """
+    try:
+        from datetime import datetime, timezone
+
+        from hamsci_dsp.ionosphere.model import IonosphericModel
+        pt = IonosphericModel().get_point(
+            38.92, -92.13, datetime(2026, 6, 15, 18, 0, 0, tzinfo=timezone.utc))
+        return getattr(pt, "source", None) == "iri"
+    except Exception:
+        return False
+
+
+_NEEDS_IRI = pytest.mark.skipif(
+    not _iri_really_works(),
+    reason="IRI-2020 unavailable (its Fortran build fails without a compiler; "
+           "the model degrades to the parametric tier). Install gfortran + "
+           "build-essential to run this.",
+)
+
+
 class TestHFPropagationModel:
     """Test the core propagation model."""
     
@@ -183,6 +212,7 @@ class TestHFPropagationModel:
             diff_ms == pytest.approx(v, abs=1e-9) for v in per_mode_iono_diff
         )
 
+    @_NEEDS_IRI
     def test_differential_delay_is_frequency_pair_independent(self):
         """The implied slant TEC is a property of the ray path, not of
         the frequency pair used to probe it — different pairs agree."""
@@ -219,6 +249,7 @@ class TestHFPropagationModel:
 class TestIonoDataService:
     """Test the ionospheric data service (offline/fallback mode)."""
     
+    @_NEEDS_IRI
     def test_climatological_fallback(self):
         from hf_timestd.core.iono_data_service import IonoDataService
         
@@ -272,6 +303,7 @@ class TestIonoDataService:
         assert Ne[0] < Ne[peak_idx]
         assert Ne[-1] < Ne[peak_idx]
     
+    @_NEEDS_IRI
     def test_diurnal_hmF2_variation(self):
         from hf_timestd.core.iono_data_service import IonoDataService
         
