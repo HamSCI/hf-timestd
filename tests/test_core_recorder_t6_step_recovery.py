@@ -195,6 +195,61 @@ class TestT6StepRecoveryT5Sanity(unittest.TestCase):
         self.assertEqual(cr._t6_disambiguation_ns, 0)
         self.assertEqual(len(cr._t6_recent_raw), 0)
 
+    def test_sustained_gps_contradiction_drops_the_stale_lock(self):
+        """The B4 livelock, end to end.
+
+        Raw pinned far from the lock, T5 steadily implying a third value
+        76.8 ms away: step-recovery refuses every candidate (correctly),
+        and before this change nothing ever dropped the lock.  After the
+        dwell, the lock and its disambiguation must be cleared so the
+        next cycle re-references against the tier hierarchy.
+        """
+        from hf_timestd.core.t6_stale_lock import STALE_LOCK_DWELL_S
+        locked = 225_754_278
+        cr = self._make_recorder_with_t5(
+            locked_ns=locked, t5_implied_ns=148_925_066.0
+        )
+        clock = {'t': 0.0}
+        cr._t6_stale_lock_clock = lambda: clock['t']
+
+        # Well past the dwell, one rejected raw per simulated second.
+        for i in range(int(STALE_LOCK_DWELL_S) + 60):
+            clock['t'] = float(i)
+            cr._t6_calibrator.process_samples.return_value = (
+                _calibrator_result(546_963_700)
+            )
+            samples, quality = _samples_quality()
+            cr._t6_on_samples(samples, quality)
+            if cr._t6_last_chain_delay_ns is None:
+                break
+
+        self.assertIsNone(
+            cr._t6_last_chain_delay_ns,
+            "lock survived a sustained GPS contradiction")
+        self.assertEqual(cr._t6_disambiguation_ns, 0)
+        self.assertEqual(len(cr._t6_recent_raw), 0)
+
+    def test_sidelobe_contradiction_never_drops_the_lock(self):
+        """2026-05-23 protection: a candidate half a second away is a
+        phantom.  No amount of dwell may drop a good lock."""
+        from hf_timestd.core.t6_stale_lock import STALE_LOCK_DWELL_S
+        locked = 32_000_000
+        cr = self._make_recorder_with_t5(
+            locked_ns=locked, t5_implied_ns=float(locked + 500_000_000)
+        )
+        clock = {'t': 0.0}
+        cr._t6_stale_lock_clock = lambda: clock['t']
+
+        for i in range(int(STALE_LOCK_DWELL_S) * 2):
+            clock['t'] = float(i)
+            cr._t6_calibrator.process_samples.return_value = (
+                _calibrator_result(418_000_000)
+            )
+            samples, quality = _samples_quality()
+            cr._t6_on_samples(samples, quality)
+
+        self.assertEqual(cr._t6_last_chain_delay_ns, locked)
+
     def test_rejection_states_the_candidate_not_just_the_lock(self):
         """AC0G-B4 2026-08-25: the REJECTED line prints ``t5_implied`` and
         the old lock, but never the candidate the cluster actually

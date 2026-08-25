@@ -2263,6 +2263,12 @@ class CoreRecorderV2:
     # caused the 2026-05-23 phantom-step incident.
     T6_STEP_RECOVERY_T5_SANITY_NS = 5_000_000
 
+    # How often the LOCK itself is re-validated against GPS.  Only
+    # reached on the wrap-rejection path (something is already wrong
+    # with the lock), and _t5_implied_effective_chain_delay() costs an
+    # rtp_to_utc, so this stays off the per-batch hot path.
+    T6_STALE_LOCK_EVAL_PERIOD_S = 30.0
+
     # Stuck-recovery timeout for the calibrator.  The MF cascade-
     # tolerance gate (in BpskPpsCalibratorMF) intentionally prevents
     # ``_last_edge_rtp`` from moving on far-out noise edges so a
@@ -2717,6 +2723,69 @@ class CoreRecorderV2:
             return None
         return int(self._t6_native_anchor.anchor_utc_ns - int(wall * 1e9))
 
+    def _t6_check_stale_lock(self) -> None:
+        """Re-validate the LOCK against GPS; drop it if it is stale.
+
+        Step-recovery guards each CANDIDATE (see t6_stale_lock for why
+        that is right and must stay).  Nothing guarded the lock, so on
+        AC0G-B4 2026-08-25 a 225,754,278 ns lock stood against T5's
+        ~149,000,000 ns for hours while the station ran 26 ms wrong on a
+        coarse fallback anchor.
+
+        Escapes only on a contradiction too large to be T5 noise and too
+        small to be the ±0.5 s sidelobe, sustained past the dwell.  The
+        action is exactly step-recovery's accept: drop the lock and the
+        disambiguation so the next cycle re-references against the
+        timing-tier hierarchy.
+        """
+        if getattr(self, '_t6_last_chain_delay_ns', None) is None:
+            return
+        clock = getattr(self, '_t6_stale_lock_clock', None) or time.monotonic
+        now = float(clock())
+        last = getattr(self, '_t6_stale_lock_last_eval', None)
+        if (last is not None
+                and (now - last) < self.T6_STALE_LOCK_EVAL_PERIOD_S):
+            return
+        self._t6_stale_lock_last_eval = now
+        watch = getattr(self, '_t6_stale_lock_watch', None)
+        if watch is None:
+            from hf_timestd.core.t6_stale_lock import StaleLockWatch
+            watch = self._t6_stale_lock_watch = StaleLockWatch()
+        t5_implied = self._t5_implied_effective_chain_delay()
+        delta = None
+        if t5_implied is not None:
+            delta = wrap_chain_delay_ns(
+                int(t5_implied - self._t6_last_chain_delay_ns))
+        if not watch.observe(delta, now):
+            return
+        from hf_timestd.core.t6_stale_lock import STALE_LOCK_DWELL_S
+        logger.critical(
+            "T6 STALE LOCK ABANDONED: GPS (T5) contradicted the locked "
+            "chain_delay %d ns by %+d ns for more than %.0f s — too "
+            "large to be T5 noise, too small to be the matched filter's "
+            "±0.5 s sidelobe, so the LOCK is the stale one, not the "
+            "candidate. Dropping lock and disambiguation; the next cycle "
+            "re-references against the timing-tier hierarchy. "
+            "(hf-timestd: B4 2026-08-25 held a 76.8 ms contradiction for "
+            "hours with no way out.)",
+            self._t6_last_chain_delay_ns, int(delta), STALE_LOCK_DWELL_S,
+        )
+        if getattr(self, '_t6_authority', None) is not None:
+            self._t6_apply_authority_decision(
+                self._t6_authority.on_mf_unlock())
+        if getattr(self, '_t6_fine_stage', None) is not None:
+            self._t6_fine_stage.reset()
+        self._t6_last_chain_delay_ns = None
+        self._t6_disambiguation_ns = 0
+        self._t6_wrap_rejections = 0
+        self._t6_recent_raw.clear()
+        store = getattr(self, '_t6_mf_chain_delay_store', None)
+        if store is not None:
+            try:
+                store.path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
     def _t5_implied_effective_chain_delay(self) -> Optional[float]:
         """Return T5-derived effective chain_delay (ns) for the current
         matched-filter edge, or None if T5 is unavailable.
@@ -3137,7 +3206,8 @@ class CoreRecorderV2:
         """
         from hf_timestd.core.t6_anchor_authority import T6AuthorityState
         from hf_timestd.core.t6_holdover import (
-            coast_ruler_intact, coast_sigma0_ns, holdover_sigma_ns,
+            coast_ruler_intact, coast_ruler_intact_by_drift,
+            coast_sigma0_ns, holdover_sigma_ns,
             may_coast,
         )
 
@@ -3154,6 +3224,7 @@ class CoreRecorderV2:
             self._t6_holdover_since = None
             self._t6_holdover_sigma0_ns = None
             self._t6_holdover_floor0_s = None
+            self._t6_holdover_drift0 = None
             self._t6_holdover_anchor_id = None
             return "live", None, "ok"
 
@@ -3182,6 +3253,7 @@ class CoreRecorderV2:
                 floor.sigma_ns, getattr(anchor, 'captured_via_tier', None)
             )
             self._t6_holdover_floor0_s = float(floor.offset_s)
+            self._t6_holdover_drift0 = getattr(cal, '_lbl_drift', None)
             self._t6_holdover_anchor_id = anchor_id
 
         since = getattr(self, '_t6_holdover_since', None)
@@ -3206,9 +3278,23 @@ class CoreRecorderV2:
                 "no arrival-floor estimate yet — nothing to coast "
                 "against (%s)" % cause
             )
+        # Counter continuity, measured rather than inferred.  The
+        # calibrator audits every batch's declared RTP against
+        # (previous declared + previous length); that accumulated
+        # discrepancy IS the ruler.  The arrival-floor offset is an
+        # arrival-LATENCY estimate and only ever stood in for it --
+        # on B4 2026-08-25 it reported a re-base 7.8 s before the
+        # audit reported 0 mismatched batches out of 1,620,545.
+        # Fall back to the old proxy only when the audit is absent.
+        drift0 = getattr(self, '_t6_holdover_drift0', None)
+        ruler_ok = coast_ruler_intact_by_drift(
+            getattr(cal, '_lbl_drift', None), drift0,
+            getattr(cal, 'sample_rate', 0) or 0)
+        if ruler_ok is None:
+            ruler_ok = coast_ruler_intact(floor.offset_s, floor0)
         ok, reason = may_coast(
             anchor_frozen=anchor is not None,
-            rtp_continuous=coast_ruler_intact(floor.offset_s, floor0),
+            rtp_continuous=ruler_ok,
             sigma_ns=sigma_ns,
             max_sigma_ns=self.T6_HOLDOVER_MAX_SIGMA_NS,
         )
@@ -4453,6 +4539,12 @@ class CoreRecorderV2:
                 # so chrony does not lose Reach during a wrap event.
                 self._t6_wrap_rejections += 1
                 self._t6_recent_raw.append(result.chain_delay_ns)
+                # A rejected raw means the lock is already in question.
+                # Ask whether GPS still corroborates the LOCK itself --
+                # step-recovery below only ever judges the candidate.
+                self._t6_check_stale_lock()
+                if self._t6_last_chain_delay_ns is None:
+                    return
                 # Step-recovery: if rejected raws cluster tightly across a
                 # full window, the calibrator has truly re-locked at a new
                 # operating point (not a transient noise wrap).  Drop the
