@@ -8,32 +8,44 @@ amends `T6_ANCHOR_INVERSION_DESIGN.md` §5 and `METROLOGY.md` §4.5.  Generalise
 by `TIMING_AUTHORITY_TWO_AXIS.md` (2026-08-25), whose §1 is this document's
 argument stated for every timing source rather than just T6.
 
-> ⛔ **ADOPTION BLOCKED 2026-08-25 — whole-second regression.**
-> The flip was attempted on AC0G-B4 at 15:00:31Z and rolled back at 15:07Z.
-> `chain_delay_ns` correctly became 10 000 (the µs ε) and chrony read the
-> predicted `+16 ms`, but **shadow residuals went to −1007.7 ms**: the labels
-> were a full second out, not −16.618 ms.  All three benches agreed to 0.2 ms,
-> so the error was T6's.  `label_plane` activated but reported
-> `offset_ns −25 846 958` with `sigma_ns 197 134 152` (197 ms).
+> ⛔ **ADOPTION BLOCKED 2026-08-25 — but NOT for the reason first recorded.**
+> The flip was attempted on AC0G-B4 at 15:00:31Z and rolled back at 15:07Z
+> because `shadow_residuals` read **−1007.7 ms** and it appeared the labels
+> had gone a full second out.
 >
-> ⚠ **chrony could not see it** — HPPS feeds `reference_time` = the integer
-> second and builds `system_time` from the floor, so a whole-second error
-> cancels out of what chrony displays.  Judge a convention change by
-> `shadow_residuals`, never by chrony.
+> ⚡ **They had not.**  The anchor ledger rows from that window
+> (`state/t6-anchor-ledger/`, `chain_delay_ns=10000`) show the anchors were
+> exactly right:
 >
-> **Lead:** the 2026-08-24 A/B tested `cd57586` only.  `0274439` — which
-> retires `chain_delay_calib_s` on the **coarse** path, the path that NAMES
-> THE SECOND — was authored 2026-08-25 11:47Z, after the A/B.  Suspects, in
-> order: the coarse path's `ref_time = round(raw_wall_time_sec −
-> chain_delay_calib_s)`; `t6_holdover.holdover_named_second()`'s
-> `floor(label_space_now − chain_delay_ns/1e9)`; the initial-accept
-> disambiguation walk binding the edge to the neighbouring second.
-> Reproduce in unit tests at both boundaries before retrying on a station.
-
-**Authors:** mjh + Claude, 2026-08-24.
-**Evidence base:** radiod source derivation (ka9q-radio @ cd44bbdd), the
-2026-08-24 bandwidth re-sweep and Λ decomposition on AC0G-B4, and the
-same-day labeling-convention A/B (§6).
+> ```
+> anchor_utc_ns       1787670061000011634
+> named_second_utc_ns 1787670061000000000    -> named_second + 11.634 us
+> chain_delay_ns      10000                  -> sub_ns = -1634 ns
+> ```
+>
+> Two consecutive content anchors 30 s apart: ΔRTP = 2,880,000 = exactly
+> 30 s × 96 kHz, Δutc = 30 s − 272 ns.  Self-consistent to **272 ns**, the
+> same shape as the legacy anchors, differing by exactly the intended
+> 16.618 ms.  `test_convention_step_is_exactly_the_retired_constant` and
+> `test_content_anchor_matches_the_b4_ledger_shape` now pin this.
+>
+> **So the labelling half of the convention works.**  What is broken is the
+> REPORTING path: `NativeAnchorBench.poll()` publishes
+> `utc = floor.offset_s + arrival_mono`, i.e. the arrival-floor map, not
+> `utc_ns_at_rtp` from the anchor.  Under content labels `arrival − label`
+> becomes the whole pipeline latency (§5.2 predicts exactly this), and the
+> label-plane tracker went `source='measured'` with `offset_ns
+> −25,846,958` and `sigma_ns 197,134,152` — 197 ms of scatter.  The
+> −1007.7 ms is an artifact of that path, not of the anchor.
+>
+> ⚠ **chrony could not see any of it** — HPPS feeds `reference_time` = the
+> integer second and builds `system_time` from the floor, so it read a
+> healthy-looking `+16 ms` throughout.  Judge a convention change by
+> `shadow_residuals` AND the anchor ledger; chrony cannot adjudicate it.
+>
+> **Remaining work before adoption:** fix the bench/label-plane reporting
+> so `shadow_residuals` means something under content labels.  Tracked as
+> hf-timestd#44.
 
 ---
 

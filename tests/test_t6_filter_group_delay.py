@@ -122,3 +122,70 @@ def test_fine_settings_refuses_an_out_of_bound_group_delay():
     with pytest.raises(ValueError, match="filter_group_delay_ns"):
         CoreRecorderV2._t6_fine_settings(
             {"filter_group_delay_ns": FILTER_GROUP_DELAY_BOUND_NS + 1})
+
+
+# ────────────────────────────────────────────────────────────────────
+# hf-timestd#44 — the convention step is EXACTLY the constant
+# ────────────────────────────────────────────────────────────────────
+
+def test_convention_step_is_exactly_the_retired_constant():
+    """Flipping legacy->content must move the anchor by 16.618 ms, no more.
+
+    AC0G-B4 2026-08-25: the flip was rolled back because shadow residuals
+    read -1007.7 ms and it looked like the labels had gone a full second
+    out.  They had not.  The ledger rows from that window
+    (state/t6-anchor-ledger, chain_delay_ns=10000) show anchors of exactly
+    the shape below --
+
+        anchor_utc_ns       1787670061000011634
+        named_second_utc_ns 1787670061000000000   -> named + 11.634 us
+        chain_delay_ns      10000
+
+    -- and two consecutive ones 30 s apart agreed to 272 ns.  The anchor
+    arithmetic was correct under content; the whole-second reading came
+    from the reporting path, not the labels.  This test pins the anchor
+    half so a future regression can be told apart from a judge artifact.
+    """
+    e = est()
+    legacy = T6AnchorAuthority(
+        sample_rate_hz=SR, delay_budget_ns=BUDGET,
+        filter_group_delay_ns=GROUP,
+    ).on_fine_estimate(e, phase(e), SECOND).anchor
+    content = T6AnchorAuthority(
+        sample_rate_hz=SR, delay_budget_ns=BUDGET,
+        filter_group_delay_ns=0,
+    ).on_fine_estimate(e, phase(e), SECOND).anchor
+
+    step_ns = content.anchor_utc_ns - legacy.anchor_utc_ns
+    assert step_ns == -GROUP, (
+        f"convention step was {step_ns} ns, expected {-GROUP} ns"
+    )
+    # ... and specifically NOT a whole second in either direction.
+    assert abs(step_ns) < 1_000_000_000
+
+
+def test_content_anchor_matches_the_b4_ledger_shape():
+    """Reproduce the live row: named_second + delay_budget - sub_ns."""
+    e = est()
+    auth = T6AnchorAuthority(sample_rate_hz=SR, delay_budget_ns=BUDGET,
+                             filter_group_delay_ns=0)
+
+    a = auth.on_fine_estimate(e, phase(e), SECOND).anchor
+
+    sub_ns = int(round(e.edge_subsample * 1e9 / SR))
+    assert a.chain_delay_ns == BUDGET
+    assert a.anchor_utc_ns == SECOND * 1_000_000_000 + BUDGET - sub_ns
+    # the offset from the named second stays microsecond-class
+    assert abs(a.anchor_utc_ns - SECOND * 1_000_000_000) < 1_000_000
+
+
+def test_naming_does_not_depend_on_the_convention():
+    """named_second_utc is supplied by the caller (NMEA + arrival
+    pairing); no chain-delay term may reach it, or the convention could
+    move which second an edge belongs to."""
+    e = est()
+    for gd in (0, GROUP):
+        auth = T6AnchorAuthority(sample_rate_hz=SR, delay_budget_ns=BUDGET,
+                                 filter_group_delay_ns=gd)
+        a = auth.on_fine_estimate(e, phase(e), SECOND).anchor
+        assert a.captured_at_utc_ns == SECOND * 1_000_000_000
