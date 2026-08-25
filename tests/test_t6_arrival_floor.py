@@ -26,6 +26,7 @@ from hf_timestd.core.core_recorder_v2 import CoreRecorderV2, newest_sample_rtp
 from hf_timestd.core.native_anchor import NativeAnchor
 from hf_timestd.core.offset_judge import NativeAnchorBench
 from hf_timestd.core.t6_arrival_floor import ArrivalFloorTracker, FloorEstimate
+from hf_timestd.core.t6_holdover import COARSE_ANCHOR_SIGMA_NS
 
 # True mono->UTC offset used throughout: an arrival delayed by L seconds
 # carries the label (mono + TRUE_OFF - L), so its reported offset is
@@ -129,12 +130,12 @@ def test_an_anchor_recapture_discards_the_old_frame():
 SR = 96000
 
 
-def _anchor(truth_utc, anchor_rtp=5000):
+def _anchor(truth_utc, anchor_rtp=5000, tier="T6"):
     ns = int(round(truth_utc * 1e9))
     return NativeAnchor(
         anchor_rtp=anchor_rtp & 0xFFFFFFFF, anchor_utc_ns=ns,
         sample_rate_hz=SR, chain_delay_ns=0,
-        captured_at_utc_ns=ns, captured_via_tier="T5",
+        captured_at_utc_ns=ns, captured_via_tier=tier,
     )
 
 
@@ -158,6 +159,70 @@ def test_bench_reads_the_floor_not_the_latest_arrival():
     error_s = (mono + TRUE_OFF) - r.utc_at(mono)
     assert error_s == pytest.approx(0.002, abs=1e-5)
     assert r.sigma_ns == pytest.approx(750_000.0)
+
+
+def test_bench_on_a_coarse_anchor_may_not_claim_fine_stage_sigma():
+    """AC0G-B4 2026-08-25: the bench published tier T6 sigma 0.837 ms while
+    ``anchor_tier`` was T5 and three benches put it 26.15 ms away.
+
+    A T5-captured anchor is not a measurement of the second boundary: its
+    ``sub_ns`` term is identically 0 and the RTP it pins was whatever
+    sample was current when the NMEA event was processed, at unbounded
+    capture latency.  Ledger arithmetic over two consecutive coarse
+    recaptures that morning showed the RTP->UTC map moving +234.2 ms and
+    then +20.74 ms, while two fine-stage anchors 30 s apart agreed to
+    32 ns.  The arrival floor measures arrival scatter and is blind to
+    all of it, so the floor sigma describes the wrong quantity.
+
+    ``coast_sigma0_ns`` already applies exactly this widening when the
+    same coarse anchor is COASTED (core_recorder_v2 ~L3181).  The live
+    path must be no less honest than the holdover path.
+    """
+    mono = 100.0
+    anchor = _anchor(truth_utc=mono + TRUE_OFF, tier="T5")
+    floor = FloorEstimate(offset_s=TRUE_OFF, sigma_ns=836_509.0,
+                          n=110, span_s=1.98)
+    bench = NativeAnchorBench(
+        provider=lambda: (anchor, 5000, mono, floor), mono_fn=lambda: mono)
+
+    r = bench.poll()
+
+    assert r is not None
+    assert r.sigma_ns >= COARSE_ANCHOR_SIGMA_NS
+    # and it must SAY so, not just be wide
+    assert r.detail["anchor_tier"] == "T5"
+    assert r.detail["anchor_sigma_floor_ns"] == pytest.approx(
+        COARSE_ANCHOR_SIGMA_NS)
+
+
+def test_bench_on_a_fine_anchor_still_reports_the_floor_sigma():
+    """The widening is provenance-driven and must not blunt the fine stage."""
+    mono = 100.0
+    anchor = _anchor(truth_utc=mono + TRUE_OFF, tier="T6")
+    floor = FloorEstimate(offset_s=TRUE_OFF, sigma_ns=750_000.0,
+                          n=110, span_s=2.0)
+    bench = NativeAnchorBench(
+        provider=lambda: (anchor, 5000, mono, floor), mono_fn=lambda: mono)
+
+    r = bench.poll()
+
+    assert r is not None
+    assert r.sigma_ns == pytest.approx(750_000.0)
+    assert "anchor_sigma_floor_ns" not in r.detail
+
+
+def test_bench_on_an_unknown_provenance_anchor_widens():
+    """Unknown provenance is not evidence of a fine capture."""
+    mono = 100.0
+    anchor = _anchor(truth_utc=mono + TRUE_OFF, tier=None)
+    floor = FloorEstimate(offset_s=TRUE_OFF, sigma_ns=750_000.0,
+                          n=110, span_s=2.0)
+    bench = NativeAnchorBench(
+        provider=lambda: (anchor, 5000, mono, floor), mono_fn=lambda: mono)
+
+    r = bench.poll()
+
+    assert r is not None and r.sigma_ns >= COARSE_ANCHOR_SIGMA_NS
 
 
 def test_bench_without_a_floor_keeps_the_conservative_bound():

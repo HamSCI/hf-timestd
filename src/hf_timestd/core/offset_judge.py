@@ -543,8 +543,10 @@ class NativeAnchorBench:
 
     The residual bias is the stream transport latency (the sample was
     created before it arrived), bounded by ``LATENCY_SIGMA_FLOOR_NS``
-    — carried honestly as the bench sigma even though the anchor
-    itself is sub-µs.  Only answers while a valid anchor exists (the
+    — carried honestly as the bench sigma even though a FINE-STAGE
+    anchor is itself sub-µs.  On a coarse (non-T6) capture the anchor
+    is not sub-µs and the arrival floor cannot see that, so the sigma
+    is widened to ``COARSE_ANCHOR_SIGMA_NS`` by provenance.  Only answers while a valid anchor exists (the
     T6 lifecycle invalidates it on GPSDO/MF unlock and RTP
     discontinuity) and the T6 stream is flowing.
 
@@ -611,10 +613,29 @@ class NativeAnchorBench:
                 round((float(floor.offset_s) + float(arrival_mono))
                       * 1e9 - utc_ns)),
         })
+        # Provenance gate (AC0G-B4 2026-08-25).  The floor measures
+        # ARRIVAL scatter.  It is blind to where the anchor's second
+        # boundary came from, so on a COARSE (non-T6) capture it
+        # describes the wrong quantity entirely: such an anchor carries
+        # sub_ns identically 0 and pins whatever RTP was current when
+        # the NMEA event was handled, at unbounded capture latency.
+        # Ledger arithmetic that morning: two consecutive coarse
+        # recaptures moved the RTP->UTC map +234.2 ms and then
+        # +20.74 ms, while two fine-stage anchors 30 s apart agreed to
+        # 32 ns -- yet the bench published sigma 0.837 ms and the judge
+        # kept judging on tier T6 while three benches put it 26.15 ms
+        # away.  ``coast_sigma0_ns`` already applies this widening when
+        # the same coarse anchor is COASTED; the live path must be no
+        # less honest than the holdover path.
+        from .t6_holdover import COARSE_ANCHOR_SIGMA_NS, coast_sigma0_ns
+        sigma_ns = float(floor.sigma_ns)
+        if str(anchor.captured_via_tier) != "T6":
+            sigma_ns = coast_sigma0_ns(sigma_ns, anchor.captured_via_tier)
+            detail["anchor_sigma_floor_ns"] = COARSE_ANCHOR_SIGMA_NS
         return BenchReading(
             tier="T6",
             utc=float(floor.offset_s) + float(arrival_mono),
-            sigma_ns=float(floor.sigma_ns),
+            sigma_ns=sigma_ns,
             mono=float(arrival_mono),
             detail=detail,
             plane="label",
