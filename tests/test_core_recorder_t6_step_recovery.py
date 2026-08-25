@@ -149,8 +149,11 @@ class TestT6StepRecoveryT5Sanity(unittest.TestCase):
     With the T5 probe wired we cross-check the candidate against GPS
     truth (LB-1421 NMEA): if the candidate's implied effective
     chain_delay disagrees with the existing lock by more than
-    ``T6_STEP_RECOVERY_T5_SANITY_NS`` (5 ms), the step is rejected and
-    the lock is held.
+    ``T6_STEP_RECOVERY_T5_SANITY_NS`` (150 ms), the step is rejected
+    and the lock is held.  That threshold answers only "are you on
+    the right feature" -- T5 is not entitled to grade T6's
+    sub-second placement, and until 2026-08-25 it did, at 5 ms,
+    tighter than T5's own 5.78 ms scatter.
     """
 
     def _make_recorder_with_t5(
@@ -205,9 +208,11 @@ class TestT6StepRecoveryT5Sanity(unittest.TestCase):
         next cycle re-references against the tier hierarchy.
         """
         from hf_timestd.core.t6_stale_lock import STALE_LOCK_DWELL_S
-        locked = 225_754_278
+        # 300 ms: step-recovery keeps refusing this (>150 ms), so the
+        # escape is the only way out -- the backstop, not the fast path.
+        locked = 400_000_000
         cr = self._make_recorder_with_t5(
-            locked_ns=locked, t5_implied_ns=148_925_066.0
+            locked_ns=locked, t5_implied_ns=100_000_000.0
         )
         clock = {'t': 0.0}
         cr._t6_stale_lock_clock = lambda: clock['t']
@@ -228,6 +233,32 @@ class TestT6StepRecoveryT5Sanity(unittest.TestCase):
             "lock survived a sustained GPS contradiction")
         self.assertEqual(cr._t6_disambiguation_ns, 0)
         self.assertEqual(len(cr._t6_recent_raw), 0)
+
+    def test_b4_stale_lock_now_clears_via_step_recovery(self):
+        """The livelock would not form under the corrected threshold.
+
+        AC0G-B4 2026-08-25: lock 225,754,278 ns, T5 implying
+        ~148,925,066 ns -- Δ = -76.8 ms.  Too big to be T5 noise (5.78 ms
+        scatter), far too small to be the ±0.5 s sidelobe.  Under the old
+        5 ms threshold this rejected forever; it must now be accepted, so
+        the lock resets and the next cycle re-disambiguates.
+        """
+        locked = 225_754_278
+        cr = self._make_recorder_with_t5(
+            locked_ns=locked, t5_implied_ns=148_925_066.0
+        )
+        for i in range(CoreRecorderV2.T6_STEP_RECOVERY_WINDOW):
+            cr._t6_calibrator.process_samples.return_value = (
+                _calibrator_result(546_963_700 + (i % 5) * 50)
+            )
+            samples, quality = _samples_quality()
+            cr._t6_on_samples(samples, quality)
+
+        self.assertIsNone(
+            cr._t6_last_chain_delay_ns,
+            "the B4 livelock re-formed: step-recovery still refuses a "
+            "76.8 ms disagreement")
+        self.assertEqual(cr._t6_disambiguation_ns, 0)
 
     def test_sidelobe_contradiction_never_drops_the_lock(self):
         """2026-05-23 protection: a candidate half a second away is a
@@ -268,8 +299,9 @@ class TestT6StepRecoveryT5Sanity(unittest.TestCase):
         """
         locked = 32_000_000
         raw = 418_000_000
+        # 300 ms: suspicious enough to reject, not a sidelobe.
         cr = self._make_recorder_with_t5(
-            locked_ns=locked, t5_implied_ns=120_000_000.0
+            locked_ns=locked, t5_implied_ns=332_000_000.0
         )
         with self.assertLogs(
             'hf_timestd.core.core_recorder_v2', level='WARNING'
@@ -298,7 +330,7 @@ class TestT6StepRecoveryT5Sanity(unittest.TestCase):
         # away from old lock, T5 (had it been available) would have
         # computed implied ~248 ms (the phantom edge's wall-clock
         # position relative to NMEA's true PPS).  Difference from old
-        # locked = 216 ms >> 5 ms → REJECT.  HPPS stays at +1 ns
+        # locked = 217.4 ms > 150 ms → REJECT.  HPPS stays at +1 ns
         # instead of walking to +216 ms.
         locked = 32_000_000
         # Mirror the bee1 incident's effective_chain_delay = 249.367 ms:

@@ -2261,7 +2261,33 @@ class CoreRecorderV2:
     # well above legitimate slow physical drift (temperature, etc.) and
     # well below the half-second-wrap sidelobe distance (500 ms) that
     # caused the 2026-05-23 phantom-step incident.
-    T6_STEP_RECOVERY_T5_SANITY_NS = 5_000_000
+    # What T5 is entitled to adjudicate about T6.
+    #
+    # T6 is the better marker of WHERE the second falls: the TS-1 flips
+    # carrier phase on the GPS edge and we localise it to ~150 ns.  T5's
+    # job is to name WHICH second (an integer choice, which cannot inject
+    # sub-second error) and to catch GROSS MISLOCK -- the matched filter
+    # latching the boxcar sidelobe at ±0.5 s, or a phantom in a
+    # zero-filled gap, and then measuring the wrong feature beautifully.
+    # It is NOT entitled to grade T6's sub-second placement.
+    #
+    # This was 5 ms until 2026-08-25, which did exactly that: the T5
+    # bench publishes its own sigma as 25 ms, and fifteen consecutive
+    # t5_implied values on AC0G-B4 spanned 147.68-153.46 ms -- a 5.78 ms
+    # scatter.  The threshold was TIGHTER THAN THE SCATTER OF THE
+    # INSTRUMENT IT ARBITRATES WITH, so it fired on T5 noise and, worse,
+    # could not tell "wrong feature" from "chain delay differs by tens of
+    # ms".  B4 sat in that gap -- 76.8 ms, too big for T5 noise, far too
+    # small for a sidelobe -- rejecting at ~1 Hz for hours with no way
+    # out.
+    #
+    # 150 ms sits between the two real incidents, ~70 ms clear of each:
+    #
+    #   B4   2026-08-25  Δ =  76.8 ms  stale lock  -> must ACCEPT
+    #   bee1 2026-05-23  Δ = 217.4 ms  phantom     -> must REJECT
+    #
+    # and is 6x T5's own 25 ms sigma, well under the 500 ms sidelobe.
+    T6_STEP_RECOVERY_T5_SANITY_NS = 150_000_000
 
     # How often the LOCK itself is re-validated against GPS.  Only
     # reached on the wrap-rejection path (something is already wrong
