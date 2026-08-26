@@ -3123,6 +3123,30 @@ class CoreRecorderV2:
             feed, reported_ns / 1e6, asserted_ns / 1e6,
         )
 
+    def _t6_dissent_sigma_floor_ns(self):
+        """The sigma floor the witnesses currently impose, or None.
+
+        hf-timestd#29's actuator.  The shadow channel has been right and
+        ignored for days at a time because ``cross_bench_conflict`` gates
+        tier ADVANCEMENT and T6 is already top tier.  This is the other
+        direction: when independent witnesses AGREE WITH EACH OTHER that
+        the adopted bench is wrong, chrony is told how wrong, in the one
+        field it actually weighs.
+
+        Widening precision is deliberately weaker than withdrawal — it
+        lets chrony demote HPPS on the evidence rather than taking the
+        feed dark, and going dark is us doing chrony's job badly
+        (t6_holdover).
+        """
+        judge = getattr(self, '_offset_judge', None)
+        d = getattr(judge, '_dissent', None) if judge is not None else None
+        if d is None:
+            return None
+        try:
+            return float(d.sigma_floor_ns)
+        except (TypeError, ValueError):
+            return None
+
     def _t6_capture_anomaly(self, reason: str) -> None:
         """Dump the pre-trigger T6 IQ window, budget permitting.
 
@@ -3621,9 +3645,11 @@ class CoreRecorderV2:
             # The coast's own sigma, not the floor's: the floor cannot
             # see how long we have been extrapolating.
             sigma_ns = getattr(self, '_t6_holdover_sigma_ns', None)
-            precision = precision_from_sigma_ns(
-                pair.sigma_ns if sigma_ns is None else sigma_ns
-            )
+            _s = pair.sigma_ns if sigma_ns is None else sigma_ns
+            _floor = self._t6_dissent_sigma_floor_ns()
+            if _floor is not None and _floor > _s:
+                _s = _floor          # hf-timestd#29
+            precision = precision_from_sigma_ns(_s)
             self._t6_shm.update(
                 reference_time=float(named),
                 system_time=pair.system_time,
@@ -5150,7 +5176,10 @@ class CoreRecorderV2:
                         if _floor is None and _pair_fallback is None:
                             _pair_fallback = "arrival floor has no estimate"
 
-                        from .t6_shm_pair import t6_shm_system_time
+                        from .t6_shm_pair import (
+                            precision_from_sigma_ns,
+                            t6_shm_system_time,
+                        )
                         _shm_pair = t6_shm_system_time(
                             edge_label_utc_s=pps_firing_utc_ns / 1e9,
                             floor=_floor,
@@ -5195,10 +5224,23 @@ class CoreRecorderV2:
                         # like a measurement.  Same derivation FUSE uses, so
                         # chrony can weigh the two feeds against each other
                         # honestly.  hf-timestd#18.
+                        # hf-timestd#29: a sustained, concordant
+                        # witness verdict overrides the bench's own
+                        # claim.  If T4 and T3 agree the bench is 26 ms
+                        # away, a 0.8 ms error bar is a false statement
+                        # whatever produced it.
+                        # NB: `_floor` above is the ARRIVAL floor; this
+                        # is a sigma floor. Different quantity, hence the
+                        # distinct name.
+                        _prec = _shm_pair.precision
+                        _dissent_floor = self._t6_dissent_sigma_floor_ns()
+                        if (_dissent_floor is not None
+                                and _dissent_floor > _shm_pair.sigma_ns):
+                            _prec = precision_from_sigma_ns(_dissent_floor)
                         self._t6_shm.update(
                             reference_time=ref_time_ns / 1e9,
                             system_time=_sys_at_edge,
-                            precision=_shm_pair.precision,
+                            precision=_prec,
                         )
                         # Structural health signal.  push_lag is the MF's
                         # detection latency (~N/sample_rate, ~455 ms at

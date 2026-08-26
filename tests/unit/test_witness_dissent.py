@@ -128,3 +128,45 @@ class TestDwell:
         w.observe(self._d(), 0.0)
         for t in range(120, 3600, 30):
             assert w.observe(self._d(), float(t)) is not None
+
+
+class TestTheActuator:
+    """The floor must reach the field chrony actually weighs.
+
+    Publishing `witness_dissent` to offset_judge.json is still only
+    observation -- #29's whole point is that correct, ignored alarms are
+    the failure mode.  The floor has to widen the SHM precision.
+    """
+
+    def test_precision_widens_when_the_floor_bites(self):
+        from hf_timestd.core.t6_shm_pair import precision_from_sigma_ns
+        d = from_shadow_residuals(B4_SHADOWS, B4_BENCH_SIGMA)
+        honest = precision_from_sigma_ns(B4_BENCH_SIGMA)
+        widened = precision_from_sigma_ns(d.sigma_floor_ns)
+        # SHM precision is log2(seconds), so a wider sigma is a LARGER
+        # (less negative) exponent -- chrony then weighs HPPS lower.
+        assert widened > honest
+        assert 2 ** widened > 2 ** honest * 20
+
+    def test_a_healthy_bench_keeps_its_own_precision(self):
+        ok = {
+            "T4": {"shadow_residual_ns": -490_000.0, "sigma_ns": 650_134.0},
+            "T3": {"shadow_residual_ns": -206_000.0, "sigma_ns": 3_195_463.2},
+        }
+        assert from_shadow_residuals(ok, 847_000.0) is None
+
+    def test_the_recorder_accessor_is_none_without_a_judge(self):
+        """getattr-guarded: test harnesses build via __new__, and a
+        missing judge must not take the push path down."""
+        from hf_timestd.core.core_recorder_v2 import CoreRecorderV2
+        r = CoreRecorderV2.__new__(CoreRecorderV2)
+        assert r._t6_dissent_sigma_floor_ns() is None
+
+    def test_the_recorder_accessor_reads_a_live_verdict(self):
+        from hf_timestd.core.core_recorder_v2 import CoreRecorderV2
+        from types import SimpleNamespace
+        r = CoreRecorderV2.__new__(CoreRecorderV2)
+        d = from_shadow_residuals(B4_SHADOWS, B4_BENCH_SIGMA)
+        r._offset_judge = SimpleNamespace(_dissent=d)
+        assert r._t6_dissent_sigma_floor_ns() == pytest.approx(
+            26_123_881.35, rel=1e-6)
