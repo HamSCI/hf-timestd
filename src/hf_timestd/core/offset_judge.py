@@ -948,6 +948,9 @@ class OffsetJudge:
         # tick), and the CRITICAL rate limiter.
         self._cross_conflict: Optional[Dict] = None
         self._shadow_residuals: Dict[str, Dict] = {}
+        self._dissent = None
+        from .witness_dissent import DissentWatch
+        self._dissent_watch = DissentWatch()
         self._last_cross_critical_log: float = 0.0
         # Precision-hold state: {candidate, incumbent,
         # sigma_candidate_ns, sigma_incumbent_ns} while a voluntary
@@ -1627,6 +1630,21 @@ class OffsetJudge:
                     "vs_tier": adopted.tier,
                 }
         self._shadow_residuals = shadows
+        # hf-timestd#29: give the witnesses an actuator.  The shadow
+        # channel has been RIGHT and IGNORED repeatedly (~5,000
+        # CRITICAL/day for four days; 3.4 h at 26 ms on 2026-08-25),
+        # because cross_bench_conflict gates tier ADVANCEMENT and the
+        # adopted bench is already top tier -- nothing above it to
+        # refuse.  Dissent needs no ladder: it only asserts "the bench is
+        # at least this wrong", which becomes a published sigma floor.
+        self._dissent = None
+        if adopted is not None:
+            try:
+                from .witness_dissent import from_shadow_residuals
+                d = from_shadow_residuals(shadows, float(adopted.sigma_ns))
+                self._dissent = self._dissent_watch.observe(d, mono_now)
+            except Exception:  # noqa: BLE001 — a guard must not crash the judge
+                self._dissent = None
 
     def _measure_source_locked(
         self, st: _SourceState, bench: BenchReading, mono_now: float
@@ -2261,6 +2279,22 @@ class OffsetJudge:
             # clear).  The refused bench stays in shadow_residuals.
             "precision_hold": self._precision_hold,
             "shadow_residuals": self._shadow_residuals,
+            # hf-timestd#29: the witnesses' collective verdict on the
+            # ADOPTED bench, once sustained.  None when they do not
+            # convict.  `sigma_floor_ns` is the smallest sigma the bench
+            # may honestly publish — if independent witnesses that agree
+            # with each other put it 26 ms away, a 0.8 ms error bar is a
+            # false statement whatever produced it.
+            "witness_dissent": (
+                None if self._dissent is None else {
+                    "implied_error_ns": round(
+                        self._dissent.implied_error_ns, 1),
+                    "sigma_floor_ns": round(
+                        self._dissent.sigma_floor_ns, 1),
+                    "concurring_tiers": list(self._dissent.tiers),
+                    "spread_ns": round(self._dissent.spread_ns, 1),
+                }
+            ),
             # P3: the T6 residual-walk rate observable, host-global
             # (one ADC clock behind every source on this radiod).
             "t6_residual_rate": (

@@ -130,3 +130,48 @@ class TestDump:
         (tmp_path / "f").write_text("not a dir")
         c.trigger("unlock")
         assert c.may_dump(now=1_700_000_000.0)
+
+
+class TestSelfPruning:
+    """The capture must bound its own footprint.
+
+    `quota_manager` walks raw_buffer/<channel>/<YYYYMMDD>/ and phase2/
+    day-directories; it cannot see flat files under state/t6-anomaly, so
+    these would accumulate forever.  On AC0G-B4 that is up to 352 MB/day
+    on a host already at 83 %, and the fleet board is blind to disk-full.
+
+    The module that creates the files owns their budget -- that also
+    survives the prune timer being disabled or broken.
+    """
+
+    def _fill(self, tmp_path, n, retain_bytes):
+        c = cap(tmp_path, retain_bytes=retain_bytes, min_interval_s=0.0,
+                max_per_day=1000)
+        for _ in range(4):
+            c.add(batch())          # ~4 * 9600 * 8 = 307 KB per dump
+        for i in range(n):
+            c.trigger(f"e{i}", now=1_700_000_000.0 + i)
+        return c
+
+    def test_oldest_dumps_are_evicted_past_the_cap(self, tmp_path):
+        self._fill(tmp_path, n=10, retain_bytes=700_000)
+        kept = sorted(p.name for p in tmp_path.glob("*.iq"))
+        assert len(kept) == 2, kept
+        # the SURVIVORS are the newest, not the oldest
+        assert kept[-1].endswith("e9.iq")
+
+    def test_a_generous_cap_keeps_everything(self, tmp_path):
+        self._fill(tmp_path, n=5, retain_bytes=100_000_000)
+        assert len(list(tmp_path.glob("*.iq"))) == 5
+
+    def test_pruning_never_deletes_the_dump_just_written(self, tmp_path):
+        """Even a cap smaller than one dump must leave the newest file."""
+        c = self._fill(tmp_path, n=3, retain_bytes=1)
+        files = list(tmp_path.glob("*.iq"))
+        assert len(files) == 1
+        assert files[0].name.endswith("e2.iq")
+
+    def test_pruning_ignores_foreign_files(self, tmp_path):
+        (tmp_path / "README.txt").write_text("not mine")
+        self._fill(tmp_path, n=10, retain_bytes=700_000)
+        assert (tmp_path / "README.txt").exists()

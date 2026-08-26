@@ -46,6 +46,14 @@ DEFAULT_MIN_INTERVAL_S = 900.0
 # Backstop on a pathology that outlives the interval floor.
 DEFAULT_MAX_PER_DAY = 20
 
+# Total footprint cap.  quota_manager walks raw_buffer/<channel>/<day>/ and
+# phase2/ day-directories; it cannot see flat files here, so without a
+# self-imposed cap these accumulate forever — up to 352 MB/day on B4's
+# settings, on a host already at 83 %, with the fleet board blind to
+# disk-full.  The module that writes the files owns their budget, which
+# also survives the prune timer being disabled or broken.
+DEFAULT_RETAIN_BYTES = 2 * 1024 ** 3      # 2 GiB ≈ 45 dumps at 46 MB
+
 
 class AnomalyCapture:
     """Rolling pre-trigger ring of T6 IQ, dumped on demand under a budget."""
@@ -58,6 +66,7 @@ class AnomalyCapture:
         window_s: float = DEFAULT_WINDOW_S,
         min_interval_s: float = DEFAULT_MIN_INTERVAL_S,
         max_per_day: int = DEFAULT_MAX_PER_DAY,
+        retain_bytes: int = DEFAULT_RETAIN_BYTES,
         now_fn: Callable[[], float] = time.time,
     ) -> None:
         self.dir_path = Path(dir_path)
@@ -65,6 +74,7 @@ class AnomalyCapture:
         self.window_samples = int(round(float(window_s) * sample_rate_hz))
         self.min_interval_s = float(min_interval_s)
         self.max_per_day = int(max_per_day)
+        self.retain_bytes = int(retain_bytes)
         self._now = now_fn
         self._ring: deque = deque()
         self._held = 0
@@ -148,6 +158,7 @@ class AnomalyCapture:
             return None
         self._last_dump = now
         self._today += 1
+        self._prune(keep=path)
         logger.warning(
             "T6 anomaly capture: wrote %.1f s of IQ to %s (reason=%s, "
             "%d/%d today). Raw samples are the only way to re-run the "
@@ -156,3 +167,39 @@ class AnomalyCapture:
             self._today, self.max_per_day,
         )
         return path
+
+    def _prune(self, keep: Optional[Path] = None) -> None:
+        """Evict oldest dumps until the directory fits ``retain_bytes``.
+
+        Filenames are ``t6-anomaly-<ISO8601>-<reason>.iq``, so lexical
+        order IS chronological order.  The dump just written is never
+        evicted — a cap smaller than one dump should still leave the most
+        recent evidence rather than nothing.  Only this module's own
+        files are considered.
+        """
+        try:
+            files = sorted(self.dir_path.glob("t6-anomaly-*.iq"))
+        except OSError:
+            return
+        total = 0
+        sizes = []
+        for f in files:
+            try:
+                sz = f.stat().st_size
+            except OSError:
+                continue
+            sizes.append((f, sz))
+            total += sz
+        for f, sz in sizes:                      # oldest first
+            if total <= self.retain_bytes:
+                break
+            if keep is not None and f == keep:
+                continue
+            try:
+                f.unlink()
+            except OSError:
+                continue
+            total -= sz
+            logger.info(
+                "T6 anomaly capture: evicted %s to stay under the %.1f GiB "
+                "retention cap.", f.name, self.retain_bytes / 1024 ** 3)

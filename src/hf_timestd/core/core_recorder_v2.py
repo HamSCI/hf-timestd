@@ -6337,15 +6337,19 @@ def main():
                 _t6_cfg_cap.get('anomaly_capture_min_interval_s', 900.0)),
             max_per_day=int(
                 _t6_cfg_cap.get('anomaly_capture_max_per_day', 20)),
+            retain_bytes=int(_t6_cfg_cap.get(
+                'anomaly_capture_retain_bytes', 2 * 1024 ** 3)),
         )
         logger.info(
             "T6 anomaly IQ capture ENABLED (window %.0f s, >= %.0f s apart, "
-            "max %d/day). A ledger row is the matched filter's OUTPUT; raw "
-            "samples are the only way to re-run it on a bad event.",
+            "max %d/day, retain %.1f GiB). A ledger row is the matched "
+            "filter's OUTPUT; raw samples are the only way to re-run it "
+            "on a bad event.",
             recorder._t6_anomaly.window_samples
             / float(recorder._t6_anomaly.sample_rate_hz),
             recorder._t6_anomaly.min_interval_s,
             recorder._t6_anomaly.max_per_day,
+            recorder._t6_anomaly.retain_bytes / 1024 ** 3,
         )
 
     # A-axis observer (hf-timestd#41).  Same published JSON the T5 probe
