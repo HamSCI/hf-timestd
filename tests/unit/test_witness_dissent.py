@@ -170,3 +170,61 @@ class TestTheActuator:
         r._offset_judge = SimpleNamespace(_dissent=d)
         assert r._t6_dissent_sigma_floor_ns() == pytest.approx(
             26_123_881.35, rel=1e-6)
+
+
+class TestTheBenchsOwnClaimMustNotSetTheBound:
+    """Found in the field on AC0G-B4 2026-08-26, not by these tests.
+
+    Two fixes from 2026-08-25 defeated each other.  The provenance sigma
+    gate (368a39c) correctly widened the bench to COARSE_ANCHOR_SIGMA_NS
+    = 25 ms once it fell back to a T5-captured anchor.  The dissent bound
+    was k*sqrt(witness^2 + bench^2), so that honest widening pushed the
+    bound to ~125 ms — and a REAL 56.5 ms error, with all three witnesses
+    agreeing to 250 us, could no longer convict:
+
+        anchor_tier T5, sigma 25.0 ms
+        shadows  T4 +56.522  T3 +56.776  T5 +56.557 ms
+        witness_dissent: None          <- wrong
+
+    Using the suspect's own claim to set the threshold for doubting it is
+    circular, and it is the exact failure this module exists to catch,
+    one level up.  The bound belongs to the WITNESSES: what limits the
+    judgement is their resolution, not the bench's opinion of itself.
+    """
+
+    LIVE = {
+        "T4": {"shadow_residual_ns": 56_522_000.0, "sigma_ns": 650_000.0},
+        "T3": {"shadow_residual_ns": 56_776_000.0, "sigma_ns": 3_195_000.0},
+        "T5": {"shadow_residual_ns": 56_557_000.0, "sigma_ns": 25_000_000.0},
+    }
+
+    def test_a_wide_bench_claim_no_longer_blocks_conviction(self):
+        d = from_shadow_residuals(self.LIVE, 25_000_000.0)
+        assert d is not None, "the 2026-08-26 field case must convict"
+        assert set(d.tiers) == {"T4", "T3"}
+
+    def test_the_verdict_is_independent_of_the_bench_claim(self):
+        """Same evidence, any claim: the witnesses decide."""
+        verdicts = [
+            from_shadow_residuals(self.LIVE, s)
+            for s in (1e5, 8.4e5, 25e6, 60e6)
+        ]
+        assert all(v is not None for v in verdicts)
+        assert len({v.implied_error_ns for v in verdicts}) == 1
+
+    def test_the_floor_still_exceeds_the_widened_claim(self):
+        d = from_shadow_residuals(self.LIVE, 25_000_000.0)
+        assert d.sigma_floor_ns > 25_000_000.0
+
+    def test_the_2026_08_25_incident_still_convicts_identically(self):
+        d = from_shadow_residuals(B4_SHADOWS, B4_BENCH_SIGMA)
+        assert set(d.tiers) == {"T4", "T3"}       # T5 still abstains
+        assert d.implied_error_ns == pytest.approx(-26_123_881.35, rel=1e-6)
+
+    def test_a_healthy_bench_is_still_not_convicted(self):
+        ok = {
+            "T4": {"shadow_residual_ns": -173_000.0, "sigma_ns": 650_000.0},
+            "T3": {"shadow_residual_ns": -384_000.0, "sigma_ns": 3_195_000.0},
+        }
+        assert from_shadow_residuals(ok, 1_252_000.0) is None
+        assert from_shadow_residuals(ok, 25_000_000.0) is None

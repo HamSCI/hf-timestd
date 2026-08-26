@@ -104,12 +104,21 @@ def evaluate(
     if len(usable) < min_quorum:
         return None
 
-    # (3) magnitude — each witness individually beyond the noise
+    # (3) magnitude — each witness individually beyond ITS OWN noise.
+    #
+    # ⚠ ``bench_sigma_ns`` is deliberately NOT in this bound.  It was,
+    # until AC0G-B4 2026-08-26 showed why that is circular: the
+    # provenance gate had honestly widened the bench to 25 ms on a
+    # coarse anchor, which pushed a k*sqrt(witness^2 + bench^2) bound to
+    # ~125 ms, and a real 56.5 ms error with three witnesses agreeing to
+    # 250 us could not convict.  Using the suspect's own claim to set
+    # the threshold for doubting it is exactly the failure this module
+    # exists to catch, one level up.  What limits the judgement is the
+    # WITNESSES' resolution.  The parameter is kept because callers pass
+    # it and because its absence here is the point.
     convinced = [
         w for w in usable
-        if abs(float(w.residual_ns))
-        > float(k) * ((float(w.sigma_ns) ** 2 + float(bench_sigma_ns) ** 2)
-                      ** 0.5)
+        if abs(float(w.residual_ns)) > float(k) * float(w.sigma_ns)
     ]
     if len(convinced) < min_quorum:
         return None
