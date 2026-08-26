@@ -298,6 +298,10 @@ class CoreRecorderV2:
         self._t6_last_fine_est = None
         # Pre-trigger IQ ring; off unless configured (#43).
         self._t6_anomaly = None
+        # T6-channel block-drop counter: this channel is not
+        # archived, so nothing else counts its losses.
+        self._t6_zero_fill = None
+        self._t6_zero_fill_logged = 0.0
         self.output_dir = Path(config['output_dir'])
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
@@ -3321,6 +3325,9 @@ class CoreRecorderV2:
             # zero; only an audit that has not run is unknown.  _lbl_drift
             # is created lazily on the first mismatch, so its absence
             # alone cannot distinguish the two -- _lbl_batches can.
+            zero_fill=(_zf.snapshot()
+                       if (_zf := getattr(self, '_t6_zero_fill', None))
+                       else None),
             label_drift_samples=(
                 int(getattr(cal, '_lbl_drift', 0) or 0)
                 if getattr(cal, '_lbl_batches', 0) else None),
@@ -4430,6 +4437,34 @@ class CoreRecorderV2:
                 _cap.add(samples)
             except Exception:  # noqa: BLE001
                 pass
+        # Count radiod block drops on THIS channel.  gap_hourly reads
+        # raw-buffer sidecars, T6 is not archived, so without this its
+        # losses are invisible to the fleet's only loss metric — hour 07
+        # on 2026-08-26 read zero gaps while a T6 capture from that hour
+        # held two dropped blocks.
+        _zf = getattr(self, '_t6_zero_fill', None)
+        if _zf is not None:
+            closed = _zf.observe(samples)
+            if closed:
+                snap = _zf.snapshot()
+                # Sample the drop itself, not only drops that went on to
+                # break something: capturing solely on T6 anomalies gives
+                # P(drop | anomaly) and never P(anomaly | drop).
+                self._t6_capture_anomaly("zero-fill")
+                now = time.monotonic()
+                if now - getattr(self, '_t6_zero_fill_logged', 0.0) > 60.0:
+                    self._t6_zero_fill_logged = now
+                    logger.warning(
+                        "T6 BLOCK DROP: %d run(s) closed this batch; run "
+                        "total %d runs / %d blocks / %d zero samples, "
+                        "longest %d samples (%.0f ms). radiod zero-fills a "
+                        "dropped block, so the counter stays continuous and "
+                        "byte counts read 100%% — these zeros are the only "
+                        "honest evidence.",
+                        closed, snap['runs'], snap['blocks'],
+                        snap['zero_samples'], snap['longest_run_samples'],
+                        snap['longest_run_samples'] / 96.0,
+                    )
         # Defensive lazy-init for unit tests that bypass __init__ via
         # ``CoreRecorderV2.__new__(CoreRecorderV2)``.  In production
         # __init__ has already set these; in tests they are absent and
@@ -6427,6 +6462,13 @@ def main():
             recorder._t6_anomaly.max_per_day,
             recorder._t6_anomaly.retain_bytes / 1024 ** 3,
         )
+
+    # Block-drop counter for the T6 channel (always on: it costs one
+    # numpy comparison per batch and closes the only blind spot in the
+    # fleet loss metric).
+    from .t6_zero_fill import ZeroFillCounter
+    recorder._t6_zero_fill = ZeroFillCounter(
+        block_samples=int(_t6_cfg_cap.get('block_samples', 1920)))
 
     # A-axis observer (hf-timestd#41).  Same published JSON the T5 probe
     # reads, but consumed for its `a_level_hint`: does a GPSDO discipline

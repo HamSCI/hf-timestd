@@ -66,6 +66,7 @@ class T6AnchorLedger:
         peer_rate_hz: Optional[int] = None,
         quality: Optional[dict] = None,
         label_drift_samples: Optional[int] = None,
+        zero_fill: Optional[dict] = None,
     ) -> bool:
         """Append one anchor row.  Returns True when a line was written.
 
@@ -97,6 +98,12 @@ class T6AnchorLedger:
             Counter continuity since capture (the calibrator's
             ``_lbl_drift``).  An anchor only labels correctly if the
             ruler did not move underneath it.
+        ``zero_fill``
+            Cumulative radiod block drops on the T6 channel since start.
+            Nothing else counts them: the channel is not archived, so it
+            writes no raw-buffer sidecar and cannot appear in
+            ``gap_hourly``.
+
         ``labeling_convention``
             ``"legacy"`` or ``"content"``.  Its absence is exactly what
             made the 2026-08-25 15:00–15:07 content window
@@ -128,6 +135,7 @@ class T6AnchorLedger:
             ("peer_rate_hz", peer_rate_hz),
             ("quality", quality),
             ("label_drift_samples", label_drift_samples),
+            ("zero_fill", zero_fill),
         ):
             if v is not None:
                 row[k] = v
