@@ -248,3 +248,78 @@ class TestMeasurementIsGatedOnTheConvention:
                        label_plane_offset_ns=-16_600_000.0)
         self._feed(j)
         assert j.effective_label_plane_offset_ns() == -16_600_000.0
+
+
+class TestMeasuredPlaneMustEarnItsUse:
+    """A plane term is only worth applying if it is better than nothing.
+
+    AC0G-B4 2026-08-25, during the content-convention window:
+
+        label_plane: offset_ns -25,846,958   sigma_ns 197,134,152   n 27
+
+    A -25.8 ms correction with a **197 ms** standard deviation.  The
+    tracker reported that sigma honestly; the consumer used the estimate
+    anyway, because `effective_label_plane_offset_ns()` took the measured
+    value whenever one existed and never looked at its uncertainty.
+
+    That term is subtracted at the single choke point the adoption gate
+    and the shadow residuals share, against bounds of order 5 ms.  A
+    correction whose own sigma is forty times the bound it perturbs makes
+    every comparison worse than leaving it alone, and it is why the
+    cross-bench delta wandered -16.877 -> +8.548 -> +5.815 ms instead of
+    sitting near a stable -16.6 ms.
+    """
+
+    LIVE_BAD = (-25_846_958.0, 197_134_152.0, 27)     # the flip window
+    GOOD = (-16_600_000.0, 500_000.0, 60)
+
+    def _seed(self, j, offset_ns, sigma_ns, n, t0=1000.0):
+        """Drive the tracker to a chosen estimate via real observations."""
+        for i in range(n):
+            host = 100.0 + i
+            j.observe_label_plane(
+                reading("T6", host + offset_ns / 1e9 +
+                        (sigma_ns / 1e9 if i % 2 else -sigma_ns / 1e9),
+                        t0 + i, plane="label"),
+                reading("T4", host, t0 + i, sigma_ns=1.0, plane="host"),
+            )
+
+    def test_a_useless_estimate_is_refused(self, tmp_path):
+        j = make_judge(tmp_path, label_plane_offset_ns=0.0,
+                       label_plane_measure=True)
+        self._seed(j, *self.LIVE_BAD)
+        est = j._label_plane.estimate()
+        assert est is not None and est.sigma_ns > 5_000_000
+        # ... and must NOT be the term in force
+        assert j.effective_label_plane_offset_ns() == 0.0
+
+    def test_a_tight_estimate_is_used(self, tmp_path):
+        j = make_judge(tmp_path, label_plane_offset_ns=0.0,
+                       label_plane_measure=True)
+        self._seed(j, *self.GOOD)
+        assert j.effective_label_plane_offset_ns() == pytest.approx(
+            -16_600_000.0, abs=1_000_000)
+
+    def test_status_reports_what_was_actually_applied(self, tmp_path):
+        """The JSON must not say 'measured' about a term that was refused
+        — the whole point of publishing it is auditability."""
+        j = make_judge(tmp_path, label_plane_offset_ns=0.0,
+                       label_plane_measure=True)
+        self._seed(j, *self.LIVE_BAD)
+        st = j.label_plane_status()
+        assert st["source"] == "config"
+        assert st["offset_ns"] == 0.0
+        # the refused estimate stays visible, so nobody has to guess why
+        est = j._label_plane.estimate()
+        assert st["rejected_sigma_ns"] == pytest.approx(est.sigma_ns, abs=1)
+        assert st["rejected_offset_ns"] == pytest.approx(est.offset_ns, abs=1)
+        assert st["rejected_n"] == est.n
+        assert "exceeds" in st["rejected_reason"]
+        # and the applied term carries no measured provenance
+        assert st["sigma_ns"] is None and st["n"] == 0
+
+    def test_no_estimate_still_falls_back_cleanly(self, tmp_path):
+        j = make_judge(tmp_path, label_plane_offset_ns=-16_618_000.0,
+                       label_plane_measure=True)
+        assert j.effective_label_plane_offset_ns() == -16_618_000.0
+        assert j.label_plane_status()["source"] == "config"

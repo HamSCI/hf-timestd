@@ -1425,30 +1425,69 @@ class OffsetJudge:
             mono=float(host.mono),
         )
 
-    def effective_label_plane_offset_ns(self) -> float:
-        """The plane term in force: measured when available, else config."""
-        est = self._label_plane.estimate() if self.label_plane_measure else None
-        return float(est.offset_ns) if est is not None \
-            else self.label_plane_offset_ns
+    # A plane correction is subtracted at the single choke point the
+    # adoption gate and the shadow residuals share, against bounds of
+    # order k*sqrt(sc^2+sr^2) ~ 5 ms.  A correction whose own sigma
+    # exceeds that makes every comparison WORSE than leaving it alone.
+    #
+    # AC0G-B4 2026-08-25, content-convention window: the tracker reported
+    # offset -25,846,958 ns with sigma 197,134,152 ns — honestly — and the
+    # consumer applied it anyway, because this method took the measured
+    # value whenever one existed and never looked at its uncertainty.
+    # The cross-bench delta then wandered -16.877 -> +8.548 -> +5.815 ms
+    # instead of sitting near a stable -16.6 ms.
+    MAX_PLANE_SIGMA_NS = 5_000_000.0
 
-    def label_plane_status(self) -> Dict:
-        """Auditable view of the term — published in offset_judge.json."""
+    def _label_plane_in_force(self):
+        """``(offset_ns, source, rejected_estimate_or_None)``.
+
+        A measured term is used only when it is tighter than the
+        comparison it perturbs; otherwise the configured value stands and
+        the refused estimate is carried out so the published status can
+        say why rather than leaving an operator to guess.
+        """
         est = self._label_plane.estimate() if self.label_plane_measure else None
         if est is None:
-            return {
-                "source": "config",
-                "offset_ns": round(self.label_plane_offset_ns, 1),
-                "sigma_ns": None,
-                "n": 0,
-                "span_s": 0.0,
-            }
-        return {
-            "source": "measured",
-            "offset_ns": round(float(est.offset_ns), 1),
-            "sigma_ns": round(float(est.sigma_ns), 1),
-            "n": int(est.n),
-            "span_s": round(float(est.span_s), 1),
+            return self.label_plane_offset_ns, "config", None
+        if float(est.sigma_ns) > self.MAX_PLANE_SIGMA_NS:
+            return self.label_plane_offset_ns, "config", est
+        return float(est.offset_ns), "measured", None
+
+    def effective_label_plane_offset_ns(self) -> float:
+        """The plane term in force: measured when it has earned it."""
+        return self._label_plane_in_force()[0]
+
+    def label_plane_status(self) -> Dict:
+        """Auditable view of the term ACTUALLY APPLIED.
+
+        Reports the term in force, not merely the term available: saying
+        "measured" about an estimate that was refused would defeat the
+        point of publishing it.  A refused estimate is carried alongside
+        so the reason is visible.
+        """
+        offset, source, rejected = self._label_plane_in_force()
+        est = self._label_plane.estimate() if self.label_plane_measure else None
+        out = {
+            "source": source,
+            "offset_ns": round(float(offset), 1),
+            "sigma_ns": (round(float(est.sigma_ns), 1)
+                         if (est is not None and source == "measured")
+                         else None),
+            "n": int(est.n) if (est is not None and source == "measured") else 0,
+            "span_s": (round(float(est.span_s), 1)
+                       if (est is not None and source == "measured") else 0.0),
         }
+        if rejected is not None:
+            out["rejected_offset_ns"] = round(float(rejected.offset_ns), 1)
+            out["rejected_sigma_ns"] = round(float(rejected.sigma_ns), 1)
+            out["rejected_n"] = int(rejected.n)
+            out["rejected_reason"] = (
+                "sigma %.3f ms exceeds the %.3f ms bound: a correction "
+                "looser than the comparison it perturbs makes it worse"
+                % (float(rejected.sigma_ns) / 1e6,
+                   self.MAX_PLANE_SIGMA_NS / 1e6)
+            )
+        return out
 
     def _cross_bench_delta_ns(
         self, cand: BenchReading, ref: BenchReading, mono_now: float
