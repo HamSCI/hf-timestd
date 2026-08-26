@@ -175,3 +175,62 @@ class TestSelfPruning:
         (tmp_path / "README.txt").write_text("not mine")
         self._fill(tmp_path, n=10, retain_bytes=700_000)
         assert (tmp_path / "README.txt").exists()
+
+
+class TestBudgetSurvivesRestart:
+    """`max_per_day` counted in memory, so a restart reset it.
+
+    Observed on AC0G-B4 2026-08-26: the log said "2/8 dumps used today"
+    at 07:49 while the directory already held 8 files for the date --
+    the 08:01 restart (hpps-watchdog recovering T6 SHM) had zeroed the
+    counter.  A restart LOOP therefore blew straight through both the
+    daily cap and the interval floor: 00:15-00:26 saw three restarts in
+    eleven minutes, and each would have been free to dump again.
+
+    The directory IS the record.  Derive both the count and the last
+    dump time from it, so the budget cannot be laundered by a restart
+    and cannot drift from what is actually on disk.
+    """
+
+    def _cap(self, tmp_path, **kw):
+        kw.setdefault("min_interval_s", 900.0)
+        kw.setdefault("max_per_day", 3)
+        c = cap(tmp_path, **kw)
+        c.add(batch())
+        return c
+
+    def test_a_restart_does_not_refill_the_daily_cap(self, tmp_path):
+        t0 = 1_700_000_000.0
+        first = self._cap(tmp_path)
+        for i in range(3):
+            first.trigger(f"a{i}", now=t0 + i * 1000)
+        assert len(list(tmp_path.glob("*.iq"))) == 3
+        # process restarts: brand-new object, same directory
+        second = self._cap(tmp_path)
+        assert second.trigger("after-restart", now=t0 + 5000) is None
+        assert len(list(tmp_path.glob("*.iq"))) == 3
+
+    def test_a_restart_does_not_bypass_the_interval_floor(self, tmp_path):
+        t0 = 1_700_000_000.0
+        first = self._cap(tmp_path, max_per_day=100)
+        assert first.trigger("x", now=t0) is not None
+        second = self._cap(tmp_path, max_per_day=100)
+        assert second.trigger("y", now=t0 + 10) is None       # inside 900 s
+        assert second.trigger("z", now=t0 + 901) is not None
+
+    def test_a_new_day_still_refills(self, tmp_path):
+        t0 = 1_700_000_000.0
+        c = self._cap(tmp_path)
+        for i in range(3):
+            c.trigger(f"a{i}", now=t0 + i * 1000)
+        assert c.trigger("same-day", now=t0 + 4000) is None
+        fresh = self._cap(tmp_path)
+        assert fresh.trigger("next-day", now=t0 + 86_400 * 2) is not None
+
+    def test_an_empty_directory_is_a_full_budget(self, tmp_path):
+        assert self._cap(tmp_path).may_dump(now=1_700_000_000.0)
+
+    def test_foreign_files_do_not_consume_budget(self, tmp_path):
+        for n in ("notes.txt", "t6-anomaly-garbage.iq"):
+            (tmp_path / n).write_text("x")
+        assert self._cap(tmp_path).may_dump(now=1_700_000_000.0)

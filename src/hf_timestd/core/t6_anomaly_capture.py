@@ -26,6 +26,7 @@ its past, and a pre-trigger ring needs no post-trigger state machine.
 """
 from __future__ import annotations
 
+import calendar
 import logging
 import time
 from collections import deque
@@ -99,24 +100,58 @@ class AnomalyCapture:
         return self._held
 
     # ------------------------------------------------------------- budget
-    def _roll_day(self, now: float) -> None:
-        day = time.strftime("%Y%m%d", time.gmtime(now))
-        if day != self._day:
-            self._day = day
-            self._today = 0
+    def _disk_state(self, now: float):
+        """Recover ``(dumps_today, last_dump_epoch)`` from the directory.
+
+        ⚠ These were in-memory counters until 2026-08-26, and a restart
+        reset them.  Observed on AC0G-B4: the log said "2/8 dumps used
+        today" at 07:49 while the directory already held 8 files for that
+        date — the 08:01 restart (hpps-watchdog recovering T6 SHM) had
+        zeroed the count.  Worse, a restart LOOP bypassed the interval
+        floor entirely: 00:15–00:26 saw three restarts in eleven minutes,
+        each free to dump again.
+
+        The directory IS the record, so read it.  The budget then cannot
+        be laundered by a restart and cannot drift from what is on disk.
+        Filenames are ``t6-anomaly-<YYYYMMDD>T<HHMMSS>Z-<reason>.iq``.
+        """
+        today = time.strftime("%Y%m%d", time.gmtime(now))
+        count, latest = 0, None
+        try:
+            names = sorted(p.name for p in
+                           self.dir_path.glob("t6-anomaly-*.iq"))
+        except OSError:
+            return 0, None
+        for name in names:
+            stamp = name[len("t6-anomaly-"):][:16]     # YYYYMMDDTHHMMSSZ
+            if len(stamp) != 16 or stamp[8] != "T" or stamp[15] != "Z":
+                continue                               # not ours; ignore
+            try:
+                secs = calendar.timegm(
+                    time.strptime(stamp, "%Y%m%dT%H%M%SZ"))
+            except ValueError:
+                continue
+            if stamp[:8] == today:
+                count += 1
+            if latest is None or secs > latest:
+                latest = secs
+        return count, latest
 
     def may_dump(self, now: Optional[float] = None) -> bool:
         """Whether the budget permits a dump right now.
 
         Pure decision, separated from I/O so the policy that stands
         between a 1 Hz pathology and a full disk is directly testable.
+        Both terms are read from disk, so they survive a restart.
         """
         now = float(self._now() if now is None else now)
-        self._roll_day(now)
-        if self._today >= self.max_per_day:
+        count, latest = self._disk_state(now)
+        self._today = count
+        if count >= self.max_per_day:
             return False
-        if (self._last_dump is not None
-                and (now - self._last_dump) < self.min_interval_s):
+        last = latest if self._last_dump is None else max(
+            self._last_dump, latest if latest is not None else self._last_dump)
+        if last is not None and (now - last) < self.min_interval_s:
             return False
         return True
 
@@ -157,7 +192,7 @@ class AnomalyCapture:
                 "not captured.", path, exc, reason)
             return None
         self._last_dump = now
-        self._today += 1
+        self._today, _ = self._disk_state(now)
         self._prune(keep=path)
         logger.warning(
             "T6 anomaly capture: wrote %.1f s of IQ to %s (reason=%s, "
