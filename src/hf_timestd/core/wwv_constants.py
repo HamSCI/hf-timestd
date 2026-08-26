@@ -157,6 +157,27 @@ STATION_SPECIFIC_FREQ = {
 WWV_ONLY_TONE_MINUTES: Set[int] = {1, 16, 17, 19}
 WWVH_ONLY_TONE_MINUTES: Set[int] = {2, 43, 44, 45, 46, 47, 48, 49, 50, 51}
 
+# Scientific-modulation test signal schedule.
+#
+# ⚠ Corrected 2026-08-26 (mjh): WWVH transmits its test signal in minute
+# **48**, not 44.  The wrong minute was carried consistently in four
+# places -- metrology_service, probabilistic_discriminator (twice) and
+# the wwvh_discrimination docstring table -- so every WWVH test-signal
+# observation was taken from a minute in which WWVH transmits no test
+# signal, guaranteeing non-detection.  Defined once here so a schedule
+# fact has a single home rather than four copies to drift apart.
+TEST_SIGNAL_MINUTE: dict = {'WWV': 8, 'WWVH': 48}
+TEST_SIGNAL_MINUTES: Set[int] = set(TEST_SIGNAL_MINUTE.values())
+
+
+def station_for_test_minute(minute: int):
+    """Which station transmits its test signal in this minute, or None."""
+    for station, m in TEST_SIGNAL_MINUTE.items():
+        if minute == m:
+            return station
+    return None
+
+
 # 440 Hz tone schedule (for station discrimination)
 # Minute 1: WWVH broadcasts 440 Hz
 # Minute 2: WWV broadcasts 440 Hz

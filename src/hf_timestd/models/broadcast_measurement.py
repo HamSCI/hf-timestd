@@ -167,7 +167,7 @@ class L1BroadcastMeasurement(BaseModel):
     bcd_time_valid: Optional[bool] = Field(None, description="BCD decoded time matches expected")
     bcd_wwv_amplitude: Optional[float] = Field(None, description="WWV BCD correlation amplitude")
     bcd_wwvh_amplitude: Optional[float] = Field(None, description="WWVH BCD correlation amplitude")
-    test_signal_detected: Optional[bool] = Field(None, description="Test signal present (min 8/44)")
+    test_signal_detected: Optional[bool] = Field(None, description="Test signal present (WWV min 8, WWVH min 48)")
     tone_500_600_hz: Optional[int] = Field(None, description="500/600 Hz tone frequency if present")
     
     # === CHU SPECIFIC FEATURES ===

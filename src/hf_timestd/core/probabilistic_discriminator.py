@@ -116,6 +116,8 @@ from collections import deque
 
 import numpy as np
 
+from hf_timestd.core.wwv_constants import TEST_SIGNAL_MINUTES
+
 logger = logging.getLogger(__name__)
 
 
@@ -165,7 +167,7 @@ class DiscriminationFeatures:
     
     # Minute-specific features
     is_440hz_minute: bool = False      # Minutes 1, 2
-    is_test_minute: bool = False       # Minutes 8, 44
+    is_test_minute: bool = False       # Minutes 8 (WWV), 48 (WWVH)
     is_ground_truth_minute: bool = False
     
     # Special tone detection
@@ -569,7 +571,7 @@ class ProbabilisticDiscriminator:
         
         # Minute-specific flags
         features.is_440hz_minute = minute in {1, 2}
-        features.is_test_minute = minute in {8, 44}
+        features.is_test_minute = minute in TEST_SIGNAL_MINUTES
         features.is_ground_truth_minute = minute in GROUND_TRUTH_MINUTES
         
         return features

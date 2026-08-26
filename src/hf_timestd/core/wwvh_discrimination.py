@@ -10,7 +10,7 @@ Provides three services used at runtime by MetrologyEngine/MetrologyService:
 2. Legacy Doppler estimation from per-tick phase progression
    estimate_doppler_shift_from_ticks() → extract_per_tick_phases()
 
-3. WWVTestSignalDetector sub-object (minutes 8/44 test signal detection)
+3. WWVTestSignalDetector sub-object (minutes 8/48 test signal detection)
    Instantiated in __init__(), accessed via self.test_signal_detector
 
 The weighted voting pipeline (compute_discrimination, finalize_discrimination,
@@ -25,7 +25,7 @@ BROADCAST FEATURE REFERENCE (for context — canonical source is wwv_constants.p
 │ Timing Tone        │ 1000 Hz, 0.8s        │ 1200 Hz, 0.8s        │
 │ 440 Hz Tone        │ Minute 2             │ Minute 1             │
 │ 500/600 Hz Tone    │ Minutes 1,16,17,19   │ Minutes 2,43-51      │
-│ Test Signal        │ Minute 8             │ Minute 44            │
+│ Test Signal        │ Minute 8             │ Minute 48            │
 │ BCD Phase          │ Leading edge         │ Lagging edge         │
 └────────────────────┴──────────────────────┴──────────────────────┘
 
@@ -35,7 +35,7 @@ REVISION HISTORY:
 2026-03-06: Removed dead voting pipeline, archived to core/legacy/
 2025-12-07: Added comprehensive theoretical documentation
 2025-12-01: Added dual-station time recovery for UTC cross-validation
-2025-11-20: Added test signal analysis for minutes 8/44
+2025-11-20: Added test signal analysis for minutes 8/48 (was 8/44 until 2026-08-26)
 2025-11-15: Added 500/600 Hz ground truth detection
 2025-10-20: Initial implementation with tone power ratio and BCD correlation
 """
@@ -94,11 +94,11 @@ class WWVHDiscriminator:
         else:
             self.bcd_encoder = None
         
-        # Initialize test signal detector for minute 8/44 discrimination (WWV/WWVH only)
+        # Initialize test signal detector for minute 8/48 discrimination (WWV/WWVH only)
         # CHU doesn't broadcast test signals
         if not self.is_chu_channel:
             self.test_signal_detector = WWVTestSignalDetector(sample_rate=sample_rate)
-            logger.info(f"{channel_name}: Test signal detector initialized for minutes 8/44 @ {sample_rate} Hz")
+            logger.info(f"{channel_name}: Test signal detector initialized for minutes 8/48 @ {sample_rate} Hz")
         else:
             self.test_signal_detector = None
         

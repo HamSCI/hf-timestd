@@ -53,6 +53,10 @@ from hf_timestd.core.ring_buffer import (
 )
 from hf_timestd.core.ring_buffer_reader import RingBufferReader
 
+from hf_timestd.core.wwv_constants import (
+    TEST_SIGNAL_MINUTES, station_for_test_minute,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -1043,7 +1047,8 @@ class MetrologyService:
 
             # Write test signal for minutes 8 and 44 (WWV/WWVH channel sounding)
             minute_number = (minute_boundary // 60) % 60
-            if minute_number in [8, 44] and self.test_signal_writer:
+            if (minute_number in TEST_SIGNAL_MINUTES
+                    and self.test_signal_writer):
                 self._write_test_signal(minute_boundary, iq_samples, minute_number)
                 
             self.minutes_processed += 1
@@ -1101,8 +1106,9 @@ class MetrologyService:
                 sample_rate=self.engine.sample_rate
             )
             
-            # Determine station from schedule: minute 8 = WWV, minute 44 = WWVH
-            station = 'WWV' if minute_number == 8 else 'WWVH'
+            # The station is a property of the SCHEDULE, not of whether we
+            # heard anything: minute 8 is WWV, minute 48 is WWVH.
+            station = station_for_test_minute(minute_number)
             
             conf = detection.confidence if detection.confidence is not None else 0.0
             logger.info(
@@ -1127,7 +1133,13 @@ class MetrologyService:
                 'timestamp_utc': timestamp_utc,
                 'minute_boundary_utc': minute_boundary,
                 'minute_number': minute_number,
-                'station': station if detection.detected else '',
+                # Recorded whichever way the detection went.  Blanking it
+                # on non-detection made every MISSING record fail schema
+                # validation and be discarded -- so the detector could only
+                # ever record its successes, and a closed path was
+                # indistinguishable from a healthy one.  `quality_flag`
+                # already carries 'MISSING'; that is where absence belongs.
+                'station': station,
                 'frequency_mhz': self.frequency_hz / 1e6,
                 'detected': bool(detection.detected),
                 'detection_confidence': detection.confidence if detection.confidence is not None else 0.0,

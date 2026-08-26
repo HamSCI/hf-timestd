@@ -27,7 +27,7 @@ Phase 1: BOOTSTRAP (Minutes 0-10)
 - GPSDO provides ±10ns UTC reference via RTP timestamps
 - Use schedule-based ground truth minutes:
   * Minutes 1, 2: 440 Hz tones (WWVH-only, WWV-only)
-  * Minutes 8, 44: Test signals (WWV-only, WWVH-only)
+  * Minutes 8, 48: Test signals (WWV-only, WWVH-only)
   * Minutes 16, 17, 19: WWV 500 Hz only
   * Minutes 43-51: WWVH 600 Hz only
 - BPM tick duration: 10ms (UTC) or 100ms (UT1) vs 5ms (WWV/WWVH)

@@ -34,6 +34,8 @@ from typing import Tuple, Optional, Dict, List
 from scipy import signal
 from dataclasses import dataclass
 
+from hf_timestd.core.wwv_constants import TEST_SIGNAL_MINUTES
+
 logger = logging.getLogger(__name__)
 
 
@@ -468,7 +470,7 @@ class WWVTestSignalDetector:
             - Processing-gain SNR estimate
         """
         # Quick exit if not test signal minute
-        if minute_number not in [8, 44]:
+        if minute_number not in TEST_SIGNAL_MINUTES:
             return TestSignalDetection(
                 detected=False,
                 confidence=0.0,

@@ -68,7 +68,7 @@ class FeatureType(str, Enum):
     """Station-specific signal features."""
     BCD_TIMECODE = "bcd"           # WWV/WWVH BCD time code
     FSK_TIMECODE = "fsk"           # CHU Bell 103 FSK
-    TEST_SIGNAL = "test_signal"    # WWV/WWVH test signal (minutes 8/44)
+    TEST_SIGNAL = "test_signal"    # WWV min 8, WWVH min 48
     DUT1_SPLITS = "dut1_splits"    # CHU split tones for DUT1
     VOICE_ID = "voice_id"          # CHU voice announcement
     UT1_TICKS = "ut1_ticks"        # BPM 100ms UT1 ticks

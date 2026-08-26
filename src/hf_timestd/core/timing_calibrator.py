@@ -54,6 +54,8 @@ try:
 except ImportError:
     STATE_FILE_VERSION = 2  # Fallback for standalone testing
 
+from hf_timestd.core.wwv_constants import TEST_SIGNAL_MINUTES
+
 logger = logging.getLogger(__name__)
 
 # Timing calibrator state file version (increment on schema changes)
@@ -1802,7 +1804,7 @@ class TimingCalibrator:
         Verify timing using the full discrimination result from WWVHDiscriminator.
         
         The discrimination system uses 8 weighted voting methods:
-        - Vote 0: Test Signal (minutes 8, 44) - weight 15.0
+        - Vote 0: Test Signal (minutes 8, 48) - weight 15.0
         - Vote 1: 440 Hz Tone (minutes 1, 2) - weight 10.0  
         - Vote 2: BCD Amplitude Ratio - weight 2.0-10.0
         - Vote 3: 1000/1200 Hz Power Ratio - weight 5.0-10.0
@@ -1813,7 +1815,7 @@ class TimingCalibrator:
         
         Ground truth minutes provide definitive verification:
         - Minutes 1, 2: 440 Hz tone (WWV min 2, WWVH min 1)
-        - Minutes 8, 44: Test signal (WWV min 8, WWVH min 44)
+        - Minutes 8, 48: Test signal (WWV min 8, WWVH min 48)
         - Minutes 16, 17, 19: WWV-only 500/600 Hz
         - Minutes 43-51: WWVH-only 500/600 Hz
         
@@ -1830,7 +1832,7 @@ class TimingCalibrator:
             
             # Check if this is a ground truth minute
             ground_truth_minutes = {
-                'test_signal': [8, 44],
+                'test_signal': sorted(TEST_SIGNAL_MINUTES),
                 '440hz': [1, 2],
                 'wwv_only_500_600': [1, 16, 17, 19],
                 'wwvh_only_500_600': [2, 43, 44, 45, 46, 47, 48, 49, 50, 51]
@@ -1937,7 +1939,7 @@ class TimingCalibrator:
             Dict with verification results, or None if not a test signal minute
         """
         # Only minutes 8 (WWV) and 44 (WWVH) have test signals
-        if minute_number not in [8, 44]:
+        if minute_number not in TEST_SIGNAL_MINUTES:
             return None
         
         station = 'WWV' if minute_number == 8 else 'WWVH'
@@ -1993,7 +1995,7 @@ class TimingCalibrator:
         test_ok = self.stats.get('test_signal_verified_ok', 0)
         
         # Require at least 5 ground truth verifications
-        # Ground truth minutes: 1, 2 (440 Hz), 8, 44 (test signal), 16, 17, 19 (WWV-only), 43-51 (WWVH-only)
+        # Ground truth minutes: 1, 2 (440 Hz), 8, 48 (test signal), 16, 17, 19 (WWV-only), 43-51 (WWVH-only)
         # That's 14 ground truth minutes per hour
         if disc_ok >= 5 or test_ok >= 2:
             self.phase = CalibrationPhase.VERIFIED
@@ -2028,7 +2030,7 @@ class TimingCalibrator:
                 'test_signal_verified_ok': self.stats.get('test_signal_verified_ok', 0)
             },
             'ground_truth_schedule': {
-                'test_signal_minutes': [8, 44],
+                'test_signal_minutes': sorted(TEST_SIGNAL_MINUTES),
                 '440hz_minutes': [1, 2],
                 'wwv_only_500_600': [1, 16, 17, 19],
                 'wwvh_only_500_600': [2, 43, 44, 45, 46, 47, 48, 49, 50, 51],

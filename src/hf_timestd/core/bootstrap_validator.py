@@ -92,7 +92,7 @@ class OffsetCandidate:
     # Station-specific confirmation
     bcd_confirmed: bool = False          # WWV BCD time code decoded
     fsk_confirmed: bool = False          # CHU FSK time code decoded
-    test_signal_confirmed: bool = False  # Test signal (min 8/44) detected
+    test_signal_confirmed: bool = False  # Test signal (min 8/48) detected
     tone_freq_confirmed: bool = False    # Tone frequency matches station
 
 
