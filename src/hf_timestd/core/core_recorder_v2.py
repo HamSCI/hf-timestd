@@ -3037,14 +3037,48 @@ class CoreRecorderV2:
                 if abs(edge_utc - named) > 0.4:
                     return None
                 self._t6_report_naming_vs_radiod_pair(wall, edge_utc)
-                return named
+                return self._t6_reconcile_naming(named, edge_rtp)
 
         if wall is None:
             return None
         named = int(round(wall))
         if abs(wall - named) > 0.4:
             return None
-        return named
+        return self._t6_reconcile_naming(named, edge_rtp)
+
+    def _t6_reconcile_naming(self, named: int, edge_rtp: int) -> int:
+        """Remove a whole-second slip from the integer-second naming.
+
+        The rounding above cannot detect its own off-by-one: when it tips,
+        ``named`` moves with it and ``abs(edge_utc - named)`` is small
+        again.  The RTP counter can — it is GPSDO-disciplined and
+        continuous, so the previous anchor carried forward by ΔRTP/f_s
+        predicts where this edge must fall, and that prediction does not
+        move with the answer.
+
+        Measured on AC0G-B4: three whole-second excursions across 2,176
+        consecutive anchor pairs, two of them under the legacy convention.
+        Each lasted one anchor (~30 s) and self-corrected, so it was
+        invisible unless something sampled inside the window.
+        """
+        try:
+            from .t6_naming_continuity import reconcile_named_second
+            fixed, slip = reconcile_named_second(
+                named, edge_rtp, getattr(self, '_t6_native_anchor', None),
+                self._t6_sample_rate(),
+            )
+        except Exception:  # noqa: BLE001 — a guard must not break naming
+            return named
+        if slip:
+            self._t6_naming_slips = getattr(self, '_t6_naming_slips', 0) + 1
+            logger.warning(
+                "T6 naming slip CORRECTED: the integer second was named "
+                "%+d s from where the RTP counter puts this edge (%d -> "
+                "%d). The counter is GPSDO-disciplined and continuous, so "
+                "the naming is the error, not the ruler. Slips this run: "
+                "%d.", slip, named, fixed, self._t6_naming_slips,
+            )
+        return fixed
 
     # Throttle for the cross-tier naming disagreement report.
     T6_NAMING_DISAGREE_LOG_PERIOD_SEC = 300.0
