@@ -15,7 +15,7 @@ from fastapi import APIRouter, HTTPException, Query
 # Services
 from services.propagation_service import PropagationService
 from services.fusion_service import FusionService
-from hf_timestd.core.solar_zenith_calculator import calculate_midpoint, solar_position
+from hamsci_physics.solar_zenith import calculate_midpoint, solar_position
 from hf_timestd.models.broadcast import (
     BroadcastRegistry, ReceiverLocation, create_registry_from_config
 )

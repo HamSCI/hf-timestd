@@ -226,7 +226,7 @@ async def get_solar_elevation(
     Solar elevation angle at the path midpoint for each station (WWV, WWVH, CHU, BPM).
 
     Uses the receiver grid square from station config and the existing
-    solar_zenith_calculator to compute elevation at the geographic midpoint
+    hamsci_physics.solar_zenith to compute elevation at the geographic midpoint
     of each propagation path. Elevation correlates with D-layer absorption.
     """
     try:
@@ -255,8 +255,8 @@ async def get_solar_elevation(
         t0 = _parse(start)
         t1 = _parse(end)
 
-        # Import calculator (installed as part of hf_timestd package)
-        from hf_timestd.core.solar_zenith_calculator import (
+        # Solar geometry moved to hamsci-physics in the 2026-08-24 split
+        from hamsci_physics.solar_zenith import (
             grid_to_latlon, calculate_midpoint, solar_position,
             WWV_LOCATION, WWVH_LOCATION, CHU_LOCATION, BPM_LOCATION,
         )

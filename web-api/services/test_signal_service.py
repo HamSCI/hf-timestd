@@ -17,7 +17,7 @@ import math
 
 from hf_timestd.io import make_data_product_reader
 from config import config
-from hf_timestd.core.solar_zenith_calculator import (
+from hamsci_physics.solar_zenith import (
     solar_position, calculate_midpoint
 )
 from hf_timestd.core.wwv_constants import (

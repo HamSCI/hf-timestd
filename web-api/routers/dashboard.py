@@ -14,7 +14,7 @@ import math
 from fastapi import APIRouter, HTTPException, Query
 
 from services.propagation_service import PropagationService
-from hf_timestd.core.solar_zenith_calculator import calculate_midpoint, solar_position
+from hamsci_physics.solar_zenith import calculate_midpoint, solar_position
 from hf_timestd.models.broadcast import BroadcastRegistry, ReceiverLocation
 from hf_timestd.io import make_data_product_reader
 from config import config

@@ -50,7 +50,7 @@ def _channel_to_station(channel: str) -> str:
 def _compute_solar_overlay(station: str, t0: datetime, t1: datetime) -> dict:
     """Compute solar elevation at the path midpoint for day/night shading."""
     try:
-        from hf_timestd.core.solar_zenith_calculator import (
+        from hamsci_physics.solar_zenith import (
             calculate_midpoint, solar_position,
         )
 

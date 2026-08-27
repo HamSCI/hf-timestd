@@ -54,7 +54,7 @@ except ImportError:
 
 from hf_timestd.core.ubx_parser import UBXParser
 from hf_timestd.core.gnss_tec import GNSSTECAnalyzer
-from hf_timestd.cddis import CDDISDownloader
+from hamsci_physics.cddis import CDDISDownloader
 from hf_timestd.io import make_data_product_writer
 
 logging.basicConfig(

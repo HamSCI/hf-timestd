@@ -17,7 +17,7 @@ from scipy import stats
 
 from services.space_weather_service import SpaceWeatherService
 from services.propagation_service import PropagationService
-from hf_timestd.core.solar_zenith_calculator import calculate_midpoint, solar_position
+from hamsci_physics.solar_zenith import calculate_midpoint, solar_position
 
 logger = logging.getLogger(__name__)
 
