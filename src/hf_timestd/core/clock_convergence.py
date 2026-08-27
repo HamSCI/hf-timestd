@@ -188,15 +188,7 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 # Import centralized version and timestamp utilities (Issues 3.1, 3.2 Fix)
-try:
-    from ..version import STATE_FILE_VERSION, utc_isoformat
-except ImportError:
-    # Fallback for standalone testing
-    STATE_FILE_VERSION = 2
-    from hf_timestd.utils import (
-        utc_now,
-        utc_isoformat
-    )
+from ..version import STATE_FILE_VERSION, utc_isoformat
 
 # Sanity thresholds for loaded Kalman state
 MAX_REASONABLE_DRIFT_MS_PER_MIN = 0.1  # GPSDO drift < 0.01 PPM = 0.012 ms/min at 20kHz
