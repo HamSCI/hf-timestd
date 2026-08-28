@@ -30,16 +30,29 @@ def _iri_really_works():
     logs a warning and silently returns its internal ``parametric`` tier
     (see CLAUDE.md — "gfortran + build-essential are apt prerequisites").
     Anything asserting real ionospheric behaviour has to call it and look.
-    """
-    try:
-        from datetime import datetime, timezone
 
-        from hamsci_dsp.ionosphere.model import IonosphericModel
-        pt = IonosphericModel().get_point(
-            38.92, -92.13, datetime(2026, 6, 15, 18, 0, 0, tzinfo=timezone.utc))
-        return getattr(pt, "source", None) == "iri"
-    except Exception:
-        return False
+    ⛔ This guard was itself broken until 2026-08-28: it called a
+    ``get_point`` method that does not exist and compared a ``source``
+    attribute that is really ``tier``, so its ``except Exception`` swallowed
+    the AttributeError and returned False on EVERY host.  These three tests
+    had therefore been skipping unconditionally — green suite, nothing run.
+    Hence the narrow except below: a missing package is a legitimate skip, but
+    API drift must be loud, not silently indistinguishable from "no IRI here".
+    """
+    from datetime import datetime, timezone
+
+    try:
+        from hamsci_dsp.ionosphere.model import (
+            IonosphericModel, IonosphericModelTier,
+        )
+    except ImportError:
+        return False        # hamsci-dsp absent — a real, expected skip
+    # Deliberately NOT wrapped: if the API moves again, this raises and the
+    # suite says so instead of quietly skipping for another few months.
+    heights = IonosphericModel().get_layer_heights(
+        timestamp=datetime(2026, 6, 15, 18, 0, 0, tzinfo=timezone.utc),
+        latitude=38.92, longitude=-92.13)
+    return heights.tier is IonosphericModelTier.IRI_2020
 
 
 _NEEDS_IRI = pytest.mark.skipif(
