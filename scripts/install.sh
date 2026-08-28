@@ -438,15 +438,28 @@ else
 fi
 _ensure_uv || { log_error "_ensure_uv failed"; exit 1; }
 
-# pyproject.toml's [tool.uv.sources] declares ka9q-python as a
-# path-based editable dep at ../ka9q-python.  uv sync needs the
-# directory to exist at /opt/git/sigmond/ka9q-python or it fails.
-if [[ ! -f /opt/git/sigmond/ka9q-python/pyproject.toml ]]; then
-    log_info "ka9q-python sibling repo not at /opt/git/sigmond/ka9q-python -- cloning"
-    mkdir -p /opt/git/sigmond
-    git clone https://github.com/HamSCI/ka9q-python /opt/git/sigmond/ka9q-python \
-        || { log_error "Failed to clone ka9q-python"; exit 1; }
-fi
+# pyproject.toml's [tool.uv.sources] declares several path-based editable
+# siblings (ka9q-python, hamsci-dsp, hamsci-physics, hs-uploader).  uv sync
+# needs every one of those directories to exist or it fails.  Read the list
+# from pyproject rather than hardcoding it: this block used to name only
+# ka9q-python, so each newly-declared sibling silently became a fresh-host
+# landmine.  Same rationale as smd's _editable_siblings().
+mapfile -t _SIBLINGS < <(python3 -c "
+import tomllib, pathlib
+d = tomllib.loads(pathlib.Path('$PROJECT_DIR/pyproject.toml').read_text())
+for name, spec in d.get('tool', {}).get('uv', {}).get('sources', {}).items():
+    if isinstance(spec, dict) and spec.get('editable') and spec.get('path'):
+        print(name, (pathlib.Path('$PROJECT_DIR') / spec['path']).resolve())
+" 2>/dev/null)
+for _entry in "${_SIBLINGS[@]}"; do
+    _sib_name=${_entry%% *}
+    _sib_path=${_entry#* }
+    [[ -f "$_sib_path/pyproject.toml" ]] && continue
+    log_info "$_sib_name sibling repo not at $_sib_path -- cloning"
+    mkdir -p "$(dirname "$_sib_path")"
+    git clone "https://github.com/HamSCI/$_sib_name" "$_sib_path" \
+        || { log_error "Failed to clone $_sib_name"; exit 1; }
+done
 
 # Create venv if missing.  --seed populates pip/setuptools/wheel for
 # compatibility with tooling that shells out to pip; harmless overhead.
@@ -513,6 +526,44 @@ log_info "Installed hf-timestd $INSTALLED_VER"
 
 # Verify critical import
 "$VENV_DIR/bin/python" -c "import hf_timestd" 2>/dev/null || { log_error "hf_timestd import FAILED"; exit 1; }
+
+# ...and every declared editable sibling.  `uv sync --frozen` reproduces
+# uv.lock, so a sibling added to pyproject but never relocked is simply
+# absent from the venv and uv still exits 0.  That is exactly what happened
+# on 2026-08-28: hamsci-physics was declared in 2f8bf5b but not locked, this
+# script reported success, and timestd-web-api then crash-looped on
+# ModuleNotFoundError at service start.  Fail here instead — an install that
+# cannot import what the units import is not a successful install.
+"$VENV_DIR/bin/python" - "$PROJECT_DIR" <<'PYEOF' || { log_error "editable sibling verification FAILED"; exit 1; }
+import importlib, sys, tomllib
+from importlib.metadata import distribution
+from pathlib import Path
+
+project = Path(sys.argv[1])
+sources = tomllib.loads((project / "pyproject.toml").read_text()) \
+    .get("tool", {}).get("uv", {}).get("sources", {})
+missing = []
+for name, spec in sources.items():
+    if not (isinstance(spec, dict) and spec.get("editable") and spec.get("path")):
+        continue
+    try:
+        # top_level.txt gives the importable name where it differs from the
+        # distribution name (ka9q-python -> ka9q); hyphen->underscore is the
+        # fallback for the rest (hamsci-dsp -> hamsci_dsp).
+        top = (distribution(name).read_text("top_level.txt") or "").split()
+        for mod in (top or [name.replace("-", "_")]):
+            importlib.import_module(mod)
+    except Exception as exc:
+        missing.append(f"{name} ({type(exc).__name__}: {exc})")
+if missing:
+    print("declared editable siblings not importable from the venv:", file=sys.stderr)
+    for m in missing:
+        print(f"  - {m}", file=sys.stderr)
+    print("run `uv lock` if one was added to pyproject without relocking",
+          file=sys.stderr)
+    raise SystemExit(1)
+print(f"[INFO]  editable siblings OK: {', '.join(sorted(sources))}")
+PYEOF
 
 log_info "Python: OK (hf-timestd $INSTALLED_VER)"
 

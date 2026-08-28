@@ -1043,6 +1043,44 @@ requires-dist = [
 provides-extras = ["dev", "iono", "raytrace", "geomag"]
 
 [[package]]
+name = "hamsci-physics"
+version = "0.1.0"
+source = { editable = "../hamsci-physics" }
+dependencies = [
+    { name = "digital-rf" },
+    { name = "h5py" },
+    { name = "hamsci-dsp" },
+    { name = "hs-uploader" },
+    { name = "matplotlib" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "systemd-python" },
+    { name = "toml" },
+    { name = "zstandard" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "boto3", marker = "extra == 'iono'", specifier = ">=1.28.0" },
+    { name = "digital-rf", specifier = ">=2.6.0" },
+    { name = "h5py", specifier = ">=3.8.0,<3.16.0" },
+    { name = "hamsci-dsp", editable = "../hamsci-dsp" },
+    { name = "hs-uploader", editable = "../hs-uploader" },
+    { name = "matplotlib", specifier = ">=3.7.0" },
+    { name = "netcdf4", marker = "extra == 'iono'", specifier = ">=1.6.0" },
+    { name = "numpy", specifier = ">=1.24.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0.0" },
+    { name = "scipy", specifier = ">=1.10.0" },
+    { name = "systemd-python", specifier = ">=235" },
+    { name = "toml", specifier = ">=0.10.0" },
+    { name = "zstandard", specifier = ">=0.22.0" },
+]
+provides-extras = ["dev", "iono"]
+
+[[package]]
 name = "hf-timestd"
 version = "7.0.0"
 source = { editable = "." }
@@ -1051,6 +1089,7 @@ dependencies = [
     { name = "digital-rf" },
     { name = "fastapi" },
     { name = "hamsci-dsp" },
+    { name = "hamsci-physics" },
     { name = "hs-uploader" },
     { name = "iri2020" },
     { name = "jinja2" },
@@ -1112,6 +1151,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.104.0" },
     { name = "flake8", marker = "extra == 'dev'", specifier = ">=6.0.0" },
     { name = "hamsci-dsp", editable = "../hamsci-dsp" },
+    { name = "hamsci-physics", editable = "../hamsci-physics" },
     { name = "hs-uploader", editable = "../hs-uploader" },
     { name = "iri2020", git = "https://github.com/space-physics/iri2020.git?rev=8b6ab9ea3e30fd0c0ed46f556d5d0854c53b20ee" },
     { name = "jinja2", specifier = ">=3.0.0" },
