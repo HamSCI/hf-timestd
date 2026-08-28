@@ -3137,6 +3137,89 @@ class CoreRecorderV2:
         return (int(round(chain_delay_calib_s * 1e9)),
                 int(round(residual_sec * 1e9)))
 
+    def _t6_ref_tracker(self):
+        """The learned-reference gate, or None when it is switched off.
+
+        OPT-IN, default off, matching the ``use_matched_filter`` convention:
+        this changes which locks T6 accepts, so it must not alter a deployed
+        station's behaviour until a config bump explicitly asks for it.
+
+        Why it exists: the Layer B guard below bounds |chain_delay| at
+        ±250 ms, which is WIDER than the first sidelobe cluster it cites
+        (200 ms), so it cannot reject that one.  Measured on B4 2026-08-28,
+        1572 locks landed in 27 clusters spanning +53..+993 ms and lock
+        quality did not discriminate between them.  A learned per-station
+        reference does: B4's true chain delay is ~15-16 ms, and everything
+        else is a phantom.
+
+        ⛔ The reference is never a shipped constant — it is a property of one
+        installation's cable, hardware revision and channel filter, so the
+        fingerprint below drops the latch whenever the channel config moves.
+        """
+        if not self._t6_config.get('reference_gate_enabled', False):
+            return None
+        fingerprint = "{}/{}/{}".format(
+            self._t6_config.get('sample_rate'),
+            self._t6_config.get('low_edge_hz'),
+            self._t6_config.get('high_edge_hz'),
+        )
+        tracker = getattr(self, '_t6_ref_tracker_obj', None)
+        if tracker is None:
+            from hf_timestd.core.t6_reference_resolver import T6ReferenceTracker
+            tracker = T6ReferenceTracker(
+                tolerance_ns=int(self._t6_config.get(
+                    'reference_tolerance_ns', 5_000_000)),
+                min_attestations=int(self._t6_config.get(
+                    'reference_min_attestations', 20)),
+                config_fingerprint=fingerprint,
+            )
+            self._t6_ref_tracker_obj = tracker
+            logger.info(
+                "T6 reference gate ENABLED: tolerance ±%.3f ms, "
+                "min_attestations %d, config %s",
+                tracker.tolerance_ns / 1e6, tracker.min_attestations,
+                fingerprint,
+            )
+        elif tracker.set_config_fingerprint(fingerprint):
+            logger.warning(
+                "T6 reference gate: channel config changed to %s — latched "
+                "reference DROPPED (chain delay moves with the filter's "
+                "group delay); relearning from scratch",
+                fingerprint,
+            )
+        return tracker
+
+    def _t6_reference_gate_rejects(self, reported_residual_ns: int) -> bool:
+        """Feed the NMEA-attested residual to the tracker, then gate on it.
+
+        ``reported_residual_ns`` is radiod wall-clock minus the NMEA integer
+        second, i.e. attested by the LB-1421 GPSDO — independent of T6's own
+        estimator, which is what makes it usable as a reference.  Observe
+        BEFORE gating so the tracker learns from the full attested
+        population rather than only from what it already agrees with; the
+        modular centre plus the support requirement carry the robustness.
+
+        Returns True when the caller should refuse this lock.
+        """
+        tracker = self._t6_ref_tracker()
+        if tracker is None:
+            return False
+        tracker.observe(attested_ns=reported_residual_ns)
+        if tracker.reference_ns is None:
+            return False          # still learning — never refuse on no reference
+        outcome = tracker.gate(candidate_ns=reported_residual_ns)
+        if outcome.accepted:
+            return False
+        logger.warning(
+            "T6 reference gate REFUSED chain_delay %+.3f ms: %+.3f ms from "
+            "the learned reference %+.3f ms (tolerance ±%.3f ms). Holding "
+            "last-good and falling back to T4 — this is the phantom the "
+            "±250 ms plausibility bound admits.",
+            reported_residual_ns / 1e6, (outcome.delta_ns or 0) / 1e6,
+            tracker.reference_ns / 1e6, tracker.tolerance_ns / 1e6,
+        )
+        return True
+
     def _t6_report_derived_residual(
         self, feed: str, reported_ns: int, asserted_ns: int
     ) -> None:
@@ -3945,6 +4028,29 @@ class CoreRecorderV2:
                     f"to T4."
                 )
                 return False
+            # Layer B is necessary but not sufficient: ±250 ms is wider than
+            # the 200 ms sidelobe cluster it cites, so the tight gate is the
+            # learned per-station reference.  Opt-in; a no-op when off or
+            # while still learning.
+            #
+            # FAILS OPEN, deliberately.  This is an opt-in *tightening* of a
+            # path that already works, so if it cannot run — a partial object,
+            # a future refactor, a bug in the tracker — the correct outcome is
+            # the pre-existing behaviour, never a silent demotion to T4.  The
+            # enclosing try/except would otherwise swallow any error here and
+            # fall back, which is exactly the "guard breaks the thing it
+            # guards" failure.  Caught by
+            # test_core_recorder_t6_origin_assertion's deliberately minimal
+            # stub, which carries no reference-gate attribute at all.
+            _ref_gate = getattr(self, '_t6_reference_gate_rejects', None)
+            if _ref_gate is not None:
+                try:
+                    if _ref_gate(reported_residual_ns):
+                        return False
+                except Exception as exc:      # pragma: no cover - defensive
+                    logger.warning(
+                        "T6 reference gate errored (%s); ignoring it and "
+                        "keeping the Layer B verdict", exc)
             # Back-derive disambig shift: effective = raw + disambig.
             self._t6_disambiguation_ns = (
                 effective_chain_delay_ns - result.chain_delay_ns
