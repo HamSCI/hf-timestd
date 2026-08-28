@@ -5,7 +5,7 @@ OnFailure=timestd-alert@%N.service
 Description=HF Time Standard Web API & UI
 After=network.target
 StartLimitIntervalSec=300
-StartLimitBurst=5
+StartLimitBurst=20
 
 [Service]
 Type=notify
