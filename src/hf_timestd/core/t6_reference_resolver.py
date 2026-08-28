@@ -7,7 +7,7 @@ replayed offline against captured lock records and WWVB ledgers.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import List, Optional, Sequence
 
 
 PPS_PERIOD_NS = 1_000_000_000
@@ -102,3 +102,93 @@ def select_reference(
     if len(scored) > 1 and scored[1][0] == best_support:
         return SelectionResult(None, "ambiguous", best_support)
     return SelectionResult(best, "selected", best_support)
+
+
+class T6ReferenceTracker:
+    """Learn a per-station chain-delay reference, then hold every lock to it.
+
+    The recorder holds one of these.  It accumulates independently-attested
+    chain delays (the T5 / LB-1421 NMEA disambiguation is the intended
+    source), latches a reference once they agree, and thereafter gates.
+    """
+
+    def __init__(
+        self,
+        *,
+        tolerance_ns: int,
+        min_attestations: int,
+        config_fingerprint: str = "",
+    ) -> None:
+        self.tolerance_ns = tolerance_ns
+        self.min_attestations = min_attestations
+        self._config_fingerprint = config_fingerprint
+        self._reference_ns: Optional[int] = None
+        self._attested: List[int] = []
+
+    @property
+    def reference_ns(self) -> Optional[int]:
+        return self._reference_ns
+
+    @property
+    def config_fingerprint(self) -> str:
+        return self._config_fingerprint
+
+    def set_config_fingerprint(self, fingerprint: str) -> bool:
+        """Declare the current channel config; drop the latch if it changed.
+
+        The reference is a property of one installation's signal path, and
+        the radiod channel filter is part of that path — its group delay
+        reaches ~150 ms at the narrowest widths.  Carrying a reference across
+        a filter change would gate every later lock against a stale value and
+        silently take T6 off the air, so a change must invalidate, not adapt.
+
+        Returns True if the latch was dropped.
+        """
+        if fingerprint == self._config_fingerprint:
+            return False
+        self._config_fingerprint = fingerprint
+        self._reference_ns = None
+        self._attested.clear()
+        return True
+
+    def observe(self, *, attested_ns: int) -> None:
+        """Feed one independently-attested chain delay and try to latch.
+
+        Latching needs a majority of the attestations to agree with their own
+        robust centre — not merely to exist.  Scattered attestations are the
+        phantom population; their mean would be a chain delay no edge ever
+        had, so they must not latch anything.
+        """
+        if self._reference_ns is not None:
+            return
+        self._attested.append(int(attested_ns))
+        if len(self._attested) < self.min_attestations:
+            return
+        centre = self._modular_centre(self._attested)
+        support = sum(
+            1 for a in self._attested
+            if abs(modular_delta_ns(a, centre)) <= self.tolerance_ns
+        )
+        if support >= self.min_attestations:
+            self._reference_ns = centre
+
+    @staticmethod
+    def _modular_centre(values: Sequence[int]) -> int:
+        """Median taken in the modular domain, not on raw values.
+
+        A cluster straddling the second boundary (999 ms, 1 ms, 2 ms) has a
+        true centre near 0.7 ms, but a naive median returns 2 ms.  Fold every
+        value onto the first, take the median of the folded offsets, and add
+        it back.
+        """
+        base = values[0]
+        deltas = sorted(modular_delta_ns(v, base) for v in values)
+        mid = deltas[len(deltas) // 2]
+        return (base + mid) % PPS_PERIOD_NS
+
+    def gate(self, *, candidate_ns: int) -> GateOutcome:
+        return gate_candidate(
+            candidate_ns=candidate_ns,
+            reference_ns=self._reference_ns,
+            tolerance_ns=self.tolerance_ns,
+        )

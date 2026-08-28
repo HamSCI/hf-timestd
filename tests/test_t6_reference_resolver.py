@@ -150,3 +150,92 @@ def test_refuses_when_too_few_attestations_to_decide():
     )
     assert result.reference_ns is None
     assert result.reason == "insufficient_attestations"
+
+
+# ---------------------------------------------------------------------------
+# T6ReferenceTracker — the stateful wrapper the recorder will hold.
+# ---------------------------------------------------------------------------
+
+def test_tracker_refuses_to_gate_before_it_has_latched():
+    """Until enough independent attestations agree, the tracker knows nothing.
+
+    This is the state the recorder is in at every cold start, and the one the
+    old code papered over by accepting the calibrator value as-is.
+    """
+    from hf_timestd.core.t6_reference_resolver import T6ReferenceTracker
+
+    t = T6ReferenceTracker(tolerance_ns=5 * MS, min_attestations=3)
+    assert t.reference_ns is None
+    outcome = t.gate(candidate_ns=197 * MS)
+    assert outcome.accepted is False
+    assert outcome.reason == "no_reference"
+
+
+def test_tracker_latches_once_attestations_agree_then_gates_against_it():
+    """Feed attestations scattered around B4's real ~15 ms; latch, then gate.
+
+    The attested values here are the shape of B4's measured derived residuals
+    (median +15.153 ms, Aug 25-28), and 197 ms is the sidelobe the ±250 ms
+    guard admitted.
+    """
+    from hf_timestd.core.t6_reference_resolver import T6ReferenceTracker
+
+    t = T6ReferenceTracker(tolerance_ns=5 * MS, min_attestations=3)
+    for attested in (14 * MS, 16 * MS, 15 * MS):
+        t.observe(attested_ns=attested)
+
+    assert t.reference_ns is not None
+    assert abs(t.reference_ns - 15 * MS) <= 2 * MS
+    assert t.gate(candidate_ns=16 * MS).accepted is True
+    assert t.gate(candidate_ns=197 * MS).accepted is False
+
+
+def test_tracker_does_not_latch_on_scattered_attestations():
+    """Attestations that do not agree are not a reference.
+
+    Three values spread across the second is exactly the phantom population;
+    latching their mean would invent a chain delay no edge ever had.
+    """
+    from hf_timestd.core.t6_reference_resolver import T6ReferenceTracker
+
+    t = T6ReferenceTracker(tolerance_ns=5 * MS, min_attestations=3)
+    for attested in (15 * MS, 197 * MS, 477 * MS):
+        t.observe(attested_ns=attested)
+    assert t.reference_ns is None
+
+
+def test_modular_centre_is_correct_across_the_second_boundary():
+    """Characterisation pin for behaviour already implemented.
+
+    A cluster at 995/0/5 ms has its true centre at 0, but a naive median of
+    the raw values returns 5.  Latching 5 would put the reference 5 ms off and
+    then reject the genuine locks.
+    """
+    from hf_timestd.core.t6_reference_resolver import T6ReferenceTracker
+
+    t = T6ReferenceTracker(tolerance_ns=10 * MS, min_attestations=3)
+    for a in (995 * MS, 0, 5 * MS):
+        t.observe(attested_ns=a)
+    assert t.reference_ns == 0
+
+
+def test_changing_the_channel_config_invalidates_the_latched_reference():
+    """Chain delay moves with the radiod filter width, so the latch must drop.
+
+    The reference is a property of THIS installation's signal path — cable,
+    hardware revision, and the configured channel filter, whose group delay
+    reaches ~150 ms at the narrowest widths.  Carrying a reference across a
+    filter change would gate every subsequent lock against a stale value and
+    silently take T6 off the air.
+    """
+    from hf_timestd.core.t6_reference_resolver import T6ReferenceTracker
+
+    t = T6ReferenceTracker(tolerance_ns=5 * MS, min_attestations=3,
+                           config_fingerprint="96000/-25000/25000")
+    for a in (14 * MS, 15 * MS, 16 * MS):
+        t.observe(attested_ns=a)
+    assert t.reference_ns is not None
+
+    t.set_config_fingerprint("96000/-4000/4000")   # narrower filter
+    assert t.reference_ns is None
+    assert t.gate(candidate_ns=15 * MS).reason == "no_reference"
