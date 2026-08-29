@@ -212,6 +212,11 @@ class T6AnchorAuthority:
             metrics["fine_coarse_max_ms"] = self.fine_coarse_max_ms
             if d_ms > self.fine_coarse_max_ms:
                 v.append("fine_coarse")
+        else:
+            # T6 can now reach AUTHORITATIVE on folded estimates alone,
+            # so this check may simply not run.  Record that positively:
+            # an unrun check must never read as a passed one.
+            metrics["fine_coarse_unverified"] = True
         if named_second_utc is None:
             v.append("naming_unavailable")
         self.last_check_metrics = metrics

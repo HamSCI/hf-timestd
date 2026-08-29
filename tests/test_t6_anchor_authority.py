@@ -356,3 +356,29 @@ class TestCheckMetricsAreMeasured:
 
     def test_metrics_start_empty(self, auth):
         assert auth.last_check_metrics == {}
+
+
+class TestUnverifiedCrossCheck:
+    """T6 may now publish on nights when the MF never locks, so
+    fine_coarse simply does not run. A check that did not run must say
+    so, rather than be inferred from a missing key."""
+
+    def test_absent_coarse_is_recorded_as_unverified(self, auth):
+        e = est()
+        auth.on_fine_estimate(e, None, SECOND)
+        assert auth.last_check_metrics.get("fine_coarse_unverified") is True
+        assert "fine_coarse_ms" not in auth.last_check_metrics
+
+    def test_present_coarse_is_not_marked_unverified(self, auth):
+        e = est()
+        auth.on_fine_estimate(e, phase(e), SECOND)
+        assert "fine_coarse_unverified" not in auth.last_check_metrics
+        assert "fine_coarse_ms" in auth.last_check_metrics
+
+    def test_becomes_authoritative_with_no_coarse_at_all(self, auth):
+        """The integration this whole change exists to permit: T6 takes
+        authority from folded estimates on a night the MF never locks."""
+        e = est()
+        d = auth.on_fine_estimate(e, None, SECOND)
+        assert d.state.name == "AUTHORITATIVE"
+        assert d.anchor is not None
