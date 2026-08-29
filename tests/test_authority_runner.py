@@ -151,6 +151,57 @@ class TestBuildAuthorityRunnerFromConfig(unittest.TestCase):
         self.assertEqual(runner.interval_sec, 10.0)
         self.assertEqual(runner.manager.upgrade_hysteresis, 2)
 
+    def test_frontend_probe_wired_when_radiod_and_t6_are_configured(self) -> None:
+        """The receiver's analog operating point is a T6 uncertainty term
+        (0.52 dB of C/N0 per dB of front-end gain, B4 2026-08-28), so the
+        snapshot must be able to record it."""
+        cfg = {
+            "ka9q": {"status": "AC0G-B4-status.local"},
+            "timing": {"t6_pps": {"enabled": True, "frequency_hz": 45375000}},
+        }
+        runner = build_authority_runner_from_config(
+            config=cfg,
+            fusion_status_path=self.tmp / "fusion_status.json",
+            authority_output_path=self.tmp / "authority.json",
+        )
+        self.assertIsNotNone(runner.manager.frontend_probe)
+
+    def test_frontend_probe_wired_when_caller_supplies_governor(self) -> None:
+        """resolve_ka9q_status is imported inside the governor branch; a
+        caller that supplies its own governor must not skip that import
+        out from under the front-end probe."""
+        cfg = {
+            "ka9q": {"status": "AC0G-B4-status.local"},
+            "timing": {"t6_pps": {"enabled": True, "frequency_hz": 45375000}},
+        }
+        runner = build_authority_runner_from_config(
+            config=cfg,
+            fusion_status_path=self.tmp / "fusion_status.json",
+            authority_output_path=self.tmp / "authority.json",
+            governor_radiod_provider=lambda: "someone-else",
+        )
+        self.assertIsNotNone(runner.manager.frontend_probe)
+
+    def test_no_frontend_probe_without_a_radiod_address(self) -> None:
+        cfg = {"timing": {"t6_pps": {"enabled": True, "frequency_hz": 45375000}}}
+        runner = build_authority_runner_from_config(
+            config=cfg,
+            fusion_status_path=self.tmp / "fusion_status.json",
+            authority_output_path=self.tmp / "authority.json",
+        )
+        self.assertIsNone(runner.manager.frontend_probe)
+
+    def test_no_frontend_probe_without_a_t6_frequency(self) -> None:
+        """Nothing to point the poll at — and guessing an SSRC is
+        forbidden, so there is no fallback."""
+        cfg = {"ka9q": {"status": "AC0G-B4-status.local"}, "timing": {}}
+        runner = build_authority_runner_from_config(
+            config=cfg,
+            fusion_status_path=self.tmp / "fusion_status.json",
+            authority_output_path=self.tmp / "authority.json",
+        )
+        self.assertIsNone(runner.manager.frontend_probe)
+
     def test_t5_lb1421_precedence_over_chrony_refid(self) -> None:
         """When both lb1421_status_path and chrony refid are configured,
         the substrate-grounded LbeT5DirectProbe must win — chrony T5 is

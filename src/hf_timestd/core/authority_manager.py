@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from hf_timestd.core.chrony_refclock_gate import ChronyRefclockGate
     from hf_timestd.core.mdns_fusion_advertiser import MdnsFusionAdvertiser
     from hf_timestd.io.authority_snapshot_store import AuthoritySnapshotStore
+    from hf_timestd.core.frontend_probe import FrontendProbe
 
 log = logging.getLogger(__name__)
 
@@ -181,6 +182,7 @@ class AuthorityManager:
         governor_radiod_provider: Optional[Callable[[], Optional[str]]] = None,
         mdns_advertiser: Optional["MdnsFusionAdvertiser"] = None,
         snapshot_store: Optional["AuthoritySnapshotStore"] = None,
+        frontend_probe: Optional["FrontendProbe"] = None,
         demote_t6_on_breach: bool = False,
         demote_t6_on_breach_min_cycles: int = 3,
     ):
@@ -209,6 +211,13 @@ class AuthorityManager:
         # overwritten in authority.json) is queryable hours/days
         # later.  None = no archiving (legacy behaviour preserved).
         self.snapshot_store = snapshot_store
+        # Receiver operating point.  radiod's RX888 AGC re-adjusts the
+        # analog front-end gain once per second from TOTAL band power,
+        # and 0.52 dB of the T6 pilot's C/N0 rides on every dB of it
+        # (B4, 2026-08-28).  Recording it beside the measurement is what
+        # makes a T6 residual attributable to it later.  None = not
+        # configured, columns stay NULL.
+        self.frontend_probe = frontend_probe
         # Phase 2B — when True AND T6's drift_monitor reports a
         # sustained breach for ``demote_t6_on_breach_min_cycles``
         # consecutive ticks AND T5 is available past
@@ -933,6 +942,14 @@ class AuthorityManager:
             snapshot["bootstrap_complete"] = 1 if bs.complete else 0
             snapshot["bootstrap_reason"] = bs.reason
             snapshot["bootstrap_delta_sec"] = bs.delta_sec
+
+        if self.frontend_probe is not None:
+            try:
+                snapshot.update(self.frontend_probe.sample())
+            except Exception:
+                # The probe's own contract is best-effort, but timing
+                # authority outranks its provenance either way.
+                pass
 
         if results is not None:
             _flatten_t6(snapshot, results.get("T6"))

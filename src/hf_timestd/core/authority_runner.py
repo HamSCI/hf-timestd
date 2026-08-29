@@ -427,6 +427,32 @@ def build_authority_runner_from_config(
         t6_cfg.get("demote_on_breach_min_cycles", 3)
     )
 
+    # Receiver operating point (provenance).  radiod's RX888 AGC moves
+    # the analog front-end gain once per second from TOTAL band power,
+    # and 0.52 dB of the T6 pilot's C/N0 rides on every dB of it (B4,
+    # 2026-08-28) — an uncertainty term that was previously recorded
+    # nowhere.  Needs both a radiod to ask and a T6 frequency to ask
+    # about; SSRCs are hash-assigned, so there is no guessing fallback.
+    frontend_probe = None
+    from ..config_utils import resolve_ka9q_status as _resolve_ka9q_status
+    _fe_status = _resolve_ka9q_status(config)
+    _fe_freq = t6_cfg.get("frequency_hz")
+    if _fe_status and _fe_freq:
+        from hf_timestd.core.frontend_probe import (
+            FrontendProbe, SsrcByFrequency,
+        )
+
+        def _make_control(address=str(_fe_status)):
+            # Deferred: RadiodControl resolves the mDNS name in its
+            # constructor, and building a runner must not touch the net.
+            from ka9q import RadiodControl
+            return RadiodControl(address, client_id="hf-timestd")
+
+        frontend_probe = FrontendProbe(
+            _make_control,
+            resolve_ssrc=SsrcByFrequency(str(_fe_status), float(_fe_freq)),
+        )
+
     manager = AuthorityManager(
         probes=probes,
         output_path=authority_output_path,
@@ -437,6 +463,7 @@ def build_authority_runner_from_config(
         governor_radiod_provider=governor_radiod_provider,
         mdns_advertiser=mdns_advertiser,
         snapshot_store=snapshot_store,
+        frontend_probe=frontend_probe,
         demote_t6_on_breach=demote_t6_on_breach,
         demote_t6_on_breach_min_cycles=demote_t6_on_breach_min_cycles,
     )

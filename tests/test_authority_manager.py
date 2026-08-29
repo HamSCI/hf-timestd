@@ -1118,5 +1118,76 @@ class TestAuthorityManagerPhase2BTrustTierAnchorGrounded(unittest.TestCase):
                 )
 
 
+class TestFrontendOperatingPointInSnapshot(unittest.TestCase):
+    """The RX888 AGC moves the analog front-end gain on radiod's own
+    1 Hz schedule, and every dB of it moves the T6 pilot's C/N0.  Each
+    snapshot records the operating point in force when its T6 numbers
+    were measured, so a residual can be attributed to it afterwards."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.out = self.tmp / "authority.json"
+        self.clock = _Clock(datetime(2026, 8, 29, 3, 0, 0, tzinfo=timezone.utc))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _row(self, frontend_probe):
+        from hf_timestd.io.authority_snapshot_store import AuthoritySnapshotStore
+        import sqlite3
+        db = self.tmp / "auth.db"
+        store = AuthoritySnapshotStore(db)
+        try:
+            mgr = AuthorityManager(
+                probes=[FakeProbe("T3", _measure("T3", 0.5, 0.3))],
+                output_path=self.out,
+                a_level_provider=lambda: "A1",
+                upgrade_hysteresis=1,
+                now_fn=self.clock,
+                snapshot_store=store,
+                frontend_probe=frontend_probe,
+            )
+            mgr.tick()
+        finally:
+            store.close()
+        with sqlite3.connect(str(db)) as conn:
+            conn.row_factory = sqlite3.Row
+            return conn.execute(
+                "SELECT * FROM authority_snapshot"
+            ).fetchone()
+
+    def test_operating_point_recorded_beside_the_measurement(self) -> None:
+        class _Probe:
+            def sample(self):
+                return {
+                    "rf_gain": -4.2, "rf_agc": 1, "if_power": -23.3,
+                    "t6_baseband_power": -94.3, "t6_n0": -142.8,
+                }
+        row = self._row(_Probe())
+        self.assertAlmostEqual(row["rf_gain"], -4.2)
+        self.assertEqual(row["rf_agc"], 1)
+        self.assertAlmostEqual(row["if_power"], -23.3)
+        self.assertAlmostEqual(row["t6_baseband_power"], -94.3)
+        self.assertAlmostEqual(row["t6_n0"], -142.8)
+        # The tick's own work is unaffected.
+        self.assertEqual(row["t_level_active"], "T3")
+
+    def test_columns_null_when_no_probe_configured(self) -> None:
+        row = self._row(None)
+        self.assertIsNone(row["rf_gain"])
+        self.assertEqual(row["t_level_active"], "T3")
+
+    def test_a_raising_probe_cannot_break_the_tick(self) -> None:
+        """Timing authority must outrank its own provenance: losing the
+        operating point is an observability gap, losing the tick is an
+        outage."""
+        class _Broken:
+            def sample(self):
+                raise RuntimeError("radiod went away")
+        row = self._row(_Broken())
+        self.assertIsNone(row["rf_gain"])
+        self.assertEqual(row["t_level_active"], "T3")
+
+
 if __name__ == "__main__":
     unittest.main()
