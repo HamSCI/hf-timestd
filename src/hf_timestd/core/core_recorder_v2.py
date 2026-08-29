@@ -4678,21 +4678,18 @@ class CoreRecorderV2:
                 coarse = self._t6_calibrator._chain_delay_samples
                 if result is not None and result.locked and coarse is not None:
                     fine_stage.set_coarse_offset_samples(coarse)
+                else:
+                    # The MF is not standing behind a position right now.
+                    # Drop its window rather than search a stale one, and
+                    # let the fold acquire on its own — the MF is a
+                    # witness for fine_coarse, no longer a veto.
+                    fine_stage.clear_coarse_offset()
+                    coarse = None
                 fine = fine_stage.process_samples(
                     samples, resolve_batch_rtp(quality))
                 if fine is not None:
                     self._t6_last_fine_est = fine
-                # Gate on a live coarse offset (Finding 3): after an MF
-                # reset/unlock, _chain_delay_samples goes None but the
-                # fine stage's own internal _coarse_offset_rtp is not
-                # cleared by reset() — consulting the authority against
-                # a stale-window estimate here would let it reach
-                # AUTHORITATIVE with the fine_coarse invariant inert
-                # (coarse=None short-circuits that check instead of
-                # enforcing it).  Skip the authority call entirely
-                # until a fresh locked coarse value is available again.
-                if (fine is not None and coarse is not None
-                        and self._t6_authority is not None):
+                if fine is not None and self._t6_authority is not None:
                     named = self._t6_name_integer_second(fine.edge_rtp)
                     decision = self._t6_authority.on_fine_estimate(
                         fine, coarse, named)

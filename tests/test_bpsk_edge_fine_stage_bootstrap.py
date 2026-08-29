@@ -123,5 +123,27 @@ class TestTrackingAndConfirmation(unittest.TestCase):
         self.assertIsNone(stage._own_offset_rtp)
 
 
+class TestCoarseLifecycle(unittest.TestCase):
+
+    def test_clear_coarse_offset_drops_the_seeded_window(self):
+        """After an MF unlock the old window is stale; searching it is
+        how a stale-window estimate reaches the authority (Finding 3)."""
+        stage = BpskEdgeFineStage(sample_rate=SR)
+        stage.set_coarse_offset_samples(EDGE)
+        self.assertIsNotNone(stage.coarse_offset_fold_domain(0))
+        stage.clear_coarse_offset()
+        self.assertIsNone(stage.coarse_offset_fold_domain(0))
+
+    def test_clear_coarse_offset_keeps_our_own_offset(self):
+        """Different fields. Losing the MF must not cost us our own
+        confirmed position -- that is the whole point of the change."""
+        stage = BpskEdgeFineStage(sample_rate=SR)
+        _drive(stage, duration_s=121.0)
+        own = stage._own_offset_rtp
+        self.assertIsNotNone(own)
+        stage.clear_coarse_offset()
+        self.assertEqual(stage._own_offset_rtp, own)
+
+
 if __name__ == "__main__":
     unittest.main()

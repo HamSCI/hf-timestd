@@ -141,6 +141,17 @@ class BpskEdgeFineStage:
         """
         self._coarse_offset_rtp = float(offset) % self.sample_rate
 
+    def clear_coarse_offset(self) -> None:
+        """Forget the MF-supplied search window.
+
+        Called when the MF is not locked.  Without this the stage keeps
+        searching a window the MF no longer stands behind, which is
+        exactly the stale-window estimate the recorder's outer gate was
+        added to block (Finding 3).  Clears ONLY the MF's window — never
+        our own confirmed offset, which is independent of it.
+        """
+        self._coarse_offset_rtp = None
+
     def coarse_offset_fold_domain(self, registration: int) -> Optional[float]:
         """Translate the stored RTP-domain coarse into the fold domain
         for a block whose median registration is ``registration``.

@@ -288,14 +288,19 @@ def _bare_on_samples_recorder():
 
 
 class TestAuthorityCoarseGate:
-    """Finding 3 (review of Task 5): after an MF reset/unlock,
-    ``_chain_delay_samples`` goes None but ``BpskEdgeFineStage.reset()``
-    does not clear its own internal ``_coarse_offset_rtp`` — so a
-    stale-window fine estimate must never reach the authority while the
-    calibrator has no live coarse offset, or the authority can claim
-    AUTHORITATIVE with the fine_coarse invariant silently inert."""
+    """Task 4: the outer veto described here (review of Task 5) is
+    removed. ``BpskEdgeFineStage.reset()`` never cleared its own
+    internal ``_coarse_offset_rtp``, so a stale-window fine estimate
+    could reach the authority after an MF reset/unlock — the recorder
+    used to gate the whole authority call on a live coarse to block
+    that. The actual defect is fixed at its source instead:
+    ``clear_coarse_offset()`` is called whenever this batch's MF result
+    is not a live lock, so the fine stage never searches a stale
+    window, and the authority is consulted on every fine estimate
+    regardless — it already tolerates ``coarse=None`` and skips the
+    ``fine_coarse`` invariant when it is absent."""
 
-    def test_authority_not_consulted_when_coarse_is_none(self):
+    def test_authority_consulted_with_no_coarse(self):
         cr = _bare_on_samples_recorder()
         cr._t6_calibrator._chain_delay_samples = None  # MF unlocked/reset
         cr._t6_fine_stage = MagicMock()
@@ -307,11 +312,31 @@ class TestAuthorityCoarseGate:
         quality = MagicMock(last_rtp_timestamp=0)
         cr._t6_on_samples(samples, quality)
 
-        cr._t6_authority.on_fine_estimate.assert_not_called()
+        cr._t6_fine_stage.clear_coarse_offset.assert_called_once()
+        cr._t6_authority.on_fine_estimate.assert_called_once()
+        args = cr._t6_authority.on_fine_estimate.call_args.args
+        assert args[1] is None
 
     def test_authority_consulted_when_coarse_is_live(self):
         cr = _bare_on_samples_recorder()
         cr._t6_calibrator._chain_delay_samples = 43_181.0  # live coarse
+        # A live coarse implies the MF's own result was a lock this
+        # batch too (``_maybe_result`` only returns non-None then) —
+        # mirror that here rather than the fixture's default None,
+        # which now means "no live coarse" under the fixed gate. Give
+        # it a chain_delay_ns matching a pre-set _t6_last_chain_delay_ns
+        # so the (unrelated, untouched-by-this-task) disambiguation
+        # cascade further down in _t6_on_samples takes its steady-state
+        # "within tolerance" path instead of initial-accept, which
+        # needs far more fixture state — mirrors
+        # test_core_recorder_t6_step_recovery.py's
+        # _make_recorder_at_locked_state/_calibrator_result pattern.
+        locked_ns = 449_802_083
+        cr._t6_last_chain_delay_ns = locked_ns
+        cr._t6_calibrator.process_samples.return_value = SimpleNamespace(
+            locked=True, chain_delay_ns=locked_ns, chain_delay_samples=43_181.0,
+            pps_consecutive=0, pps_ok=0, pps_noise=0,
+        )
         cr._t6_fine_stage = MagicMock()
         cr._t6_fine_stage.process_samples.return_value = est()
         cr._t6_authority = MagicMock()
@@ -321,6 +346,8 @@ class TestAuthorityCoarseGate:
         quality = MagicMock(last_rtp_timestamp=0)
         cr._t6_on_samples(samples, quality)
 
+        cr._t6_fine_stage.set_coarse_offset_samples.assert_called_once_with(
+            43_181.0)
         cr._t6_authority.on_fine_estimate.assert_called_once()
         args = cr._t6_authority.on_fine_estimate.call_args.args
         assert args[1] == 43_181.0
