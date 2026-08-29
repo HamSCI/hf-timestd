@@ -59,7 +59,20 @@ class TestAcquisitionCliff(unittest.TestCase):
                     last = est
             self.assertIsNotNone(last, f"no estimate at seed {seed}")
             err = (last.edge_offset_samples - EDGE + SR / 2) % SR - SR / 2
-            self.assertLess(abs(err) / SR * 1e6, 200.0, f"seed {seed}")
+            err_us = abs(err) / SR * 1e6
+            self.assertLess(err_us, 200.0, f"seed {seed}")
+            # Precision gate, tighter than the acquisition/cliff pin above.
+            # Measured at 48.5 dB-Hz on 2026-08-29: 0.50 / 0.50 / 2.73 us for
+            # seeds 11 / 23 / 37. 20 us leaves ~7x headroom over the worst
+            # observed seed -- tight enough to catch a tenfold degradation,
+            # loose enough not to flake on noise realisation.
+            self.assertLess(
+                err_us, 20.0,
+                f"seed {seed}: folded stage still acquired but its "
+                f"precision degraded well beyond the measured floor "
+                f"({err_us:.2f} us vs a 20 us gate) -- investigate as a "
+                f"regression, do not just raise this bound",
+            )
 
     def test_matched_filter_alone_does_not_acquire_there(self):
         """The premise. If this ever starts passing, the MF improved and
