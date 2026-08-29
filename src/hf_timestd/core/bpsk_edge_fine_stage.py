@@ -64,6 +64,15 @@ REGISTRATION_SPREAD_LIMIT = 240
 # restarted; re-registering the median would be meaningless.
 STREAM_RESTART_LIMIT_SEC = 2.0
 
+# Self-seeding can cement a wrong crossing — the displaced-reference
+# failure the MF guards with STEP_CONFIRM_EDGES = 60.  The fold gets the
+# same discipline: this many consecutive full-search estimates must agree
+# before the stage will use its own offset as a search centre.
+BOOTSTRAP_CONFIRM_BLOCKS = 3
+BOOTSTRAP_CONFIRM_TOLERANCE_MS = 1.0
+# No slower to abandon a position than to adopt one.
+DEMOTE_AFTER_FAILED_BLOCKS = 3
+
 
 def _wrapped_signed(delta: int) -> int:
     """Map a mod-2^32 difference to signed [-2^31, 2^31)."""
@@ -100,6 +109,9 @@ class BpskEdgeFineStage:
         # coarse), 'tracking' (our own confirmed offset) or 'bootstrap'
         # (full-second matched filter).  Surfaced for tests and telemetry.
         self._last_search_mode: str = "none"
+        self._own_offset_rtp: Optional[float] = None
+        self._bootstrap_history: list[float] = []
+        self._failed_blocks = 0
         self._last_avg_for_test: Optional[np.ndarray] = None
         # One continuous counter domain (see rtp_domain).  Deliberately
         # NOT cleared by reset(): a re-lock after reset must land in the
@@ -255,8 +267,54 @@ class BpskEdgeFineStage:
         if seeded is not None:
             self._last_search_mode = "seeded"
             return seeded
+        if self._own_offset_rtp is not None:
+            self._last_search_mode = "tracking"
+            return (self._own_offset_rtp - int(registration)) % self.sample_rate
         self._last_search_mode = "bootstrap"
         return float(bootstrap_edge_index(in_phase))
+
+    def _note_block_estimate(self, edge_phase_rtp: float) -> None:
+        """Record a successful block and maintain the self-seed."""
+        self._failed_blocks = 0
+        if self._last_search_mode != "bootstrap":
+            # Already trusted: keep the tracking centre fresh.
+            self._own_offset_rtp = edge_phase_rtp
+            return
+        self._bootstrap_history.append(edge_phase_rtp)
+        if len(self._bootstrap_history) > BOOTSTRAP_CONFIRM_BLOCKS:
+            self._bootstrap_history.pop(0)
+        if len(self._bootstrap_history) < BOOTSTRAP_CONFIRM_BLOCKS:
+            return
+        first = self._bootstrap_history[0]
+        tol = BOOTSTRAP_CONFIRM_TOLERANCE_MS * 1e-3 * self.sample_rate
+        spread = max(
+            abs((v - first + self.sample_rate / 2) % self.sample_rate
+                - self.sample_rate / 2)
+            for v in self._bootstrap_history
+        )
+        if spread <= tol:
+            self._own_offset_rtp = first
+            logger.info(
+                "T6 fine stage: self-acquired edge confirmed across %d "
+                "blocks (spread %.0f samples), tracking from own offset.",
+                BOOTSTRAP_CONFIRM_BLOCKS, spread,
+            )
+
+    def _note_block_failed(self) -> None:
+        """A block produced no estimate. Enough of these and any adopted
+        position is abandoned, so a wrong lock is escapable."""
+        self._failed_blocks += 1
+        if self._failed_blocks >= DEMOTE_AFTER_FAILED_BLOCKS:
+            if self._own_offset_rtp is not None:
+                logger.warning(
+                    "T6 fine stage: %d consecutive blocks without an "
+                    "estimate — dropping the self-acquired offset and "
+                    "returning to full-second search.",
+                    self._failed_blocks,
+                )
+            self._own_offset_rtp = None
+            self._bootstrap_history.clear()
+            self._failed_blocks = 0
 
     def _compute_estimate(
         self, avg: np.ndarray, registration: int
@@ -276,6 +334,7 @@ class BpskEdgeFineStage:
         outer = np.concatenate([seg[: W // 2], seg[-(W // 2) :]])
         A = float(np.median(np.abs(outer)))
         if A <= 0.0:
+            self._note_block_failed()
             return None
 
         # Locate the sign-change candidate nearest the coarse offset
@@ -291,6 +350,7 @@ class BpskEdgeFineStage:
         # consideration; checking locally at the candidate avoids that.
         changes = np.nonzero(np.diff(np.sign(seg)) != 0)[0]
         if len(changes) == 0:
+            self._note_block_failed()
             return None
         k = int(changes[np.argmin(np.abs(changes - W))])
         if seg[k] > seg[k + 1]:
@@ -304,11 +364,13 @@ class BpskEdgeFineStage:
         while hi < len(seg) - 1 and abs(seg[hi + 1]) < band:
             hi += 1
         if hi - lo < 1:
+            self._note_block_failed()
             return None
         xs = np.arange(lo, hi + 1, dtype=np.float64)
         ys = seg[lo : hi + 1].astype(np.float64)
         m, b = np.polyfit(xs, ys, 1)
         if m <= 0.0:
+            self._note_block_failed()
             return None
         x0 = -b / m
         fit_rms = float(np.sqrt(np.mean((ys - (m * xs + b)) ** 2)) / A)
@@ -321,6 +383,7 @@ class BpskEdgeFineStage:
         edge_rtp_float = registration + c_edge
         edge_rtp = int(round(edge_rtp_float))
         subsample = float(edge_rtp_float - edge_rtp)
+        self._note_block_estimate(float(edge_rtp % p))
         return FineEdgeEstimate(
             edge_offset_samples=float(edge_offset),
             # Continuous (unwrapped) domain — consumers that hand this

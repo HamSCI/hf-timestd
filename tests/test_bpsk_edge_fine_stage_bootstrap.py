@@ -68,5 +68,60 @@ class TestBootstrapAcquisition(unittest.TestCase):
         self.assertEqual(stage._last_search_mode, "seeded")
 
 
+class TestTrackingAndConfirmation(unittest.TestCase):
+
+    def test_does_not_self_seed_before_confirmation(self):
+        """One bootstrap block is not enough. Self-seeding a wrong
+        crossing is how a displaced reference gets cemented -- the same
+        failure STEP_CONFIRM_EDGES guards in the MF."""
+        stage = BpskEdgeFineStage(sample_rate=SR)
+        _drive(stage, duration_s=31.0)          # exactly one fold block
+        self.assertIsNone(stage._own_offset_rtp)
+
+    def test_self_seeds_after_confirming_blocks_agree(self):
+        stage = BpskEdgeFineStage(sample_rate=SR)
+        _drive(stage, duration_s=91.0)          # three fold blocks
+        self.assertIsNotNone(stage._own_offset_rtp)
+
+    def test_tracks_from_its_own_offset_once_confirmed(self):
+        stage = BpskEdgeFineStage(sample_rate=SR)
+        _drive(stage, duration_s=121.0)         # four fold blocks
+        self.assertEqual(stage._last_search_mode, "tracking")
+
+    def test_disagreeing_bootstraps_are_not_promoted(self):
+        """Feed blocks whose edges differ by far more than the tolerance;
+        the stage must stay in bootstrap rather than adopt either."""
+        stage = BpskEdgeFineStage(sample_rate=SR)
+        for k, edge in enumerate((10000.0, 40000.0, 70000.0)):
+            sig = _make_bpsk_signal(
+                duration_s=30.0, sample_rate=SR, edge_offset_samples=edge,
+                noise_std=_noise_std_for(55.0), seed=11 + k,
+            )
+            for i in range(0, len(sig), BATCH):
+                stage.process_samples(sig[i:i + BATCH], i + k * len(sig))
+        self.assertIsNone(stage._own_offset_rtp)
+
+    def test_a_second_with_no_edge_yields_no_estimate(self):
+        """Spec §6: absence of an estimate must stay visible as absence.
+        A constant second has no polarity transition to find."""
+        stage = BpskEdgeFineStage(sample_rate=SR)
+        flat = np.ones(SR * 31, dtype=np.complex64)
+        produced = []
+        for i in range(0, len(flat), BATCH):
+            est = stage.process_samples(flat[i:i + BATCH], i)
+            if est is not None:
+                produced.append(est)
+        self.assertEqual(produced, [])
+        self.assertGreater(stage._failed_blocks, 0)
+
+    def test_demotes_to_bootstrap_after_repeated_failures(self):
+        stage = BpskEdgeFineStage(sample_rate=SR)
+        _drive(stage, duration_s=121.0)
+        self.assertIsNotNone(stage._own_offset_rtp)
+        for _ in range(3):
+            stage._note_block_failed()
+        self.assertIsNone(stage._own_offset_rtp)
+
+
 if __name__ == "__main__":
     unittest.main()
