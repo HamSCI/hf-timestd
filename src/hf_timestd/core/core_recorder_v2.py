@@ -5920,6 +5920,18 @@ class CoreRecorderV2:
                     ),
                     'pps_ok': self._t6_calibrator.pps_ok,
                     'pps_noise': self._t6_calibrator.pps_noise,
+                    # Spec §5: one batch with a disagreeing registration
+                    # discards a whole fold block, and three missed blocks
+                    # trip estimate_stale.  Published so drop tolerance is
+                    # built on measurement, not assumption.
+                    'fold_blocks_discarded': getattr(
+                        getattr(self, '_t6_fine_stage', None),
+                        'blocks_discarded', None,
+                    ),
+                    'fold_seconds': getattr(
+                        getattr(self, '_t6_fine_stage', None),
+                        'fold_seconds', None,
+                    ),
                     # Off-position (phantom) edges held inert while
                     # acquired — TSL3 displaced-reference fix.  None for
                     # the legacy non-MF calibrator.

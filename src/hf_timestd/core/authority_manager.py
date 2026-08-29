@@ -980,6 +980,8 @@ def _flatten_t6(snapshot: Dict[str, Any], r: Optional[ProbeResult]) -> None:
     snapshot["t6_pps_noise"] = d.get("pps_noise")
     snapshot["t6_pps_consecutive"] = d.get("pps_consecutive")
     snapshot["t6_chain_delay_ns"] = d.get("chain_delay_ns")
+    snapshot["t6_fold_blocks_discarded"] = d.get("fold_blocks_discarded")
+    snapshot["t6_fold_seconds"] = d.get("fold_seconds")
     dm = d.get("drift_monitor")
     if isinstance(dm, dict):
         snapshot["t6_anchor_discontinuity"] = (

@@ -734,6 +734,16 @@ class TestSnapshotStore(unittest.TestCase):
         self.assertEqual(row["t6_anchor_discontinuity"], 0)
         self.assertEqual(row["t6_anchor_residual_samples"], 12)
 
+    def test_fold_telemetry_reaches_the_snapshot(self) -> None:
+        from hf_timestd.core.authority_manager import _flatten_t6
+        snapshot = {}
+        _flatten_t6(snapshot, ProbeResult(
+            "T6", available=True, offset_ms=0.0, sigma_ms=0.001,
+            detail={"fold_blocks_discarded": 7, "fold_seconds": 30},
+        ))
+        assert snapshot["t6_fold_blocks_discarded"] == 7
+        assert snapshot["t6_fold_seconds"] == 30
+
     def test_t5_substrate_fields_flattened(self) -> None:
         """LbeT5DirectProbe substrate fields (valid_fix, pps_utc_sec,
         nmea_age_sec, anchor_age_sec) round-trip into their dedicated

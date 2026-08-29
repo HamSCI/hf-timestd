@@ -300,6 +300,8 @@ class BpskPpsProbe:
             "local_minus_source_ns_std_ns": lms_std_ns,
             "sigma_floor_ms": self.sigma_floor_ms,
             "age_sec": round(age_sec, 3),
+            "fold_blocks_discarded": t6.get("fold_blocks_discarded"),
+            "fold_seconds": t6.get("fold_seconds"),
         }
         # hf-timestd-native (RTP, UTC) anchor — forward into the
         # ProbeResult detail so downstream consumers (authority
