@@ -15,17 +15,56 @@ acquisition provenance (`t6_fine_search_mode`, `t6_fine_coarse_unverified`) are
 recorded per authority tick. Without those, the Type A term in §4 cannot be
 computed and this model would be a schema around asserted constants.
 
-## 0. Goals, and which one wins
+## 0. One fixed invariant, one continuing programme
 
-1. **Make the instrument as accurate as the hardware and methods allow.**
-2. **Report honestly and clearly, in terms both metrology and physics
-   recognise.**
+These are not two goals with a tie-break. They are different KINDS of thing, and
+the difference is structural.
 
-⛔ Where they conflict, **goal 2 wins.** An instrument that is less accurate
-than it could be but reports honestly is recoverable by everyone downstream. One
-that overclaims is not, and it silently corrupts every analysis built on it.
-Concretely: we do not apply a correction we cannot yet validate merely because
-it would make a symptom disappear.
+### FIXED — honesty, clarity, and recognisable description
+
+Every product describes its timing in terms metrology and physics both
+recognise: a stated measurand, corrections separated from uncertainties,
+coverage stated, each term typed A or B with its evaluation method, and no claim
+the evidence does not support. **This is settled and not renegotiable.** It does
+not improve, it does not get traded against accuracy, and it does not relax when
+a deadline or a result would be more convenient without it.
+
+Three consequences that shape the design:
+
+1. **The schema must be able to describe every instrument state honestly,
+   including bad ones and ones we have not imagined.** A schema that only
+   expresses the instrument working well is not honest; it just fails silently
+   when it matters most. Hence `origin: null`, unqualified chains, and absence
+   recorded as absence (§7) are first-class, not error paths.
+2. **No future improvement may weaken the description.** A term may not be
+   dropped from the budget because it became small, a correction may not be
+   applied because it makes a symptom disappear, and a chain may not be
+   relabelled to look better. If a change to the instrument would make its
+   description less honest, the change is rejected however much accuracy it
+   promises. This is the rule that forbids pasting 16.618 ms into the config to
+   clear the falseticker.
+3. **The invariant must be mechanically enforced, not merely intended** — hence
+   the overclaim gate in §8. An invariant nobody can check is an aspiration.
+
+### CONTINUING — the best instrument the hardware and methods allow
+
+Arranging the hardware and using the best available methods to extract the most
+information from it. This has no completion state; it is the work, ongoing.
+
+The measurable form of progress is the **Type B → Type A burn-down**: every term
+that moves from asserted to measured is a real improvement in what the instrument
+can be said to know, and the budget in §4.2 is the ledger of how far that has
+got. Today two terms are Type B and the model says so.
+
+### Why the pairing works
+
+The fixed half is what makes the continuing half safe. Because the description
+cannot be weakened, the instrument can be changed freely — aggressively, even —
+without any risk of quietly overstating what came out of it. Data taken today
+under a Type B group delay stays comparable with data taken after that term
+becomes Type A, because both carry an honest account of what was known at the
+time. Improvement never invalidates the archive; it only narrows the error bars
+on the parts recorded after it.
 
 ## 1. Problem
 
@@ -266,7 +305,7 @@ supports. If a term is unknown, the chain is unqualified.
   never smaller than the observed scatter against an independent reference
   (T5/T4 residuals over the same interval). If the record ever claims better than
   reality, that fails a gate rather than being noticed in a paper two years on.
-  This is what makes goal 2 mechanically enforced instead of aspirational.
+  This is what mechanically enforces the fixed invariant of §0 instead of leaving it an aspiration.
 
 ## 9. Out of scope
 
