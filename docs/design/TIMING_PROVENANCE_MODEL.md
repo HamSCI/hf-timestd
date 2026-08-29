@@ -120,9 +120,49 @@ and honest where "T6 station" sounded uniformly excellent.
 
 ## 3. The record
 
-A JSONL sidecar beside the product, bundled into the OBS zip, using
-mag-recorder's proven policy: append when the STABLE identity changes, plus an
-unconditional heartbeat to bound staleness. Two block types.
+### 3.0 ⚡ This EXTENDS an existing mechanism — it does not replace one
+
+An earlier draft of this section specified a fresh JSONL sidecar as the only
+carrier. That was written without knowing GRAPE already has a per-chunk timing
+sidecar, and building a parallel one would have duplicated it.
+
+`binary_archive_writer` already writes, per chunk, a `timing` block described in
+its own source as "fully self-describing (raw mapping + applied correction)":
+
+```python
+{'radiod_gps_time_ns': ..., 'radiod_rtp_timesnap': ...,   # the raw host-clock mapping
+ 'offset_ns': ..., 'offset_sigma_ns': ..., 'judge_tier': ...,
+ 'judge_age_s': ..., 'segment_id': ..., 'rate_ppm': ...}
+```
+
+`hamsci_physics.grape.decimation_pipeline.timing_from_sidecar()` consumes it and
+already honours two of this model's principles: a verdict without an uncertainty
+is treated as no verdict, and the `"X"` sentinel keeps saying "no verdict" rather
+than defaulting to a good-looking one. That is absence-as-absence, already
+shipped.
+
+So the mapping is:
+
+- **`state` block → the existing per-chunk `timing` block, extended.** No new
+  per-chunk file.
+- **`chain` block → a new JSONL sidecar**, because the chain description and its
+  budget are cross-chunk and change rarely. This is where mag-recorder's
+  change-plus-heartbeat policy applies.
+
+Two existing constructs are retained but demoted, not deleted:
+`judge_tier` becomes the optional non-normative local shorthand of §2, and
+`decimation_pipeline`'s A/B/C/D grade ladder (bounds 2 / 4 / 8 ms) is left
+untouched for the fusion chain while being explicitly noted as having **no
+resolution for a payload-anchored chain** — every µs-class chunk grades "A", so
+the ladder stops discriminating exactly where the instrument gets good. Choosing
+its replacement is out of scope here and belongs with Phase 3.
+
+### 3.0.1 Delivery
+
+The JSONL chain sidecar is bundled into the OBS zip by
+`hamsci_physics.grape.packager`, using mag-recorder's proven policy: append when
+the STABLE identity changes, plus an unconditional heartbeat to bound staleness.
+Two block types.
 
 ### 3.1 `state` — every interval
 
