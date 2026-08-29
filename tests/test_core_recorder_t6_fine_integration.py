@@ -352,6 +352,32 @@ class TestAuthorityCoarseGate:
         args = cr._t6_authority.on_fine_estimate.call_args.args
         assert args[1] == 43_181.0
 
+    def test_authority_receives_none_when_calibrator_not_locked(self):
+        """Review finding (fix round 1): _chain_delay_samples is set on
+        every accepted edge (bpsk_pps_calibrator_mf.py), including
+        pre-acquisition, and pps_consecutive resetting to 0 makes
+        ``locked`` False WITHOUT clearing it -- so an unlocked
+        calibrator can still hold a live-looking, but stale, chain
+        delay. The else-branch's ``coarse = None`` (not just
+        ``clear_coarse_offset()``) is what stops that stale value from
+        reaching the authority as the fine_coarse witness."""
+        cr = _bare_on_samples_recorder()
+        cr._t6_calibrator._chain_delay_samples = 43_181.0  # stale but live-looking
+        cr._t6_calibrator.process_samples.return_value = None  # not locked
+        cr._t6_fine_stage = MagicMock()
+        cr._t6_fine_stage.process_samples.return_value = est()
+        cr._t6_authority = MagicMock()
+        cr._t6_authority.on_tick.return_value = None  # liveness: nothing due
+
+        samples = MagicMock()
+        quality = MagicMock(last_rtp_timestamp=0)
+        cr._t6_on_samples(samples, quality)
+
+        cr._t6_fine_stage.clear_coarse_offset.assert_called_once()
+        cr._t6_authority.on_fine_estimate.assert_called_once()
+        args = cr._t6_authority.on_fine_estimate.call_args.args
+        assert args[1] is None
+
 
 class TestAuthorityStatus:
     def test_status_none_when_authority_absent(self):
