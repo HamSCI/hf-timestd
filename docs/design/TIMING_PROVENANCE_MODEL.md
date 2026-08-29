@@ -41,8 +41,9 @@ Three consequences that shape the design:
    applied because it makes a symptom disappear, and a chain may not be
    relabelled to look better. If a change to the instrument would make its
    description less honest, the change is rejected however much accuracy it
-   promises. This is the rule that forbids pasting 16.618 ms into the config to
-   clear the falseticker.
+   promises. This is the rule that forbade pasting 16.618 ms into the config to
+   drive HPPS toward zero — and, as it turned out, the rule that made the
+   misdiagnosis in §1 recoverable rather than baked into the instrument.
 3. **The invariant must be mechanically enforced, not merely intended** — hence
    the overclaim gate in §8. An invariant nobody can check is an aspiration.
 
@@ -85,11 +86,23 @@ continuously AUTHORITATIVE and anchoring. Same station, same instant, two
 subsystems, two incompatible answers. At DASI2 the tiers are structurally
 unavailable — they are defined by hardware that station does not have.
 
-**A known systematic is neither corrected nor reported.** The radiod filter
-group delay is configured as `filter_group_delay_ns = 16618000` and armed as
-`filter_group_delay=0 ns`. chrony sees HPPS at **+17 ms** and marks it `#x`
-falseticker. Metrologically this is the worst of both worlds: a correction that
-is not applied, and an uncertainty that does not report it.
+**Two instrumental terms have never been evaluated.** The injector modulator
+delay (≈10 µs, vendor documentation) and the receiver front end (sub-µs, not
+characterised) are the terms that set the combined uncertainty of the
+payload-anchored chain, and neither has been measured. They are fixed properties
+of the installation, so they are evaluable — nobody has done it.
+
+⛔ **A correction to an earlier draft of this document.** It claimed the radiod
+filter group delay was "a known systematic neither corrected nor reported",
+citing HPPS reading +17 ms in chrony as evidence of a defect. That was wrong.
+B4 runs `labeling_convention = "content"`: the label denotes the **antenna
+epoch**, so the processing interval Λ is excluded from the measurand *by
+definition*, not by omission. HPPS reporting ≈+17 ms is the label-vs-host plane
+offset — which IS Λ — and chrony refusing it is the correct outcome, not a
+falseticker bug. The open item is the known one-line change that brings HPPS
+near zero under content by subtracting the floor-measured transport; it is not a
+metrological defect. The earlier draft made the instrument look two orders of
+magnitude worse than it is by importing a term its own measurand excludes.
 
 ## 2. The model: a chain, not a tier
 
@@ -212,8 +225,9 @@ a 16.6 ms "uncertainty" would be precisely the error this section prevents.
 ⚡ **`correction_ns` and `u_ns` are separate fields on every term.** A known
 systematic that is applied shows a non-zero correction; one that is known but
 unapplied shows the correction it *should* carry and is flagged. That split is
-what makes the §1 falseticker legible instead of invisible, and it is the
-difference between a GUM budget and a list of numbers.
+what distinguishes a GUM budget from a list of numbers — and what would have
+caught the §1 misdiagnosis on its own, since a term whose `correction_ns` is
+excluded by the measurand cannot be silently reported as an uncertainty.
 
 ### 3.3 Two uncertainties, because two audiences need different ones
 
@@ -294,24 +308,35 @@ and are reported separately.
 
 | Term | Correction | u | Type | Basis |
 |---|---|---|---|---|
-| GPS → GPSDO epoch | 0 | ~20 ns | B | standard GPSDO discipline |
-| GPSDO holdover (coasting only) | 0 | 1.44 µs/h | **A** | measured on B4 |
-| TS-1 modulator | 0 | 10 µs | B | vendor guide assertion |
-| RF path electrical length | 0 | < 1 µs | B | named for completeness |
-| ADC clock | 0 | ppm-level over interval | B | GPSDO-locked |
-| **radiod filter group delay** | **16.618 ms** | **1.5 ms** | **B** | asserted; vs T4-referenced 15.153 ms |
-| Edge estimation | 0 | from C/N0 | **A** (§4.3) | per record |
+| GNSS 1 PPS at the injector | 0 | 100 ns | B | receiver specification |
+| **Injector modulator delay** | 0 | **not evaluated** (≈10 µs) | B | vendor documentation |
+| Feed transit, 20 m @ 5 ns/m | 100 ns | ≤ 20 ns | B | cable length and velocity factor |
+| **Receiver front end** | 0 | **not evaluated** (sub-µs) | B | not characterised |
+| Fiducial localisation | 0 | 150 ns | A | repeatability, 120 s |
+| Sub-aperture interpolation | 0 | 5 ns | A | quantisation |
+| Anchor-to-anchor agreement | 0 | 32 ns | A | consecutive anchors, 30 s |
+| Anchor origin dispersion | 0 | 1.9 µs | A | 63 anchors over 4.5 h |
+| Rate reference, carried 1 h | 0 | 1.44 µs | A | −0.0004 ± 0.0004 ppm |
 
-The group delay dominates by three orders of magnitude — and dominates as an
-*uncorrected* term, which is the indefensible part, not its size.
+Type A combines to **0.15 µs** over a 30 s carry and **2.4 µs** over 4.5 h. The
+combined uncertainty is therefore set by the two **unevaluated** analogue Type B
+terms, of order **10 µs**.
+
+⚡ The processing interval Λ (≈14.1 ms, load-dependent) does **not** appear here.
+Under the content convention the label denotes the antenna epoch, so Λ is outside
+the measurand by definition. Under the legacy convention it is inside it, and
+then it dominates and is not a constant of the design. Which convention is in
+force is therefore a statement about *what was measured*, not a correction to it
+— which is why `chain` carries it and why the two are reported separately
+throughout.
 
 ### 4.3 ⛔ The Type A claim is not yet earned, and the spec must not pretend it is
 
 The σ-vs-C/N0 relation measured on 2026-08-29 — 12 % of σ per dB, obeying
 1/√SNR — was measured on the **coarse** matched-filter stage. The stage that
 produces the published edge is the **fine** stage, for which we have three points
-at a single C/N0 (0.50 / 0.50 / 2.73 µs at 48.5 dB-Hz) and a 22 ns figure from
-`BPSK-PPS-DETECTION-METHODS.md` at unstated conditions.
+at a single C/N0 (0.50 / 0.50 / 2.73 µs at 48.5 dB-Hz) a 22 ns figure from `BPSK-PPS-DETECTION-METHODS.md` at unstated conditions, and
+the 150 ns fiducial-localisation Type A above, also at unstated C/N0.
 
 ⇒ **`edge_estimation` MUST be published as Type B with a conservative bound until
 the fine-stage σ-vs-C/N0 sweep has run.** Reusing the coarse relation for the
