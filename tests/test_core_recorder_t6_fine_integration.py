@@ -969,3 +969,197 @@ class TestHppsPublishStatusIsObservable:
         cr = CoreRecorderV2.__new__(CoreRecorderV2)
         s = cr._t6_hpps_publish_status()
         assert s["mode"] is None and s["publishing"] is False
+
+
+# ---------------------------------------------------------------------
+# Final-review C1 / C2 / I1: the recovery paths must actually escape.
+# ---------------------------------------------------------------------
+
+import math  # noqa: E402
+import sys   # noqa: E402
+from pathlib import Path  # noqa: E402
+
+import numpy as np  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_bpsk_pps_calibrator_mf import _make_bpsk_signal  # noqa: E402
+from hf_timestd.core.bpsk_edge_fine_stage import (  # noqa: E402
+    BpskEdgeFineStage,
+)
+
+BATCH = 1920
+TRUE_EDGE = 47_916.1672
+
+
+def _noise_std_for(cn0_db_hz: float) -> float:
+    snr = 10 ** ((cn0_db_hz - 10 * math.log10(SR)) / 10.0)
+    return 1.0 / math.sqrt(2.0 * snr)
+
+
+def _feed(stage, edge, duration_s, rtp0, cn0_db_hz=55.0, seed=11):
+    sig = _make_bpsk_signal(
+        duration_s=duration_s, sample_rate=SR, edge_offset_samples=edge,
+        noise_std=_noise_std_for(cn0_db_hz), seed=seed,
+    )
+    last = None
+    for i in range(0, len(sig), BATCH):
+        e = stage.process_samples(sig[i:i + BATCH], rtp0 + i)
+        if e is not None:
+            last = e
+    return last
+
+
+def _recovery_recorder(fine_stage):
+    """Bare recorder able to run the three T6 recovery sites."""
+    cr = CoreRecorderV2.__new__(CoreRecorderV2)
+    cr._use_shared_multistream = True
+    cr._t6_first_sample_logged = True
+    cr._t6_calibrator = MagicMock()
+    cr._t6_calibrator.process_samples.return_value = None
+    cr._t6_fine_stage = fine_stage
+    cr._t6_authority = None
+    cr._t6_disambiguation_ns = 0
+    cr._t6_wrap_rejections = 0
+    cr._t6_recent_raw = deque(maxlen=CoreRecorderV2.T6_STEP_RECOVERY_WINDOW)
+    cr._t6_last_locked_wall = None
+    cr._t6_mf_chain_delay_store = None
+    cr._t6_shm = None
+    cr._t6_channel_info = None
+    cr.recorders = {}
+    cr._t6_capture_anomaly = lambda *a, **k: None
+    return cr
+
+
+class TestRecoveryPathsRepudiateTheStagePosition:
+    """C1 + I1.  ``test_authority_not_consulted_when_coarse_is_none``
+    used to be the only assertion that a stale-window fine estimate
+    could not reach the authority.  Its replacement asserts only that
+    ``clear_coarse_offset()`` is called — and that method deliberately
+    spares the stage's own tracking offset, so the property it guarded
+    became false.  Here it is in its new form: after a recovery-path
+    unlock the stage must not localise against the inherited position,
+    and must go back to a full-second bootstrap.
+    """
+
+    def test_stale_lock_abandonment_clears_the_stage_position(self):
+        stage = MagicMock()
+        cr = _recovery_recorder(stage)
+        cr._t6_last_chain_delay_ns = 225_754_278
+        cr._t6_stale_lock_clock = lambda: 0.0
+        cr._t5_implied_effective_chain_delay = MagicMock(
+            return_value=148_925_066.0)
+        cr._t6_stale_lock_watch = SimpleNamespace(
+            observe=lambda delta, now: True)
+        cr._t6_check_stale_lock()
+        stage.reset.assert_called_once()
+        stage.clear_own_offset.assert_called_once()
+
+    def test_stuck_unlock_clears_the_stage_position(self):
+        stage = MagicMock()
+        cr = _recovery_recorder(stage)
+        cr._t6_last_chain_delay_ns = 33_000_000
+        samples, quality = MagicMock(), MagicMock(last_rtp_timestamp=0)
+        with patch(
+            'hf_timestd.core.core_recorder_v2.time.monotonic'
+        ) as clock:
+            clock.return_value = 1000.0
+            cr._t6_on_samples(samples, quality)
+            clock.return_value = 1000.0 + CoreRecorderV2.T6_STUCK_TIMEOUT_SEC + 1
+            cr._t6_on_samples(samples, quality)
+        stage.clear_own_offset.assert_called_once()
+
+    def test_step_recovery_clears_the_stage_position(self):
+        stage = MagicMock()
+        stage.process_samples.return_value = None
+        cr = _recovery_recorder(stage)
+        cr._t6_last_chain_delay_ns = 32_000_000
+        cr._t5_implied_effective_chain_delay = MagicMock(
+            return_value=32_050_000.0)
+        for i in range(CoreRecorderV2.T6_STEP_RECOVERY_WINDOW):
+            cr._t6_calibrator.process_samples.return_value = SimpleNamespace(
+                locked=True, chain_delay_ns=418_000_000 + (i % 5) * 50,
+                chain_delay_samples=0.0, pps_consecutive=0, pps_ok=0,
+                pps_noise=0,
+            )
+            cr._t6_on_samples(MagicMock(),
+                              MagicMock(last_rtp_timestamp=0))
+        assert cr._t6_last_chain_delay_ns is None  # recovery really fired
+        stage.clear_own_offset.assert_called_once()
+
+    def test_after_abandonment_the_stage_bootstraps_the_true_edge(self):
+        """The behaviour, not the call.  A real fine stage inherits a
+        displaced position (the B4 -26 ms / -76.8 ms family), the
+        stale-lock watch abandons the lock, and the stage must then find
+        the edge that is actually there rather than go on localising
+        where the repudiated MF put it."""
+        displaced = TRUE_EDGE - 0.026 * SR      # a 26 ms displaced lock
+        stage = BpskEdgeFineStage(sample_rate=SR)
+        stage.set_coarse_offset_samples(displaced)
+        _feed(stage, displaced, 120.0, 0)
+        assert stage._own_offset_rtp is not None   # inherited it
+
+        cr = _recovery_recorder(stage)
+        cr._t6_last_chain_delay_ns = 225_754_278
+        cr._t6_stale_lock_clock = lambda: 0.0
+        cr._t5_implied_effective_chain_delay = MagicMock(
+            return_value=148_925_066.0)
+        cr._t6_stale_lock_watch = SimpleNamespace(
+            observe=lambda delta, now: True)
+        cr._t6_check_stale_lock()
+        # _t6_on_samples does this on every batch the MF is not locked,
+        # which it no longer is after the abandonment above.
+        stage.clear_coarse_offset()
+
+        est_after = _feed(stage, TRUE_EDGE, 30.0, 120 * SR)
+        assert stage._last_search_mode == "bootstrap"
+        assert est_after is not None
+        err = (est_after.edge_offset_samples - TRUE_EDGE + SR / 2) % SR - SR / 2
+        assert abs(err) / SR * 1e6 < 100.0
+
+
+class TestEdgePeriodRejectionReachesTheStage:
+    """C2 — spec §3.3's missing half.  A position that fits cleanly
+    every block but violates ``edge_period`` at the authority must be
+    demoted at the stage, or it is re-installed the moment the
+    authority re-acquires."""
+
+    def _cr(self, violations):
+        cr = _recovery_recorder(MagicMock())
+        cr._t6_last_chain_delay_ns = None
+        cr._t6_calibrator._chain_delay_samples = None
+        cr._t6_fine_stage.process_samples.return_value = est()
+        cr._t6_authority = MagicMock()
+        cr._t6_authority.on_tick.return_value = None
+        cr._t6_authority.on_fine_estimate.return_value = SimpleNamespace(
+            state=T6AuthorityState.DEGRADED,
+            previous_state=T6AuthorityState.AUTHORITATIVE,
+            anchor=None, violations=violations,
+        )
+        cr._t6_apply_authority_decision = MagicMock()
+        cr._t6_on_samples(MagicMock(), MagicMock(last_rtp_timestamp=0))
+        return cr
+
+    def test_violations_are_reported_to_the_stage(self):
+        cr = self._cr(("edge_period",))
+        cr._t6_fine_stage.note_authority_violations.assert_called_once_with(
+            ("edge_period",))
+
+    def test_a_clean_decision_is_reported_too(self):
+        """The verdict clears the failure run; silence would leave it
+        standing for ever."""
+        cr = self._cr(())
+        cr._t6_fine_stage.note_authority_violations.assert_called_once_with(())
+
+    def test_sustained_edge_period_rejection_demotes_a_real_stage(self):
+        """End to end on a real stage: the authority rejects every
+        block, and within DEMOTE_AFTER_FAILED_BLOCKS the stage lets go
+        of the position instead of defending it."""
+        from hf_timestd.core.bpsk_edge_fine_stage import (
+            DEMOTE_AFTER_FAILED_BLOCKS,
+        )
+        stage = BpskEdgeFineStage(sample_rate=SR)
+        _feed(stage, TRUE_EDGE, 120.0, 0)
+        for _ in range(DEMOTE_AFTER_FAILED_BLOCKS):
+            stage._verdict_pending = True
+            stage.note_authority_violations(("edge_period",))
+        assert stage._own_offset_rtp is None

@@ -112,6 +112,15 @@ class BpskEdgeFineStage:
         self._own_offset_rtp: Optional[float] = None
         self._bootstrap_history: list[float] = []
         self._failed_blocks = 0
+        # A block whose fit succeeded has NOT yet been judged: the
+        # authority may still reject its position for ``edge_period``,
+        # which spec §3.3 counts as a failed block.  The failure run is
+        # therefore cleared by the VERDICT (note_authority_violations),
+        # not by the fit.  A caller with no authority attached (unit
+        # tests, offline analysis) never reports one; an unreported
+        # verdict is treated as acceptance when the next block lands, so
+        # standalone behaviour is unchanged.
+        self._verdict_pending = False
         self._last_avg_for_test: Optional[np.ndarray] = None
         # One continuous counter domain (see rtp_domain).  Deliberately
         # NOT cleared by reset(): a re-lock after reset must land in the
@@ -151,6 +160,63 @@ class BpskEdgeFineStage:
         our own confirmed offset, which is independent of it.
         """
         self._coarse_offset_rtp = None
+
+    def clear_own_offset(self) -> None:
+        """Repudiate the stage's own tracking position.
+
+        Deliberately NOT part of ``reset()``: reset runs at every fold
+        block boundary, where clearing would be pure churn fighting the
+        recorder's per-batch re-seed.  This is the escape hatch for the
+        recorder's three recovery sites (stale-lock abandonment,
+        stuck-unlock, step-recovery), each of which has just concluded
+        that the position the stage is sitting on is not defensible.
+
+        Without it, self-acquisition made a displaced lock HARDER to
+        shed than before: the MF unlocks, the authority UNLOCKs and
+        drops its ``_prev_edge``, and the fine stage goes on localising
+        at the same wrong position, re-installing it within one fold
+        block with ``edge_period`` unreferenced and ``fine_coarse``
+        unverified (the B4 -26 ms / -76.8 ms family).
+
+        Clears the confirmation history too: keeping it would let the
+        very next block re-promote the repudiated position without the
+        full ``BOOTSTRAP_CONFIRM_BLOCKS`` agreement the spec requires.
+        """
+        if self._own_offset_rtp is not None:
+            logger.warning(
+                "T6 fine stage: tracking offset repudiated by a recovery "
+                "path — returning to full-second bootstrap.",
+            )
+        self._own_offset_rtp = None
+        self._bootstrap_history.clear()
+        self._failed_blocks = 0
+        self._verdict_pending = False
+
+    def note_authority_violations(self, violations) -> None:
+        """Feed the authority's verdict on this block's estimate back in.
+
+        Spec §3.3 demotes to bootstrap after
+        ``DEMOTE_AFTER_FAILED_BLOCKS`` consecutive blocks that either
+        fail their fit **or** are rejected for ``edge_period``.  Only
+        the recorder sees the authority's decision, so it reports it
+        here; without this half, a position that fits cleanly every
+        block while violating ``edge_period`` drives the authority
+        AUTHORITATIVE → DEGRADED → UNLOCKED while the stage keeps
+        tracking it, and re-installs it on the next acquisition.
+
+        ``edge_period`` only.  ``fine_coarse`` is the matched-filter
+        witness disagreeing — a different signal, and deliberately
+        non-fatal since the MF was demoted from gate to witness;
+        ``naming_unavailable`` says nothing about this stage's position
+        at all.
+        """
+        if not self._verdict_pending:
+            return
+        self._verdict_pending = False
+        if "edge_period" in tuple(violations or ()):
+            self._note_block_failed()
+        else:
+            self._failed_blocks = 0
 
     def coarse_offset_fold_domain(self, registration: int) -> Optional[float]:
         """Translate the stored RTP-domain coarse into the fold domain
@@ -286,7 +352,13 @@ class BpskEdgeFineStage:
 
     def _note_block_estimate(self, edge_phase_rtp: float) -> None:
         """Record a successful block and maintain the self-seed."""
-        self._failed_blocks = 0
+        if self._verdict_pending:
+            # The previous block's verdict never arrived, so no
+            # authority is attached and a clean fit is the only evidence
+            # there is.  (With an authority, note_authority_violations
+            # has already cleared or extended the run.)
+            self._failed_blocks = 0
+        self._verdict_pending = True
         if self._last_search_mode != "bootstrap":
             # Already trusted: keep the tracking centre fresh.
             self._own_offset_rtp = edge_phase_rtp
@@ -314,6 +386,7 @@ class BpskEdgeFineStage:
     def _note_block_failed(self) -> None:
         """A block produced no estimate. Enough of these and any adopted
         position is abandoned, so a wrong lock is escapable."""
+        self._verdict_pending = False
         self._failed_blocks += 1
         if self._failed_blocks >= DEMOTE_AFTER_FAILED_BLOCKS:
             if self._own_offset_rtp is not None:

@@ -123,6 +123,149 @@ class TestTrackingAndConfirmation(unittest.TestCase):
         self.assertIsNone(stage._own_offset_rtp)
 
 
+def _drive_at(stage, edge, duration_s, rtp0, cn0_db_hz=55.0, seed=11,
+              violations=None):
+    """Drive ``duration_s`` of signal whose edge sits at ``edge``, with the
+    stream's RTP starting at ``rtp0`` so successive calls stay continuous.
+
+    ``violations``, when given, is reported to the stage as the
+    authority's verdict after every block that produced an estimate —
+    what the recorder does in production.
+    """
+    sig = _make_bpsk_signal(
+        duration_s=duration_s, sample_rate=SR, edge_offset_samples=edge,
+        noise_std=_noise_std_for(cn0_db_hz), seed=seed,
+    )
+    last = None
+    for i in range(0, len(sig), BATCH):
+        est = stage.process_samples(sig[i:i + BATCH], rtp0 + i)
+        if est is not None:
+            last = est
+            if violations is not None:
+                stage.note_authority_violations(violations)
+    return last
+
+
+class TestOwnOffsetEscapeHatch(unittest.TestCase):
+    """C1: the recovery paths must be able to make the stage let go.
+
+    ``reset()`` runs at every fold-block boundary, so it deliberately
+    keeps the tracking offset.  The three recorder recovery sites
+    (stale-lock abandonment, stuck-unlock, step-recovery) need a way to
+    say "the position you inherited is repudiated" — otherwise a
+    displaced MF lock is *harder* to shed after self-acquisition than
+    before it: the MF unlocks, the authority UNLOCKs, and the fine
+    stage keeps localising at the same wrong place.
+    """
+
+    def test_clear_own_offset_drops_the_tracking_position(self):
+        stage = BpskEdgeFineStage(sample_rate=SR)
+        _drive(stage, duration_s=121.0)
+        self.assertIsNotNone(stage._own_offset_rtp)
+        stage.clear_own_offset()
+        self.assertIsNone(stage._own_offset_rtp)
+
+    def test_clear_own_offset_forces_a_fresh_confirmation(self):
+        """Dropping the offset but keeping the history would let the very
+        next block re-promote the repudiated position."""
+        stage = BpskEdgeFineStage(sample_rate=SR)
+        _drive(stage, duration_s=121.0)
+        stage.clear_own_offset()
+        self.assertEqual(list(stage._bootstrap_history), [])
+
+    def test_reset_alone_still_keeps_the_tracking_position(self):
+        """The escape hatch must NOT live inside ``reset()``: reset runs
+        at every block boundary and clearing there would fight the
+        recorder's per-batch re-seed."""
+        stage = BpskEdgeFineStage(sample_rate=SR)
+        _drive(stage, duration_s=121.0)
+        own = stage._own_offset_rtp
+        stage.reset()
+        self.assertEqual(stage._own_offset_rtp, own)
+
+    def test_a_repudiated_position_is_abandoned_and_the_true_edge_found(self):
+        """The B4 displaced-lock family, end to end at stage level.
+
+        The stage is seeded at P1 and adopts it.  The lock is then
+        repudiated and the true edge is elsewhere (P2).  Before
+        ``clear_own_offset`` the stage went on searching +-6 ms around
+        P1 and produced NOTHING for ever; after it, one bootstrap block
+        finds P2.
+        """
+        P1 = EDGE
+        P2 = EDGE + 20_000.0
+        stage = BpskEdgeFineStage(sample_rate=SR)
+        stage.set_coarse_offset_samples(P1)
+        _drive_at(stage, P1, 120.0, 0)
+        self.assertEqual(stage._last_search_mode, "seeded")
+        self.assertIsNotNone(stage._own_offset_rtp)
+
+        # Exactly what the three recovery sites do.
+        stage.clear_coarse_offset()
+        stage.clear_own_offset()
+        stage.reset()
+
+        est = _drive_at(stage, P2, 30.0, 120 * SR)
+        self.assertEqual(stage._last_search_mode, "bootstrap")
+        self.assertIsNotNone(est, "no estimate after abandoning the lock")
+        err = (est.edge_offset_samples - P2 + SR / 2) % SR - SR / 2
+        self.assertLess(abs(err) / SR * 1e6, 100.0)
+
+
+class TestAuthorityVerdictFeedback(unittest.TestCase):
+    """C2: spec §3.3's other half — ``edge_period`` rejections count.
+
+    A position can fit cleanly on every block and still be rejected by
+    the authority for violating ``edge_period``.  Without this feedback
+    the stage keeps tracking it and re-installs it the moment the
+    authority re-acquires, so the demotion contract is only half
+    honoured and C1's escape hatch has nothing to escape from.
+    """
+
+    def _tracking_stage(self):
+        stage = BpskEdgeFineStage(sample_rate=SR)
+        _drive_at(stage, EDGE, 120.0, 0, violations=())
+        self.assertIsNotNone(stage._own_offset_rtp)
+        return stage
+
+    def test_edge_period_rejections_demote_to_bootstrap(self):
+        stage = self._tracking_stage()
+        _drive_at(stage, EDGE, 90.0, 120 * SR,
+                  violations=("edge_period",))
+        self.assertIsNone(
+            stage._own_offset_rtp,
+            "a position rejected for edge_period on every block was "
+            "still being tracked")
+
+    def test_fine_coarse_rejections_do_not_demote(self):
+        """The witness disagreeing is a different signal, and since this
+        work it is deliberately non-fatal."""
+        stage = self._tracking_stage()
+        own = stage._own_offset_rtp
+        _drive_at(stage, EDGE, 90.0, 120 * SR,
+                  violations=("fine_coarse",))
+        self.assertEqual(stage._own_offset_rtp, own)
+
+    def test_a_clean_verdict_clears_the_failure_run(self):
+        """Demotion is on CONSECUTIVE failures, per the spec."""
+        stage = self._tracking_stage()
+        stage._note_block_failed()
+        stage._note_block_failed()
+        _drive_at(stage, EDGE, 30.0, 120 * SR, violations=())
+        self.assertEqual(stage._failed_blocks, 0)
+
+    def test_a_clean_fit_alone_does_not_clear_the_run(self):
+        """The defect this closes: ``_note_block_estimate`` used to zero
+        the counter on any successful FIT, before the authority had
+        said anything, so consecutive rejections never accumulated."""
+        stage = self._tracking_stage()
+        stage._note_block_failed()
+        self.assertEqual(stage._failed_blocks, 1)
+        _drive_at(stage, EDGE, 30.0, 120 * SR,
+                  violations=("edge_period",))
+        self.assertEqual(stage._failed_blocks, 2)
+
+
 class TestCoarseLifecycle(unittest.TestCase):
 
     def test_clear_coarse_offset_drops_the_seeded_window(self):

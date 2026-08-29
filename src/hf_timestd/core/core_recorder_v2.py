@@ -2853,6 +2853,13 @@ class CoreRecorderV2:
                 self._t6_authority.on_mf_unlock())
         if getattr(self, '_t6_fine_stage', None) is not None:
             self._t6_fine_stage.reset()
+            # reset() alone is not an escape: it keeps the stage's own
+            # tracking offset (by design — it runs at every fold-block
+            # boundary).  This site has just repudiated the position, so
+            # say so, or the stage goes on localising exactly where the
+            # abandoned lock put it and re-installs it within one fold
+            # block.  See BpskEdgeFineStage.clear_own_offset.
+            self._t6_fine_stage.clear_own_offset()
         self._t6_last_chain_delay_ns = None
         self._t6_disambiguation_ns = 0
         self._t6_wrap_rejections = 0
@@ -4693,6 +4700,18 @@ class CoreRecorderV2:
                     named = self._t6_name_integer_second(fine.edge_rtp)
                     decision = self._t6_authority.on_fine_estimate(
                         fine, coarse, named)
+                    # Spec §3.3: demotion follows N consecutive blocks
+                    # that fail their fit OR are rejected for
+                    # edge_period.  The stage sees only the first half;
+                    # the verdict lives here, so report it.  A position
+                    # that fits cleanly every block while violating
+                    # edge_period would otherwise be tracked all the way
+                    # through AUTHORITATIVE → DEGRADED → UNLOCKED and
+                    # re-installed on the next acquisition.  The stage
+                    # filters on edge_period itself — fine_coarse is the
+                    # demoted MF witness disagreeing, deliberately
+                    # non-fatal now.
+                    fine_stage.note_authority_violations(decision.violations)
                     self._t6_apply_authority_decision(decision)
             except Exception as e:
                 if not getattr(self, '_t6_fine_warned', False):
@@ -4774,6 +4793,8 @@ class CoreRecorderV2:
                     self._t6_authority.on_mf_unlock())
             if getattr(self, '_t6_fine_stage', None) is not None:
                 self._t6_fine_stage.reset()
+                # Repudiate the tracked position too — reset() spares it.
+                self._t6_fine_stage.clear_own_offset()
             self._t6_last_chain_delay_ns = None
             self._t6_disambiguation_ns = 0
             self._t6_wrap_rejections = 0
@@ -5084,6 +5105,11 @@ class CoreRecorderV2:
                                 self._t6_authority.on_mf_unlock())
                         if getattr(self, '_t6_fine_stage', None) is not None:
                             self._t6_fine_stage.reset()
+                            # Repudiate the tracked position too —
+                            # reset() spares it, so without this the
+                            # stage re-installs the operating point the
+                            # step-recovery just admitted was stale.
+                            self._t6_fine_stage.clear_own_offset()
                         self._t6_last_chain_delay_ns = None
                         self._t6_disambiguation_ns = 0
                         self._t6_wrap_rejections = 0
