@@ -224,6 +224,57 @@ Doppler science: a 16 ms constant epoch offset barely affects a TID measurement,
 while 100 ns of jitter inside a file does. The metrologist reads the first; the
 physicist usually reads the second; neither is served by an average of them.
 
+### 3.4 Two namespaces, one declared normative subset
+
+Everything we can profitably act on is captured. But what a metrologist or a
+physicist needs is a **declared subset** of that, and the rest is noise to them —
+so the record separates the two by namespace rather than by file.
+
+⛔ **One record, two namespaces — not two files.** The moment they are separate
+files they drift, and the correlation that makes the engineering data worth
+keeping is lost: "this uncertainty was large *because* the front-end gain was at
+-7 dB" is only answerable while both live in the same record.
+
+**The membership rule**, which is testable rather than a matter of taste:
+
+> A field belongs in the normative subset if it changes a decision a
+> **metrologist or physicist** would make about *this data*. If it only changes
+> a decision **we** would make about *the instrument*, it is engineering.
+
+| Normative (the formal model) | Engineering (under `engineering:`) |
+|---|---|
+| `measurand`, `reference_plane` | `fine_search_mode`, `cross_checked` |
+| `chain`, `origin` | `rf_gain_db`, `cn0_db_hz`, `if_power_dbfs` |
+| per-term `correction_ns` / `u_ns` / `type` / `method` | `fold_blocks_discarded`, `fold_seconds` |
+| `u_epoch_ns`, `k`, `p` | `judge_age_s`, `segment_id`, `rate_ppm` |
+| `stability_ns`, `tau_s` | `judge_tier` (the demoted shorthand of §2) |
+| `traceability.claim` / `.qualified` / `.qualification` | `radiod_gps_time_ns`, `radiod_rtp_timesnap` |
+
+⚡ Note `cn0_db_hz` is **engineering**, even though the normative `u_epoch_ns` is
+computed from it. That is deliberate and worth being explicit about: the
+physicist needs the uncertainty, not the mechanism that produced it. The
+derivation is ours to defend, not theirs to audit — but it stays in the record so
+that it *can* be audited, by us or by a reviewer who asks.
+
+A science consumer reads the top level and ignores `engineering:` wholesale. A
+developer reads both. Neither has to negotiate with the other about what belongs
+in the file.
+
+### 3.5 The three decisions the record must support
+
+The model earns its place only if each audience can act on it. Stated as the
+decision each one is trying to make:
+
+| Audience | Decision | What answers it |
+|---|---|---|
+| Metrologist | Can we rely on this clock? | corrections applied, uncertainties remaining, coverage, the traceability qualification |
+| Physicist | Is this a real ionospheric phenomenon, or the instrument? | `stability_ns` over `tau_s`, and the **chain** — a chain with no ionospheric term cannot manufacture one |
+| Us | Did we build the instrument correctly? | the `engineering:` namespace |
+
+That middle row is the one that justifies publishing the chain at all rather than
+just a number: the strongest evidence that a Doppler feature is ionospheric is
+that the timing chain which recorded it contains no ionospheric term.
+
 ## 4. The budgets
 
 ### 4.1 ⚡ §13.2 does not apply to the payload-anchored chain
