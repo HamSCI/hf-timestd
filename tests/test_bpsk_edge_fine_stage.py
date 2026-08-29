@@ -215,11 +215,19 @@ class TestLocalisation:
         err_us = abs(ests[0].edge_offset_samples - self.EDGE) / SR * 1e6
         assert err_us < 2.0
 
-    def test_no_coarse_offset_returns_none(self):
+    def test_no_coarse_offset_bootstraps_the_edge(self):
+        # Was test_no_coarse_offset_returns_none: the coarse seed used to
+        # be a veto the MF calibrator held over the whole tier. Task 2
+        # (T6 folded self-acquisition) removed it -- with no coarse ever
+        # set, the stage now finds its own edge via the full-second
+        # bootstrap matched filter.
         iq = make_bpsk(SR, 2, self.EDGE)
         stage = BpskEdgeFineStage(SR, fold_seconds=2)
         ests = feed_batches(stage, iq, rtp0=0)
-        assert ests == []
+        assert len(ests) == 1
+        err_us = abs(ests[0].edge_offset_samples - self.EDGE) / SR * 1e6
+        assert err_us < 1.0
+        assert stage._last_search_mode == "bootstrap"
 
     def test_edge_near_fold_boundary_wraps_cleanly(self):
         edge = 20.0  # 20 samples after the fold wrap point

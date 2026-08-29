@@ -1,0 +1,72 @@
+"""Fine stage acquiring its own edge with no matched-filter seed."""
+from __future__ import annotations
+
+import math
+import sys
+import unittest
+from pathlib import Path
+
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from test_bpsk_pps_calibrator_mf import _make_bpsk_signal
+from hf_timestd.core.bpsk_edge_fine_stage import BpskEdgeFineStage
+
+SR = 96000
+BATCH = 1920
+EDGE = 47916.1672
+
+
+def _noise_std_for(cn0_db_hz: float) -> float:
+    """Per-component complex-noise sigma giving this C/N0 at SR."""
+    snr = 10 ** ((cn0_db_hz - 10 * math.log10(SR)) / 10.0)
+    return 1.0 / math.sqrt(2.0 * snr)
+
+
+def _drive(stage, cn0_db_hz=55.0, duration_s=31.0, edge=EDGE, seed=11):
+    sig = _make_bpsk_signal(
+        duration_s=duration_s, sample_rate=SR, edge_offset_samples=edge,
+        noise_std=_noise_std_for(cn0_db_hz), seed=seed,
+    )
+    last = None
+    for i in range(0, len(sig), BATCH):
+        est = stage.process_samples(sig[i:i + BATCH], i)
+        if est is not None:
+            last = est
+    return last
+
+
+class TestBootstrapAcquisition(unittest.TestCase):
+
+    def test_produces_an_estimate_with_no_coarse_ever_set(self):
+        """Today this returns None forever -- the coarse seed is a veto
+        held by the stage that fails first."""
+        stage = BpskEdgeFineStage(sample_rate=SR)
+        est = _drive(stage)
+        self.assertIsNotNone(est)
+
+    def test_bootstrapped_estimate_lands_on_the_edge(self):
+        stage = BpskEdgeFineStage(sample_rate=SR)
+        est = _drive(stage)
+        err_samples = (est.edge_offset_samples - EDGE + SR / 2) % SR - SR / 2
+        self.assertLess(abs(err_samples) / SR * 1e6, 100.0)
+
+    def test_mode_is_reported_as_bootstrap(self):
+        stage = BpskEdgeFineStage(sample_rate=SR)
+        _drive(stage)
+        self.assertEqual(stage._last_search_mode, "bootstrap")
+
+    def test_a_coarse_seed_still_takes_precedence(self):
+        """Regression: seeded behaviour is unchanged, and is preferred
+        because a ±6 ms window is more selective than a whole second."""
+        stage = BpskEdgeFineStage(sample_rate=SR)
+        stage.set_coarse_offset_samples(EDGE)
+        est = _drive(stage)
+        self.assertIsNotNone(est)
+        self.assertEqual(stage._last_search_mode, "seeded")
+
+
+if __name__ == "__main__":
+    unittest.main()

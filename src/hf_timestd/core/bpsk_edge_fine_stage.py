@@ -50,6 +50,7 @@ from typing import Optional
 
 import numpy as np
 
+from hf_timestd.core.bpsk_fold_bootstrap import bootstrap_edge_index
 from hf_timestd.core.rtp_domain import RtpUnwrapper
 
 logger = logging.getLogger(__name__)
@@ -95,6 +96,10 @@ class BpskEdgeFineStage:
         # RTP-domain coarse (see module docstring).  Translated to the
         # fold domain per block in _compute_estimate.
         self._coarse_offset_rtp: Optional[float] = None
+        # Which search mode produced the last estimate: 'seeded' (MF
+        # coarse), 'tracking' (our own confirmed offset) or 'bootstrap'
+        # (full-second matched filter).  Surfaced for tests and telemetry.
+        self._last_search_mode: str = "none"
         self._last_avg_for_test: Optional[np.ndarray] = None
         # One continuous counter domain (see rtp_domain).  Deliberately
         # NOT cleared by reset(): a re-lock after reset must land in the
@@ -236,18 +241,35 @@ class BpskEdgeFineStage:
     # plateau participate in the zero-crossing fit (spec §3: ∓40%).
     FIT_BAND_FRACTION = 0.4
 
+    def _search_centre(
+        self, in_phase: np.ndarray, registration: int
+    ) -> Optional[float]:
+        """Fold-domain centre for the zero-crossing search window.
+
+        Preference order: a fresh MF coarse (most selective), then our
+        own confirmed offset, then a full-second bootstrap.  Bootstrap
+        exists so that the MF -- which locks itself out at low C/N0 --
+        can no longer veto the tier.
+        """
+        seeded = self.coarse_offset_fold_domain(registration)
+        if seeded is not None:
+            self._last_search_mode = "seeded"
+            return seeded
+        self._last_search_mode = "bootstrap"
+        return float(bootstrap_edge_index(in_phase))
+
     def _compute_estimate(
         self, avg: np.ndarray, registration: int
     ) -> Optional[FineEdgeEstimate]:
-        coarse_fold = self.coarse_offset_fold_domain(registration)
-        if coarse_fold is None:
-            return None
         p = self.sample_rate
         # Derotate: squaring removes the BPSK sign, leaving 2× carrier phase.
         phi = 0.5 * float(np.angle(np.mean(avg.astype(np.complex128) ** 2)))
         in_phase = np.real(avg * np.exp(-1j * phi))
 
-        c = int(round(coarse_fold)) % p
+        centre = self._search_centre(in_phase, registration)
+        if centre is None:
+            return None
+        c = int(round(centre)) % p
         W = max(8, int(self.search_window_ms * 1e-3 * p))
         seg = np.take(in_phase, np.arange(c - W, c + W + 1) % p)
 
