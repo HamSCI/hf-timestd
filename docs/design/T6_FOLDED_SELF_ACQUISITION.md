@@ -90,8 +90,12 @@ proven pieces: run the boxcar MF across the folded second, take its peak as
 the search centre, and hand it to the existing zero-crossing fit exactly as a
 coarse seed is handed over today.
 
-Processing gain is `10*log10(K)`: 17.8 dB at K = 60 s, which places the cliff
-near 40 dB-Hz — below the worst C/N0 observed on B4 (48.5).
+Processing gain is `10*log10(K)`. **K stays at the shipped default of 30 s**
+— 14.8 dB, placing the cliff near 43-44 dB-Hz, already below the worst C/N0
+observed on B4 (48.5) — because leaving `fold_seconds` untouched keeps this
+change to the acquisition path alone. K = 60 s (17.8 dB) remains available as
+an existing knob if §8's measurement shows 30 s is not enough; it is not part
+of this work.
 
 ### 3.2 The search is well posed
 
@@ -112,8 +116,10 @@ The fine stage gets the same discipline in its own terms:
 agree within `bootstrap_confirm_tolerance_ms` (default 1.0) before the stage
 will use its own offset as a seed. Until then every block does a full search.
 
-Demotion back to bootstrap on repeated fit failure or a run of `edge_period`
-violations, so a wrong lock is always escapable rather than defended.
+Demotion back to bootstrap after **3 consecutive blocks** that either fail
+their fit or are rejected for `edge_period`, so a wrong lock is always
+escapable rather than defended. Three matches the confirmation count: the
+stage should be no slower to abandon a position than it was to adopt one.
 
 ### 3.4 Stale coarse is fixed at the source
 
@@ -140,8 +146,12 @@ affirmatively marked rather than inferred from a missing key.
 
 Once §3 lands, the treadmill is no longer a T6 outage — it is a lost
 cross-check. Still worth fixing, because a witness that goes dark exactly when
-it is most needed is a poor witness, but it is explicitly second-order and
-may be implemented after §3 is verified.
+it is most needed is a poor witness, but it is explicitly second-order.
+
+**Sequencing: this is a separate commit, after §3 is deployed and verified on
+B4 per §8.** Changing the detector and its threshold in one step would make a
+regression in either indistinguishable from the other, on the tier that
+decides whether the station may publish.
 
 Replace `threshold = 0.5 * _peak_running` with `k * sigma_noise`.
 
@@ -149,9 +159,10 @@ Replace `threshold = 0.5 * _peak_running` with `k * sigma_noise`.
 clean MF output is a triangle wave whose median sits on the **ramp**, not in
 noise, which is why the peak-relative form was chosen. Use the **MAD of the
 second difference of `y`** — a triangle's second difference is ~zero except at
-the apex, so what survives is noise. `k` is set for a target false-alarm rate
-and is a module constant with its derivation written down, not an operator
-knob.
+the apex, so what survives is noise. `k` is fixed at the value giving a per-block false-alarm probability
+of <= 1e-3 against the measured noise distribution; it is derived during
+implementation, pinned by a test, and written down as a module constant with
+its derivation — not an operator knob.
 
 ## 5. Packet drops inside a fold — measure first
 
