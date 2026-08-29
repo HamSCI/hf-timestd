@@ -744,6 +744,91 @@ class TestSnapshotStore(unittest.TestCase):
         assert snapshot["t6_fold_blocks_discarded"] == 7
         assert snapshot["t6_fold_seconds"] == 30
 
+    def test_search_mode_and_unverified_reach_the_snapshot(self) -> None:
+        """Spec §8 asks to prove T6 held "on folded estimates alone".
+        ``fine_coarse_unverified`` reached only ``last_check_metrics``,
+        read by the transition log — which emits nothing across a whole
+        night sitting at AUTHORITATIVE, so held-without-witness was
+        indistinguishable from held-with-witness."""
+        from hf_timestd.core.authority_manager import _flatten_t6
+        snapshot = {}
+        _flatten_t6(snapshot, ProbeResult(
+            "T6", available=True, offset_ms=0.0, sigma_ms=0.001,
+            detail={"fine_search_mode": "bootstrap",
+                    "fine_coarse_unverified": True},
+        ))
+        assert snapshot["t6_fine_search_mode"] == "bootstrap"
+        assert snapshot["t6_fine_coarse_unverified"] == 1
+
+    def test_a_verified_check_is_recorded_as_verified_not_absent(self) -> None:
+        from hf_timestd.core.authority_manager import _flatten_t6
+        snapshot = {}
+        _flatten_t6(snapshot, ProbeResult(
+            "T6", available=True, offset_ms=0.0, sigma_ms=0.001,
+            detail={"fine_search_mode": "seeded",
+                    "fine_coarse_unverified": False},
+        ))
+        assert snapshot["t6_fine_coarse_unverified"] == 0
+
+    def test_a_producer_without_the_fields_leaves_them_null(self) -> None:
+        """Mixed producer/consumer versions must not invent a value."""
+        from hf_timestd.core.authority_manager import _flatten_t6
+        snapshot = {}
+        _flatten_t6(snapshot, ProbeResult(
+            "T6", available=True, offset_ms=0.0, sigma_ms=0.001, detail={},
+        ))
+        assert snapshot["t6_fine_search_mode"] is None
+        assert snapshot["t6_fine_coarse_unverified"] is None
+
+    def test_fine_telemetry_survives_producer_to_sqlite(self) -> None:
+        """All four hops at once: the recorder's ``t6_pps`` status block
+        -> BpskPpsProbe detail whitelist -> _flatten_t6 -> the sqlite
+        column.  Four plausible edits that do not connect would pass
+        every test above and still store nothing."""
+        from hf_timestd.core.bpsk_pps_probe import BpskPpsProbe
+        from hf_timestd.core.authority_manager import _flatten_t6
+        from hf_timestd.io.authority_snapshot_store import (
+            AuthoritySnapshotStore,
+        )
+        import sqlite3
+        now = datetime(2026, 8, 29, 12, 0, 0, tzinfo=timezone.utc)
+        status = self.tmp / "core-recorder-status.json"
+        status.write_text(json.dumps({
+            "timestamp": now.isoformat(),
+            "t6_pps": {
+                "enabled": True,
+                "locked": True,
+                "pps_consecutive": 30,
+                "pps_ok": 1,
+                "pps_noise": 0,
+                "chain_delay_ns": 43_000_000,
+                "local_minus_source_ns": 1_000,
+                "fine_search_mode": "bootstrap",
+                "fine_coarse_unverified": True,
+            },
+        }))
+        probe = BpskPpsProbe(status_path=status, now_fn=lambda: now)
+        result = probe.poll()
+        assert result.available, result.reason
+        assert result.detail["fine_search_mode"] == "bootstrap"
+
+        snapshot = {"utc_published": now.isoformat()}
+        _flatten_t6(snapshot, result)
+        db = self.tmp / "e2e.db"
+        store = AuthoritySnapshotStore(db)
+        try:
+            store.insert(snapshot)
+        finally:
+            store.close()
+        with sqlite3.connect(str(db)) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT t6_fine_search_mode, t6_fine_coarse_unverified "
+                "FROM authority_snapshot"
+            ).fetchone()
+        self.assertEqual(row["t6_fine_search_mode"], "bootstrap")
+        self.assertEqual(row["t6_fine_coarse_unverified"], 1)
+
     def test_t5_substrate_fields_flattened(self) -> None:
         """LbeT5DirectProbe substrate fields (valid_fix, pps_utc_sec,
         nmea_age_sec, anchor_age_sec) round-trip into their dedicated

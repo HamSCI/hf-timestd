@@ -1163,3 +1163,91 @@ class TestEdgePeriodRejectionReachesTheStage:
             stage._verdict_pending = True
             stage.note_authority_violations(("edge_period",))
         assert stage._own_offset_rtp is None
+
+
+class TestFineTelemetryLeavesTheRecorder:
+    """I2, hop 1 of 4.  ``fine_coarse_unverified`` reached only
+    ``last_check_metrics``, read by the transition log — which emits
+    nothing across a whole night sitting at AUTHORITATIVE.  Spec §8's
+    verification ("T6 held on folded estimates alone") was therefore
+    indistinguishable from held-with-MF-witness.  The status block is
+    where the value has to leave the recorder; hops 2-4 (probe detail,
+    _flatten_t6, the sqlite column) are pinned in
+    tests/test_authority_manager.py.
+    """
+
+    def _t6_pps(self, tmp_path, *, search_mode, metrics):
+        cr = CoreRecorderV2.__new__(CoreRecorderV2)
+        cr.start_time = 0.0
+        cr.recorders = {}
+        cr.status_file = tmp_path / "status.json"
+        cr._t6_calibrator = SimpleNamespace(
+            locked=True, costas_locked=True, pps_ok=1, pps_noise=0,
+            pps_phantom=0, pps_consecutive=30, sample_rate=SR,
+            _chain_delay_samples=4318.0,
+        )
+        cr._t6_fine_stage = SimpleNamespace(
+            blocks_discarded=0, fold_seconds=30,
+            _last_search_mode=search_mode,
+        )
+        cr._t6_last_local_minus_source_ns = 1_000
+        cr._t6_chain_delay_history = deque()
+        cr._t6_local_minus_source_history = deque()
+        cr._t6_native_anchor = None
+        cr._t6_channel_info = None
+        cr._t6_authority = SimpleNamespace(last_check_metrics=metrics)
+        cr._t6_authority_status = lambda: None
+        captured = {}
+        with patch('hf_timestd.core.core_recorder_v2.json.dump',
+                   side_effect=lambda obj, f, **kw: captured.update(obj)):
+            cr._write_status()
+        assert 't6_pps' in captured, "status write failed before t6_pps"
+        return captured['t6_pps']
+
+    def test_search_mode_is_published(self, tmp_path):
+        block = self._t6_pps(tmp_path, search_mode="bootstrap", metrics={})
+        assert block['fine_search_mode'] == "bootstrap"
+
+    def test_an_unrun_cross_check_is_published_as_unverified(self, tmp_path):
+        block = self._t6_pps(
+            tmp_path, search_mode="bootstrap",
+            metrics={"edge_period_us": 3.0, "fine_coarse_unverified": True})
+        assert block['fine_coarse_unverified'] is True
+
+    def test_a_run_cross_check_is_published_as_verified(self, tmp_path):
+        block = self._t6_pps(
+            tmp_path, search_mode="seeded",
+            metrics={"edge_period_us": 3.0, "fine_coarse_ms": 0.2})
+        assert block['fine_coarse_unverified'] is False
+
+    def test_no_check_yet_is_unknown_not_verified(self, tmp_path):
+        """An empty metrics dict means no check has ever run.  Reporting
+        that as False would claim a cross-check the authority never
+        performed."""
+        block = self._t6_pps(tmp_path, search_mode="bootstrap", metrics={})
+        assert block['fine_coarse_unverified'] is None
+
+
+class TestTransitionLogFormatting:
+    """M3: a boolean formatted with ``:.3f`` renders as
+    ``fine_coarse_unverified=1.000`` and reads as a measurement."""
+
+    def test_a_flag_is_not_rendered_as_a_measurement(self, caplog):
+        r = bare_recorder()
+        r._t6_authority = SimpleNamespace(
+            last_check_metrics={"edge_period_us": 3.25,
+                                "fine_coarse_unverified": True},
+            delay_budget_ns=0, filter_group_delay_ns=0,
+        )
+        decision = SimpleNamespace(
+            state=T6AuthorityState.DEGRADED,
+            previous_state=T6AuthorityState.AUTHORITATIVE,
+            anchor=None, violations=("edge_period",),
+        )
+        r._t6_capture_anomaly = lambda *a, **k: None
+        with caplog.at_level("WARNING"):
+            r._t6_apply_authority_decision(decision)
+        text = caplog.text
+        assert "fine_coarse_unverified=True" in text
+        assert "fine_coarse_unverified=1.000" not in text
+        assert "edge_period_us=3.250" in text

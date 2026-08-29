@@ -302,6 +302,12 @@ class BpskPpsProbe:
             "age_sec": round(age_sec, 3),
             "fold_blocks_discarded": t6.get("fold_blocks_discarded"),
             "fold_seconds": t6.get("fold_seconds"),
+            # Spec §8: which search mode the fine stage used, and
+            # whether the fine_coarse cross-check ran.  Without these
+            # "T6 held on folded estimates alone" is unprovable from
+            # the archive.  None on producers older than this change.
+            "fine_search_mode": t6.get("fine_search_mode"),
+            "fine_coarse_unverified": t6.get("fine_coarse_unverified"),
         }
         # hf-timestd-native (RTP, UTC) anchor — forward into the
         # ProbeResult detail so downstream consumers (authority

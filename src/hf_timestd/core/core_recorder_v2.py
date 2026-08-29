@@ -3438,7 +3438,11 @@ class CoreRecorderV2:
                 'last_check_metrics', None,
             ) or {}
             _measured = " ".join(
-                f"{k}={v:.3f}" for k, v in sorted(_metrics.items())
+                # Only the measured magnitudes get 3 decimals; a flag
+                # such as fine_coarse_unverified rendered as "=1.000"
+                # reads as a measurement it is not.
+                (f"{k}={v:.3f}" if isinstance(v, float) else f"{k}={v}")
+                for k, v in sorted(_metrics.items())
             )
             logger.warning(
                 "T6 anchor authority: %s → %s%s%s",
@@ -5933,8 +5937,30 @@ class CoreRecorderV2:
                             }
                     except Exception as e:  # noqa: BLE001 — status only
                         logger.debug(f"t6 residual rate snapshot: {e}")
+                # Spec §8 asks to prove T6 held "on folded estimates
+                # alone".  Which search mode produced the estimate, and
+                # whether the fine_coarse cross-check ran at all, are
+                # the two facts that answer it — and they reached only
+                # ``last_check_metrics``, read by the transition log,
+                # which emits nothing across a whole night sitting at
+                # AUTHORITATIVE.  Held-without-witness was
+                # indistinguishable from held-with-witness.
+                # An empty metrics dict means no check has run yet:
+                # report that as unknown (None), never as "verified".
+                _t6_check_metrics = getattr(
+                    getattr(self, '_t6_authority', None),
+                    'last_check_metrics', None,
+                ) or None
                 status['t6_pps'] = {
                     'enabled': True,
+                    'fine_search_mode': getattr(
+                        getattr(self, '_t6_fine_stage', None),
+                        '_last_search_mode', None,
+                    ),
+                    'fine_coarse_unverified': (
+                        bool(_t6_check_metrics.get('fine_coarse_unverified'))
+                        if _t6_check_metrics else None
+                    ),
                     'locked': self._t6_calibrator.locked,
                     # Costas carrier-recovery loop health (Layer A TSL3
                     # fix).  False during a phase excursion — the

@@ -982,6 +982,14 @@ def _flatten_t6(snapshot: Dict[str, Any], r: Optional[ProbeResult]) -> None:
     snapshot["t6_chain_delay_ns"] = d.get("chain_delay_ns")
     snapshot["t6_fold_blocks_discarded"] = d.get("fold_blocks_discarded")
     snapshot["t6_fold_seconds"] = d.get("fold_seconds")
+    # Spec §8's "held on folded estimates alone" evidence.  NULL on
+    # producers that do not publish them — an absent field must not be
+    # recorded as a verified check.
+    snapshot["t6_fine_search_mode"] = d.get("fine_search_mode")
+    _unverified = d.get("fine_coarse_unverified")
+    snapshot["t6_fine_coarse_unverified"] = (
+        None if _unverified is None else (1 if _unverified else 0)
+    )
     dm = d.get("drift_monitor")
     if isinstance(dm, dict):
         snapshot["t6_anchor_discontinuity"] = (
