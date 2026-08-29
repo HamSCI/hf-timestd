@@ -85,10 +85,25 @@ authority ──────────── unchanged; runs whenever an estim
 
 Not a new detector. The matched filter is the right thing for locating the
 transition; folding is what gives it the SNR. The fine stage already owns the
-accumulator, sign alternation and registration, so bootstrap reuses both
-proven pieces: run the boxcar MF across the folded second, take its peak as
-the search centre, and hand it to the existing zero-crossing fit exactly as a
+accumulator, sign alternation and registration, so bootstrap adds only the
+statistic, and hands its result to the existing zero-crossing fit exactly as a
 coarse seed is handed over today.
+
+The folded second is `-A` on `[0,e)` and `+A` on `[e,p)`, so the matched
+filter for the single free parameter `e` has a closed form:
+
+    T(e) = sum_{j>=e} x[j] - sum_{j<e} x[j] = C[p-1] - 2*C[e-1],  C = cumsum(x)
+
+`argmax |T|` is the estimate — `|T|` because the global polarity is set by an
+arbitrary sign-alternation phase. O(p), no window parameter, no tuning.
+
+⚠ Use this, **not** a plain CUSUM (`argmax |cumsum(x - mean)|`). CUSUM was
+measured to be exact for a mid-second edge but structurally biased by 1-40 ms
+when the edge lands near the fold origin, because its tent collapses when the
+two segments are unbalanced. The error was identical at every C/N0, i.e. bias
+rather than noise, and it does not self-correct: `registration` advances by
+exactly `fold_seconds * p` per block, so the fold-domain position is FIXED for
+the life of a lock and such a stream would never acquire.
 
 Processing gain is `10*log10(K)`. **K stays at the shipped default of 30 s**
 — 14.8 dB, placing the cliff near 43-44 dB-Hz, already below the worst C/N0
@@ -99,13 +114,23 @@ of this work.
 
 ### 3.2 The search is well posed
 
-After sign-alternated folding the derotated second is +A before the edge and
--A after, so a **linear** array has exactly one interior sign change: the
-edge. The circular wrap is not a sample-to-sample transition and cannot be
-mistaken for one. The single awkward case is an edge within a few samples of
-fold index 0, where the transition straddles the array boundary; the fold is
-circular, so rolling by p/2 before the search and unrolling afterwards costs
-nothing and removes the case.
+Measured on the real fold (`BpskEdgeFineStage` driven by
+`_make_bpsk_signal`, 30 s blocks): the derotated folded second has **exactly
+one interior sign change**, at the edge — found at index 47916 for an edge at
+47916.1672 and at 299 for an edge at 300. The wrap discontinuity is real (full
+2A: `ip[-1] = +0.977`, `ip[0] = -0.993`) but lies **between index p-1 and 0**,
+outside the linear array, and is never an interior feature.
+
+⛔ Therefore **do not roll the array**. An earlier draft proposed rolling by
+p/2 to handle an edge near the origin; that is wrong — rolling moves the wrap
+into the interior and creates exactly the two-candidate ambiguity it was meant
+to avoid. The linear array is unambiguous as it stands, and §3.1's statistic
+needs no boundary special-casing.
+
+Validation across C/N0 34-48.5 dB-Hz and edge positions 300 / 47916 / 95700
+(the last two bracketing both degenerate zones): worst error 2 samples
+(21 µs), and no result fell outside the ±6 ms window the zero-crossing fit
+then searches. B4's worst measured night C/N0 is 48.5.
 
 ### 3.3 Promotion requires confirmation
 
