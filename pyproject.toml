@@ -97,6 +97,9 @@ addopts = "-ra -q"
 testpaths = [
     "tests",
 ]
+markers = [
+    "slow: drives the real detector across many C/N0 points",
+]
 
 [tool.uv.sources]
 # editable=true so a `git pull` of ka9q-python propagates to this consumer's
