@@ -239,7 +239,8 @@ Two block types.
 ```json
 {"type":"chain", "id":"payload-anchored@1",
  "measurand":"UTC instant of digitisation of sample n, at the antenna terminals",
- "reference_plane":"antenna_terminals",
+ "measurand_plane":"antenna_terminals",
+ "calibration_plane":"ts1_injection_point",
  "traceability":{"claim":"UTC(USNO) via GPS", "qualified":true,
    "qualification":"antenna-to-injector path not declared; receiver front end not characterised"},
  "budget":[
@@ -247,10 +248,17 @@ Two block types.
    "method":"asserted from config; disagrees with T4-referenced median 15.153 ms by 1.5 ms"},
   {"term":"ts1_modulator_delay","correction_ns":0,"u_ns":200,"type":"B",
    "method":"designer statement, P. Elliott WB6CXC, 2026-08-30; standard injector mode"},
-  {"term":"antenna_to_injector","correction_ns":null,"u_ns":null,"type":"B",
-   "method":"NOT DECLARED — feed, preamp and filter ahead of the injection point; station-specific"},
-  {"term":"gnss_antenna_feed","correction_ns":null,"u_ns":null,"type":"B",
-   "method":"NOT DECLARED — cable length x velocity factor; a sign-known bias, not an uncertainty"},
+  {"term":"antenna_to_injector","disposition":"not_declared","type":"B",
+   "spans":["antenna_terminals","ts1_injection_point"],
+   "method":"feed, preamp and filter ahead of the injection point; station-specific"},
+  {"term":"injector_to_receiver","disposition":"cancels",
+   "spans":["ts1_injection_point","rx888_adc"],
+   "method":"identical path for signal and injected reference; cancels by construction"},
+  {"term":"gnss_antenna_feed","disposition":"not_declared","type":"B",
+   "method":"cable length x velocity factor; a sign-known bias, not an uncertainty"},
+  {"term":"anchor_origin_dispersion","correction_ns":0,"u_ns":1900,"type":"A",
+   "measured_on":{"build":"pre-folding","date":"2026-08-24"},"disposition":"historical",
+   "method":"63 anchors over 4.5 h ACROSS RE-LOCKS; the folded build of 2026-08-29 removed the re-locks"},
   {"term":"edge_estimation","correction_ns":0,"u_ns":5000,"type":"B",
    "method":"conservative bound; becomes Type A computed from cn0_db_hz once the fine-stage sweep of §4.3 has run"}],
  "u_combined_ns":1500008, "k":2}
@@ -262,6 +270,35 @@ correction. In the example the 16.618 ms correction dominates the corrections
 while contributing 1.5 ms of residual uncertainty, and those are different
 numbers in different fields on purpose: an uncorrected 16.6 ms bias reported as
 a 16.6 ms "uncertainty" would be precisely the error this section prevents.
+
+⚡ **A chain carries two planes, not one.** `measurand_plane` names where the
+timestamp claims to apply — the antenna terminals. `calibration_plane` names
+where the reference enters — the TS-1 injection point. Earlier revisions
+carried a single `reference_plane` and thereby conflated them. That conflation
+did real damage: the antenna-to-injector run lives precisely in the gap
+between the two planes, and with only one field the schema offered nowhere to
+put it. The term went undeclared because it stayed invisible, not because
+anyone neglected it. **Every term spanning the gap between the two planes MUST
+appear in the budget**, declared or explicitly marked undeclared.
+
+⚡ **A term states a value or states a `disposition`. Silence never means
+zero.** Three dispositions carry meaning a number cannot. `cancels` records a
+term someone considered and found common to both paths, which differs
+absolutely from a term nobody listed. `not_declared` records a term the
+station owes and has not supplied. `historical` records a term measured on a
+configuration the station no longer runs. A reader can distinguish all three
+from a genuine zero, and from each other.
+
+⚡ **Every Type A term carries `measured_on`.** Build identifier and date, both
+required. A budget assembled from terms measured across a month of changing
+software describes no instrument that ever existed, and a term whose
+configuration no longer matches the running station publishes as `historical`
+rather than as current.
+
+⚡ **A term's name MUST denote its measurand.** This rule looks like
+housekeeping and is not — §4.4 shows a field named for a quantity it does not
+measure, already written into a cross-repo contract as a correction every
+client subtracts.
 
 ⚡ **`correction_ns` and `u_ns` are separate fields on every term.** A known
 systematic that is applied shows a non-zero correction; one that is known but
@@ -298,9 +335,9 @@ keeping is lost: "this uncertainty was large *because* the front-end gain was at
 
 | Normative (the formal model) | Engineering (under `engineering:`) |
 |---|---|
-| `measurand`, `reference_plane` | `fine_search_mode`, `cross_checked` |
+| `measurand`, `measurand_plane`, `calibration_plane` | `fine_search_mode`, `cross_checked` |
 | `chain`, `origin` | `rf_gain_db`, `cn0_db_hz`, `if_power_dbfs` |
-| per-term `correction_ns` / `u_ns` / `type` / `method` | `fold_blocks_discarded`, `fold_seconds` |
+| per-term `correction_ns` / `u_ns` / `type` / `method` / `disposition` / `measured_on` | `fold_blocks_discarded`, `fold_seconds` |
 | `u_epoch_ns`, `k`, `p` | `judge_age_s`, `segment_id`, `rate_ppm` |
 | `stability_ns`, `tau_s` | `judge_tier` (the demoted shorthand of §2) |
 | `traceability.claim` / `.qualified` / `.qualification` | `radiod_gps_time_ns`, `radiod_rtp_timesnap` |
@@ -402,15 +439,8 @@ T6 floor lands near 0.11 µs at τ ≈ 280 s, which sits almost exactly on the
 stated 100 ns. Either the two agree by coincidence, or the GNSS pulse itself
 sets our floor.
 
-⛔ **`chain_delay_ns` does not measure the analogue chain, despite its name.**
-On B4 it reads 0.5955 s with a standard deviation of 2.37 µs. No analogue path
-in this station spans half a second. The quantity tracks where the recovered
-edge falls inside the named second, which the coarse cascade determines, and
-it therefore offers no independent check on the injector delay. Anyone
-reaching for it as a calibration of the modulator path — the obvious move,
-given the name — would be reading a different measurand. The field wants
-renaming, and §4 should propose an estimator that does measure the analogue
-delay.
+⛔ **`chain_delay_ns` names three different quantities, and one of them is a
+cross-repo contract.** See §4.5.
 
 ⚡ The processing interval Λ (≈14.1 ms, load-dependent) does **not** appear here.
 Under the content convention the label denotes the antenna epoch, so Λ is outside
@@ -440,6 +470,61 @@ of compute and no station risk.
 root dispersion and maximum error, so the top of this chain is genuinely Type A.
 The **restamp latency** (sample acquisition → `time.time()`) is the term that
 needs measuring rather than assuming.
+
+
+### 4.5 The `chain_delay_ns` collision
+
+Three distinct quantities currently wear this one name.
+
+| Where | Reads | What it actually measures |
+|---|---|---|
+| `CLIENT-CONTRACT.md` §RADIOD facts | e.g. 4250 ns | a real analogue path delay, per radiod |
+| `core-recorder-status.json` `t6_pps.chain_delay_ns` | **0.5955 s** ± 2.37 µs | where the recovered edge falls inside the named second |
+| `t6_authority.asserted_chain_delay_ns` | 10 000 ns | the configured `delay_budget_ns` being applied |
+
+Only the first matches the name. The second measures the coarse cascade's
+naming of the second and has no analogue interpretation — no path in this
+station spans half a second. The third reports an assertion rather than a
+measurement.
+
+**The collision reaches beyond this repository, and it carries a hazard.** The
+client contract publishes a per-radiod fact,
+`RADIOD_<id>_CHAIN_DELAY_NS`, and requires every timing-critical client to
+apply it:
+
+    utc_corrected = utc_raw − chain_delay_ns / 1e9
+
+The contract sources that value from "the calibrating hf-timestd instance",
+and the hf-timestd field bearing the matching name reads 0.5955 s. Nothing
+publishes it today: B4 carries no such fact in `coordination.env`, no client
+reports `chain_delay_ns_applied`, and the contract still marks the publishing
+mechanism "TBD in sigmond Phase 4". So the hazard stays latent. But an
+implementer wiring that mechanism as written, reaching for the field whose
+name matches the contract, would shift every client's UTC by 596 ms — and each
+client would faithfully report the correction it was applying.
+
+**Proposed renaming**, which needs coordination with sigmond because the
+contract owns the surviving name:
+
+| Now | Proposed | Rationale |
+|---|---|---|
+| contract `chain_delay_ns` | unchanged | the name fits the quantity |
+| `t6_pps.chain_delay_ns` | `edge_phase_in_named_second_ns` | states what it measures |
+| `asserted_chain_delay_ns` | `applied_delay_budget_ns` | an assertion, not a measurement |
+
+`core-recorder-status.json` serves as a published surface, so the rename runs
+through a deprecation window: emit both keys, mark the old one deprecated in
+`docs/`, and retire it one release later. No consumer outside hf-timestd reads
+the two renamed keys today, which keeps the window cheap.
+
+**What none of this supplies is a measurement of the analogue chain.** The
+contract asks hf-timestd to calibrate one, and hf-timestd does not. Section 4
+should propose an estimator that does — most plausibly a two-point method that
+compares the injected edge against the same edge taken at a second, known
+plane. Until such an estimator exists, the honest publication for
+`RADIOD_<id>_CHAIN_DELAY_NS` remains absent rather than a plausible number,
+and this document's budget marks the antenna-to-injector term `not_declared`
+for exactly that reason.
 
 ## 5. What a metrologist gets, and what we do not claim
 
