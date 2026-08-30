@@ -4466,7 +4466,17 @@ class CoreRecorderV2:
             'labeling_convention': convention,
             'fine_stage_enabled': bool(t6_cfg.get('fine_stage_enabled', True)),
             'fine_fold_seconds': int(t6_cfg.get('fine_fold_seconds', 30)),
-            'delay_budget_ns': int(t6_cfg.get('delay_budget_ns', 10_000)),
+            # Default: the TS-1 modulator alone, sourced from the designer
+            # (P. Elliott WB6CXC, 2026-08-30: under 200 ns in standard
+            # injector mode).  The previous 10_000 default originated as a
+            # comment in our own config template, was cited back to us as
+            # vendor documentation, and over-corrected every anchor by
+            # ~9.8 us.  A station that measures its antenna-to-injector run
+            # SHOULD set this explicitly: that term enters the sum with the
+            # OPPOSITE sign (the injected reference never traverses it), so
+            # the site value is d_modulator - d_antenna_to_injector.  See
+            # docs/design/TIMING_PROVENANCE_MODEL.md §4.5.
+            'delay_budget_ns': int(t6_cfg.get('delay_budget_ns', 200)),
             # Applied only under the legacy convention; the configured value
             # is kept beside it so the operator can see what was retired.
             'filter_group_delay_ns': (

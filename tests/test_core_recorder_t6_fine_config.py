@@ -14,7 +14,14 @@ class TestFineSettings:
             'labeling_convention': 'content',
             'fine_stage_enabled': True,
             'fine_fold_seconds': 30,
-            'delay_budget_ns': 10_000,
+            # TS-1 modulator only, and sourced: Paul Elliott (WB6CXC),
+            # who designed the TS-1, puts the standard-injector modulator
+            # delay under 200 ns (2026-08-30).  The former 10_000 default
+            # came from a comment in our own config template and nothing
+            # outside the project ever supported it.  The antenna-to-
+            # injector run enters this sum NEGATIVELY and stays undeclared;
+            # see docs/design/TIMING_PROVENANCE_MODEL.md §4.5.
+            'delay_budget_ns': 200,
             'filter_group_delay_ns': 0,
             # What the site configured, applied or not — so a retired
             # value is visible rather than silently dropped.

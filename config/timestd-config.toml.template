@@ -442,21 +442,25 @@ description = "BPSK_PPS"
 # --- T6 anchor inversion (docs/design/T6_ANCHOR_INVERSION_DESIGN.md) ---
 # fine_stage_enabled = true        # coherent zero-crossing fine stage + T6 anchor authority
 # fine_fold_seconds = 30           # coherent fold length K (seconds)
-# delay_budget_ns = 10000          # TS-1 modulator path only (~10 µs).
-#                                  # ⛔ THIS DEFAULT IS WRONG AND STILL APPLIED.
-#                                  # P. Elliott (WB6CXC), who designed the TS-1,
-#                                  # puts the standard-injector modulator delay
-#                                  # under 200 ns (2026-08-30).  The 10 µs here
-#                                  # originated as this comment and nothing
-#                                  # outside the project ever supported it; it
-#                                  # is also the code default in
-#                                  # core_recorder_v2.py, so a station that
-#                                  # leaves this commented out still applies it.
-#                                  # The right value for a site is the antenna-
-#                                  # to-injector run (feed, preamp, filter) plus
-#                                  # that <200 ns — measure it, do not inherit
-#                                  # this.  See
-#                                  # docs/design/TIMING_PROVENANCE_MODEL.md §2.
+# delay_budget_ns = 200            # TS-1 modulator path only.  DEFAULT 200 ns.
+#                                  # Source: P. Elliott (WB6CXC), who designed
+#                                  # the TS-1 — under 200 ns in standard
+#                                  # injector mode (2026-08-30).
+#                                  # ⛔ This default read 10000 until 2026-08-30.
+#                                  # That figure originated as THIS COMMENT,
+#                                  # was then cited back as vendor
+#                                  # documentation, and over-corrected every
+#                                  # T6 anchor by ~9.8 µs.
+#                                  # ⚡ A site that measures its own plumbing
+#                                  # SHOULD set this explicitly.  The antenna-
+#                                  # to-injector run (feed, preamp, filter)
+#                                  # enters with the OPPOSITE sign, because the
+#                                  # injected reference never traverses it:
+#                                  #     delay_budget_ns = d_mod − d_ant_to_inj
+#                                  # The injector-to-receiver coax cancels — it
+#                                  # is common to signal and reference.
+#                                  # See docs/design/TIMING_PROVENANCE_MODEL.md
+#                                  # §4.5.
 #                                  # HARD BOUND ±1 ms — the guard exists to stop
 #                                  # timestamp error being absorbed here, so do
 #                                  # NOT widen it; the radiod filter group delay
