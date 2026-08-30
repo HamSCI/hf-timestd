@@ -68,16 +68,26 @@ the T6-vs-T4 shadow residual, and T4 is measured through the transport.
 
 ## 2 · The physics already settles it
 
-The TS-1 flips its carrier on the GPS second: ±~100 ns of GPS plus a
-documented ~10 µs modulator delay (Paul Elliott, TimeSync-1).  That flip
-travels the same coax → RX888 → ADC path as the science signal, and the fine
-stage locates it in the sample stream to nanoseconds (5 ns repeatability;
-1.9 µs origin spread over 4.5 h, 2026-08-24).  **This is an a-priori absolute
-time transfer.**  There is no physical mechanism by which the wavefront
-reached the antenna 16.6 ms after the second — so the content-true assertion
-for the edge-sample is
+The TS-1 flips its carrier on the GPS second: ±~100 ns of GPS plus the
+modulator delay, which Paul Elliott (WB6CXC), who designed the TS-1, puts
+under 200 ns in standard injector mode (2026-08-30).  ⛔ Earlier revisions of
+this file cited him for ~10 µs.  He never gave that figure — it came from a
+comment in our own configuration template — and the correction leaves the
+argument below stronger, since ε shrinks by a further factor of fifty against
+the 16.6 ms it displaces.  That flip travels the same coax → RX888 → ADC path
+as the science signal, and the fine stage locates it in the sample stream to
+nanoseconds (5 ns repeatability).
 
-    anchor_utc(edge) = named_second + ε,     ε ≈ 10 µs (analog + modulator)
+⚠ The companion figure, 1.9 µs of origin spread over 4.5 h, dates to
+2026-08-24 and describes an instrument we no longer run.  It measured scatter
+**across re-locks**, and the folded self-acquisition landed on 2026-08-29
+removed the re-locks: T6 then held 7 h 01 m with zero transitions.  Treat the
+number as a historical bound until someone re-measures it on the folded
+build.  **This remains an a-priori absolute time transfer.**  There is no
+physical mechanism by which the wavefront reached the antenna 16.6 ms after
+the second — so the content-true assertion for the edge-sample is
+
+    anchor_utc(edge) = named_second + ε,     ε ≲ 1 µs (analog + modulator)
 
 i.e. `delay_budget_ns ≈ 10 000` and `filter_group_delay_ns = 0` — **which is
 the shipped default**.  The ±1 ms `DELAY_BUDGET_BOUND_NS` guard and the

@@ -358,7 +358,7 @@ and are reported separately.
 | Fiducial localisation | 0 | 150 ns | A | repeatability, 120 s |
 | Sub-aperture interpolation | 0 | 5 ns | A | quantisation |
 | Anchor-to-anchor agreement | 0 | 32 ns | A | consecutive anchors, 30 s |
-| Anchor origin dispersion | 0 | 1.9 µs | A | 63 anchors over 4.5 h |
+| Anchor origin dispersion | 0 | 1.9 µs ⚠ | A | 63 anchors over 4.5 h, **2026-08-24, pre-folding** |
 | Rate reference, carried 1 h | 0 | 1.44 µs | A | −0.0004 ± 0.0004 ppm |
 
 Type A combines to **0.15 µs** over a 30 s carry and **2.4 µs** over 4.5 h.
@@ -370,6 +370,26 @@ physics: a station closes them by measuring its own cable runs and front end.
 That leaves the largest single error in the payload-anchored chain sitting in
 software — the 10 µs `delay_budget_ns` default described in §2, which no
 measurement supports.
+
+⚠ **The budget mixes instrument epochs, and it must stop doing that.** The
+1.9 µs origin dispersion dates to 2026-08-24. It measured scatter *across
+re-locks*, on a build whose coarse stage chased a detection threshold and
+re-locked repeatedly. The folded self-acquisition of 2026-08-29 removed the
+re-locks: T6 afterwards held 7 h 01 m with zero transitions, then a further
+6 h 52 m overnight. A term that counts variation between re-locks cannot mean
+the same thing on an instrument that no longer re-locks, so the number now
+serves as a historical bound rather than a current uncertainty. Carrying it
+forward would overstate the instrument, which errs toward honesty but still
+errs.
+
+The deeper fault lies in the table's shape, not in one row. **Every Type A
+term needs the configuration it was measured on**, and none of them carries
+it. A budget assembled from terms measured across a month of changing
+software describes no instrument that ever existed. §3.2 therefore gains a
+`measured_on` field beside every Type A term — build identifier and date —
+and a term whose configuration no longer matches the running station gets
+published as historical, never as current. Re-measuring the dispersion on the
+folded build remains open work.
 
 ⚡ **The 100 ns GNSS term needs one clarification before it can settle.**
 WB6CXC describes it as PPS variability. If that variability means
