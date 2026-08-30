@@ -443,6 +443,20 @@ description = "BPSK_PPS"
 # fine_stage_enabled = true        # coherent zero-crossing fine stage + T6 anchor authority
 # fine_fold_seconds = 30           # coherent fold length K (seconds)
 # delay_budget_ns = 10000          # TS-1 modulator path only (~10 µs).
+#                                  # ⛔ THIS DEFAULT IS WRONG AND STILL APPLIED.
+#                                  # P. Elliott (WB6CXC), who designed the TS-1,
+#                                  # puts the standard-injector modulator delay
+#                                  # under 200 ns (2026-08-30).  The 10 µs here
+#                                  # originated as this comment and nothing
+#                                  # outside the project ever supported it; it
+#                                  # is also the code default in
+#                                  # core_recorder_v2.py, so a station that
+#                                  # leaves this commented out still applies it.
+#                                  # The right value for a site is the antenna-
+#                                  # to-injector run (feed, preamp, filter) plus
+#                                  # that <200 ns — measure it, do not inherit
+#                                  # this.  See
+#                                  # docs/design/TIMING_PROVENANCE_MODEL.md §2.
 #                                  # HARD BOUND ±1 ms — the guard exists to stop
 #                                  # timestamp error being absorbed here, so do
 #                                  # NOT widen it; the radiod filter group delay

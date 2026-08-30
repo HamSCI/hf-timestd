@@ -86,11 +86,25 @@ continuously AUTHORITATIVE and anchoring. Same station, same instant, two
 subsystems, two incompatible answers. At DASI2 the tiers are structurally
 unavailable — they are defined by hardware that station does not have.
 
-**Two instrumental terms have never been evaluated.** The injector modulator
-delay (≈10 µs, vendor documentation) and the receiver front end (sub-µs, not
-characterised) are the terms that set the combined uncertainty of the
-payload-anchored chain, and neither has been measured. They are fixed properties
-of the installation, so they are evaluable — nobody has done it.
+**The instrumental terms now divide into three.** Paul Elliott (WB6CXC), who
+designed the TS-1, gives the injector modulator delay as under 200 ns in
+standard injector mode. That settles the largest term the earlier draft
+carried. Two terms remain unevaluated. The first covers the run from the
+antenna terminals to the injection point, together with any preamplifier and
+filter the signal passes on the way. The second covers the receiver front end.
+Both remain fixed properties of a given installation, so a station can measure
+them. None has.
+
+⛔ **The software still applies 10 µs.** `delay_budget_ns` defaults to 10,000
+in `core_recorder_v2.py`, and B4 does not override it, so every T6 anchor
+carries that correction. Against WB6CXC's figure the station over-corrects by
+roughly 9.8 µs. That exceeds the Type A uncertainty of a 30-second carry by a
+factor of sixty-five, and it exceeds every other term in this budget combined.
+The number entered as a comment in our own configuration template, and this
+document then cited it as vendor documentation. Nothing outside the project
+ever supported it. Correcting a live instrument's published timestamps calls
+for an operator decision, so this document records the defect and proposes the
+change rather than making it.
 
 ⛔ **A correction to an earlier draft of this document.** It claimed the radiod
 filter group delay was "a known systematic neither corrected nor reported",
@@ -113,12 +127,35 @@ own chain. No field presumes a GPSDO, a Stratum-1 LAN server, or a BPSK pilot.
 
 ```
 payload-anchored (GRAPE / hf-timestd)
-  UTC(USNO via GPS) → GPSDO → TS-1 modulator → RF path → RX888 ADC
-                    → radiod channel filter → edge detection → RTP↔UTC anchor
+
+  reference  UTC(USNO via GPS) → TS-1 onboard GPS → modulator ──┐
+                                                                ├─ injection
+  signal     antenna terminals → feed, preamp, filter ──────────┘   point
+                                                                       │
+             shared coax → RX888 ADC → radiod channel filter →─────────┘
+             edge detection → RTP↔UTC anchor
 
 host-clock (mag-recorder)
   UTC(NIST) → NTP/chrony reference → system clock → sample restamp
 ```
+
+⚡ **The injection point serves as the reference plane, and that choice does
+real work.** Downstream of it the measured signal and the injected reference
+travel the same coax, so that delay cancels and never enters the measurand.
+WB6CXC states the same cancellation independently: the line from the TS-1 to
+the receiver does not affect a time-of-arrival measurement, because both
+signals ride it together. Upstream the two paths differ. The reference
+originates inside the TS-1, while the signal crosses the antenna feed and
+whatever preamplifier and filter sit in front of the injector. That segment
+survives in the measurand, it varies from station to station, and §3.2 asks
+each station to declare it.
+
+A third chain waits on hardware. WB6CXC reports that a TS-1 generating an
+over-the-air timestamped signal would carry an effective modulator delay near
+5 µs, and that the work under way there leaves injector operation untouched.
+The chain model absorbs such a variant as a chain of its own, with its own
+budget, rather than as a revision to this one. Recording it now costs nothing
+and demonstrates what the structure claims to do.
 
 ⚡ **The chain is the portable structure; the uncertainty is the portable
 quantity; the tier is local shorthand.** A station with no GPSDO publishes a
@@ -204,15 +241,19 @@ Two block types.
  "measurand":"UTC instant of digitisation of sample n, at the antenna terminals",
  "reference_plane":"antenna_terminals",
  "traceability":{"claim":"UTC(USNO) via GPS", "qualified":true,
-   "qualification":"instrumental delay links are not independently calibrated; 2 terms remain Type B"},
+   "qualification":"antenna-to-injector path not declared; receiver front end not characterised"},
  "budget":[
   {"term":"filter_group_delay","correction_ns":16618000,"u_ns":1500000,"type":"B",
    "method":"asserted from config; disagrees with T4-referenced median 15.153 ms by 1.5 ms"},
-  {"term":"ts1_modulator_delay","correction_ns":0,"u_ns":10000,"type":"B",
-   "method":"vendor guide assertion, WB6CXC TimeSync-1"},
+  {"term":"ts1_modulator_delay","correction_ns":0,"u_ns":200,"type":"B",
+   "method":"designer statement, P. Elliott WB6CXC, 2026-08-30; standard injector mode"},
+  {"term":"antenna_to_injector","correction_ns":null,"u_ns":null,"type":"B",
+   "method":"NOT DECLARED — feed, preamp and filter ahead of the injection point; station-specific"},
+  {"term":"gnss_antenna_feed","correction_ns":null,"u_ns":null,"type":"B",
+   "method":"NOT DECLARED — cable length x velocity factor; a sign-known bias, not an uncertainty"},
   {"term":"edge_estimation","correction_ns":0,"u_ns":5000,"type":"B",
    "method":"conservative bound; becomes Type A computed from cn0_db_hz once the fine-stage sweep of §4.3 has run"}],
- "u_combined_ns":1500042, "k":2}
+ "u_combined_ns":1500008, "k":2}
 ```
 
 `u_combined_ns` is the RSS of the `u_ns` terms — the uncertainty **remaining
@@ -308,9 +349,11 @@ and are reported separately.
 
 | Term | Correction | u | Type | Basis |
 |---|---|---|---|---|
-| GNSS 1 PPS at the injector | 0 | 100 ns | B | receiver specification |
-| **Injector modulator delay** | 0 | **not evaluated** (≈10 µs) | B | vendor documentation |
-| Feed transit, 20 m @ 5 ns/m | 100 ns | ≤ 20 ns | B | cable length and velocity factor |
+| GNSS 1 PPS at the injector | 0 | 100 ns | B | WB6CXC, 2026-08-30; Type A/B open |
+| GNSS antenna feed | **not declared** | — | B | length × velocity factor; a sign-known bias |
+| Injector modulator delay | 0 | ≤ 200 ns | B | P. Elliott WB6CXC (designer), 2026-08-30 |
+| **Antenna to injection point** | **not declared** | **not evaluated** | B | feed, preamp, filter; station-specific |
+| Injection point to receiver | cancels | cancels | — | common to signal and reference |
 | **Receiver front end** | 0 | **not evaluated** (sub-µs) | B | not characterised |
 | Fiducial localisation | 0 | 150 ns | A | repeatability, 120 s |
 | Sub-aperture interpolation | 0 | 5 ns | A | quantisation |
@@ -318,9 +361,36 @@ and are reported separately.
 | Anchor origin dispersion | 0 | 1.9 µs | A | 63 anchors over 4.5 h |
 | Rate reference, carried 1 h | 0 | 1.44 µs | A | −0.0004 ± 0.0004 ppm |
 
-Type A combines to **0.15 µs** over a 30 s carry and **2.4 µs** over 4.5 h. The
-combined uncertainty is therefore set by the two **unevaluated** analogue Type B
-terms, of order **10 µs**.
+Type A combines to **0.15 µs** over a 30 s carry and **2.4 µs** over 4.5 h.
+Once the modulator settles at 200 ns or below, the Type A terms dominate
+everything this budget has actually evaluated. The uncertainty that remains
+lives in our estimator and in how long we carry the rate, not in the injector.
+Two analogue terms stay unevaluated, and both describe plumbing rather than
+physics: a station closes them by measuring its own cable runs and front end.
+That leaves the largest single error in the payload-anchored chain sitting in
+software — the 10 µs `delay_budget_ns` default described in §2, which no
+measurement supports.
+
+⚡ **The 100 ns GNSS term needs one clarification before it can settle.**
+WB6CXC describes it as PPS variability. If that variability means
+pulse-to-pulse jitter, it averages down as 1/√N, and our fine stage already
+exploits exactly that. If instead it bounds a bias that wanders slowly, it
+averages down not at all and it sets the floor. The distinction changes the
+term's classification and its weight, so the budget carries it as open rather
+than guessing. One observation makes the question worth asking: our measured
+T6 floor lands near 0.11 µs at τ ≈ 280 s, which sits almost exactly on the
+stated 100 ns. Either the two agree by coincidence, or the GNSS pulse itself
+sets our floor.
+
+⛔ **`chain_delay_ns` does not measure the analogue chain, despite its name.**
+On B4 it reads 0.5955 s with a standard deviation of 2.37 µs. No analogue path
+in this station spans half a second. The quantity tracks where the recovered
+edge falls inside the named second, which the coarse cascade determines, and
+it therefore offers no independent check on the injector delay. Anyone
+reaching for it as a calibration of the modulator path — the obvious move,
+given the name — would be reading a different measurand. The field wants
+renaming, and §4 should propose an estimator that does measure the analogue
+delay.
 
 ⚡ The processing interval Λ (≈14.1 ms, load-dependent) does **not** appear here.
 Under the content convention the label denotes the antenna epoch, so Λ is outside
