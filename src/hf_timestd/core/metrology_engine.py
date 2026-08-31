@@ -278,6 +278,38 @@ class MetrologyEngine:
             elif abs(self.frequency_mhz - 15.0) < 0.1:
                 bpm_active_hours = set(range(1, 9))
 
+            # Free-space great-circle delays: the hard floor the arrival
+            # gate enforces.  Scatter delays a tick; nothing accelerates
+            # one, so an arrival earlier than this is not that station by
+            # any mechanism.  Computed here rather than defaulted, because
+            # the fallback (modelled delay less the early tolerance) sits
+            # BELOW the physical floor and would admit impossible arrivals.
+            try:
+                import math as _math
+                from hf_timestd.core.wwv_constants import STATION_CATALOG as _CAT
+
+                def _gc_km(lat1, lon1, lat2, lon2):
+                    p1, p2 = _math.radians(lat1), _math.radians(lat2)
+                    dp = p2 - p1
+                    dl = _math.radians(lon2 - lon1)
+                    a = (_math.sin(dp / 2) ** 2
+                         + _math.cos(p1) * _math.cos(p2) * _math.sin(dl / 2) ** 2)
+                    return 6371.0 * 2 * _math.asin(_math.sqrt(a))
+
+                _C_KM_PER_MS = 299.792458
+                self._station_freespace_ms = {}
+                for _name in ('WWV', 'WWVH', 'BPM', 'CHU'):
+                    _st = _CAT.get(_name)
+                    if _st is None:
+                        continue
+                    _d = _gc_km(self.precise_lat, self.precise_lon,
+                                _st.lat, _st.lon)
+                    self._station_freespace_ms[_name] = _d / _C_KM_PER_MS
+            except Exception as _exc:  # noqa: BLE001 — a floor is optional, not fatal
+                logger.debug("%s: free-space floors unavailable: %s",
+                             self.channel_name, _exc)
+                self._station_freespace_ms = None
+
             from hf_timestd.core.bpm_discriminator import BPMDiscriminator
             self.bpm_discriminator = BPMDiscriminator(
                 receiver_lat=self.precise_lat,
