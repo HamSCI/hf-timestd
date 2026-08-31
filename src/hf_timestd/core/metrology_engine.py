@@ -2492,7 +2492,7 @@ class MetrologyEngine:
         try:
             import time as _time
             from .station_arrival_gate import (
-                arrival_windows, can_discriminate, eligible_candidates,
+                arrival_windows, eligible_candidates,
                 gate_arrivals,
             )
             if not expected_delays_by_station:
@@ -2537,19 +2537,29 @@ class MetrologyEngine:
                 sigma_ms = float(
                     getattr(buffer_timing, "offset_sigma_ns", 0.0) or 0.0) / 1e6
                 tier = getattr(buffer_timing, "judge_tier", None)
-            if not can_discriminate(expected_delays_by_station, sigma_ms):
-                logger.info(
-                    "%s: ARRIVAL GATE abstains — reference sigma %.2f ms "
-                    "(tier %s) cannot resolve the station separation",
-                    self.channel_name, sigma_ms, tier)
-                return
             # Free-space great-circle floors.  Scatter delays; nothing
             # accelerates -- so an arrival earlier than this is not that
             # station by any mechanism, whatever the tolerances say.
             floors = getattr(self, "_station_freespace_ms", None)
-            windows = arrival_windows(expected_delays_by_station,
-                                      reference_sigma_ms=sigma_ms,
-                                      floors_ms=floors)
+            # ONE computation.  This asked can_discriminate() first and
+            # then built the windows, but the check ran WITHOUT the floors
+            # while the build ran WITH them -- two partitions that can
+            # disagree, and did: 10 MHz abstained while 5 MHz gated on the
+            # same reference sigma.  Build once; a refusal is the build's
+            # own, and carries its reason.
+            try:
+                windows = arrival_windows(expected_delays_by_station,
+                                          reference_sigma_ms=sigma_ms,
+                                          floors_ms=floors)
+            except ValueError as exc:
+                logger.info(
+                    "%s: ARRIVAL GATE abstains — reference sigma %.2f ms "
+                    "(tier %s): %s | candidates=%s",
+                    self.channel_name, sigma_ms, tier, exc,
+                    {k: round(v, 2) for k, v in
+                     sorted(expected_delays_by_station.items(),
+                            key=lambda kv: kv[1])})
+                return
             arrivals = []
             for m in measurements:
                 d = expected_delays_by_station.get(m.get('station'))
