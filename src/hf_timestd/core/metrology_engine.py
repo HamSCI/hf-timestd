@@ -1940,6 +1940,13 @@ class MetrologyEngine:
             logger.info(f"{self.channel_name}: {mode_label} mode measured "
                        f"{len(detections)} signal(s) "
                        f"({n_best} best for timing): {station_names}")
+
+            # Time-of-arrival gate, logged BESIDE the existing verdict so
+            # the two can be compared on identical minutes rather than
+            # across hours with different propagation.  Reports only --
+            # nothing downstream consumes it yet.
+            self._log_arrival_gate(measurements, expected_delays_by_station,
+                                   buffer_timing)
              
         # === Step 2: Channel Characterization ===
         # We need this for Station ID and Metrics
@@ -2376,6 +2383,57 @@ class MetrologyEngine:
                         self._gap_warning_emitted[stn] = now
         
         return results
+
+    def _log_arrival_gate(self, measurements, expected_delays_by_station,
+                          buffer_timing=None) -> None:
+        """Report which stations their ARRIVAL TIMES support.
+
+        The deployed discriminator assigns by ORDER -- early peak and
+        late peak -- so it must emit a pair and cannot say "neither".
+        That is what labelled BPM (arriving ~39.7 ms) as WWVH, and what
+        put all 297 of SHARED_5000's WWVH ensembles at the WWV delay.
+
+        A measurement's residual is against its OWN label's predicted
+        delay, so adding that delay back recovers the absolute arrival,
+        which is what geometry constrains.  Logged only; no verdict of
+        this function reaches any product.  See
+        core/station_arrival_gate.py.
+        """
+        try:
+            from .station_arrival_gate import (
+                arrival_windows, can_discriminate, gate_arrivals,
+            )
+            if not expected_delays_by_station:
+                return
+            # How well is the ruler known?  ToA rides the Offset Judge's
+            # correction, so when its bench degrades the arrivals stay
+            # where they are while the confidence in them does not.
+            sigma_ms = float(getattr(buffer_timing, "offset_sigma_ns", 0.0)) / 1e6
+            tier = getattr(buffer_timing, "judge_tier", None)
+            if not can_discriminate(expected_delays_by_station, sigma_ms):
+                logger.info(
+                    "%s: ARRIVAL GATE abstains — reference sigma %.2f ms "
+                    "(tier %s) cannot resolve the station separation",
+                    self.channel_name, sigma_ms, tier)
+                return
+            windows = arrival_windows(expected_delays_by_station,
+                                      reference_sigma_ms=sigma_ms)
+            arrivals = []
+            for m in measurements:
+                d = expected_delays_by_station.get(m.get('station'))
+                if d is None:
+                    continue
+                arrivals.append(round(float(d) + float(m['timing_error_ms']), 2))
+            v = gate_arrivals(arrivals, windows)
+            logger.info(
+                "%s: ARRIVAL GATE assigned=%s gated=%s arrivals=%s "
+                "unmatched=%s tier=%s ref_sigma_ms=%.2f",
+                self.channel_name,
+                sorted({m['station'] for m in measurements}),
+                list(v.present), arrivals, list(v.unmatched), tier, sigma_ms,
+            )
+        except Exception as exc:  # noqa: BLE001 — a diagnostic must not break metrology
+            logger.debug("%s: arrival gate skipped: %s", self.channel_name, exc)
 
     def _write_bootstrap_state_on_lock(self):
         """Write bootstrap state file when FusionTimingState achieves lock.

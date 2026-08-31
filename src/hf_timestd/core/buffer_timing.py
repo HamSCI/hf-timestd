@@ -116,6 +116,12 @@ class BufferTiming:
     # radiod mapping, exactly as before).
     offset_applied_ns: float = 0.0
     judge_tier: Optional[str] = None
+    #: The judge's own uncertainty on that correction.  Carried because
+    #: a consumer that reasons about WHERE something arrived needs to
+    #: know how well the ruler is known -- the arrival gate widens its
+    #: windows by this and abstains when they would overlap, so losing
+    #: T6 produces an abstention rather than a confident wrong answer.
+    offset_sigma_ns: float = 0.0
 
     def sample_to_utc(self, sample_index: float) -> float:
         """Convert a sample index to a UTC timestamp."""
@@ -172,8 +178,10 @@ def resolve_buffer_timing(
     judge_block = metadata.get('timing') or {}
     try:
         judge_offset_ns = float(judge_block.get('offset_ns') or 0.0)
+        judge_sigma_ns = float(judge_block.get('offset_sigma_ns') or 0.0)
     except (TypeError, ValueError):
         judge_offset_ns = 0.0
+        judge_sigma_ns = 0.0
     judge_tier = judge_block.get('judge_tier')
 
     top_gps_ns = metadata.get('gps_time_ns')
@@ -201,6 +209,7 @@ def resolve_buffer_timing(
             jitter_ms=0.0,
             offset_applied_ns=judge_offset_ns,
             judge_tier=judge_tier,
+            offset_sigma_ns=judge_sigma_ns,
         )
 
     # Fallback: timing_snapshots[] array (for files written before this change)
