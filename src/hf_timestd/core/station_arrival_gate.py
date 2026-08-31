@@ -238,6 +238,8 @@ def eligible_candidates(
     utc_minute: int = None,
     utc_hour: int = None,
     bpm_active_hours=None,
+    frequency_mhz: float = None,
+    station_frequencies: Dict[str, list] = None,
 ) -> Dict[str, float]:
     """Drop candidates that cannot be transmitting at this instant.
 
@@ -252,6 +254,23 @@ def eligible_candidates(
     dropped -- narrowing on an assumption would be its own error.
     """
     out = dict(expected_delays_ms)
+
+    # A station that does not broadcast here is not a candidate here.
+    # The engine offered every station on every channel without checking
+    # frequency, and the gate abstained on all four shared channels the
+    # minute it went live.  CHU exposed it -- 3.33 / 7.85 / 14.67 MHz, so
+    # never present on a shared frequency, yet still offered there, and
+    # near enough to WWV in delay to break the partition.  The defect was
+    # the missing frequency check, not CHU.
+    if frequency_mhz is not None and station_frequencies:
+        keep = {}
+        for st, d in out.items():
+            fs = station_frequencies.get(st)
+            if fs is None or any(abs(float(f) - float(frequency_mhz)) < 0.1
+                                 for f in fs):
+                keep[st] = d
+        out = keep
+
     if "BPM" not in out:
         return out
     if utc_minute is not None and int(utc_minute) in BPM_UT1_MINUTES:

@@ -343,3 +343,49 @@ class TestScatterDelaysButNeverAccelerates:
         v = gate_arrivals([15.0], w)
         assert v.present == ("WWV",)
         assert v.timing_usable == ()
+
+
+class TestACandidateMustBroadcastOnThisFrequency:
+    """Caught on B4 within a minute of deploying the gate.
+
+    The engine offered WWV, WWVH, CHU and BPM on every channel without
+    checking which of them broadcast there, and the gate abstained on all
+    four shared channels within a minute of going live.  Failing safe was
+    right; the unfiltered candidate list was not.
+
+    CHU exposed the defect rather than causing it: on 3.33 / 7.85 /
+    14.67 MHz it never appears on a shared frequency at all, so it could
+    not have competed with WWV or WWVH -- but offered anyway, its ~5.1 ms
+    delay sits close enough to WWV's to break the partition.
+
+    Same rule as BPM's schedule, one step earlier: a candidate must be
+    able to be there.
+    """
+
+    ALL = {"WWV": 4.24, "WWVH": 22.82, "CHU": 5.46, "BPM": 39.66}
+    FREQS = {"WWV": [2.5, 5.0, 10.0, 15.0, 20.0, 25.0],
+             "WWVH": [2.5, 5.0, 10.0, 15.0],
+             "CHU": [3.33, 7.85, 14.67],
+             "BPM": [2.5, 5.0, 10.0, 15.0]}
+
+    def test_chu_is_dropped_from_a_shared_frequency(self):
+        c = eligible_candidates(self.ALL, frequency_mhz=5.0,
+                                station_frequencies=self.FREQS)
+        assert set(c) == {"WWV", "WWVH", "BPM"}
+
+    def test_dropping_chu_lets_the_partition_build(self):
+        c = eligible_candidates(self.ALL, frequency_mhz=5.0,
+                                station_frequencies=self.FREQS)
+        assert can_discriminate(c)
+
+    def test_keeping_chu_correctly_refuses(self):
+        assert not can_discriminate(self.ALL)
+
+    def test_wwvh_is_dropped_from_20_mhz(self):
+        """WWVH does not transmit above 15 MHz."""
+        c = eligible_candidates(self.ALL, frequency_mhz=20.0,
+                                station_frequencies=self.FREQS)
+        assert "WWVH" not in c and "WWV" in c
+
+    def test_an_unknown_frequency_keeps_everything(self):
+        assert set(eligible_candidates(self.ALL)) == set(self.ALL)

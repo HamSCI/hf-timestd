@@ -126,6 +126,20 @@ def _vacuum_hop_fallback_delay(dist_km: float, frequency_hz: float) -> Tuple[flo
     return total_delay_ms, uncertainty_ms
 
 
+def _live_station_names():
+    """Stations still transmitting, in catalogue order.
+
+    Falls back to the historical hard-coded set only if the catalogue
+    cannot be read, and never silently includes a retired station when
+    the catalogue is available.
+    """
+    try:
+        from hamsci_dsp.stations import BUILTIN_CATALOG
+        return [s.name for s in BUILTIN_CATALOG.active_stations()]
+    except Exception:  # noqa: BLE001 — a catalogue read must not stop metrology
+        return ['WWV', 'WWVH', 'BPM']
+
+
 class MetrologyEngine:
     """
     Metrology Engine: Pure DSP processing for Time-of-Arrival.
@@ -298,7 +312,7 @@ class MetrologyEngine:
 
                 _C_KM_PER_MS = 299.792458
                 self._station_freespace_ms = {}
-                for _name in ('WWV', 'WWVH', 'BPM', 'CHU'):
+                for _name in _live_station_names():
                     _st = _CAT.get(_name)
                     if _st is None:
                         continue
@@ -1393,7 +1407,11 @@ class MetrologyEngine:
         # Compute expected delays and uncertainties for all stations using physics model
         expected_delays_by_station = {}
         expected_uncertainty_by_station = {}
-        for station in ['WWV', 'WWVH', 'CHU', 'BPM']:
+        # Only stations still transmitting.  CHU (NRC Ottawa) has ceased,
+        # so predicting a delay for it describes a signal that cannot
+        # arrive.  The catalogue keeps the entry so archived data naming
+        # CHU still resolves.
+        for station in _live_station_names():
             expected_delay_ms, dist_km, uncertainty_ms = self._predict_geometric_delay(
                 station, system_time
             )
@@ -2451,9 +2469,18 @@ class MetrologyEngine:
                 utc_hour, utc_minute = tm.tm_hour, tm.tm_min
             bpm_hours = getattr(
                 getattr(self, "bpm_discriminator", None), "active_hours", None)
+            try:
+                from hf_timestd.core.wwv_constants import STATION_CATALOG as _CAT
+                st_freqs = {n: list(_CAT.get(n).frequencies_mhz)
+                            for n in _live_station_names()
+                            if _CAT.get(n) is not None}
+            except Exception:  # noqa: BLE001
+                st_freqs = None
             candidates = eligible_candidates(
                 expected_delays_by_station, utc_minute=utc_minute,
-                utc_hour=utc_hour, bpm_active_hours=bpm_hours)
+                utc_hour=utc_hour, bpm_active_hours=bpm_hours,
+                frequency_mhz=self.frequency_mhz,
+                station_frequencies=st_freqs)
             dropped = sorted(set(expected_delays_by_station) - set(candidates))
             expected_delays_by_station = candidates
             # How well is the ruler known?  ToA rides the Offset Judge's
