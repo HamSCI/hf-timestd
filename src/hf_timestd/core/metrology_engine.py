@@ -145,12 +145,22 @@ def _judge_reference():
             d = json.load(fh)
     except Exception:  # noqa: BLE001 — the judge is advisory here
         return (None, None)
-    lp = d.get("label_plane") or {}
-    tier = (d.get("judge") or {}).get("tier")
-    # Prefer the plane term's own sigma; fall back to the adopted bench's.
-    sig = lp.get("sigma_ns")
+    judge = d.get("judge") or {}
+    tier = judge.get("tier")
+    # The ADOPTED BENCH's sigma, because that is the uncertainty which
+    # actually reaches an arrival time.  buffer_timing.sample0_utc is
+    # radiod's RTP/GPS pair plus the judge's offset_ns, so the judge's own
+    # uncertainty on "what time is it" is what an arrival inherits.
+    #
+    # NOT label_plane.sigma_ns.  That is the uncertainty of the (label -
+    # host) PLANE TERM, which the live RTP path never applies.  Reaching
+    # for it read 3.9 ms where the bench reads 0.6-0.9, and at k=3 that is
+    # 11.8 ms of slack a side against an 18 ms separation -- so the
+    # windows merged and the gate abstained on every single minute.  It
+    # was refusing correctly from the wrong number.
+    sig = judge.get("sigma_ns")
     if sig is None:
-        sig = (d.get("judge") or {}).get("sigma_ns")
+        sig = (d.get("label_plane") or {}).get("sigma_ns")
     if sig is None:
         return (None, tier)
     return (float(sig) / 1e6, tier)
