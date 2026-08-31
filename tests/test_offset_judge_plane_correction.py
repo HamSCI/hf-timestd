@@ -351,20 +351,23 @@ class TestViolationPathUsesTheSameTerm:
                             sigma_ns=sigma_ns, mono=0.0, plane=plane)
 
     def test_a_pure_plane_gap_is_not_a_violation(self, tmp_path):
-        j = make_judge(tmp_path, label_plane_offset_ns=self.LAMBDA_NS)
+        j = make_judge(tmp_path, label_plane_offset_ns=self.LAMBDA_NS,
+                       violation_plane_correction=True)
         # The source sits exactly one plane-gap from a label-plane bench.
         assert not j._violates(self.LAMBDA_NS, self._bench("label")), (
             "Λ is excluded from the label by definition, not a contradiction")
 
     def test_a_real_epoch_error_still_violates(self, tmp_path):
-        j = make_judge(tmp_path, label_plane_offset_ns=self.LAMBDA_NS)
+        j = make_judge(tmp_path, label_plane_offset_ns=self.LAMBDA_NS,
+                       violation_plane_correction=True)
         # 30 ms beyond the plane gap is a genuine disagreement.
         off = self.LAMBDA_NS - 30_000_000.0
         assert j._violates(off, self._bench("label")), \
             "the correction must not blind the judge to a true epoch error"
 
     def test_a_host_plane_bench_is_never_plane_corrected(self, tmp_path):
-        j = make_judge(tmp_path, label_plane_offset_ns=self.LAMBDA_NS)
+        j = make_judge(tmp_path, label_plane_offset_ns=self.LAMBDA_NS,
+                       violation_plane_correction=True)
         # Against a host-plane bench there is no plane gap to remove, so
         # the same raw offset that was innocent above is a violation here.
         assert j._violates(self.LAMBDA_NS, self._bench("host")), \
@@ -372,7 +375,8 @@ class TestViolationPathUsesTheSameTerm:
 
     def test_the_plane_terms_own_uncertainty_widens_the_bound(self, tmp_path):
         """Subtracting a measured term imports that term's sigma."""
-        j = make_judge(tmp_path, label_plane_offset_ns=self.LAMBDA_NS)
+        j = make_judge(tmp_path, label_plane_offset_ns=self.LAMBDA_NS,
+                       violation_plane_correction=True)
         bench = self._bench("label")
         # Just outside k*sigma_bench alone (5 * 0.88 ms = 4.4 ms)...
         off = self.LAMBDA_NS - 5_000_000.0
@@ -380,3 +384,21 @@ class TestViolationPathUsesTheSameTerm:
         # ...but inside it once a 3 ms plane-term sigma is combined in.
         j._plane_sigma_for_test = 3_000_000.0
         assert not j._violates(off, bench, plane_sigma_ns=3_000_000.0)
+
+
+class TestTheCorrectionIsOffUntilEarned:
+    """AC0G-B4 refuted the premise fifteen minutes after deployment."""
+
+    def test_default_applies_no_plane_term_to_violations(self, tmp_path):
+        j = make_judge(tmp_path, label_plane_offset_ns=-18_000_000.0)
+        bench = BenchReading(tier="T6", utc=1_700_000_000.0,
+                             sigma_ns=880_000.0, mono=0.0, plane="label")
+        # radiod and T6 agree to 1 ms, as observed live.  Subtracting an
+        # 18 ms plane term would manufacture a violation out of agreement.
+        assert not j._violates(1_000_000.0, bench)
+
+    def test_the_cross_bench_gate_still_corrects(self, tmp_path):
+        """Only the violation test changed.  The gate genuinely compares
+        across planes and must keep its term."""
+        j = make_judge(tmp_path, label_plane_offset_ns=-16_600_000.0)
+        assert j.effective_label_plane_offset_ns() == -16_600_000.0

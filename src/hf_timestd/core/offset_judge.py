@@ -886,6 +886,12 @@ class OffsetJudge:
         # cross-bench gate exists to detect.  The recorder sets this from
         # [timing.t6_pps].labeling_convention.
         self.label_plane_measure = bool(cfg.get("label_plane_measure", True))
+        # Whether the sustained-violation test removes the plane term.
+        # OFF by default -- see _plane_expected_ns for why AC0G-B4 refuted
+        # the premise. The cross-bench gate is unaffected and still
+        # corrects, because it really does compare across planes.
+        self.violation_plane_correction = bool(
+            cfg.get("violation_plane_correction", False))
         from .label_plane import LabelPlaneTracker
         self._label_plane = LabelPlaneTracker(
             window_s=float(cfg.get("label_plane_window_s",
@@ -1777,7 +1783,29 @@ class OffsetJudge:
     # choke point.
 
     def _plane_expected_ns(self, bench) -> float:
-        """Expected (bench − radiod) purely from the plane difference."""
+        """Expected (bench − radiod) purely from the plane difference.
+
+        ⛔ DEFAULTS OFF, and the default is the finding.  This correction
+        was added on the reasoning that radiod's advertised epoch sits in
+        the host plane, so a label-plane bench should differ from it by Λ.
+        AC0G-B4 refuted that within fifteen minutes of deployment: the raw
+        offset against T6 read +1 ms and against T4 +4 ms, so radiod
+        agrees with BOTH benches and no Λ-sized gap exists in this
+        comparison at all.  ``st.radiod_utc_now()`` derives UTC from
+        radiod's own RTP/GPS pair -- radiod's frame, not the host clock --
+        and that is the frame T6 anchors in.
+
+        The tracker measures (label bench − HOST CLOCK).  This test
+        compares (bench − RADIOD).  Different pairs, and only the first
+        has a plane gap in it.  Applying the term here injected an 18.8 ms
+        error and manufactured the violations it was meant to remove.
+
+        The seam and its tests stay so the mechanism is available if a
+        station is ever shown to need it, but nothing applies it until
+        that evidence exists.
+        """
+        if not self.violation_plane_correction:
+            return 0.0
         if getattr(bench, "plane", "host") != "label":
             return 0.0
         return float(self.effective_label_plane_offset_ns())
@@ -1789,6 +1817,8 @@ class OffsetJudge:
         zero for a configured constant, whose uncertainty we do not
         know and must not invent.  A measured term carries its own.
         """
+        if not self.violation_plane_correction:
+            return 0.0
         if getattr(bench, "plane", "host") != "label":
             return 0.0
         offset, source, _rejected = self._label_plane_in_force()
