@@ -323,3 +323,60 @@ class TestMeasuredPlaneMustEarnItsUse:
                        label_plane_measure=True)
         assert j.effective_label_plane_offset_ns() == -16_618_000.0
         assert j.label_plane_status()["source"] == "config"
+
+
+class TestViolationPathUsesTheSameTerm:
+    """The plane term reached the cross-bench gate but not the alarm.
+
+    AC0G-B4, 2026-08-30/31: the offset judge logged ~295 CRITICAL
+    violations an hour against radiod's advertised epoch, every one of
+    them negative and clustered at -13 to -14 ms across all five
+    channels at once.  That is not a fault signature -- a fault does not
+    arrive on every channel simultaneously with the same sign and the
+    same magnitude.  It is Λ, the radiod processing interval, which the
+    content-time convention excludes from the label BY DEFINITION.
+
+    ``_cross_bench_delta_ns`` already corrected for exactly this, but the
+    sustained-violation test compared ``ema_offset_ns`` raw.  So one half
+    of the judge knew about labeling conventions and the other half
+    screamed at one.  Same term, same choke point, both halves.
+    """
+
+    T = 1_700_000_000.0
+    LAMBDA_NS = -13_500_000.0        # label reads EARLIER than host
+
+    def _bench(self, plane, sigma_ns=880_000.0, utc=None):
+        return BenchReading(tier="T6" if plane == "label" else "T4",
+                            utc=self.T if utc is None else utc,
+                            sigma_ns=sigma_ns, mono=0.0, plane=plane)
+
+    def test_a_pure_plane_gap_is_not_a_violation(self, tmp_path):
+        j = make_judge(tmp_path, label_plane_offset_ns=self.LAMBDA_NS)
+        # The source sits exactly one plane-gap from a label-plane bench.
+        assert not j._violates(self.LAMBDA_NS, self._bench("label")), (
+            "Λ is excluded from the label by definition, not a contradiction")
+
+    def test_a_real_epoch_error_still_violates(self, tmp_path):
+        j = make_judge(tmp_path, label_plane_offset_ns=self.LAMBDA_NS)
+        # 30 ms beyond the plane gap is a genuine disagreement.
+        off = self.LAMBDA_NS - 30_000_000.0
+        assert j._violates(off, self._bench("label")), \
+            "the correction must not blind the judge to a true epoch error"
+
+    def test_a_host_plane_bench_is_never_plane_corrected(self, tmp_path):
+        j = make_judge(tmp_path, label_plane_offset_ns=self.LAMBDA_NS)
+        # Against a host-plane bench there is no plane gap to remove, so
+        # the same raw offset that was innocent above is a violation here.
+        assert j._violates(self.LAMBDA_NS, self._bench("host")), \
+            "correcting a same-plane comparison would hide a real fault"
+
+    def test_the_plane_terms_own_uncertainty_widens_the_bound(self, tmp_path):
+        """Subtracting a measured term imports that term's sigma."""
+        j = make_judge(tmp_path, label_plane_offset_ns=self.LAMBDA_NS)
+        bench = self._bench("label")
+        # Just outside k*sigma_bench alone (5 * 0.88 ms = 4.4 ms)...
+        off = self.LAMBDA_NS - 5_000_000.0
+        assert j._violates(off, bench)
+        # ...but inside it once a 3 ms plane-term sigma is combined in.
+        j._plane_sigma_for_test = 3_000_000.0
+        assert not j._violates(off, bench, plane_sigma_ns=3_000_000.0)

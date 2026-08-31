@@ -120,3 +120,83 @@ def test_estimate_reports_its_span():
     _feed(t, 10, dt=10.0)
     est = t.estimate()
     assert est.span_s == pytest.approx(90.0, abs=0.001)
+
+
+# ── Separating how well we know the CENTRE from how much the term MOVES ──
+#
+# AC0G-B4, 2026-08-31.  The judge had been falling back to its configured
+# constant for the whole content-time era, and the published reason was
+# always the same:
+#
+#   "sigma 6.989 ms exceeds the 5.000 ms bound: a correction looser than
+#    the comparison it perturbs makes it worse"
+#
+# The bound is right.  The sigma was not.  It came from
+#
+#     sigma = max(worst host sigma in window, pstdev(offsets))
+#
+# and neither branch shrinks with n, so no amount of measuring could ever
+# beat the bound.  The measurement could not lose on the evidence; it was
+# arithmetically barred from winning.
+#
+# pstdev is the spread of the POPULATION — how far Λ wanders as load
+# moves it.  The uncertainty of the MEDIAN of n such samples is a
+# different quantity, smaller by roughly 1.2533/sqrt(n_eff).  Both matter
+# to the judge and they matter differently: the centre says what to
+# subtract, the spread says how much slack the violation test needs.  So
+# the tracker now reports both.
+
+def test_the_centre_is_known_better_than_the_term_wanders():
+    """sigma_ns must shrink with n; spread_ns must not."""
+    t = LabelPlaneTracker(min_n=4, window_s=1e9)
+    # Deliberate wander: alternate +/- 6 ms about the transport.
+    for i in range(200):
+        off = TRANSPORT_NS + (6 * MS if i % 2 else -6 * MS)
+        t.observe(label_utc=1.0 + off / 1e9, host_utc=1.0,
+                  host_sigma_ns=20_000.0, mono=float(i))
+    est = t.estimate()
+    assert est.spread_ns > 5 * MS, "the term really does wander this much"
+    assert est.sigma_ns < est.spread_ns, (
+        "the median of 200 samples is known far better than one sample")
+
+
+def test_sigma_shrinks_as_the_sample_grows():
+    def sigma_for(n):
+        t = LabelPlaneTracker(min_n=4, window_s=1e9)
+        for i in range(n):
+            off = TRANSPORT_NS + (6 * MS if i % 2 else -6 * MS)
+            t.observe(label_utc=1.0 + off / 1e9, host_utc=1.0,
+                      host_sigma_ns=20_000.0, mono=float(i))
+        return t.estimate().sigma_ns
+    assert sigma_for(400) < sigma_for(25), \
+        "more evidence must narrow the centre"
+
+
+def test_sigma_never_beats_the_host_clock_it_was_measured_against():
+    """The averaging-down argument applies to NOISE, never to bias.
+
+    A host clock with a systematic error contributes a floor no amount of
+    averaging removes, so the original guard survives in the form that is
+    actually true.
+    """
+    t = LabelPlaneTracker(min_n=4, window_s=1e9, host_bias_floor_ns=200_000.0)
+    for i in range(1000):
+        t.observe(label_utc=1.0 + TRANSPORT_NS / 1e9, host_utc=1.0,
+                  host_sigma_ns=20_000.0, mono=float(i))
+    assert t.estimate().sigma_ns >= 200_000.0
+
+
+def test_correlated_samples_do_not_count_as_independent():
+    """Observations 10 s apart against one chrony-disciplined clock are
+    not 1000 independent draws.  n_eff comes from the span and a declared
+    correlation time, so a fast poll cannot manufacture confidence."""
+    fast = LabelPlaneTracker(min_n=4, window_s=1e9, correlation_time_s=60.0)
+    slow = LabelPlaneTracker(min_n=4, window_s=1e9, correlation_time_s=60.0)
+    for i in range(600):                       # 600 samples, 1 s apart
+        fast.observe(label_utc=1.0 + (TRANSPORT_NS + (MS if i % 2 else -MS)) / 1e9,
+                     host_utc=1.0, host_sigma_ns=20_000.0, mono=float(i))
+    for i in range(600):                       # 600 samples, 60 s apart
+        slow.observe(label_utc=1.0 + (TRANSPORT_NS + (MS if i % 2 else -MS)) / 1e9,
+                     host_utc=1.0, host_sigma_ns=20_000.0, mono=float(i * 60))
+    assert slow.estimate().sigma_ns < fast.estimate().sigma_ns, (
+        "the same count spread over a longer span carries more information")

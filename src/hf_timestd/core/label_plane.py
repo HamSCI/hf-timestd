@@ -46,6 +46,7 @@ made-up plane offset is not.
 """
 from __future__ import annotations
 
+import math
 import statistics
 from collections import deque
 from dataclasses import dataclass
@@ -62,6 +63,14 @@ class LabelPlaneEstimate:
     sigma_ns: float
     n: int
     span_s: float
+    #: How much the term WANDERS (population spread), as distinct from how
+    #: well its centre is known (``sigma_ns``).  The judge subtracts the
+    #: centre and widens its violation tolerance by the spread: a term can
+    #: be centred precisely and still move, and both facts change what a
+    #: comparison should conclude.
+    spread_ns: float = 0.0
+    #: Independent-sample count actually credited (span / correlation time).
+    n_eff: float = 0.0
 
 
 class LabelPlaneTracker:
@@ -76,6 +85,21 @@ class LabelPlaneTracker:
     #: Below this many observations the median is not meaningful.
     DEFAULT_MIN_N = 8
 
+    #: Consecutive observations against ONE chrony-disciplined host clock
+    #: are not independent draws: the host's error is correlated over
+    #: tens of seconds, so polling faster manufactures confidence rather
+    #: than information.  Independent samples are credited from the span,
+    #: not the count.
+    DEFAULT_CORRELATION_TIME_S = 60.0
+
+    #: The averaging-down argument applies to host clock NOISE and never
+    #: to host clock BIAS.  A caller that can defend a figure for the
+    #: irreducible part declares it as ``host_bias_floor_ns``; otherwise
+    #: the whole reported host sigma stands as the floor, which keeps the
+    #: honest half of the original guard -- the term may never claim to be
+    #: tighter than the systematic error of the clock it was measured
+    #: against.
+
     #: Host clocks worse than this are not a usable reference for the
     #: measurement.  1 ms is already ~6% of the term; anything looser and
     #: the estimate says more about the host than about the pipeline.
@@ -86,10 +110,15 @@ class LabelPlaneTracker:
         window_s: float = DEFAULT_WINDOW_S,
         min_n: int = DEFAULT_MIN_N,
         max_host_sigma_ns: float = DEFAULT_MAX_HOST_SIGMA_NS,
+        correlation_time_s: float = DEFAULT_CORRELATION_TIME_S,
+        host_bias_floor_ns: Optional[float] = None,
     ):
         self.window_s = float(window_s)
         self.min_n = int(min_n)
         self.max_host_sigma_ns = float(max_host_sigma_ns)
+        self.correlation_time_s = max(1e-9, float(correlation_time_s))
+        self.host_bias_floor_ns = (None if host_bias_floor_ns is None
+                                   else max(0.0, float(host_bias_floor_ns)))
         # (mono, offset_ns, host_sigma_ns)
         self._obs: Deque[Tuple[float, float, float]] = deque()
 
@@ -135,20 +164,45 @@ class LabelPlaneTracker:
         offsets = [o for _, o, _ in self._obs]
         median = statistics.median(offsets)
 
-        # Spread of the term itself, combined with the worst host sigma in
-        # the window: the estimate may never claim to be tighter than the
-        # clock it was measured against.
+        # How far the term WANDERS.  Λ is a pipeline latency that moves
+        # with load, so a large spread is a true statement about the
+        # quantity — not evidence that the measurement is poor.
         try:
             spread = statistics.pstdev(offsets)
         except statistics.StatisticsError:  # pragma: no cover - len>=min_n
             spread = 0.0
-        host_sigma = max(s for _, _, s in self._obs)
-        sigma = max(host_sigma, spread)
 
         span = self._obs[-1][0] - self._obs[0][0]
+
+        # How well the CENTRE is known.  This is the standard error of the
+        # median (1.2533 * s / sqrt(n_eff)), and the two quantities differ
+        # by an order of magnitude in practice.  The former code returned
+        # max(host_sigma, spread) for both, which shrinks with neither n
+        # nor span -- so a measured term could never beat the bound the
+        # consumer applies, and the configured constant won by default
+        # rather than on merit (AC0G-B4 published exactly that refusal for
+        # the whole content-time era).
+        #
+        # n_eff comes from the SPAN and a declared correlation time, never
+        # from the raw count: consecutive reads of one disciplined clock
+        # carry one clock's error, and polling faster does not divide it.
+        n_eff = max(1.0, span / self.correlation_time_s)
+        sem = 1.2533 * spread / math.sqrt(n_eff)
+
+        # The host clock's systematic error is the floor: noise averages
+        # down, bias does not.  Take the worst host sigma offered as an
+        # upper bound on that bias unless the caller declares a tighter
+        # one it can defend.
+        host_sigma = max(s for _, _, s in self._obs)
+        floor = (host_sigma if self.host_bias_floor_ns is None
+                 else self.host_bias_floor_ns)
+        sigma = math.sqrt(sem * sem + floor * floor)
+
         return LabelPlaneEstimate(
             offset_ns=median,
             sigma_ns=float(sigma),
             n=len(self._obs),
             span_s=float(span),
+            spread_ns=float(spread),
+            n_eff=float(n_eff),
         )

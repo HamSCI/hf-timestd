@@ -1474,6 +1474,15 @@ class OffsetJudge:
                          if (est is not None and source == "measured")
                          else None),
             "n": int(est.n) if (est is not None and source == "measured") else 0,
+            # How far the term WANDERS, distinct from how well its centre
+            # is known.  Published because the two answer different
+            # questions and the old estimator conflated them, which is
+            # what kept the measured term permanently refused.
+            "spread_ns": (round(float(est.spread_ns), 1)
+                          if (est is not None and source == "measured")
+                          else None),
+            "n_eff": (round(float(est.n_eff), 1)
+                      if (est is not None and source == "measured") else None),
             "span_s": (round(float(est.span_s), 1)
                        if (est is not None and source == "measured") else 0.0),
         }
@@ -1481,6 +1490,8 @@ class OffsetJudge:
             out["rejected_offset_ns"] = round(float(rejected.offset_ns), 1)
             out["rejected_sigma_ns"] = round(float(rejected.sigma_ns), 1)
             out["rejected_n"] = int(rejected.n)
+            out["rejected_spread_ns"] = round(float(rejected.spread_ns), 1)
+            out["rejected_n_eff"] = round(float(rejected.n_eff), 1)
             out["rejected_reason"] = (
                 "sigma %.3f ms exceeds the %.3f ms bound: a correction "
                 "looser than the comparison it perturbs makes it worse"
@@ -1724,8 +1735,12 @@ class OffsetJudge:
         if st.ema_offset_ns is None or self._best is None:
             return
         sigma_ns = max(self._best.sigma_ns, 1.0)
-        bound_ns = self.k * sigma_ns
-        if abs(st.ema_offset_ns) > bound_ns:
+        plane_ns = self._plane_expected_ns(self._best)
+        plane_sigma_ns = self._plane_sigma_ns(self._best)
+        residual_ns = st.ema_offset_ns - plane_ns
+        bound_ns = self.k * math.sqrt(
+            sigma_ns * sigma_ns + plane_sigma_ns * plane_sigma_ns)
+        if abs(residual_ns) > bound_ns:
             if st.violation_since is None:
                 st.violation_since = mono_now
             if (mono_now - st.violation_since) >= self.sustain_window_s:
@@ -1740,12 +1755,62 @@ class OffsetJudge:
             st.last_critical_log = mono_now
             logger.critical(
                 f"OFFSET JUDGE VIOLATION: {self._key_str(st.source_key)} "
-                f"offset={st.ema_offset_ns/1e9:+.3f}s exceeds "
+                f"offset={st.ema_offset_ns/1e9:+.3f}s "
+                f"(plane {plane_ns/1e9:+.4f}s removed ⇒ residual "
+                f"{residual_ns/1e9:+.4f}s) exceeds "
                 f"{self.k:.0f}x sigma ({bound_ns/1e9:.4f}s, tier "
                 f"{self._best.tier}) sustained >{self.sustain_window_s:.0f}s "
                 f"— labels remain CORRECTED (segment {st.segment_id}); "
                 f"radiod's advertised epoch is contradicted."
             )
+
+    # ── plane term at the violation choke point ─────────────────────────
+    #
+    # A source's offset is (bench − radiod).  radiod's advertised epoch
+    # always sits in the host plane; the bench may not.  Under the
+    # content-time convention a label-plane bench reads one processing
+    # interval EARLIER by definition, so comparing the two without
+    # removing that term reports a definition as a fault -- which is what
+    # AC0G-B4 did, ~295 CRITICALs an hour, all one sign, all five
+    # channels at once.  The cross-bench gate already corrected for this
+    # through _cross_bench_delta_ns; these are the same term at the other
+    # choke point.
+
+    def _plane_expected_ns(self, bench) -> float:
+        """Expected (bench − radiod) purely from the plane difference."""
+        if getattr(bench, "plane", "host") != "label":
+            return 0.0
+        return float(self.effective_label_plane_offset_ns())
+
+    def _plane_sigma_ns(self, bench) -> float:
+        """Uncertainty imported by subtracting the plane term.
+
+        Zero for a same-plane comparison (nothing was subtracted) and
+        zero for a configured constant, whose uncertainty we do not
+        know and must not invent.  A measured term carries its own.
+        """
+        if getattr(bench, "plane", "host") != "label":
+            return 0.0
+        offset, source, _rejected = self._label_plane_in_force()
+        if source != "measured":
+            return 0.0
+        est = self._label_plane.estimate()
+        return float(est.sigma_ns) if est is not None else 0.0
+
+    def _violates(self, offset_ns: float, bench,
+                  plane_sigma_ns: Optional[float] = None) -> bool:
+        """Does this offset exceed k*sigma once the plane term is removed?
+
+        Exposed as its own method so the rule is testable without driving
+        a full tick, and so both callers cannot drift apart.
+        """
+        sigma_ns = max(float(bench.sigma_ns), 1.0)
+        if plane_sigma_ns is None:
+            plane_sigma_ns = self._plane_sigma_ns(bench)
+        residual = float(offset_ns) - self._plane_expected_ns(bench)
+        bound = self.k * math.sqrt(
+            sigma_ns * sigma_ns + float(plane_sigma_ns) ** 2)
+        return abs(residual) > bound
 
     def _refresh_rate_locked(self, st: _SourceState) -> None:
         """Recompute the per-source rate estimates (once per tick).
