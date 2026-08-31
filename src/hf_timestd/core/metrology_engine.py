@@ -126,6 +126,36 @@ def _vacuum_hop_fallback_delay(dist_km: float, frequency_hz: float) -> Tuple[flo
     return total_delay_ms, uncertainty_ms
 
 
+#: Where the Offset Judge publishes what it is doing.  A consumer that
+#: reasons about WHERE a signal arrived needs to know how well the clock
+#: it measured against is known, and this is the surface that says.
+_JUDGE_STATUS_PATH = "/run/hf-timestd/offset_judge.json"
+
+
+def _judge_reference():
+    """``(sigma_ms, tier)`` from the judge, or ``(None, None)``.
+
+    Returns None rather than zero when unavailable: a missing reading is
+    not evidence of a perfect ruler, and treating it as one is how the
+    gate ended up running with no abstention path at all.
+    """
+    try:
+        import json
+        with open(_JUDGE_STATUS_PATH) as fh:
+            d = json.load(fh)
+    except Exception:  # noqa: BLE001 — the judge is advisory here
+        return (None, None)
+    lp = d.get("label_plane") or {}
+    tier = (d.get("judge") or {}).get("tier")
+    # Prefer the plane term's own sigma; fall back to the adopted bench's.
+    sig = lp.get("sigma_ns")
+    if sig is None:
+        sig = (d.get("judge") or {}).get("sigma_ns")
+    if sig is None:
+        return (None, tier)
+    return (float(sig) / 1e6, tier)
+
+
 def _live_station_names():
     """Stations still transmitting, in catalogue order.
 
@@ -2486,8 +2516,17 @@ class MetrologyEngine:
             # How well is the ruler known?  ToA rides the Offset Judge's
             # correction, so when its bench degrades the arrivals stay
             # where they are while the confidence in them does not.
-            sigma_ms = float(getattr(buffer_timing, "offset_sigma_ns", 0.0)) / 1e6
-            tier = getattr(buffer_timing, "judge_tier", None)
+            # The ruler's own uncertainty.  buffer_timing carries it only
+            # when built from a sidecar; on the live RTP path it is built
+            # from the stream and has no judge block, so the gate ran with
+            # sigma 0 and tier None -- tight windows and no abstention
+            # path, which looked like it was working and was not.  The
+            # judge publishes this for exactly this purpose.
+            sigma_ms, tier = _judge_reference()
+            if sigma_ms is None:
+                sigma_ms = float(
+                    getattr(buffer_timing, "offset_sigma_ns", 0.0) or 0.0) / 1e6
+                tier = getattr(buffer_timing, "judge_tier", None)
             if not can_discriminate(expected_delays_by_station, sigma_ms):
                 logger.info(
                     "%s: ARRIVAL GATE abstains — reference sigma %.2f ms "
