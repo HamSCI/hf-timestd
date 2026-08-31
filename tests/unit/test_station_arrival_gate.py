@@ -27,6 +27,8 @@ import pytest
 
 from hf_timestd.core.station_arrival_gate import (
     can_discriminate,
+    classify_arrival,
+    eligible_candidates,
     GateVerdict, arrival_windows, gate_arrivals,
 )
 
@@ -76,12 +78,22 @@ class TestBothOneOrNeither:
         v = gate_arrivals([], windows)
         assert v.present == ()
 
-    def test_an_arrival_in_no_window_names_no_station(self, windows):
-        """An 11 ms peak is no station at all -- it must be reported
-        unmatched, never assigned to whichever station is nearest."""
-        v = gate_arrivals([11.0], windows)
+    def test_an_arrival_before_every_floor_names_no_station(self, windows):
+        """Earlier than WWV's floor is earlier than light allows for any
+        candidate, so it is reported unmatched rather than assigned to
+        whichever station happens to be nearest."""
+        v = gate_arrivals([1.0], windows)
         assert v.present == ()
-        assert v.unmatched == (11.0,)
+        assert v.unmatched == (1.0,)
+
+    def test_a_late_arrival_is_scattered_not_unmatched(self, windows):
+        """An 11 ms peak cannot be direct WWV and cannot be WWVH at all,
+        but sidescattered WWV is physically open to it.  It is therefore
+        evidence about WWV -- carried, and withheld from timing."""
+        v = gate_arrivals([11.0], windows)
+        assert v.present == ("WWV",)
+        assert v.timing_usable == ()
+        assert v.scattered["WWV"] == (11.0,)
 
 
 class TestBPMIsNamed:
@@ -212,3 +224,122 @@ class TestItDegradesWithTheRuler:
             assert "WWV" in str(exc)
         else:
             pytest.fail("expected a refusal")
+
+
+class TestACandidateMustBeAbleToBeOnTheAir:
+    """Geometry says WHERE a station would land; it cannot say WHETHER the
+    station is transmitting.  Both must hold before we name it.
+
+    BPM fails this two ways.  It alternates its time base -- minutes
+    25-29 and 55-59 carry UT1, not UTC, and UT1 differs from UTC by DUT1
+    up to 0.9 s, fifty times the whole span these windows cover.  And it
+    does not broadcast around the clock on every frequency: on 2.5 MHz it
+    is off 01-07Z, on 15 MHz it is on only 01-08Z.
+
+    An arrival near 39.7 ms while BPM is off is still an arrival, and
+    still worth reporting -- as unmatched.  What it must not do is
+    acquire BPM's name.
+    """
+
+    ALL = {"WWV": 4.24, "WWVH": 22.82, "BPM": 39.66}
+
+    def test_bpm_is_a_candidate_in_a_utc_minute_while_scheduled(self):
+        c = eligible_candidates(self.ALL, utc_minute=10, utc_hour=12,
+                                bpm_active_hours=set(range(24)))
+        assert "BPM" in c
+
+    @pytest.mark.parametrize("minute", [25, 27, 29, 55, 57, 59])
+    def test_bpm_is_dropped_in_its_ut1_minutes(self, minute):
+        c = eligible_candidates(self.ALL, utc_minute=minute, utc_hour=12,
+                                bpm_active_hours=set(range(24)))
+        assert "BPM" not in c
+
+    def test_bpm_is_dropped_when_off_schedule(self):
+        """2.5 MHz: off 01-07Z."""
+        off = {0} | set(range(8, 24))
+        assert "BPM" not in eligible_candidates(
+            self.ALL, utc_minute=10, utc_hour=3, bpm_active_hours=off)
+        assert "BPM" in eligible_candidates(
+            self.ALL, utc_minute=10, utc_hour=9, bpm_active_hours=off)
+
+    def test_the_us_stations_are_never_dropped_by_bpm_rules(self):
+        c = eligible_candidates(self.ALL, utc_minute=27, utc_hour=3,
+                                bpm_active_hours=set())
+        assert set(c) == {"WWV", "WWVH"}
+
+    def test_an_arrival_where_bpm_would_be_is_unmatched_when_bpm_is_off(self):
+        c = eligible_candidates(self.ALL, utc_minute=27, utc_hour=12,
+                                bpm_active_hours=set(range(24)))
+        v = gate_arrivals([39.7], arrival_windows(c))
+        assert v.present == ()
+        assert v.unmatched == (39.7,)
+
+    def test_unknown_time_keeps_every_candidate(self):
+        """Absent knowledge of the minute we do not silently narrow."""
+        assert set(eligible_candidates(self.ALL)) == {"WWV", "WWVH", "BPM"}
+
+
+class TestScatterDelaysButNeverAccelerates:
+    """The asymmetry is physical, so it belongs in the structure.
+
+    Sidescatter and backscatter are real and can delay a tick
+    substantially -- those paths are among the more interesting things on
+    the air.  Nothing accelerates one.  A signal from station X can
+    therefore never arrive before X's great-circle free-space time, and
+    an arrival earlier than that floor is not X by any mechanism.
+
+    So the early bound is HARD and the late bound is GENEROUS, bounded
+    only by where the next station's own floor begins.  Between a
+    station's modelled modes and that limit an arrival is possible-but-
+    scattered: worth recording, and useless for timing, because a
+    scattered path has no known length and therefore no known delay.
+    """
+
+    FLOORS = {"WWV": 3.73, "WWVH": 22.02, "BPM": 38.37}
+    MODES = {"WWV": 4.24, "WWVH": 22.82, "BPM": 39.66}
+
+    def test_nothing_arrives_before_the_free_space_floor(self):
+        w = arrival_windows(self.MODES, floors_ms=self.FLOORS)
+        assert classify_arrival(3.0, w) is None
+        # 21.5 ms is earlier than WWVH's floor, so it can never be WWVH.
+        # It remains physically open to scattered WWV, and that is what
+        # the gate must say -- not silently the nearer station.
+        st, kind = classify_arrival(21.5, w)
+        assert st != "WWVH"
+        assert (st, kind) == ("WWV", "scattered")
+
+    def test_a_huge_tolerance_still_cannot_breach_the_floor(self):
+        """Loosening the late side must not loosen the early side."""
+        w = arrival_windows(self.MODES, floors_ms=self.FLOORS, late_ms=8.0)
+        assert classify_arrival(3.0, w) is None
+
+    def test_a_direct_arrival_is_usable_for_timing(self):
+        w = arrival_windows(self.MODES, floors_ms=self.FLOORS)
+        st, kind = classify_arrival(4.1, w)
+        assert (st, kind) == ("WWV", "direct")
+
+    def test_a_late_arrival_is_scattered_and_not_usable_for_timing(self):
+        """The 8-22 ms population: too late for direct WWV, too early to
+        be WWVH at all.  Sidescattered WWV is plausible; its path length
+        is not knowable, so it must not carry a delay."""
+        w = arrival_windows(self.MODES, floors_ms=self.FLOORS)
+        st, kind = classify_arrival(15.0, w)
+        assert (st, kind) == ("WWV", "scattered")
+
+    def test_scatter_stops_at_the_next_stations_floor(self):
+        w = arrival_windows(self.MODES, floors_ms=self.FLOORS)
+        st, kind = classify_arrival(22.5, w)
+        assert st == "WWVH" and kind == "direct"
+
+    def test_only_direct_arrivals_reach_the_timing_verdict(self):
+        w = arrival_windows(self.MODES, floors_ms=self.FLOORS)
+        v = gate_arrivals([4.1, 15.0, 22.5], w)
+        assert v.present == ("WWV", "WWVH")
+        assert v.timing_usable == ("WWV", "WWVH")
+        assert v.scattered == {"WWV": (15.0,)}
+
+    def test_a_station_seen_only_by_scatter_is_present_but_untimed(self):
+        w = arrival_windows(self.MODES, floors_ms=self.FLOORS)
+        v = gate_arrivals([15.0], w)
+        assert v.present == ("WWV",)
+        assert v.timing_usable == ()

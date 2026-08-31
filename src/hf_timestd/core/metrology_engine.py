@@ -2400,11 +2400,30 @@ class MetrologyEngine:
         core/station_arrival_gate.py.
         """
         try:
+            import time as _time
             from .station_arrival_gate import (
-                arrival_windows, can_discriminate, gate_arrivals,
+                arrival_windows, can_discriminate, eligible_candidates,
+                gate_arrivals,
             )
             if not expected_delays_by_station:
                 return
+            # Geometry says WHERE a tick would land; it cannot say WHETHER
+            # the station is transmitting.  BPM alternates to UT1 for ten
+            # minutes an hour and is off entirely on some frequencies at
+            # some hours, so it stops being a candidate then -- an arrival
+            # near its window is still reported, just not under its name.
+            utc0 = float(getattr(buffer_timing, "sample0_utc", 0.0) or 0.0)
+            utc_hour = utc_minute = None
+            if utc0 > 0:
+                tm = _time.gmtime(utc0)
+                utc_hour, utc_minute = tm.tm_hour, tm.tm_min
+            bpm_hours = getattr(
+                getattr(self, "bpm_discriminator", None), "active_hours", None)
+            candidates = eligible_candidates(
+                expected_delays_by_station, utc_minute=utc_minute,
+                utc_hour=utc_hour, bpm_active_hours=bpm_hours)
+            dropped = sorted(set(expected_delays_by_station) - set(candidates))
+            expected_delays_by_station = candidates
             # How well is the ruler known?  ToA rides the Offset Judge's
             # correction, so when its bench degrades the arrivals stay
             # where they are while the confidence in them does not.
@@ -2416,8 +2435,13 @@ class MetrologyEngine:
                     "(tier %s) cannot resolve the station separation",
                     self.channel_name, sigma_ms, tier)
                 return
+            # Free-space great-circle floors.  Scatter delays; nothing
+            # accelerates -- so an arrival earlier than this is not that
+            # station by any mechanism, whatever the tolerances say.
+            floors = getattr(self, "_station_freespace_ms", None)
             windows = arrival_windows(expected_delays_by_station,
-                                      reference_sigma_ms=sigma_ms)
+                                      reference_sigma_ms=sigma_ms,
+                                      floors_ms=floors)
             arrivals = []
             for m in measurements:
                 d = expected_delays_by_station.get(m.get('station'))
@@ -2426,11 +2450,14 @@ class MetrologyEngine:
                 arrivals.append(round(float(d) + float(m['timing_error_ms']), 2))
             v = gate_arrivals(arrivals, windows)
             logger.info(
-                "%s: ARRIVAL GATE assigned=%s gated=%s arrivals=%s "
-                "unmatched=%s tier=%s ref_sigma_ms=%.2f",
+                "%s: ARRIVAL GATE assigned=%s present=%s timing_usable=%s "
+                "scattered=%s arrivals=%s unmatched=%s tier=%s "
+                "ref_sigma_ms=%.2f ineligible=%s",
                 self.channel_name,
                 sorted({m['station'] for m in measurements}),
-                list(v.present), arrivals, list(v.unmatched), tier, sigma_ms,
+                list(v.present), list(v.timing_usable),
+                {k: list(x) for k, x in v.scattered.items()},
+                arrivals, list(v.unmatched), tier, sigma_ms, dropped,
             )
         except Exception as exc:  # noqa: BLE001 — a diagnostic must not break metrology
             logger.debug("%s: arrival gate skipped: %s", self.channel_name, exc)
