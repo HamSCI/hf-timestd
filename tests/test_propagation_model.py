@@ -405,8 +405,16 @@ class TestArrivalPatternMatrixIntegration:
         utc_time = datetime(2026, 3, 15, 18, 0, 0, tzinfo=timezone.utc)
         result = self.matrix.compute_matrix(utc_time)
         
-        # get_arrival should still work
-        for station in ['WWV', 'WWVH', 'CHU', 'BPM']:
+        # get_arrival should still work, for every station we actually
+        # predict.  Derived from the catalogue rather than hardcoded, so a
+        # retired station does not leave this asserting arrivals for a
+        # transmitter that is off the air.
+        from hamsci_dsp.propagation.arrival_matrix import STATION_FREQUENCIES
+        from hamsci_dsp.stations import BUILTIN_CATALOG
+        predicted = [s.name for s in BUILTIN_CATALOG.active_stations()
+                     if s.name in STATION_FREQUENCIES]
+        assert predicted, "no active stations to check"
+        for station in predicted:
             arrivals = result.get_station_arrivals(station)
             assert len(arrivals) > 0
             for a in arrivals:
