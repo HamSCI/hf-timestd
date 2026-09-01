@@ -153,6 +153,56 @@ conf=0.50 case, which today resolves to a coin flip and emits a label.
 
 ### Key 3 — consistent with history
 
+⚡ **CALIBRATED 2026-09-01 from 3M archived arrivals. The provisional 1.0 ms
+was wrong, and the way it was wrong matters more than the number.**
+
+Measured the minute-to-minute step in each station's arrival, circular
+distance so the second boundary does not wrap into a false 999 ms jump.
+Against the arrivals as the DEPLOYED pipeline labelled them:
+
+    station   p50    p90     p99
+    WWV      5.06   23.59  121.33 ms
+    WWVH     4.50   26.69  235.18 ms
+
+On that evidence key 3 is impossible. Admitting normal variation would need a
+tolerance near 25 ms, which is WIDER than the 18.6 ms WWV-WWVH separation — a
+history gate that admits the wrong station is not a gate.
+
+⛔ **But that distribution is circular.** It measures arrivals labelled by the
+model whose labelling is the defect. A "WWVH track" containing minutes when
+WWVH was not there will jump, and the jumps are mis-attribution, not physics.
+
+Re-measured over arrivals that pass keys 1 and 2 first — above the floor AND
+inside exactly one geometric window, windows recomputed hourly from the fixed
+predictor:
+
+    station   p50    p90    p95    p99      n
+    WWV      0.73   3.97   4.86   6.23   11469
+    WWVH     1.35   5.04   6.03   7.30   11865
+    BPM      2.56   6.87   8.69  18.92   10912
+
+p90 falls about 5x and p99 about 20x. The variation was never propagation.
+
+⇒ **KEY 3 MUST BE CALIBRATED ON DATA ALREADY FILTERED BY KEYS 1 AND 2.** The
+keys are ordered, and so is their calibration. Calibrating key 3 against raw
+labels measures the defect it exists to catch.
+
+**Proposed tolerances**, the p95 of the post-filter step distribution, which
+rejects about 5% of single minutes by construction — and key 3 rejects a LONE
+outlier while `reacquire_after` agreeing arrivals still force re-acquisition,
+so a 5% single-minute rate is a gate, not a wall:
+
+    WWV   5 ms      WWVH  6 ms      BPM  9 ms
+
+All sit far below the 18.6 ms inter-station separation, so the gate cannot
+admit a neighbour. BPM is the loosest and should be: 11,528 km over three hops
+varies more than 1,122 km over one.
+
+⚠ Per-station, not one number. A single tolerance either starves WWV or lets
+BPM's real variation look like an outlier.
+
+
+
 An arrival can clear the floor and land in a window and still be a sidelobe or a
 mis-assignment. Propagation delay moves smoothly; mode changes step by known
 amounts. The recent track constrains what is plausible. This follows the
