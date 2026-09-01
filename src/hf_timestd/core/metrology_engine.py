@@ -166,6 +166,46 @@ def _judge_reference():
     return (float(sig) / 1e6, tier)
 
 
+#: Free space, km per millisecond.
+_C_KM_PER_MS = 299.792458
+
+
+def freespace_floors_ms(receiver_lat: float, receiver_lon: float,
+                        frequency_mhz: float) -> Dict[str, float]:
+    """Great-circle free-space time to each live station, per channel.
+
+    `arrival_windows` takes these as a HARD early bound: nothing accelerates,
+    so an arrival before this is not that station by any mechanism, whatever
+    the tolerances say.
+
+    Two corrections over the version this replaces, both in the direction of
+    admitting less:
+
+    * It uses the shared WGS-84 geodesic rather than a local spherical
+      approximation on R=6371 km.  The sphere UNDERSTATED the distance — by
+      2.7 km to WWV, 10.4 km to WWVH and 24.0 km to BPM from AC0G — so the
+      floors sat 8.9, 34.5 and 80.0 us too LOW and admitted arrivals the
+      physics forbids.
+    * It uses the antenna that radiates THIS frequency where the operator
+      publishes one.  NIST publishes WWVH's four separately, and a metrology
+      channel is one frequency, so the floor can name the right antenna.  The
+      replay harness already did this; while the engine did not, the two
+      adjudicated against different windows.
+
+    Retired stations get no floor: they cannot arrive.
+    """
+    floors: Dict[str, float] = {}
+    from hamsci_dsp.stations import BUILTIN_CATALOG as _CAT
+    for name in _live_station_names():
+        station = _CAT.get(name)
+        if station is None:
+            continue
+        lat, lon = station.antenna_for(frequency_mhz)
+        floors[name] = great_circle_km(
+            receiver_lat, receiver_lon, lat, lon) / _C_KM_PER_MS
+    return floors
+
+
 def _live_station_names():
     """Stations still transmitting, in catalogue order.
 
@@ -339,26 +379,8 @@ class MetrologyEngine:
             # the fallback (modelled delay less the early tolerance) sits
             # BELOW the physical floor and would admit impossible arrivals.
             try:
-                import math as _math
-                from hf_timestd.core.wwv_constants import STATION_CATALOG as _CAT
-
-                def _gc_km(lat1, lon1, lat2, lon2):
-                    p1, p2 = _math.radians(lat1), _math.radians(lat2)
-                    dp = p2 - p1
-                    dl = _math.radians(lon2 - lon1)
-                    a = (_math.sin(dp / 2) ** 2
-                         + _math.cos(p1) * _math.cos(p2) * _math.sin(dl / 2) ** 2)
-                    return 6371.0 * 2 * _math.asin(_math.sqrt(a))
-
-                _C_KM_PER_MS = 299.792458
-                self._station_freespace_ms = {}
-                for _name in _live_station_names():
-                    _st = _CAT.get(_name)
-                    if _st is None:
-                        continue
-                    _d = _gc_km(self.precise_lat, self.precise_lon,
-                                _st.lat, _st.lon)
-                    self._station_freespace_ms[_name] = _d / _C_KM_PER_MS
+                self._station_freespace_ms = freespace_floors_ms(
+                    self.precise_lat, self.precise_lon, self.frequency_mhz)
             except Exception as _exc:  # noqa: BLE001 — a floor is optional, not fatal
                 logger.debug("%s: free-space floors unavailable: %s",
                              self.channel_name, _exc)
