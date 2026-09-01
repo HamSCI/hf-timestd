@@ -229,6 +229,30 @@ def t6_chain_delay_uncalibrated(t6_config) -> bool:
     return float(t6_config.get("chain_delay_calib_s", 0.0)) == 0.0
 
 
+def _t6_pps_edge_phase_keys(chain_delay_ns) -> dict:
+    """Publish where the recovered edge falls inside the named second.
+
+    The number reads about 0.5955 s and measures the coarse cascade's naming
+    of the second.  No analogue path in this station spans half a second, so
+    the old name `chain_delay_ns` described nothing it held — and it collided
+    with the client contract's `RADIOD_<id>_CHAIN_DELAY_NS`, a real per-radiod
+    path delay that every timing-critical client subtracts from its UTC.
+    Nothing publishes that fact yet, so the collision stays latent; an
+    implementer wiring the mechanism as written and reaching for the matching
+    name would move every client by 596 ms.
+
+    Both keys go out for one release.  `core-recorder-status.json` serves as a
+    published surface, so the old name earns a deprecation window even though
+    no consumer outside hf-timestd reads it today.  See
+    docs/design/TIMING_PROVENANCE_MODEL.md §4.5.
+    """
+    return {
+        'edge_phase_in_named_second_ns': chain_delay_ns,
+        # DEPRECATED — retire one release after 2026-09-01.
+        'chain_delay_ns': chain_delay_ns,
+    }
+
+
 def wrap_chain_delay_ns(effective_ns: int) -> int:
     """Fold a chain delay onto the representative nearest zero.
 
@@ -3895,7 +3919,14 @@ class CoreRecorderV2:
                            if decision is not None else []),
             'delay_budget_ns': auth.delay_budget_ns,
             'filter_group_delay_ns': auth.filter_group_delay_ns,
-            'asserted_chain_delay_ns': (
+            # The configured budget being applied — an assertion, not a
+            # measurement, and never the contract's analogue path delay.
+            # `asserted_chain_delay_ns` rides along for one release so any
+            # reader outside this repo can move.  See
+            # docs/design/TIMING_PROVENANCE_MODEL.md §4.5.
+            'applied_delay_budget_ns': (
+                auth.delay_budget_ns + auth.filter_group_delay_ns),
+            'asserted_chain_delay_ns': (  # DEPRECATED — use applied_delay_budget_ns
                 auth.delay_budget_ns + auth.filter_group_delay_ns),
             'anchor_tier': (anchor.captured_via_tier
                             if anchor is not None else None),
@@ -6001,10 +6032,14 @@ class CoreRecorderV2:
                         self._t6_calibrator, 'pps_phantom', None
                     ),
                     'pps_consecutive': self._t6_calibrator.pps_consecutive,
-                    'chain_delay_ns': (self._t6_calibrator._chain_delay_samples
-                                       * 1_000_000_000 / self._t6_calibrator.sample_rate
-                                       if self._t6_calibrator._chain_delay_samples is not None
-                                       else None),
+                    # Where the recovered edge falls inside the named second.
+                    # Emitted under both names for one release — see
+                    # `_t6_pps_edge_phase_keys`.
+                    **_t6_pps_edge_phase_keys(
+                        self._t6_calibrator._chain_delay_samples
+                        * 1_000_000_000 / self._t6_calibrator.sample_rate
+                        if self._t6_calibrator._chain_delay_samples is not None
+                        else None),
                     # Δ = chrony's view of TSL3 offset == local_clock − source_UTC.
                     # The value the BpskPpsProbe forwards as offset_ms.  None
                     # until the first SHM push has happened.

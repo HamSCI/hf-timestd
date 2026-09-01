@@ -596,7 +596,9 @@ Not a commitment — a draft sequence.
      `local_minus_source_ns = int(round((wall_time_sec − round(wall_time_sec)) × 1e9))`
      and write it into the `l6_pps` block of
      `/var/lib/timestd/status/core-recorder-status.json` alongside
-     `chain_delay_ns`.
+     `edge_phase_in_named_second_ns` (published since 2026-09-01;
+     `chain_delay_ns` names the same value for one more release and then
+     goes away — see `docs/design/TIMING_PROVENANCE_MODEL.md` §4.5).
    - In `BpskPpsProbe.poll()`, read the new field and publish
      `offset_ms = local_minus_source_ns / 1_000_000`. Treat the field
      as required (probe returns `available=False` if missing) so a

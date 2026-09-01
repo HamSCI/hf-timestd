@@ -577,19 +577,27 @@ implementer wiring that mechanism as written, reaching for the field whose
 name matches the contract, would shift every client's UTC by 596 ms — and each
 client would faithfully report the correction it was applying.
 
-**Proposed renaming**, which needs coordination with sigmond because the
-contract owns the surviving name:
+**The renaming SHIPPED on 2026-09-01.** Rob endorsed the split as contract
+owner, and the contract keeps the name that fits its quantity:
 
-| Now | Proposed | Rationale |
+| Was | Now | Rationale |
 |---|---|---|
 | contract `chain_delay_ns` | unchanged | the name fits the quantity |
 | `t6_pps.chain_delay_ns` | `edge_phase_in_named_second_ns` | states what it measures |
 | `asserted_chain_delay_ns` | `applied_delay_budget_ns` | an assertion, not a measurement |
 
 `core-recorder-status.json` serves as a published surface, so the rename runs
-through a deprecation window: emit both keys, mark the old one deprecated in
-`docs/`, and retire it one release later. No consumer outside hf-timestd reads
-the two renamed keys today, which keeps the window cheap.
+through a deprecation window. `core_recorder_v2` emits **both** keys today:
+`_t6_pps_edge_phase_keys()` writes the pair inside `t6_pps`, and
+`_t6_authority_status()` writes `applied_delay_budget_ns` beside the old
+`asserted_chain_delay_ns`. No consumer outside hf-timestd reads either
+deprecated key, which keeps the window cheap.
+
+⛔ **Retire the two deprecated keys one release after 2026-09-01.** Delete
+the `chain_delay_ns` entry from `_t6_pps_edge_phase_keys` and the
+`asserted_chain_delay_ns` entry from `_t6_authority_status`, and drop the
+matching assertions from `tests/test_chain_delay_ns_rename.py`. Leaving them
+longer re-opens the collision this rename closed.
 
 **What none of this supplies is a measurement of the analogue chain.** The
 contract asks hf-timestd to calibrate one, and hf-timestd does not. Section 4
