@@ -214,6 +214,24 @@ Verified inverting on live rows: arrival 59056.21 ms, model 41.77,
 | Key 1 floor, relative | threshold in existing `corr_snr_db` units | full archive |
 | Key 1 floor, absolute + effective N | recompute correlations at several P_fa from raw IQ | ⏳ ~36 h only |
 | censored set | `L2_detection_attempts` records rejections WITH their SNR | 302k attempts |
+| `BELOW_FLOOR` / `CHANNEL_SILENT` verdicts | GRAPE DRF **carrier amplitude** — an INDEPENDENT witness of path openness | full archive |
+
+⚡ **The GRAPE archive is an independent check, and a strong one.**
+`drf_properties.h5` reports 10 Hz complex, 6 subchannels, hourly files, daily
+directories — the PSWS Doppler product, kept locally back to 2026-08-24 and
+long-term on PSWS. At 10 Hz it CANNOT calibrate the tick floor: the ticks are
+~5 ms bursts of 1000 Hz tone, and 10 Hz cannot represent a 1000 Hz tone. But its
+carrier AMPLITUDE tracks whether a path is open, on a completely separate signal
+path from the tick detector. A `BELOW_FLOOR` verdict should coincide with
+carrier collapse in GRAPE. That is a second instrument agreeing over months,
+which beats the same detector agreeing with itself over one night.
+
+⛔ **The archive has a bandwidth gap.** 10 Hz kept forever, 24 kHz kept 36 hours,
+nothing between. `/var/lib/timestd/drf` sits EMPTY — the full-rate DRF writer is
+retired in `archive/legacy-drf-core/`. Retaining even a few minutes per hour at
+24 kHz would make this whole class of question answerable retrospectively for
+good, instead of depending on a rolling buffer. Worth doing regardless of this
+design.
 
 ⛔ **Censoring caveat.** The archive records what the old detector kept. We can
 test what the new rule would have REJECTED from what was admitted; we cannot
