@@ -65,3 +65,51 @@ def test_opens_read_only(tiny_db):
     with pytest.raises(sqlite3.OperationalError):
         con.execute("INSERT INTO L1_all_arrivals (channel) VALUES ('x')")
     con.close()
+
+
+def test_skips_null_snr_and_counts_them(tmp_path):
+    """Rows with NULL corr_snr_db must be excluded and counted."""
+    path = tmp_path / "timestd.db"
+    con = sqlite3.connect(path)
+    con.execute(
+        "CREATE TABLE L1_all_arrivals ("
+        " channel TEXT, timestamp_utc TEXT, minute_boundary_utc INTEGER,"
+        " station TEXT, frequency_mhz REAL, utc_second INTEGER,"
+        " peak_rank INTEGER, arrival_ms REAL, timing_error_ms REAL,"
+        " corr_snr_db REAL, peak_value REAL, model_expected_ms REAL)")
+    rows = [
+        ("SHARED_10000", "2026-08-31T17:19:00+0000", 1788196740, "WWV",
+         10.0, 1788196741, 0, 59004.24, 0.0, 22.5, 1.0, 4.24),
+        ("SHARED_10000", "2026-08-31T17:19:00+0000", 1788196740, "WWVH",
+         10.0, 1788196741, 1, 59022.85, 0.0, None, 0.2, 22.85),
+        ("SHARED_10000", "2026-08-31T17:19:00+0000", 1788196740, "CHU",
+         10.0, 1788196741, 2, 59031.00, 0.0, 18.0, 0.1, 31.0),
+    ]
+    con.executemany(
+        "INSERT INTO L1_all_arrivals VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+    con.commit()
+    con.close()
+
+    groups = list(read_minutes(path))
+    assert len(groups) == 1
+    assert len(groups[0].arrivals) == 2
+    assert groups[0].arrivals[0].corr_snr_db == 22.5
+    assert groups[0].arrivals[1].corr_snr_db == 18.0
+    assert groups[0].skipped_null_snr == 1
+
+
+def test_end_utc_filter(tiny_db):
+    """end_utc filter excludes rows at or after the boundary."""
+    got = list(read_minutes(tiny_db, end_utc=1788196800))
+    assert [g.minute_utc for g in got] == [1788196740]
+
+
+def test_all_filters_together(tiny_db):
+    """channel + start_utc + end_utc filters composed together."""
+    got = list(read_minutes(
+        tiny_db,
+        channel="SHARED_10000",
+        start_utc=1788196740,
+        end_utc=1788196801))
+    assert [g.minute_utc for g in got] == [1788196740, 1788196800]
+    assert all(g.channel == "SHARED_10000" for g in got)

@@ -11,9 +11,11 @@ a second, so the reader reduces it modulo 1000.
 
 from __future__ import annotations
 
+import contextlib
+import os
 import sqlite3
 from dataclasses import dataclass, field
-from typing import Iterator, List, Optional, Set
+from typing import Iterator, List, Optional, Set, Union
 
 from hf_timestd.core.admission_cascade import ObservedArrival
 
@@ -25,17 +27,18 @@ class MinuteGroup:
     frequency_mhz: float
     arrivals: List[ObservedArrival] = field(default_factory=list)
     deployed_labels: Set[str] = field(default_factory=set)
+    skipped_null_snr: int = 0
 
 
 def read_minutes(
-    db_path,
+    db_path: Union[str, os.PathLike],
     *,
     channel: Optional[str] = None,
     start_utc: Optional[int] = None,
     end_utc: Optional[int] = None,
 ) -> Iterator[MinuteGroup]:
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    try:
+    with contextlib.closing(con):
         sql = ("SELECT channel, minute_boundary_utc, frequency_mhz, station,"
                " arrival_ms, corr_snr_db FROM L1_all_arrivals")
         clauses, params = [], []
@@ -50,10 +53,14 @@ def read_minutes(
             params.append(int(end_utc))
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
-        sql += " ORDER BY channel, minute_boundary_utc"
+        sql += " ORDER BY channel, minute_boundary_utc, utc_second, peak_rank"
 
         current: Optional[MinuteGroup] = None
         for ch, minute, freq, station, arrival_ms, snr in con.execute(sql, params):
+            if snr is None:
+                if current is not None:
+                    current.skipped_null_snr += 1
+                continue
             if current is None or (ch, minute) != (current.channel,
                                                    current.minute_utc):
                 if current is not None:
@@ -62,10 +69,8 @@ def read_minutes(
                                       frequency_mhz=float(freq))
             current.arrivals.append(ObservedArrival(
                 arrival_ms=float(arrival_ms) % 1000.0,
-                corr_snr_db=float(snr if snr is not None else 0.0)))
+                corr_snr_db=float(snr)))
             if station:
                 current.deployed_labels.add(str(station))
         if current is not None:
             yield current
-    finally:
-        con.close()
