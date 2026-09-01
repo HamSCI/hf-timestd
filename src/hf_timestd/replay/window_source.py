@@ -49,9 +49,20 @@ class WindowSource:
         expected = self._expected(minute_utc, frequency_mhz)
         if not expected:
             return {}
+        # Free-space great-circle floors: scatter delays an arrival, nothing
+        # accelerates one, so an arrival earlier than this is not that
+        # station by any mechanism, whatever the tolerances say.  Without
+        # this the window floor falls back to `expected - early_ms - slack`,
+        # which sits below the physical floor and admits impossible
+        # arrivals -- see metrology_engine.py's identical computation.
+        floors_ms = {
+            station: self._matrix.distance_km(station, frequency_mhz) / 299.792458
+            for station in expected
+        }
         try:
             return arrival_windows(
-                expected, reference_sigma_ms=self.reference_sigma_ms)
+                expected, reference_sigma_ms=self.reference_sigma_ms,
+                floors_ms=floors_ms)
         except ValueError:
             # Overlapping windows: the geometry cannot separate these
             # stations at this sigma.  Refusing is the honest answer.

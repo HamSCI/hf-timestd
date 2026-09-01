@@ -183,6 +183,64 @@ def test_arrival_at_window_boundaries_is_contained():
     assert verdict.stations["WWV"].arrival_ms in [3.0, 5.0]
 
 
+def test_two_hops_in_one_window_leave_nothing_unclaimed():
+    """I1: two above-floor arrivals inside the SAME station's window are
+    both this station's own signal (e.g. two hops).  The loser must not
+    fall through into unclaimed_ms and drag the channel to
+    CHANNEL_UNIDENTIFIED -- that state means 'no window claims it', and a
+    window does."""
+    windows = {"WWV": _win("WWV", 3.0, 8.0)}
+    arrivals = [
+        ObservedArrival(arrival_ms=4.0, corr_snr_db=15.0),
+        ObservedArrival(arrival_ms=6.0, corr_snr_db=25.0),  # winner
+    ]
+
+    verdict = adjudicate_channel(
+        windows=windows, arrivals=arrivals, eligible={"WWV"},
+        floor_snr_db=10.0, history_ok=lambda station, ms: True,
+    )
+
+    assert verdict.stations["WWV"].state is AdmissionState.ADMITTED
+    assert verdict.stations["WWV"].arrival_ms == 6.0
+    assert verdict.unclaimed_ms == []
+    assert verdict.channel_state is not ChannelState.CHANNEL_UNIDENTIFIED
+
+
+def test_nothing_above_floor_anywhere_is_below_floor():
+    """I3a: no above-floor energy at all -- the path delivered nothing
+    detectable, full stop.  BELOW_FLOOR, not OFF_MODEL."""
+    windows = {"WWV": _win("WWV", 3.0, 5.0), "WWVH": _win("WWVH", 22.0, 24.0)}
+    arrivals = [ObservedArrival(arrival_ms=4.0, corr_snr_db=2.0)]  # under floor
+
+    verdict = adjudicate_channel(
+        windows=windows, arrivals=arrivals, eligible={"WWV", "WWVH"},
+        floor_snr_db=10.0, history_ok=lambda station, ms: True,
+    )
+
+    assert verdict.stations["WWV"].state is AdmissionState.BELOW_FLOOR
+    assert verdict.stations["WWVH"].state is AdmissionState.BELOW_FLOOR
+
+
+def test_above_floor_energy_outside_every_window_is_off_model():
+    """I3b: the channel DID carry above-floor energy, but no station's
+    window claims it -- the path delivered and the model missed it.
+    Eligible stations with nothing in their own window get OFF_MODEL,
+    not BELOW_FLOOR -- the conflation the floor exists to break."""
+    windows = {"WWV": _win("WWV", 3.0, 5.0), "WWVH": _win("WWVH", 22.0, 24.0)}
+    arrivals = [ObservedArrival(arrival_ms=13.0, corr_snr_db=30.0)]  # no window
+
+    verdict = adjudicate_channel(
+        windows=windows, arrivals=arrivals, eligible={"WWV", "WWVH"},
+        floor_snr_db=10.0, history_ok=lambda station, ms: True,
+    )
+
+    assert verdict.stations["WWV"].state is AdmissionState.OFF_MODEL
+    assert verdict.stations["WWV"].arrival_ms is None
+    assert verdict.stations["WWVH"].state is AdmissionState.OFF_MODEL
+    assert verdict.stations["WWVH"].arrival_ms is None
+    assert verdict.admitted_count == 0
+
+
 def test_highest_snr_chosen_from_multiple_arrivals_in_window():
     """When a station's window contains multiple above-floor arrivals,
     the one with the highest corr_snr_db is chosen."""

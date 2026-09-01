@@ -39,12 +39,12 @@ the PROVISIONAL defaults (`floor_snr_db=10.0`, `tolerance_ms=1.0`,
 `lookback=10`, `reacquire_after=3`). Full verbatim output:
 `.superpowers/sdd/2026-09-01-admission-replay-harness/task-6-report.md`.
 
-| channel | minutes | ADMITTED | INCONSISTENT | BELOW_FLOOR | DEGRADED | NOT_ELIGIBLE | deployed_over_reports | deployed_under_reports |
-|---|---|---|---|---|---|---|---|---|
-| SHARED_2500  | 3379 | 3132 (30.9%) | 4434 (43.7%) | 1126 (11.1%) | 885 (8.7%) | 560 (5.5%) | 3226 | 20 |
-| SHARED_5000  | 3380 | 4219 (41.6%) | 4525 (44.6%) | 325 (3.2%) | 511 (5.0%) | 560 (5.5%) | 3232 | 1 |
-| SHARED_10000 | 3380 | 5467 (53.9%) | 3618 (35.7%) | 188 (1.9%) | 307 (3.0%) | 560 (5.5%) | 3017 | 0 |
-| SHARED_15000 | 3381 | 3670 (36.2%) | 4620 (45.5%) | 1176 (11.6%) | 117 (1.2%) | 560 (5.5%) | 2951 | 413 |
+| channel | minutes | ADMITTED | INCONSISTENT | OFF_MODEL | BELOW_FLOOR | DEGRADED | NOT_ELIGIBLE | deployed_over_reports | deployed_under_reports |
+|---|---|---|---|---|---|---|---|---|---|
+| SHARED_2500  | 3379 | 3146 (31.0%) | 4797 (47.3%) | 711 (7.0%) | 21 (0.2%) | 902 (8.9%) | 560 (5.5%) | 3238 | 105 |
+| SHARED_5000  | 3380 | 4158 (41.0%) | 4644 (45.8%) | 214 (2.1%) | 0 (0.0%) | 564 (5.6%) | 560 (5.5%) | 3245 | 1 |
+| SHARED_10000 | 3380 | 5484 (54.1%) | 3625 (35.7%) | 211 (2.1%) | 4 (0.0%) | 256 (2.5%) | 560 (5.5%) | 3014 | 0 |
+| SHARED_15000 | 3381 | 3630 (35.8%) | 4679 (46.1%) | 1066 (10.5%) | 94 (0.9%) | 114 (1.1%) | 560 (5.5%) | 2966 | 413 |
 
 Read this beside the 2776-fewer / 0-more figures immediately above: that count
 is over 6461 gated ensembles and measures the forced pair against geometry
@@ -55,12 +55,19 @@ bound how often forcing a label adds or misses a station.
 
 Three things this table would mislead a reader on if left bare:
 
-(a) ⚠ These runs predate the station-coordinate unification (commit 763c928,
-`coordinates: resolve through the catalogue, here too`) and so reflect the
-PRE-unification geometry — WWV at 1122.486 km. Re-running now would shift WWV
-by −1.64 µs and BPM by +1.02 µs. Treat this table as the harness's first
-output, not a settled result; it needs re-running once the geometry fix is
-picked up.
+(a) These runs use the unified station coordinates (commit 763c928,
+`coordinates: resolve through the catalogue, here too`) AND the free-space
+floors (`floors_ms`, threaded into `WindowSource.windows_for` in the
+2026-09-01 fix wave). The PREVIOUS table was produced without the floors: the
+window's early bound fell back to `expected − 1.5 ms − 3σ`, which at 10 MHz
+sat below the physical free-space time and admitted arrivals no propagation
+mechanism can produce. That table therefore OVERSTATED ADMITTED. This one
+also carries OFF_MODEL for the first time — `AdmissionState.OFF_MODEL` was
+declared and never assigned before this fix wave — which is why BELOW_FLOOR
+fell sharply on every channel: energy the channel carried but no window
+claimed is now reported as OFF_MODEL ("the path delivered and our model
+missed it") rather than folded into BELOW_FLOOR ("the path delivered
+nothing").
 
 (b) INCONSISTENT firing 35–45% of the time is the harness doing exactly what
 §5 says it should: thresholds are OUTPUTS of validation, not inputs, and this

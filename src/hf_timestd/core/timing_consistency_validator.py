@@ -100,8 +100,12 @@ STATION_LOCATIONS = {
     if s.name in ('WWV', 'WWVH', 'BPM')
 }
 
-# Expected arrival order (by increasing distance from central US)
-EXPECTED_ARRIVAL_ORDER = ['WWV', 'CHU', 'WWVH', 'BPM']
+# Expected arrival order (by increasing distance from central US).
+# Derived from the catalogue's active stations, not hardcoded: CHU no
+# longer transmits, and a literal list here silently outlived that fact
+# once before (see STATION_LOCATIONS above).
+EXPECTED_ARRIVAL_ORDER = [s.name for s in _CATALOG.active_stations()
+                         if s.name in STATION_LOCATIONS]
 
 
 @dataclass

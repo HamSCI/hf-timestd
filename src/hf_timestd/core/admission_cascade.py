@@ -82,7 +82,15 @@ def adjudicate_channel(
     above = [a for a in arrivals if a.corr_snr_db >= floor_snr_db]
 
     stations: Dict[str, StationVerdict] = {}
-    claimed: List[float] = []
+    # Tracked by object identity, not by arrival_ms value: two distinct
+    # arrivals can legitimately share a float, and `in` over a list of
+    # floats would silently collapse them.
+    claimed_ids: Set[int] = set()
+    # Stations with nothing in their own window wait for the second pass:
+    # whether that means BELOW_FLOOR or OFF_MODEL depends on whether the
+    # channel carries above-floor energy that no window — anyone's — ends
+    # up claiming, which is only known once every station has been walked.
+    pending: List[str] = []
 
     for station, window in windows.items():
         if station not in eligible:
@@ -100,14 +108,12 @@ def adjudicate_channel(
                          if window.admits(a.arrival_ms)
                          and not window.contains(a.arrival_ms)]
             if scattered:
-                claimed.extend(a.arrival_ms for a in scattered)
+                claimed_ids.update(id(a) for a in scattered)
                 stations[station] = StationVerdict(
                     station, AdmissionState.DEGRADED, None,
                     "arrival lies in the scatter tail, not the direct modes")
                 continue
-            stations[station] = StationVerdict(
-                station, AdmissionState.BELOW_FLOOR, None,
-                f"nothing above {floor_snr_db:.1f} dB in window")
+            pending.append(station)
             continue
 
         # More than one window claiming the same arrival means we cannot
@@ -121,11 +127,14 @@ def adjudicate_channel(
             stations[station] = StationVerdict(
                 station, AdmissionState.AMBIGUOUS, None,
                 "arrival satisfies more than one station window")
-            claimed.extend(a.arrival_ms for a in inside)
+            claimed_ids.update(id(a) for a in inside)
             continue
 
         best = max(inside, key=lambda a: a.corr_snr_db)
-        claimed.append(best.arrival_ms)
+        # The whole window, not just its winner: a second above-floor
+        # arrival in the SAME window is another hop of this station's own
+        # signal, not energy that belongs to CHANNEL_UNIDENTIFIED.
+        claimed_ids.update(id(a) for a in inside)
 
         if not history_ok(station, best.arrival_ms):
             stations[station] = StationVerdict(
@@ -136,7 +145,21 @@ def adjudicate_channel(
         stations[station] = StationVerdict(
             station, AdmissionState.ADMITTED, best.arrival_ms, "")
 
-    unclaimed = [a.arrival_ms for a in above if a.arrival_ms not in claimed]
+    unclaimed = [a.arrival_ms for a in above if id(a) not in claimed_ids]
+
+    # Second pass: a station with nothing in its own window is BELOW_FLOOR
+    # ("the path delivered nothing detectable") unless the channel carried
+    # above-floor energy that no window claimed — then the path delivered
+    # and the model missed it, which is OFF_MODEL, not BELOW_FLOOR.
+    for station in pending:
+        if unclaimed:
+            stations[station] = StationVerdict(
+                station, AdmissionState.OFF_MODEL, None,
+                "channel carries above-floor energy no window claims")
+        else:
+            stations[station] = StationVerdict(
+                station, AdmissionState.BELOW_FLOOR, None,
+                f"nothing above {floor_snr_db:.1f} dB in window")
 
     if any(v.state is AdmissionState.ADMITTED for v in stations.values()):
         channel_state = ChannelState.CHANNEL_PARTIAL

@@ -22,13 +22,15 @@ WWV - NIST Radio Station, Fort Collins, Colorado, USA
     Power: 2.5 kW (2.5, 20, 25 MHz), 10 kW (5, 10, 15 MHz)
 
 WWVH - NIST Radio Station, Kekaha, Kauai, Hawaii, USA
-    Coordinates: 21.9886°N, 159.7639°W
+    Coordinates: see STATION_CATALOG — this module derives them below and
+    does not restate them, which is how the last stale copy got here.
     Frequencies: 2.5, 5, 10, 15 MHz
     Timing Tone: 1200 Hz, 800ms duration at second 0
     Power: 10 kW (all frequencies)
 
 CHU - NRC Radio Station, Ottawa, Ontario, Canada
-    Coordinates: 45.2925°N, 75.7542°W
+    Coordinates: see STATION_CATALOG — this module derives them below and
+    does not restate them, which is how the last stale copy got here.
     Frequencies: 3.33, 7.85, 14.67 MHz
     Timing Tone: 1000 Hz, 500ms duration (1000ms at hour)
     Special: FSK time code at seconds 31-39 (Bell 103 AFSK)
