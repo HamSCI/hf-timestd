@@ -307,6 +307,79 @@ what distinguishes a GUM budget from a list of numbers — and what would have
 caught the §1 misdiagnosis on its own, since a term whose `correction_ns` is
 excluded by the measurand cannot be silently reported as an uncertainty.
 
+### 3.2.1 Inherited chains — when the payload carries the authority
+
+A station does not have to own the instrument whose timing it publishes.
+`[ka9q].status` is an mDNS name, so a host runs its clients against a
+radiod anywhere on the network, and the RTP stream it consumes already
+carries the timing: the TS-1 pilot was injected ahead of that radiod's
+ADC, and everything downstream of the injection point is common-mode.
+**Where the payload contains the timing authority, local hardware
+detection is ancillary.** It answers what this box could originate, not
+what the data it handles is worth.
+
+⚡ **Expect this configuration to be common, for a reason that has
+nothing to do with metrology.** Running radiod and the full client suite
+on one small machine is a resource fight: contention for cores, thread
+placement, IRQ and cache pressure, and a scheduling jitter that shows up
+directly in the timing products. Moving radiod to its own computer
+retires that whole class of problem at a stroke. A collaborator adding a
+second host is therefore doing the obvious thing, and the model has to
+describe the result rather than treat it as an exception.
+
+Today it cannot. A client-only station has two bad options and no good
+one: publish a chain describing an injector, a feed and a front end it
+does not have, which is false; or publish `origin: null` with an
+unqualified chain, which discards ns-class provenance it legitimately
+inherited. The real chain is
+
+    TS-1 (remote site) → remote radiod → RTP multicast → this host → archive
+
+where every instrumental term belongs to the far end and this host
+contributes transport and labelling only.
+
+**A chain expresses this; a tier cannot.** "T6" does not say whose T6, or
+which links are the publisher's own. A chain is an ordered list, so the
+first links can belong to another host and the record can name where
+custody transferred:
+
+```json
+{"type":"chain", "id":"payload-anchored@1",
+ "inherited_from":{"radiod_id":"AC0G-B4-status.local",
+                   "chain_id":"payload-anchored@1",
+                   "chain_seen_utc":"2026-09-01T02:14:07Z"},
+ "custody_boundary":"rtp_multicast",
+ "measurand_plane":"antenna_terminals",
+ "calibration_plane":"ts1_injection_point",
+ "traceability":{"claim":"UTC(USNO) via GPS", "qualified":true,
+   "qualification":"links before rtp_multicast are inherited and NOT independently verifiable here"},
+ "budget":[ ...terms this host can itself evaluate... ]}
+```
+
+Three rules follow, and the third is the one that keeps the record
+honest:
+
+1. **`inherited_from` names the source**, by the same `radiod_id` §18
+   already carries for radiod subscribers, so the two records can be
+   joined rather than guessed at.
+2. **`custody_boundary` names where the chain stops being ours.** Terms
+   before it are the remote station's; terms after it are this host's.
+   The publisher's budget carries only what it can evaluate.
+3. **An inherited chain is qualified, always.** The publisher is
+   asserting links it cannot measure, and saying so is not a weakness of
+   the record but the whole point of it. A station that inherits a chain
+   and reports `qualified: false` is claiming to have verified an
+   injector it has never seen.
+
+⚠ Open, and deliberately not resolved here: whether the inheriting host
+should COPY the remote budget's terms into its own record or merely
+reference them. Copying makes the record self-contained and immediately
+stale; referencing keeps it true and makes a reader fetch two documents.
+The staleness matters — a remote station that recalibrates its feed
+invalidates every copy downstream, silently. Resolving this needs a
+second station to exist and be publishing, which is the point at which
+the question stops being hypothetical.
+
 ### 3.3 Two uncertainties, because two audiences need different ones
 
 `u_epoch_ns` is absolute epoch uncertainty. `stability_ns` over `tau_s` is
@@ -336,11 +409,12 @@ keeping is lost: "this uncertainty was large *because* the front-end gain was at
 | Normative (the formal model) | Engineering (under `engineering:`) |
 |---|---|
 | `measurand`, `measurand_plane`, `calibration_plane` | `fine_search_mode`, `cross_checked` |
+| `inherited_from`, `custody_boundary` | `radiod_gps_time_ns`, `radiod_rtp_timesnap` |
 | `chain`, `origin` | `rf_gain_db`, `cn0_db_hz`, `if_power_dbfs` |
 | per-term `correction_ns` / `u_ns` / `type` / `method` / `disposition` / `measured_on` | `fold_blocks_discarded`, `fold_seconds` |
 | `u_epoch_ns`, `k`, `p` | `judge_age_s`, `segment_id`, `rate_ppm` |
 | `stability_ns`, `tau_s` | `judge_tier` (the demoted shorthand of §2) |
-| `traceability.claim` / `.qualified` / `.qualification` | `radiod_gps_time_ns`, `radiod_rtp_timesnap` |
+| `traceability.claim` / `.qualified` / `.qualification` | `judge_age_s` |
 
 ⚡ Note `cn0_db_hz` is **engineering**, even though the normative `u_epoch_ns` is
 computed from it. That is deliberate and worth being explicit about: the
