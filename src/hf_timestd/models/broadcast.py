@@ -138,39 +138,44 @@ class DerivedChannel:
 # =============================================================================
 # DEFAULT STATION DEFINITIONS
 # =============================================================================
-# These are the canonical time signal stations. In the future, these could
-# be loaded from config, but for now they're hardcoded as they rarely change.
+# These are the canonical time signal stations.  Their COORDINATES come from
+# `hamsci_dsp.stations.BUILTIN_CATALOG` — the one catalogue — rather than being
+# repeated here.  They were repeated here, and were a fourth distinct set of
+# numbers: WWV at 40.67805/-105.04719, some 0.6 km from NIST's published
+# figure.  "They rarely change" was true; what changed was our knowledge of
+# them, and a correction reached one copy out of four.
+from hamsci_dsp.stations import BUILTIN_CATALOG as _CATALOG
 
 DEFAULT_STATIONS = [
     BroadcastStation(
         name="WWV",
         location="Fort Collins, CO",
-        latitude=40.67805,
-        longitude=-105.04719,
+        latitude=_CATALOG.get("WWV").lat,
+        longitude=_CATALOG.get("WWV").lon,
         frequencies_hz=[2500000, 5000000, 10000000, 15000000, 20000000, 25000000],
         tone_pattern=TonePattern.WWV_1000HZ,
     ),
     BroadcastStation(
         name="WWVH",
         location="Kekaha, HI",
-        latitude=21.98830,
-        longitude=-159.76220,
+        latitude=_CATALOG.get("WWVH").lat,
+        longitude=_CATALOG.get("WWVH").lon,
         frequencies_hz=[2500000, 5000000, 10000000, 15000000],
         tone_pattern=TonePattern.WWVH_1200HZ,
     ),
     BroadcastStation(
         name="CHU",
         location="Ottawa, ON",
-        latitude=45.29525,
-        longitude=-75.75433,
+        latitude=_CATALOG.get("CHU").lat,
+        longitude=_CATALOG.get("CHU").lon,
         frequencies_hz=[3330000, 7850000, 14670000],
         tone_pattern=TonePattern.CHU_BCD_FSK,
     ),
     BroadcastStation(
         name="BPM",
         location="Pucheng, Shaanxi",
-        latitude=34.94833,
-        longitude=109.54167,
+        latitude=_CATALOG.get("BPM").lat,
+        longitude=_CATALOG.get("BPM").lon,
         frequencies_hz=[2500000, 5000000, 10000000, 15000000],
         tone_pattern=TonePattern.BPM_1000HZ,
     ),

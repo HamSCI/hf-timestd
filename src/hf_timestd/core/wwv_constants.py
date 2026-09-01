@@ -15,7 +15,8 @@ parameters based on empirical observations or specification changes.
 STATION SPECIFICATIONS
 ================================================================================
 WWV - NIST Radio Station, Fort Collins, Colorado, USA
-    Coordinates: 40.6775°N, 105.0472°W
+    Coordinates: see STATION_CATALOG — this module derives them below and
+    does not restate them, which is how the last stale copy got here.
     Frequencies: 2.5, 5, 10, 15, 20, 25 MHz
     Timing Tone: 1000 Hz, 800ms duration at second 0
     Power: 2.5 kW (2.5, 20, 25 MHz), 10 kW (5, 10, 15 MHz)

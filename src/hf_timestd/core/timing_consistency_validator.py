@@ -86,12 +86,18 @@ C_LIGHT_KM_MS = 299.792458  # km/ms
 K_IONOSPHERE = 40.3 / C_LIGHT_KM_MS  # ms·MHz² / TECU (for group delay)
 TECU_SCALE = 1e16  # 1 TECU = 10^16 el/m²
 
-# Station locations (lat, lon)
+# Station locations (lat, lon) — from the ONE catalogue.
+#
+# These were hardcoded, and were the SUPERSEDED values: WWV sat at
+# (40.6781, -105.0469) while `broadcast_specs` a few files away carried NIST's
+# published figure with the citation in its comment.  A validator checking
+# timing consistency against coordinates that disagree with the predictor is
+# not checking what it thinks it is.  Retired stations are excluded.
+from hamsci_dsp.stations import BUILTIN_CATALOG as _CATALOG
+
 STATION_LOCATIONS = {
-    'WWV': (40.6781, -105.0469),   # Fort Collins, Colorado
-    'WWVH': (21.9886, -159.7642),  # Kauai, Hawaii
-    'CHU': (45.2925, -75.7542),    # Ottawa, Canada
-    'BPM': (34.9500, 109.5500),    # Xi'an, China
+    s.name: s.coordinates for s in _CATALOG.active_stations()
+    if s.name in ('WWV', 'WWVH', 'BPM')
 }
 
 # Expected arrival order (by increasing distance from central US)
