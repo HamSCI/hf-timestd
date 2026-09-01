@@ -49,3 +49,46 @@ def test_stations_are_tracked_independently():
     _settle(h, "WWVH", 23.0)
     assert h.accepts("WWVH", 23.2) is True
     assert h.accepts("WWVH", 4.0) is False
+
+
+class TestPerStationTolerance:
+    """Calibration gave a different tolerance per station, not one number.
+
+    Measured over 3M archived arrivals, after keys 1 and 2 had filtered them:
+    the p95 minute-to-minute step is 4.86 ms for WWV, 6.03 for WWVH and 8.69
+    for BPM. One shared value either starves WWV or lets BPM's real variation
+    look like an outlier — 11,528 km over three hops moves more than 1,122 km
+    over one.
+    """
+
+    def _h(self):
+        return ArrivalHistory(
+            tolerance_ms={"WWV": 5.0, "WWVH": 6.0, "BPM": 9.0},
+            lookback=10, reacquire_after=3)
+
+    def _settle(self, h, station, value):
+        for _ in range(5):
+            h.observe(station, value)
+
+    def test_each_station_gets_its_own_tolerance(self):
+        h = self._h()
+        self._settle(h, "WWV", 4.0)
+        self._settle(h, "BPM", 40.0)
+        # 7 ms away: inside BPM's 9 ms, outside WWV's 5 ms
+        assert h.accepts("BPM", 47.0) is True
+        assert h.accepts("WWV", 11.0) is False
+
+    def test_a_station_absent_from_the_mapping_still_works(self):
+        """An unmapped station must not crash or silently admit everything."""
+        h = self._h()
+        self._settle(h, "WWVB", 4.0)
+        assert h.accepts("WWVB", 4.2) is True
+        assert h.accepts("WWVB", 400.0) is False
+
+    def test_a_plain_float_still_works(self):
+        """The scalar form stays valid — the replay CLI passes one."""
+        h = ArrivalHistory(tolerance_ms=2.0, lookback=5, reacquire_after=3)
+        for _ in range(5):
+            h.observe("WWV", 4.0)
+        assert h.accepts("WWV", 5.5) is True
+        assert h.accepts("WWV", 40.0) is False

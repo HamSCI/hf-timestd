@@ -2589,6 +2589,23 @@ class MetrologyEngine:
                     continue
                 arrivals.append(round(float(d) + float(m['timing_error_ms']), 2))
             v = gate_arrivals(arrivals, windows)
+
+            # === Admission cascade, MEASUREMENT-ONLY (spec step 3) ===
+            # The gate above answers "which stations do these arrivals
+            # support".  The cascade answers the narrower question the timing
+            # path actually needs: which single measurements may be trusted.
+            # Above the floor, inside exactly one window, consistent with
+            # history — and nothing else counts.  Nothing consumes this yet;
+            # it runs beside the gate so live verdicts can be compared against
+            # the replay before anything is wired to it.
+            try:
+                self._log_admission_cascade(
+                    measurements, expected_delays_by_station, windows,
+                    set(candidates))
+            except Exception as _exc:  # noqa: BLE001 — a diagnostic must not break metrology
+                logger.debug("%s: admission cascade skipped: %s",
+                             self.channel_name, _exc)
+
             logger.info(
                 "%s: ARRIVAL GATE assigned=%s present=%s timing_usable=%s "
                 "scattered=%s arrivals=%s unmatched=%s tier=%s "
@@ -2601,6 +2618,81 @@ class MetrologyEngine:
             )
         except Exception as exc:  # noqa: BLE001 — a diagnostic must not break metrology
             logger.debug("%s: arrival gate skipped: %s", self.channel_name, exc)
+
+    #: Per-station history tolerances, calibrated 2026-09-01 from 3M archived
+    #: arrivals AFTER keys 1 and 2 filtered them: the p95 minute-to-minute
+    #: step is 4.86 ms (WWV), 6.03 (WWVH), 8.69 (BPM).  Measured against the
+    #: DEPLOYED model's labels instead, the same statistic reads 23.6 and
+    #: 26.7 ms — wider than the 18.6 ms WWV-WWVH separation, which would make
+    #: the gate admit a neighbour.  That distribution measures mis-attribution,
+    #: not propagation, which is why key 3 can only be calibrated downstream
+    #: of keys 1 and 2.
+    HISTORY_TOLERANCE_MS = {'WWV': 5.0, 'WWVH': 6.0, 'BPM': 9.0}
+
+    #: Sigma for the admission floor.  Calibrated from raw 24 kHz IQ: the
+    #: matched-filter envelope decorrelates over a median 354.5 ms, so a
+    #: search window holds ~1 independent trial (2.8 while ACQUIRING at
+    #: +/-500 ms), not the hundreds a naive sample count suggests.  3.5 sigma
+    #: covers acquisition at the shortest decorrelation observed and costs
+    #: almost nothing where 3.09 would do.
+    ADMISSION_FLOOR_SIGMA = 3.5
+
+    def _log_admission_cascade(self, measurements, expected_delays_by_station,
+                               windows, eligible) -> None:
+        """Report which measurements the three keys would admit.
+
+        MEASUREMENT-ONLY.  No verdict here reaches a product, a calibration or
+        the clock.  It exists so the live cascade can be compared against the
+        replay that validated it, before step 5 wires anything to it.
+        """
+        from .admission_cascade import (
+            AdmissionState, ObservedArrival, adjudicate_channel,
+        )
+        from .arrival_history import ArrivalHistory
+
+        if not windows:
+            return
+
+        history = getattr(self, '_admission_history', None)
+        if history is None:
+            history = ArrivalHistory(
+                tolerance_ms=self.HISTORY_TOLERANCE_MS,
+                lookback=10, reacquire_after=3)
+            self._admission_history = history
+
+        # A measurement's residual is against its OWN label's predicted delay,
+        # so adding that delay back recovers the absolute arrival — the thing
+        # geometry constrains.  Same reconstruction the gate uses.
+        arrivals = []
+        for m in measurements:
+            d = expected_delays_by_station.get(m.get('station'))
+            if d is None:
+                continue
+            snr = m.get('corr_snr_db')
+            if snr is None:
+                snr = m.get('snr_db')
+            if snr is None:
+                continue        # cannot judge the floor; do not invent one
+            arrivals.append(ObservedArrival(
+                arrival_ms=float(d) + float(m['timing_error_ms']),
+                corr_snr_db=float(snr)))
+
+        verdict = adjudicate_channel(
+            windows=windows, arrivals=arrivals, eligible=eligible,
+            floor_snr_db=self.ADMISSION_FLOOR_SIGMA,
+            history_ok=history.accepts)
+
+        admitted = {s: round(v.arrival_ms, 2)
+                    for s, v in verdict.stations.items()
+                    if v.state is AdmissionState.ADMITTED}
+        logger.info(
+            "%s: ADMISSION channel=%s admitted=%s states=%s unclaimed=%s "
+            "floor_snr_db=%.1f",
+            self.channel_name, verdict.channel_state.value, admitted,
+            {s: v.state.value for s, v in sorted(verdict.stations.items())},
+            [round(a, 2) for a in verdict.unclaimed_ms],
+            self.ADMISSION_FLOOR_SIGMA,
+        )
 
     def _write_bootstrap_state_on_lock(self):
         """Write bootstrap state file when FusionTimingState achieves lock.
