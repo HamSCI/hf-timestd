@@ -32,6 +32,53 @@ writes: `assigned=['WWV','WWVH']` beside `present=['WWV']`.
 and MORE **zero** times. Not once did forcing a pair recover a station the
 geometry had missed. It only ever added one that was not there.
 
+⚡ **First off-station replay (Task 6, 2026-09-01).** `scripts/replay_admission.py`
+ran read-only against a 3M-row local copy of the archive (57.9 h,
+`minute_boundary_utc` 1788076440–1788284880), one run per shared channel, at
+the PROVISIONAL defaults (`floor_snr_db=10.0`, `tolerance_ms=1.0`,
+`lookback=10`, `reacquire_after=3`). Full verbatim output:
+`.superpowers/sdd/2026-09-01-admission-replay-harness/task-6-report.md`.
+
+| channel | minutes | ADMITTED | INCONSISTENT | BELOW_FLOOR | DEGRADED | NOT_ELIGIBLE | deployed_over_reports | deployed_under_reports |
+|---|---|---|---|---|---|---|---|---|
+| SHARED_2500  | 3379 | 3132 (30.9%) | 4434 (43.7%) | 1126 (11.1%) | 885 (8.7%) | 560 (5.5%) | 3226 | 20 |
+| SHARED_5000  | 3380 | 4219 (41.6%) | 4525 (44.6%) | 325 (3.2%) | 511 (5.0%) | 560 (5.5%) | 3232 | 1 |
+| SHARED_10000 | 3380 | 5467 (53.9%) | 3618 (35.7%) | 188 (1.9%) | 307 (3.0%) | 560 (5.5%) | 3017 | 0 |
+| SHARED_15000 | 3381 | 3670 (36.2%) | 4620 (45.5%) | 1176 (11.6%) | 117 (1.2%) | 560 (5.5%) | 2951 | 413 |
+
+Read this beside the 2776-fewer / 0-more figures immediately above: that count
+is over 6461 gated ensembles and measures the forced pair against geometry
+alone; `deployed_over_reports` / `deployed_under_reports` here is over ~3380
+replayed minutes per channel and measures the three-key cascade against the
+currently deployed model. Different statistics, placed together because both
+bound how often forcing a label adds or misses a station.
+
+Three things this table would mislead a reader on if left bare:
+
+(a) ⚠ These runs predate the station-coordinate unification (commit 763c928,
+`coordinates: resolve through the catalogue, here too`) and so reflect the
+PRE-unification geometry — WWV at 1122.486 km. Re-running now would shift WWV
+by −1.64 µs and BPM by +1.02 µs. Treat this table as the harness's first
+output, not a settled result; it needs re-running once the geometry fix is
+picked up.
+
+(b) INCONSISTENT firing 35–45% of the time is the harness doing exactly what
+§5 says it should: thresholds are OUTPUTS of validation, not inputs, and this
+is the first one the replay has told us is wrong. Real HF propagation wanders
+several ms diurnally; the PROVISIONAL 1.0 ms history-consistency tolerance is
+evidently too tight for that. Read as a finding to act on when a tolerance is
+finally chosen, not as a defect in the cascade or the harness.
+
+(c) SHARED_15000's 413 `deployed_under_reports` is an outlier against 20 / 1 /
+0 elsewhere. MEASURED CORRELATION, explicitly not proof: on the deployed
+pipeline, BPM has no row at all in 2355 of SHARED_15000's 3381 minutes
+(present in only 1026/3381), while it is present in essentially every minute
+on 5 and 10 MHz (3380/3380). 413/2355 = 17.5% of BPM-absent minutes on 15 MHz
+see the cascade admit BPM anyway, against 20/845 = 2.4% on 2.5 MHz —
+consistent with 15 MHz being a materially better path to Pucheng (11,528 km)
+than 2.5 MHz. Confirming this needs a per-station breakdown that `summarise()`
+does not currently produce; not built as part of this task.
+
 ⛔ **WWV and WWVH transmit continuously.** Absence in an expectation window
 therefore never means a station stopped broadcasting. It means the signal did
 not get through as expected — always a statement about the path, never about

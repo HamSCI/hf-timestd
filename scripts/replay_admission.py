@@ -41,15 +41,29 @@ def main(argv=None) -> int:
     filters = {}
     if args.channel:
         filters["channel"] = args.channel
-    if args.start_utc:
+    if args.start_utc is not None:
         filters["start_utc"] = args.start_utc
-    if args.end_utc:
+    if args.end_utc is not None:
         filters["end_utc"] = args.end_utc
 
     report = summarise(replay(
         args.db_path, source, floor_snr_db=args.floor_snr_db,
         tolerance_ms=args.tolerance_ms, lookback=args.lookback,
         reacquire_after=args.reacquire_after, **filters))
+
+    if report.minutes == 0:
+        # A gap in the data must never look like a clean, quiet result: say
+        # plainly what was asked for and fail loudly rather than print a
+        # full-looking report of zeroes.
+        asked = [f"channel={args.channel}" if args.channel else "channel=<all>"]
+        if args.start_utc is not None:
+            asked.append(f"start_utc={args.start_utc}")
+        if args.end_utc is not None:
+            asked.append(f"end_utc={args.end_utc}")
+        print(f"no minutes matched this selection ({', '.join(asked)}) "
+              f"in {args.db_path} — 0 minutes replayed", file=sys.stderr)
+        return 1
+
     print(report.render())
     return 0
 

@@ -30,3 +30,15 @@ def test_cli_runs_and_reports(tmp_path):
     assert out.returncode == 0, out.stderr
     assert "minutes replayed" in out.stdout
     assert "state counts" in out.stdout
+
+
+def test_cli_no_match_fails_loudly_instead_of_reporting_zeroes(tmp_path):
+    db = _db(tmp_path)
+    out = subprocess.run(
+        [sys.executable, "scripts/replay_admission.py", str(db),
+         "--channel", "NOPE_9999"],
+        capture_output=True, text=True, timeout=300)
+    assert out.returncode != 0
+    combined = out.stdout + out.stderr
+    assert "no minutes matched" in combined
+    assert "NOPE_9999" in combined
