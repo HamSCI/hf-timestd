@@ -16,6 +16,8 @@ class ReplayReport:
     by_hour: Dict[int, Counter] = field(default_factory=lambda: defaultdict(Counter))
     deployed_over_reports: int = 0
     deployed_under_reports: int = 0
+    geometry_refused: int = 0
+    skipped_null_snr_total: int = 0
     minutes: int = 0
 
     def render(self) -> str:
@@ -27,7 +29,10 @@ class ReplayReport:
                   f"  deployed named a station the cascade refused: "
                   f"{self.deployed_over_reports}",
                   f"  cascade named a station deployed missed:      "
-                  f"{self.deployed_under_reports}"]
+                  f"{self.deployed_under_reports}",
+                  "",
+                  f"geometry refused: {self.geometry_refused}",
+                  f"arrivals with null SNR (skipped): {self.skipped_null_snr_total}"]
         return "\n".join(lines)
 
 
@@ -35,6 +40,10 @@ def summarise(verdicts: Iterable) -> ReplayReport:
     report = ReplayReport()
     for mv in verdicts:
         report.minutes += 1
+        report.skipped_null_snr_total += mv.skipped_null_snr
+        if mv.geometry_refused:
+            report.geometry_refused += 1
+            continue
         hour = datetime.fromtimestamp(mv.minute_utc, tz=timezone.utc).hour
         admitted = set()
         for station, sv in mv.verdict.stations.items():
