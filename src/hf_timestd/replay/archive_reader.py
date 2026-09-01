@@ -57,20 +57,19 @@ def read_minutes(
 
         current: Optional[MinuteGroup] = None
         for ch, minute, freq, station, arrival_ms, snr in con.execute(sql, params):
-            if snr is None:
-                if current is not None:
-                    current.skipped_null_snr += 1
-                continue
             if current is None or (ch, minute) != (current.channel,
                                                    current.minute_utc):
                 if current is not None:
                     yield current
                 current = MinuteGroup(channel=ch, minute_utc=int(minute),
                                       frequency_mhz=float(freq))
+            if station:
+                current.deployed_labels.add(str(station))
+            if snr is None:
+                current.skipped_null_snr += 1
+                continue
             current.arrivals.append(ObservedArrival(
                 arrival_ms=float(arrival_ms) % 1000.0,
                 corr_snr_db=float(snr)))
-            if station:
-                current.deployed_labels.add(str(station))
         if current is not None:
             yield current
