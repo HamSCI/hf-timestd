@@ -24,7 +24,7 @@ import logging
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, Optional
+from typing import Callable, Dict, Optional
 
 from hf_timestd.core.bpsk_edge_fine_stage import FineEdgeEstimate
 from hf_timestd.core.native_anchor import NativeAnchor
@@ -125,6 +125,16 @@ class T6AnchorAuthority:
         # stream dies while the MF stays locked, nothing edge-triggered
         # would ever fire again and the anchor would freeze silently.
         self._last_estimate_at: Optional[float] = None
+        # `_last_estimate_at` moves only when an estimate is ACCEPTED, so
+        # `estimate_stale` cannot distinguish "the fine stage went quiet" from
+        # "every estimate was refused".  Those are opposite faults with
+        # opposite fixes, and on 2026-08-31 the ambiguity cost B4 6h23m of T6
+        # that only a restart cleared.  Track what ARRIVED, and why it was
+        # turned away, so the next occurrence reports itself.
+        self._last_estimate_seen_at: Optional[float] = None
+        self._estimates_seen: int = 0
+        self._rejected_since_accept: int = 0
+        self._rejection_reasons: Dict[str, int] = {}
         self._last_acquiring_warn_at: Optional[float] = None
 
     @property
@@ -171,6 +181,50 @@ class T6AnchorAuthority:
         fields that *are* RTP-domain: ``edge_rtp + edge_subsample``.
         """
         return (int(est.edge_rtp) + float(est.edge_subsample)) % self.sample_rate_hz
+
+    def note_estimate_seen(self, violations: tuple) -> None:
+        """Record that an estimate ARRIVED, and how it was judged.
+
+        Called for every fine estimate regardless of verdict — that is the
+        point.  An accepted estimate clears the rejection run; a refused one
+        adds its reasons to it.
+        """
+        self._last_estimate_seen_at = self._now()
+        self._estimates_seen += 1
+        if not violations:
+            self._rejected_since_accept = 0
+            self._rejection_reasons = {}
+            return
+        self._rejected_since_accept += 1
+        for name in violations:
+            self._rejection_reasons[name] = (
+                self._rejection_reasons.get(name, 0) + 1)
+
+    def stale_diagnosis(self) -> Dict[str, object]:
+        """Why is there no accepted estimate?
+
+        ``verdict`` is the part that matters:
+          ``absent``   — nothing arrived; look at the fine stage.
+          ``rejected`` — estimates arrived and every one was refused; look at
+                         the invariant named in ``rejection_reasons``.  The
+                         fine stage will NOT self-correct here, because from
+                         its side the blocks are succeeding.
+        """
+        now = self._now()
+        since_seen = (None if self._last_estimate_seen_at is None
+                      else now - self._last_estimate_seen_at)
+        arriving = (self._last_estimate_seen_at is not None
+                    and self._rejected_since_accept > 0)
+        return {
+            "verdict": "rejected" if arriving else "absent",
+            "estimates_arriving": arriving,
+            "estimates_seen": self._estimates_seen,
+            "rejected_since_accept": self._rejected_since_accept,
+            "rejection_reasons": dict(self._rejection_reasons),
+            "since_seen_sec": since_seen,
+            "since_accept_sec": (None if self._last_estimate_at is None
+                                 else now - self._last_estimate_at),
+        }
 
     def _check(
         self,
@@ -247,6 +301,7 @@ class T6AnchorAuthority:
     ) -> T6AnchorDecision:
         prev = self._state
         violations = self._check(est, coarse_offset_samples, named_second_utc)
+        self.note_estimate_seen(violations)
 
         if not violations:
             self._anchor = self._build_anchor(est, named_second_utc)
@@ -320,6 +375,19 @@ class T6AnchorAuthority:
             return None
 
         prev = self._state
+        diag = self.stale_diagnosis()
+        logger.warning(
+            "T6 estimate_stale: %s — %d estimate(s) seen, %d refused since "
+            "the last accepted one, reasons=%s, last seen %ss ago, last "
+            "accepted %ss ago",
+            "estimates ARE arriving and every one is being refused"
+            if diag["verdict"] == "rejected"
+            else "no estimates are arriving at all",
+            diag["estimates_seen"], diag["rejected_since_accept"],
+            diag["rejection_reasons"],
+            None if diag["since_seen_sec"] is None else f"{diag['since_seen_sec']:.0f}",
+            None if diag["since_accept_sec"] is None else f"{diag['since_accept_sec']:.0f}",
+        )
         if self._degraded_since is None:
             self._degraded_since = now
         if now - self._degraded_since > self.degraded_unlock_after_sec:
