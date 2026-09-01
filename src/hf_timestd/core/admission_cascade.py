@@ -72,7 +72,12 @@ def adjudicate_channel(
     floor_snr_db: float,
     history_ok: HistoryCheck,
 ) -> ChannelVerdict:
-    """Run the cascade for every station this channel could carry."""
+    """Run the cascade for every station this channel could carry.
+
+    Note: arrival_windows guarantees disjoint windows, so AMBIGUOUS is a
+    defensive branch for window sources that do not. This function is pure
+    over whatever windows a caller hands it and must not silently assume
+    disjointness."""
     arrivals = list(arrivals)
     above = [a for a in arrivals if a.corr_snr_db >= floor_snr_db]
 
@@ -106,10 +111,11 @@ def adjudicate_channel(
             continue
 
         # More than one window claiming the same arrival means we cannot
-        # say whose it is.  Refuse rather than pick.
+        # say whose it is.  Refuse rather than pick.  Only eligible stations'
+        # windows can contest; an off-schedule window must not veto.
         contested = [
             a for a in inside
-            if sum(1 for w in windows.values() if w.contains(a.arrival_ms)) > 1
+            if sum(1 for s, w in windows.items() if s in eligible and w.contains(a.arrival_ms)) > 1
         ]
         if contested:
             stations[station] = StationVerdict(

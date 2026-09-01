@@ -119,3 +119,84 @@ def test_only_admitted_carries_a_value():
     for v in verdict.stations.values():
         if v.state is not AdmissionState.ADMITTED:
             assert v.arrival_ms is None
+
+
+def test_ambiguous_overlapping_windows():
+    """When two eligible stations' windows overlap, an arrival inside both
+    is AMBIGUOUS with arrival_ms=None.  Windows are hand-built to overlap
+    because arrival_windows() raises ValueError on any overlap — this test
+    verifies the cascade defends against overlapping window sources."""
+    # Hand-build overlapping windows (arrival_windows would refuse them)
+    win1 = StationWindow(station="WWV", min_ms=3.0, max_ms=8.0, scatter_max_ms=8.0)
+    win2 = StationWindow(station="WWVH", min_ms=6.0, max_ms=10.0, scatter_max_ms=10.0)
+    windows = {"WWV": win1, "WWVH": win2}
+    arrivals = [ObservedArrival(arrival_ms=7.0, corr_snr_db=25.0)]
+
+    verdict = adjudicate_channel(
+        windows=windows, arrivals=arrivals, eligible={"WWV", "WWVH"},
+        floor_snr_db=10.0, history_ok=lambda station, ms: True,
+    )
+
+    # Both stations see the same arrival; neither can claim it
+    assert verdict.stations["WWV"].state is AdmissionState.AMBIGUOUS
+    assert verdict.stations["WWV"].arrival_ms is None
+    assert verdict.stations["WWVH"].state is AdmissionState.AMBIGUOUS
+    assert verdict.stations["WWVH"].arrival_ms is None
+    assert verdict.admitted_count == 0
+
+
+def test_ineligible_overlapping_window_does_not_veto():
+    """An off-schedule station's overlapping window must not force an
+    eligible station into AMBIGUOUS.  Only eligible stations can contest."""
+    win1 = StationWindow(station="WWV", min_ms=3.0, max_ms=8.0, scatter_max_ms=8.0)
+    win2 = StationWindow(station="BPM", min_ms=6.0, max_ms=10.0, scatter_max_ms=10.0)
+    windows = {"WWV": win1, "BPM": win2}
+    arrivals = [ObservedArrival(arrival_ms=7.0, corr_snr_db=25.0)]
+
+    verdict = adjudicate_channel(
+        windows=windows, arrivals=arrivals, eligible={"WWV"},
+        floor_snr_db=10.0, history_ok=lambda station, ms: True,
+    )
+
+    # BPM is ineligible, so its window does not contest.  WWV gets admitted.
+    assert verdict.stations["WWV"].state is AdmissionState.ADMITTED
+    assert verdict.stations["WWV"].arrival_ms == 7.0
+    assert verdict.stations["BPM"].state is AdmissionState.NOT_ELIGIBLE
+
+
+def test_arrival_at_window_boundaries_is_contained():
+    """Arrivals exactly at min_ms and max_ms are inside the window."""
+    windows = {"WWV": _win("WWV", 3.0, 5.0)}
+    arrivals = [
+        ObservedArrival(arrival_ms=3.0, corr_snr_db=20.0),
+        ObservedArrival(arrival_ms=5.0, corr_snr_db=20.0),
+    ]
+
+    verdict = adjudicate_channel(
+        windows=windows, arrivals=arrivals, eligible={"WWV"},
+        floor_snr_db=10.0, history_ok=lambda station, ms: True,
+    )
+
+    # Both boundary arrivals are contained; pick the one with higher SNR
+    # (they have equal SNR, so max() picks the first one by default)
+    assert verdict.stations["WWV"].state is AdmissionState.ADMITTED
+    assert verdict.stations["WWV"].arrival_ms in [3.0, 5.0]
+
+
+def test_highest_snr_chosen_from_multiple_arrivals_in_window():
+    """When a station's window contains multiple above-floor arrivals,
+    the one with the highest corr_snr_db is chosen."""
+    windows = {"WWV": _win("WWV", 3.0, 5.0)}
+    arrivals = [
+        ObservedArrival(arrival_ms=4.0, corr_snr_db=15.0),
+        ObservedArrival(arrival_ms=4.2, corr_snr_db=25.0),  # highest
+        ObservedArrival(arrival_ms=4.5, corr_snr_db=18.0),
+    ]
+
+    verdict = adjudicate_channel(
+        windows=windows, arrivals=arrivals, eligible={"WWV"},
+        floor_snr_db=10.0, history_ok=lambda station, ms: True,
+    )
+
+    assert verdict.stations["WWV"].state is AdmissionState.ADMITTED
+    assert verdict.stations["WWV"].arrival_ms == 4.2
