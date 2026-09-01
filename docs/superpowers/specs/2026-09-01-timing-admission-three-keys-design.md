@@ -336,6 +336,16 @@ Nothing here changes timing behaviour until the replay has spoken.
    the way the arrival gate runs today. Compare live verdicts against replay.
 4. **Retire the forced pair.** The order-based discriminator loses its authority
    to label; its output becomes a diagnostic compared against the cascade.
+⛔ **Before step 5: the deployed engine's floors are not the harness's.**
+`metrology_engine._station_freespace_ms` computes free-space floors from raw
+SITE lat/lon, while the harness now derives them from
+`ArrivalPatternMatrix.distance_km(station, frequency)` and therefore carries
+per-antenna precision where NIST publishes it. The two disagree by up to
+~0.17 us on WWVH. Close that before wiring the cascade into production, or the
+live path will adjudicate against slightly different windows than the replay
+validated against — precisely the unattributable difference this design exists
+to remove.
+
 5. **Wire consumers.** The calibrator and fusion admit only `ADMITTED`. This is
    the only step that reaches the host clock, and it goes through the canonical
    update path (`hamsci-ops/docs/canonical-update-path.md`) with per-channel
