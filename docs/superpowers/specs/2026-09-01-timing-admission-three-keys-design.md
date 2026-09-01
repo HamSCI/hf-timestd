@@ -113,34 +113,53 @@ well: median absolute deviation, samples taken OUTSIDE the search region so
 signal cannot inflate its own noise estimate, the 1.4826 MAD-to-sigma
 conversion. Keep the estimator. Change what we do with its output.
 
-It returns `median + 3σ`. That serves as a detection aid and fails as an
-admission test, because we do not test one sample — we take the peak over a
-window. 3σ one-sided gives P_fa = 1.35e-3 **per sample**; a window at 24 kHz
-holds 144 samples at ±3 ms and 240 at ±5 ms:
+⛔ **CALIBRATED 2026-09-01 FROM RAW IQ — AND IT REFUTED THIS SECTION'S OWN
+ARITHMETIC. The 3σ floor was very nearly right; the criticism of it was not.**
 
-    ±3 ms window   144 × 1.35e-3  ≈  19 % false alarm per window
-    ±5 ms window   240 × 1.35e-3  ≈  32 %
+This section argued that `median + 3σ` fails as an admission test because a
+window holds 144–240 samples, so N·P_fa gives a 19–32 % false alarm *per
+window*. That reasoning assumed the samples in a window are INDEPENDENT. They
+are not, and the error is about two orders of magnitude.
 
-Set the floor from a **per-window** false-alarm probability instead. One policy
-number, P_fa_window (proposed 1e-3), and the threshold follows from it and the
-trial count:
+The detector matches against an **800 ms** template (1000 Hz for WWV, 1200 Hz
+for WWVH — the minute tone, not the 5 ms second tick). A matched filter that
+long produces an output that is smooth over hundreds of milliseconds.
+Measured on the preserved 24 kHz IQ — 15 blocks across 5 channels, both tones:
 
-    P_fa_sample = P_fa_window / N
-    threshold   = median + z(P_fa_sample) · σ_MAD
+    1/e decorrelation lag of the correlation envelope
+      median 354.5 ms   (spread 127–579 ms)
 
-    N = 144 → ≈ 4.34σ        N = 240 → ≈ 4.46σ
+A search window is far NARROWER than one decorrelation length, so it contains
+essentially one independent trial, not hundreds:
 
-**This is why narrowing a window improves sensitivity.** A narrower window
-lowers N, which lowers the sigma needed for the same confidence. Window width,
-floor and sensitivity form one coupled system rather than three knobs, and the
-width already derives from the Offset Judge's reference sigma through
-`arrival_windows`.
+    detector state      window      N_raw   N_eff   needed   code has
+    ACQUIRING          ±500 ms      24000    2.82    3.39σ     3.00σ
+    CONVERGING          ±50 ms       2400    1.00    3.09σ     3.00σ
+    LOCKED good SNR     ±15 ms        720    1.00    3.09σ     3.00σ
+    LOCKED high SNR      ±5 ms        240    1.00    3.09σ     3.00σ
 
-⚠ Matched-filter output samples are NOT independent — they correlate over the
-template length — so effective N is lower than raw sample count. Assuming
-independence sets the floor slightly too high, which errs toward abstention and
-therefore errs safely. Ship the conservative form; **measure** effective N from
-raw IQ rather than assuming it (§5).
+What the existing 3.0σ actually delivers per window:
+
+    ACQUIRING          P_fa = 0.0038      (3.8× the 1e-3 target)
+    CONVERGING         P_fa = 0.0013      (on target)
+    LOCKED             P_fa = 0.0013      (on target)
+
+⇒ **The floor was not the defect.** It is correct in every locked state and
+only mildly permissive during acquisition, where the ±500 ms window is wide
+enough to hold ~3 independent trials. This agrees with what the detection
+record already said and this design initially argued past: the detector
+rejects 75 % of attempts (`correlation_flat` 46 %, `corr_snr_low` 28 %), and
+the wrong measurements were getting through ATTRIBUTION, not the floor.
+
+**Recommendation: 3.5σ, applied uniformly.** It covers ACQUIRING even at the
+shortest decorrelation observed (127 ms → N_eff ≈ 7.9 → 3.6σ), and costs
+almost nothing in the locked states where the requirement is 3.09σ. Keep the
+existing MAD estimator unchanged — it was never at fault.
+
+⚠ The lesson is the one this design keeps relearning. The spec said "measure
+effective N from raw IQ rather than assuming it", and measuring destroyed the
+assumption the same section had been built on. A threshold argued from
+plausible arithmetic is still a guess.
 
 ### Key 2 — inside exactly one geometric window
 
