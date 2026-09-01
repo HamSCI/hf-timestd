@@ -239,9 +239,20 @@ directly test what it would have ADMITTED from what was discarded.
 `L2_detection_attempts` lifts this partly, since it stores the rejections and
 their SNR.
 
-⏳ **`raw_buffer` is a ~36-hour ROLLING window and is perishable.** It currently
-covers the overnight gate run. Copy it off before floor calibration, or that
-evidence is gone.
+✅ **PRESERVED 2026-09-01.** `raw_buffer` retention runs off an 80% disk quota
+(not a day count), which was yielding about two days. A full diurnal cycle is
+now held off-station at `/home/mjh/hamsci/iq-preserve-20260901/`: 6 channels ×
+24 hourly 5-minute blocks, 7.0 GB, `complex64` at 24 kHz, every sidecar
+reporting `completeness_pct 100.0` and `gap_count 0`, all 144 blocks verified
+with `zstd -t`. The one perishable input to this design is no longer
+perishable.
+
+⚠ **The resource guardian under-counts ingest by ~3.5×.** It preflights
+`4.0 GB/ch/day`; measured reality is ~14–15 GB/ch/day (~86 GB/day), because
+`complex64` at 24 kHz is 16.6 GB/ch/day uncompressed and float IQ compresses
+only ~11%. Its "2.7 days headroom — OK" is therefore badly optimistic on a disk
+at 75% against an 80% quota. Separate defect; the chaos drills already found the
+board blind to disk-full, and this is the arithmetic behind it.
 
 Retrospective replay does the discovery. Raw IQ calibrates the floor. A short
 prospective run confirms — it no longer needs to carry a full diurnal
