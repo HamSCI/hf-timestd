@@ -242,6 +242,34 @@ rtp_expected_accuracy_ms = 0.001  # L4 accuracy (GPS+PPS via LAN)
 # writes /run/hf-timestd/authority.json (schema v1, frozen).
 [timing.authority_manager]
 
+# === T2 — the WAN NTP witness (on by default, and it should stay on) ===
+#
+# T2 ranks BELOW T3: HF tick fusion resolves ~0.5-2 ms where WAN NTP over a
+# domestic link sits at ~20 ms.  This block does not make the pool a time
+# SOURCE.  It makes it a WITNESS — the only reading of UTC a T3-only station
+# has that does not come from its own ADC.
+#
+# ⛔ AC0G-ND, 2026-09-03.  Shipped with this section EMPTY, so no probe was ever
+# constructed, `t_level_witnesses` stayed `[]` on every tick, and §4.5's
+# asymmetric T3↔T2 rule — "a gross T3-vs-WAN disagreement forces T3 down" —
+# could not fire, because it is gated on `"T2" in witnesses`.  The station's
+# RX888 was not governed by its GPSDO, so it sampled ~350 ppm fast; FUSE
+# inherited the error, chrony followed FUSE with `trust` in force and walked the
+# host clock TWELVE SECONDS off UTC.  Fusion reported itself locked and
+# sub-millisecond throughout, because it locks a ONE-SECOND tick and so measures
+# modulo one second.  Nothing else was watching.
+#
+# It needs no site-specific configuration — the matcher is "any server not
+# claimed by T4" — and costs one `chronyc` call per tick.  Turn it off only if
+# the host has no network time sources at all, and understand that doing so
+# leaves Fusion policing itself.
+[timing.authority_manager.t2]
+enabled = true
+# max_error_ms = 50.0    # optional last-sample error-margin ceiling; off by
+#                        # default, since the cross-check layer already catches
+#                        # a witness whose offset has drifted.
+
+
 # === Coarse-time producer (bootstrap input) ===
 # The authority manager's bootstrap coordinator consumes
 # /run/hf-timestd/coarse_time.json to detect a wildly-wrong system
