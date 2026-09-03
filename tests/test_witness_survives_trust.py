@@ -109,6 +109,37 @@ class FalsetickerStillWitnessesTest(unittest.TestCase):
         self.assertFalse(r.available)
         self.assertFalse(r.witness_only)
 
+    def test_state_question_mark_also_witnesses(self):
+        """`trust` yields `x` when the pool DISAGREES with the refclock and `?`
+        when it merely loses to it.  ND showed `x` at 12 s and `?` once the
+        offsets came back to milliseconds — both still carry a measurement."""
+        q = "\n".join([
+            "#,*,FUSE,0,4,125,16,0.001749,0.000924,0.0015",
+            "^,?,23.186.168.131,2,6,177,9,-0.000813,-0.001638,0.079",
+            "^,?,162.254.225.151,2,6,177,10,0.009126,0.008301,0.065",
+        ])
+        r = _t2_probe(q, witness_state_chars="x-?").poll()
+        self.assertTrue(r.witness_only)
+        self.assertFalse(r.available)
+        self.assertIsNotNone(r.offset_ms)
+
+    def test_a_witness_whose_last_poll_failed_is_dropped(self):
+        """reach is an OCTAL shift register with the newest poll in the low bit.
+        A witness-only source is not selected by chrony, so nothing else vouches
+        for its freshness; a stale offset must not cross-check a live tier.
+        `376` = seven good polls then a miss."""
+        stale = "^,?,a,2,6,376,300,-12.0,-12.0,0.05"
+        r = _t2_probe(stale, witness_state_chars="x-?").poll()
+        self.assertFalse(r.witness_only)
+        self.assertFalse(r.available)
+
+    def test_a_selectable_source_is_not_held_to_the_stricter_bar(self):
+        """`377` and `376` both select fine; only witness-only rows tighten."""
+        ok = "^,+,a,2,6,376,9,0.002,0.002,0.05"
+        r = _t2_probe(ok, witness_state_chars="x-?").poll()
+        self.assertTrue(r.available)
+        self.assertFalse(r.witness_only)
+
 
 class GrossErrorRuleFiresAgainTest(unittest.TestCase):
     """The §4.5 asymmetric T3↔T2 rule, against ND's actual numbers."""

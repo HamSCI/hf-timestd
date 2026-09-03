@@ -372,7 +372,12 @@ def build_authority_runner_from_config(
             # FUSE refclock marks the whole pool falseticker, which used to
             # empty the witness set and silence the asymmetric T3↔T2 rule.
             # See ProbeResult.witness_only (AC0G-ND, 2026-09-03).
-            witness_state_chars="x-",
+            # x = falseticker, - = not combined, ? = not selectable.  `trust`
+            # produces `x` when the pool disagrees with the refclock and `?`
+            # when it merely loses to it, and both still carry a measurement.
+            # The last-poll-succeeded guard in the probe is what keeps a stale
+            # offset out; the state char alone is not enough.
+            witness_state_chars="x-?",
             max_error_ms=_opt_float(t2_cfg.get("max_error_ms")),
         ))
 

@@ -150,7 +150,11 @@ class ChronyTrackingProbe:
             witness_only = True
 
         # §4.5: a healthy state with reach 0 is a transient/bug — drop it.
-        reachable = [r for r in healthy if _reach_nonzero(r.get("reach"))]
+        # A witness-only source is held to the stricter bar: its LAST poll must
+        # have succeeded, since chrony is not selecting it and nothing else
+        # vouches for the freshness of the offset we are about to cross-check.
+        _reach_ok = _reach_last_poll_ok if witness_only else _reach_nonzero
+        reachable = [r for r in healthy if _reach_ok(r.get("reach"))]
         if not reachable:
             reaches = ",".join(str(r.get("reach")) for r in healthy)
             return ProbeResult(
@@ -235,6 +239,24 @@ class ChronyTrackingProbe:
                 "error_s": parts[self._IDX_ERROR],
             })
         return rows
+
+
+def _reach_last_poll_ok(reach: object) -> bool:
+    """True if chrony's MOST RECENT poll of this source succeeded.
+
+    `chronyc -c sources` prints reach as an OCTAL shift register whose low
+    bit is the newest poll ("377" = last 8 all succeeded).  Non-zero reach
+    only says the source answered sometime in the last eight polls, which is
+    too weak for a witness-only source: such a source is not selected by
+    chrony, so nothing else vouches for its freshness, and a stale offset
+    would be compared against a live active tier.  Requiring the low bit
+    means the offset shown was measured on the last poll.
+
+    Be lenient on a parse failure, matching _reach_nonzero's reasoning."""
+    try:
+        return int(str(reach).strip() or "0", 8) & 1 == 1
+    except (TypeError, ValueError):
+        return True
 
 
 def _reach_nonzero(reach: object) -> bool:
