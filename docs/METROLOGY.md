@@ -458,6 +458,96 @@ This is the structural fix for the 2026-04-20 failure mode: when chrony lost all
 
 This is the **host-clock-vs-UTC** watchdog, and is DISTINCT from `timestd-chrony-monitor`, which only watches the FUSE/HPPS SHM segments' reach (whether hf-timestd's own refclock feed is alive). `timestd-clock-monitor` was added after a 2026-06 field incident: the host's USB-GPS dropped off the bus and chrony free-ran ~6 s, darkening FT8/FT4 decoding on the co-hosted recorders. It guards the operator wall clock and syslog/journal timestamps — not the data labels, which remain correct via the RTP-reference invariant above.
 
+#### `trust` on the FUSE refclock — the T3-only station
+
+Some stations have no higher authority than Fusion. No TS-1 injector, so no T6.
+No LBE-142x feeding a PPS, so no T5 — a bare frequency GPSDO such as the LBE-Mini
+disciplines the ADC but emits no pulse chrony can read. No stratum-1 server on
+the LAN, so no T4. On such a host **T3 is the top of the hierarchy**, and it
+should be: multi-station HF tick fusion resolves UTC to ~0.5–2 ms typical, while
+WAN NTP over a domestic link (T2) sits at ~20 ms and is routinely worse under
+load. T3 outranks T2 in `T_LEVELS_RANKED` for that reason.
+
+Chrony does not know any of this. Its falseticker test is a **majority vote**,
+not a comparison of quality, so a handful of loose WAN servers agreeing with each
+other around +20 ms will outvote one tight local refclock — and chrony discards
+the better clock. AC0G-B4 showed exactly that: FUSE at 348 µs Std Dev voted down
+by four sources 40–100× worse. `trust` is the correct remedy. It exempts FUSE
+from the vote without overstating its accuracy — selection still runs on the
+honest numbers, so it removes a poll, not a measurement.
+
+**But `trust` is a claim about the front end, not about Fusion.** Fusion measures
+WWV/WWVH tick arrival *in sample time*. If the ADC's sample clock is not
+disciplined, every tick measurement is scaled by the clock's error and FUSE
+inherits it — while still reporting itself locked, converged and sub-millisecond,
+because it locks a **one-second** tick and therefore measures **modulo one
+second**. An integer-second offset, and any rate error that has accumulated past
+a second, are both invisible to it.
+
+⛔ **AC0G-ND, 2026-09-03.** Its LBE-Mini's OUT1 drive sat at 8 mA — the floor of
+the Mini's 8/16/24/32 ladder — so the GPSDO's 27 MHz never took over the RX888's
+reference and the board sampled ~350 ppm fast. FUSE inherited the error, `trust`
+told chrony to believe it, and chrony drove the host clock 374 ppm fast and
+walked it **twelve seconds** off UTC, marking all three honest WAN servers
+falsetickers. `chronyc tracking` reported stratum 1 and 380 µs of system-time
+error; hf-timestd published T3 at −87 µs. Every number honest, every number
+useless. radiod's GPS_TIME **is** the host clock, so every RTP label carried the
+drift and the station decoded nothing for a day.
+
+**The precondition, stated plainly: `trust` is earned by a GPS-governed ADC, not
+by Fusion's own confidence.** Fusion's self-gating (`quality_ok and
+multi_station and consistent and discontinuity_ok`) is honest and blind at the
+same time — it cannot see the one error class that matters here, so it cannot be
+the thing that earns `trust`.
+
+**How to verify the precondition.** The GPSDO's own status cannot confirm it: ND's
+reported `pll_locked`, `gps_fix: 3D`, 17 satellites and `out1_hz: 27000000`
+throughout. The arbiter is **radiod's "measured sample rate"**, logged once a
+minute when `clock-rate-log` is set:
+
+| | governed | not governed |
+|---|---|---|
+| measured sample rate | scatters **both ways** within ~±20 ppm | consistently **one-sided** |
+| AC0G-B4 (LBE-1421) | +2.9, −16.4, −2.7 ppm | — |
+| AC0G-ND before | — | +276 … +400 ppm |
+| AC0G-ND after (32 mA) | +2.4 ppm chrony frequency, skew 0.96 ppm | — |
+
+⚠ Read that figure only once the host clock is independently verified — it is
+samples per *host* second, and a host clock captured by a bad FUSE makes it
+circular. Check `chronyc -n sources` and confirm the **network rows** agree in
+milliseconds, not seconds.
+
+**The cross-check that polices `trust`.** §4.5's asymmetric T3↔T2 rule — a
+gross T3-vs-WAN disagreement forces T3 down — is what should catch a Fusion gone
+wrong. On ND it never fired, and the reason is circular: `trust` makes chrony
+mark the whole WAN pool `x`, the T2 probe required state `*`/`+`, so T2 went
+unavailable, the witness set came back empty and the rule had nothing to compare
+against. **`trust` had disabled the check written to catch it.**
+
+The fix separates measurement from selection. A source can carry a good
+measurement while chrony refuses to steer to it, and a falseticker verdict on a
+WAN server — when a local refclock is trusted — records only that it disagrees
+with that refclock, which is precisely the disagreement we need. The T2 probe now
+accepts states `x` and `-` as **witness-only** (`ProbeResult.witness_only`):
+eligible to cross-check, never eligible for selection. The gross-error rule works
+again with `trust` in force, and a falseticker can never become the active tier.
+
+**Configuring a T3-only station, in order:**
+
+1. Give the ADC a disciplined reference and **verify it** by the table above.
+   For an LBE-Mini, `gpsdo-monitor set-drive 32` — 8 mA is the floor and does not
+   drive an RX888's reference input. Re-check after any power cycle; the Mini's
+   SET_DRIVE opcode documents no flash persistence.
+2. Restart radiod **after** the reference is strong, so the Si5351 configures
+   with it present. Raising the drive under a running radiod is not enough.
+3. Keep the WAN pool configured even though T3 outranks it. It costs nothing,
+   and it is the only independent witness the station has.
+4. Then, and only then, `trust` on the FUSE refclock is correct and should stay.
+
+`smd doctor` reports the failure directly as `chrony-refclock-captured`:
+independent network sources agreeing with each other and disagreeing with the
+selected refclock by more than a second.
+
 #### hf-timestd as a LAN NTP server — standard mechanisms only
 
 When authority.json reports T3 or T6 active and non-stale, an hf-timestd host functions as a standard NTP server for its LAN, using entirely unextended mechanisms:

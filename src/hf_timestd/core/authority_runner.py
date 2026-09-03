@@ -367,6 +367,12 @@ def build_authority_runner_from_config(
         probes.append(ChronyTrackingProbe(
             t_level="T2",
             source_matcher=match_any_server_not_in(t4_peers),
+            # A WAN server chrony refuses to select still MEASURES, and T2's
+            # job here is to cross-check, not to discipline. `trust` on the
+            # FUSE refclock marks the whole pool falseticker, which used to
+            # empty the witness set and silence the asymmetric T3↔T2 rule.
+            # See ProbeResult.witness_only (AC0G-ND, 2026-09-03).
+            witness_state_chars="x-",
             max_error_ms=_opt_float(t2_cfg.get("max_error_ms")),
         ))
 

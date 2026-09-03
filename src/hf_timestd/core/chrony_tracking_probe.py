@@ -69,6 +69,7 @@ class ChronyTrackingProbe:
         t_level: str,
         source_matcher: Callable[[dict], bool],
         healthy_state_chars: str = "*+",
+        witness_state_chars: str = "",
         chronyc_bin: Optional[str] = None,
         timeout_sec: float = 5.0,
         max_error_ms: Optional[float] = None,
@@ -92,6 +93,10 @@ class ChronyTrackingProbe:
         self.t_level = t_level
         self.source_matcher = source_matcher
         self.healthy_state_chars = healthy_state_chars
+        # States that may WITNESS but never be selected. Empty by default so
+        # nothing changes for probes that do not opt in; the T2 (WAN NTP)
+        # witness sets "x-" — see ProbeResult.witness_only.
+        self.witness_state_chars = witness_state_chars
         self.chronyc_bin = chronyc_bin or shutil.which("chronyc") or "chronyc"
         self.timeout_sec = float(timeout_sec)
         self.max_error_ms = float(max_error_ms) if max_error_ms is not None else None
@@ -124,12 +129,25 @@ class ChronyTrackingProbe:
             return ProbeResult(self.t_level, available=False, reason="no matching source")
 
         healthy = [r for r in matching if r.get("state") in self.healthy_state_chars]
+        witness_only = False
         if not healthy:
             states = ",".join(r.get("state", "?") for r in matching)
-            return ProbeResult(
-                self.t_level, available=False,
-                reason=f"matching sources unhealthy: states={states}",
-            )
+            # ⛔ AC0G-ND, 2026-09-03: `trust` on the FUSE refclock made chrony
+            # mark every WAN server a falseticker, so this returned unavailable,
+            # the witness set came back empty, and the asymmetric T3↔T2 rule
+            # that exists to catch a wildly-wrong Fusion could not fire.  A
+            # falseticker verdict on a WAN server, when a local refclock is
+            # trusted, records only that it disagrees with that refclock — which
+            # is the very disagreement we need.  Such a source still measures,
+            # so let it WITNESS; ProbeResult.witness_only keeps it unselectable.
+            healthy = [r for r in matching
+                       if r.get("state") in self.witness_state_chars]
+            if not healthy:
+                return ProbeResult(
+                    self.t_level, available=False,
+                    reason=f"matching sources unhealthy: states={states}",
+                )
+            witness_only = True
 
         # §4.5: a healthy state with reach 0 is a transient/bug — drop it.
         reachable = [r for r in healthy if _reach_nonzero(r.get("reach"))]
@@ -178,7 +196,8 @@ class ChronyTrackingProbe:
 
         return ProbeResult(
             t_level=self.t_level,
-            available=True,
+            available=not witness_only,
+            witness_only=witness_only,
             offset_ms=offset_s * 1000.0,
             sigma_ms=TRUST_SIGMA_MS.get(self.t_level, 1.0),
             detail={

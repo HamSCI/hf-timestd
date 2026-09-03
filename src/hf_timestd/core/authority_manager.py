@@ -142,6 +142,21 @@ class ProbeResult:
     detail: Dict[str, object] = field(default_factory=dict)
     reason: Optional[str] = None
     frame: str = "sysclock"
+    # ⛔ AC0G-ND, 2026-09-03.  A source can carry a perfectly good MEASUREMENT
+    # while chrony refuses to SELECT it, and the two must not be conflated.
+    # `trust` on the FUSE refclock made chrony mark all three WAN servers
+    # falsetickers (`^x`) at -12.2 s.  The T2 probe requires state `*`/`+`, so
+    # T2 went unavailable, the witness set came back EMPTY, and the asymmetric
+    # T3↔T2 rule below — which exists precisely to catch a wildly-wrong Fusion —
+    # could not fire.  `trust` had disabled the check written to catch it.
+    #
+    # A falseticker verdict on a WAN server, when a local refclock is trusted,
+    # says nothing about that server's quality: it records only that it
+    # disagrees with the trusted refclock, which is exactly the disagreement we
+    # need to see.  So such a result witnesses (`witness_only`) but is never
+    # selectable — `_pick_active` reads `available` alone, so a falseticker can
+    # never become the active tier.
+    witness_only: bool = False
 
 
 class Probe(Protocol):
@@ -488,7 +503,9 @@ class AuthorityManager:
             if lvl == active:
                 continue
             r = results[lvl]
-            if r.available and r.offset_ms is not None:
+            # A witness needs a MEASUREMENT, not chrony's vote — see
+            # ProbeResult.witness_only.
+            if (r.available or r.witness_only) and r.offset_ms is not None:
                 witnesses.append(lvl)
                 flag = self._check_pair(active, active_result, lvl, r)
                 if flag:
@@ -524,7 +541,21 @@ class AuthorityManager:
                 disagreement_flags.append(
                     f"asymmetric-T3-T2:{diff:.0f}ms>{ASYMMETRIC_T3_T2_FORCE_DOWN_MS:.0f}ms"
                 )
-                active = "T2"
+                if results["T2"].available:
+                    active = "T2"
+                else:
+                    # T2 could only WITNESS (chrony marked it a falseticker
+                    # because a trusted refclock outvotes it).  Selecting a
+                    # source chrony will not steer to would be worse than
+                    # holding no authority, so fall to the best tier that is
+                    # genuinely available below T3 — else none at all, which is
+                    # the honest state and lets chrony age the stale Fusion
+                    # sample out and fall back to the pool on its own.
+                    below = T_LEVELS_RANKED[T_LEVELS_RANKED.index("T3") + 1:]
+                    active = next(
+                        (l for l in below if results[l].available), None)
+                    disagreement_flags.append(
+                        f"asymmetric-T3-T2:witness-only-T2:demoted-to:{active or 'none'}")
 
         return active, witnesses, disagreement_flags
 
