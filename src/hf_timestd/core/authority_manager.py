@@ -1034,6 +1034,16 @@ class AuthorityManager:
             "last_transition_utc": state.last_transition_utc,
             "disagreement_flags": list(state.disagreement_flags),
         }
+        # The host-clock verdict as four flat columns (hamsci-dsp
+        # authority_snapshot_store, 2026-09-04): the verdict, when the
+        # episode began, and the two epoch witnesses.  On 2026-09-04 B4 ran
+        # 11.6 s slow for thirteen hours with nothing in the table saying so.
+        hc = state.host_clock or {}
+        witnesses = hc.get("witnesses") or {}
+        snapshot["host_clock_verdict"] = hc.get("verdict")
+        snapshot["host_clock_since_utc"] = hc.get("since_utc")
+        snapshot["host_clock_t2_ms"] = (witnesses.get("T2") or {}).get("value")
+        snapshot["host_clock_lb1421_s"] = (witnesses.get("lb1421") or {}).get("value")
 
         if self.governor_radiod_provider is not None:
             try:

@@ -230,3 +230,35 @@ def test_thresholds_are_configurable(tmp_path):
     rate = _manager(tmp_path, [t6], host_clock_rate_provider=lambda: 30.0,
                     host_clock_rate_suspect_ppm=20.0)
     assert rate.tick().host_clock["verdict"] == "suspect"
+
+
+class _RecordingStore:
+    def __init__(self):
+        self.rows = []
+
+    def insert(self, snapshot):
+        self.rows.append(dict(snapshot))
+
+
+def test_snapshot_store_receives_flat_host_clock_columns(tmp_path):
+    store = _RecordingStore()
+    t6 = FakeProbe("T6", _rtp("T6", 0.0, 0.004))
+    t2 = FakeProbe("T2", _sysclock("T2", -11679.507, witness_only=True))
+    t5 = FakeProbe("T5", ProbeResult("T5", available=False, reason="no valid fix",
+                                     detail={"host_minus_gps_s": -12.1}))
+    m = _manager(tmp_path, [t6, t2, t5], snapshot_store=store)
+    m.tick()
+    row = store.rows[-1]
+    assert row["host_clock_verdict"] == "fault"
+    assert row["host_clock_since_utc"] == "2026-09-04T15:06:50.000000Z"
+    assert row["host_clock_t2_ms"] == pytest.approx(11679.507, abs=0.001)
+    assert row["host_clock_lb1421_s"] == -12.1
+
+
+def test_snapshot_columns_are_none_when_unwitnessed(tmp_path):
+    store = _RecordingStore()
+    m = _manager(tmp_path, [FakeProbe("T6", _rtp("T6", 0.0, 0.004))], snapshot_store=store)
+    m.tick()
+    row = store.rows[-1]
+    assert row["host_clock_verdict"] == "unwitnessed"
+    assert row["host_clock_t2_ms"] is None and row["host_clock_lb1421_s"] is None
