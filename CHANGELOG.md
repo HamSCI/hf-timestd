@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — the per-second tick search is anchored on the minute marker (2026-09-04)
+
+Step 0.5(b) of the host-clock program (`docs/design/HOST_CLOCK_INTEGRITY.md`).
+`TickEdgeDetector.detect_edges()` takes `anchor_onset`, the measured
+minute-marker onset for the station; every second's ±20 ms search window
+then sits at `marker_onset + n × sample_rate`, so the ticks are looked for
+where the signal says the seconds are and the host clock names only the
+integer second.  `timing_error_ms` stays front-edge minus the label's
+expectation, so a host clock 300 ms off reads as a 300 ms error rather
+than as a tick "found" where the clock said to look.  The anchor must be
+confirmed by ≥ 10 ticks with per-tick scatter ≤ 6 ms, else the
+label-anchored pass runs as before; a label-anchored ensemble must show
+the same tick-like scatter before either synthetic-measurement path or
+the L2 `tick_timing` row may carry its timing.  `EdgeEnsembleResult`
+gains `anchor_source` and `sigma_single_ms`; `d_clock_source` reads
+`edge_ensemble:minute_marker` or `edge_ensemble:host_label`.
+
 ### Changed — the host-clock verdict withdraws FUSE from chrony (2026-09-04)
 
 Step 0.5 of the host-clock program (`docs/design/HOST_CLOCK_INTEGRITY.md`).

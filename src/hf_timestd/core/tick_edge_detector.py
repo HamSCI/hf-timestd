@@ -164,7 +164,7 @@ class TickDetection:
     """Single per-second tick matched filter detection result."""
     utc_second: int              # Absolute UTC second
     sec_in_minute: int           # 0-59
-    expected_sample: int         # Expected onset sample in buffer
+    expected_sample: int         # Onset sample the HOST LABEL names (utc_sec + delay)
     peak_sample: float           # Matched filter peak sample (sub-sample)
     front_edge_sample: float     # Front edge sample (peak - half_template)
     corr_snr_db: float           # Matched filter correlation SNR
@@ -174,6 +174,7 @@ class TickDetection:
     is_doubled_tick: bool        # UT1 doubled tick (seconds 1-16)
     carrier_phase_rad: float = 0.0  # Carrier phase at tick (from IQ mixing)
     clean_arrivals: List['CleanComponent'] = field(default_factory=list)  # CLEAN multipath
+    search_center_sample: int = 0   # Where the search window sat (anchor grid or label)
 
 
 @dataclass
@@ -196,6 +197,19 @@ class EdgeEnsembleResult:
     # Quality
     mean_edge_snr_db: float            # Mean SNR of detected ticks
     confidence: float                  # 0-1 quality metric
+
+    # Where the per-second search grid came from (step 0.5(b)):
+    #   'minute_marker' — anchored on the measured minute-marker onset;
+    #                     the host clock named only the integer second.
+    #   'host_label'    — anchored on the host-clock label (the pre-0.5(b)
+    #                     behaviour); a walking clock can pull this grid off
+    #                     the ticks, so timing from it needs sigma_single_ms
+    #                     to vouch for it.
+    anchor_source: str = 'host_label'
+    # Per-tick scatter (MAD·1.4826) BEFORE the /√N: real ticks under HF sit
+    # at a few ms; threshold-level junk found where the label said to look
+    # spreads over the whole ±SEARCH_WINDOW_MS (σ ≈ 11.5 ms for ±20 ms).
+    sigma_single_ms: float = 0.0
     
     # Doppler from carrier phase slope across the minute
     doppler_hz: Optional[float] = None
@@ -279,6 +293,18 @@ class TickEdgeDetector:
     MIN_TICK_SNR_DB = 4.0           # Individual tick minimum
     MIN_TICK_SNR_CLEAN_DB = 3.0     # Lower threshold for clean minutes
     MIN_ENSEMBLE_TICKS = 3          # Minimum ticks for valid ensemble
+
+    # Step 0.5(b) (HOST_CLOCK_INTEGRITY.md).  A minute-marker anchor is
+    # accepted only when the ticks confirm it: at least this many ticks
+    # found on the marker grid.  Otherwise the label-anchored pass stands
+    # (and, if the marker was a sidelobe lock, the edge cross-check in the
+    # engine still catches it, as it did on bee1 2026-05-20).
+    ANCHOR_MIN_CONFIRMING_TICKS = 10
+    # Tick-like scatter: an ensemble may carry timing (label-anchored) or
+    # confirm an anchor (marker-anchored) only when its per-tick σ₁ looks
+    # like ticks, not like the search window.  Uniform junk over ±20 ms
+    # gives σ ≈ 11.5 ms; real HF ticks give 1–4 ms.
+    LABEL_ANCHOR_MAX_SIGMA_MS = 6.0
     
     # Bandpass filter: 800-1400 Hz (same as ntpd)
     # Wide enough to pass both 1000 and 1200 Hz with their sidebands,
@@ -502,10 +528,22 @@ class TickEdgeDetector:
         expected_delay_sec: float,
         is_dedicated_channel: bool = False,
         iq_samples: np.ndarray = None,
+        anchor_onset: Optional[Tuple[int, float]] = None,
     ) -> Optional[EdgeEnsembleResult]:
         """
         Detect tick onsets for all seconds in the buffer.
-        
+
+        Step 0.5(b): when ``anchor_onset = (anchor_utc_second, onset_sample)``
+        names the measured minute-marker onset, every second's search window
+        sits at ``onset_sample + (utc_sec - anchor_utc_second) * sample_rate``
+        — the ticks are looked for where the *signal* says the seconds are,
+        and the host clock supplies only the integer-second name.  The
+        anchored pass must be confirmed by ``ANCHOR_MIN_CONFIRMING_TICKS``
+        ticks; otherwise the label-anchored pass (the old behaviour) stands.
+        Either way ``timing_error_ms`` stays front_edge − label_expected: a
+        clock that walked 300 ms reads as a 300 ms error, not as a tick
+        found where the clock said to look.
+
         Args:
             audio_signal: AM-demodulated audio (real-valued, magnitude - mean)
             station: Station name ('WWV', 'WWVH', 'BPM')
@@ -517,6 +555,8 @@ class TickEdgeDetector:
                        carrier phase is extracted at each detected tick by
                        mixing down at the tone frequency. Phase slope across
                        the minute gives Doppler shift.
+            anchor_onset: ``(utc_second, onset_sample)`` of this station's
+                       measured minute marker in this buffer, or None.
             
         Returns:
             EdgeEnsembleResult with combined timing estimate, or None if
@@ -526,7 +566,65 @@ class TickEdgeDetector:
             return None
         if self._bandpass_sos is None:
             return None
-        
+
+        if anchor_onset is not None:
+            anchored = self._detect_edges_pass(
+                audio_signal, station, minute_number, buffer_timing,
+                expected_delay_sec, is_dedicated_channel, iq_samples,
+                anchor_onset=anchor_onset,
+            )
+            # Confirmation needs both count AND tick-like scatter: a grid
+            # placed between the ticks still collects threshold-level junk
+            # on enough seconds to pass a count alone (σ₁ ≈ 11 ms for a
+            # ±20 ms window), while ticks on the grid sit within 1–4 ms.
+            if (anchored is not None
+                    and anchored.n_detected >= self.ANCHOR_MIN_CONFIRMING_TICKS
+                    and anchored.sigma_single_ms <= self.LABEL_ANCHOR_MAX_SIGMA_MS):
+                return anchored
+            found = 0 if anchored is None else anchored.n_detected
+            sig = float('nan') if anchored is None else anchored.sigma_single_ms
+            logger.info(
+                f"{station}: minute-marker anchor not confirmed by the ticks "
+                f"({found} found, σ₁={sig:.1f} ms; need ≥{self.ANCHOR_MIN_CONFIRMING_TICKS} "
+                f"within {self.LABEL_ANCHOR_MAX_SIGMA_MS:.0f} ms); falling back to the host label"
+            )
+        return self._detect_edges_pass(
+            audio_signal, station, minute_number, buffer_timing,
+            expected_delay_sec, is_dedicated_channel, iq_samples,
+            anchor_onset=None,
+        )
+
+    @classmethod
+    def timing_admissible(cls, result: "EdgeEnsembleResult") -> Tuple[bool, str]:
+        """May this ensemble's timing error stand as a clock offset?
+
+        A marker-anchored ensemble was found where the signal put the
+        seconds and confirmed by the ticks: yes.  A label-anchored one was
+        found where the host clock said to look; it stands only if its
+        per-tick scatter looks like ticks (≤ LABEL_ANCHOR_MAX_SIGMA_MS),
+        not like the search window.
+        """
+        if result.anchor_source == 'minute_marker':
+            return True, "anchored on the minute marker"
+        if result.sigma_single_ms <= cls.LABEL_ANCHOR_MAX_SIGMA_MS:
+            return True, (f"host-label anchor, per-tick σ {result.sigma_single_ms:.1f} ms "
+                          f"≤ {cls.LABEL_ANCHOR_MAX_SIGMA_MS:.0f} ms")
+        return False, (f"host-label anchor with per-tick σ {result.sigma_single_ms:.1f} ms "
+                       f"> {cls.LABEL_ANCHOR_MAX_SIGMA_MS:.0f} ms — the window, not the ticks")
+
+    def _detect_edges_pass(
+        self,
+        audio_signal: np.ndarray,
+        station: str,
+        minute_number: int,
+        buffer_timing,
+        expected_delay_sec: float,
+        is_dedicated_channel: bool,
+        iq_samples: Optional[np.ndarray],
+        anchor_onset: Optional[Tuple[int, float]],
+    ) -> Optional[EdgeEnsembleResult]:
+        """One search pass; see detect_edges for the anchor semantics."""
+        anchor_source = 'minute_marker' if anchor_onset is not None else 'host_label'
         tick_freq = STATION_TICK_FREQ[station]
         skip_seconds = STATION_SKIP_SECONDS[station]
         template_sin, template_cos = self._templates[station]
@@ -565,21 +663,31 @@ class TickEdgeDetector:
             if sec_in_minute == 0:
                 continue
             
-            # Expected onset sample (integer!)
+            # Onset sample the host label names (integer!).  timing_error
+            # is always measured against this, whatever anchors the search.
             onset_utc = utc_sec + expected_delay_sec
             expected_sample = int(round(buffer_timing.utc_to_sample(onset_utc)))
+
+            # Where to LOOK: the marker grid when anchored, else the label.
+            if anchor_onset is not None:
+                anchor_sec, anchor_sample = anchor_onset
+                search_center = int(round(
+                    anchor_sample + (utc_sec - anchor_sec) * self.sample_rate
+                ))
+            else:
+                search_center = expected_sample
             
             # Check buffer bounds
-            if expected_sample - margin < 0:
+            if search_center - margin < 0:
                 continue
-            if expected_sample + margin >= n_samples:
+            if search_center + margin >= n_samples:
                 continue
             
-            # Extract region around expected onset for correlation.
+            # Extract region around the search centre for correlation.
             # The region must be large enough for the search window on
             # both sides plus the template length.
-            region_start = expected_sample - search_samples - n_template
-            region_end = expected_sample + search_samples + n_template
+            region_start = search_center - search_samples - n_template
+            region_end = search_center + search_samples + n_template
             region_start = max(0, region_start)
             region_end = min(n_samples, region_end)
             region = filtered[region_start:region_end]
@@ -597,8 +705,8 @@ class TickEdgeDetector:
             
             # Search window in correlation index space.
             # corr_env[0] corresponds to template aligned at region_start.
-            # The expected onset maps to:
-            expected_corr_idx = expected_sample - region_start
+            # The search centre maps to:
+            expected_corr_idx = search_center - region_start
             sw_start = max(0, expected_corr_idx - search_samples)
             sw_end = min(len(corr_env), expected_corr_idx + search_samples)
             
@@ -725,6 +833,7 @@ class TickEdgeDetector:
                 is_doubled_tick=doubled,
                 carrier_phase_rad=carrier_phase,
                 clean_arrivals=clean_components,
+                search_center_sample=search_center,
             ))
         
         # --- Ensemble combination ---
@@ -748,6 +857,8 @@ class TickEdgeDetector:
                 mean_edge_snr_db=0.0,
                 confidence=0.0,
                 edges=ticks,
+                anchor_source=anchor_source,
+                sigma_single_ms=999.0,
             )
         
         # Robust SNR-weighted median of timing errors
@@ -780,7 +891,8 @@ class TickEdgeDetector:
         
         dop_str = f", doppler={doppler_hz:+.4f}Hz" if doppler_hz is not None else ""
         logger.info(f"{station}: Tick MF ensemble: {n_detected}/{len(ticks)} ticks, "
-                    f"timing={ensemble_error:+.3f}±{ensemble_uncertainty:.3f}ms, "
+                    f"timing={ensemble_error:+.3f}±{ensemble_uncertainty:.3f}ms "
+                    f"(σ₁={sigma_single:.1f}ms), anchor={anchor_source}, "
                     f"SNR={mean_snr:.1f}dB, clean={n_clean}, conf={confidence:.2f}"
                     f"{dop_str}")
         
@@ -799,6 +911,8 @@ class TickEdgeDetector:
             doppler_hz=doppler_hz,
             doppler_uncertainty_hz=doppler_uncertainty_hz,
             edges=ticks,
+            anchor_source=anchor_source,
+            sigma_single_ms=float(sigma_single),
         )
     
     @staticmethod

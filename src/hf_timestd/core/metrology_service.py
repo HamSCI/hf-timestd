@@ -106,7 +106,8 @@ class MetrologyService:
     DEFAULT_MIN_TICK_SNR_DB = 10.0
 
     @staticmethod
-    def tick_measurement_admissible(n_edges, mean_snr_db, min_snr_db):
+    def tick_measurement_admissible(n_edges, mean_snr_db, min_snr_db,
+                                    anchor_source=None, sigma_single_ms=None):
         """(admissible, reason) for a per-minute tick measurement.
 
         Refusing is how a channel reports BLINDNESS: it publishes no
@@ -125,6 +126,18 @@ class MetrologyService:
             return False, ("SNR %.1f dB below the %.1f dB floor — treating "
                            "as BLIND, not as a measurement"
                            % (float(mean_snr_db), float(min_snr_db)))
+        # Step 0.5(b): an ensemble found where the host clock said to look
+        # must look like ticks, not like the search window, before its
+        # d_clock may be published (HOST_CLOCK_INTEGRITY.md).
+        if anchor_source is not None and anchor_source != 'minute_marker':
+            from hf_timestd.core.tick_edge_detector import TickEdgeDetector
+            if sigma_single_ms is None:
+                return False, "host-label anchor with no per-tick scatter reported"
+            if float(sigma_single_ms) > TickEdgeDetector.LABEL_ANCHOR_MAX_SIGMA_MS:
+                return False, ("host-label anchor, per-tick σ %.1f ms > %.0f ms — "
+                               "the search window, not the ticks"
+                               % (float(sigma_single_ms),
+                                  TickEdgeDetector.LABEL_ANCHOR_MAX_SIGMA_MS))
         return True, "ok"
 
     def __init__(
@@ -698,6 +711,8 @@ class MetrologyService:
                         n_edges=edge_result.ensemble_n_edges,
                         mean_snr_db=edge_result.mean_edge_snr_db,
                         min_snr_db=_min_snr,
+                        anchor_source=getattr(edge_result, 'anchor_source', None),
+                        sigma_single_ms=getattr(edge_result, 'sigma_single_ms', None),
                     )
                     # Loud on TRANSITIONS only — this runs every minute
                     # and a blind channel would otherwise log forever.
@@ -736,7 +751,8 @@ class MetrologyService:
                         'expected_delay_ms': expected_delay_ms,
                         'd_clock_ms': d_clock_ms,
                         'd_clock_uncertainty_ms': d_clock_uncertainty_ms,
-                        'd_clock_source': 'edge_ensemble',
+                        'd_clock_source': 'edge_ensemble:' + str(
+                            getattr(edge_result, 'anchor_source', 'host_label')),
                         'doppler_hz': edge_result.doppler_hz,
                         'doppler_uncertainty_hz': edge_result.doppler_uncertainty_hz,
                         'ensemble_n_edges': edge_result.ensemble_n_edges,

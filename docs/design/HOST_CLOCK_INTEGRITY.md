@@ -150,51 +150,54 @@ command socket, which the timestd user lacks on a stock install; the
 gate is off in the template and absent from the station configs as of
 this writing.  The template section says what to grant.
 
-## Open: where the detector looks
+## Step 0.5(b) — the ticks are looked for where the signal put them (2026-09-04, evening)
 
-The walk mechanism (bus 18:09Z, `reference_fuse_walk_mechanism`) has a
-second half the gate does not touch.  `tick_edge_detector` searches
+The walk mechanism (bus 18:09Z, `reference_fuse_walk_mechanism`) had a
+second half the gate did not touch.  `tick_edge_detector` searched
 ±`SEARCH_WINDOW_MS` = 20 ms around the sample the *host-clock label*
-names for each second.  Past 20 ms of clock error the real tick leaves
-the window, the correlator returns threshold-level junk centred where it
-was told to look, and the timing error reads ≈ 0.  Fusion admits what
-clears 10 dB.  The withdrawal above stops chrony from acting on that
-number; it does not stop the number from being wrong.
+named for each second.  Past 20 ms of clock error the real tick left the
+window, the correlator returned threshold-level junk centred where it
+was told to look, and the timing error read ≈ 0.  Fusion admitted what
+cleared 10 dB.  The gate stops chrony from acting on that number; this
+step stops the number from being wrong.
 
-Two ways to make the detector honest, for Michael's call:
+Michael chose the second of the two options that stood here: anchor the
+per-second search on the minute marker.  The 800 ms marker correlation
+already runs each minute and lands its own onset sample.  The engine now
+hands that onset to the edge detector (`anchor_onset`), and every
+second's search window sits at `marker_onset + n × sample_rate` — the
+GPSDO ruler carries the seconds; the host clock names only which second
+the marker was.  The timing error stays `front_edge − label_expected`, so
+a clock that walked 300 ms reads as a 300 ms error instead of a tick
+found where the clock said to look.  The synthetic test minute in
+`tests/unit/test_tick_edge_anchor.py` shows exactly that: label-anchored,
+the walked minute yields junk the detector refuses to vouch for;
+marker-anchored, 57 ticks land within 1 ms of +300 ms.
 
-1. **Widen the window.**  Search ±500 ms or more.  Cheap, but the window
-   exists to reject the sidelobes and the other station's tick; widening
-   it re-admits both, and on a shared channel WWV and WWVH ticks sit
-   tens of ms apart.  A wide window would need the CLEAN/sidelobe
-   machinery to hold the line the window used to hold.
-2. **Anchor the per-second search on the minute marker.**  The 800 ms
-   marker correlation already runs each minute and lands its own onset
-   sample; place every second's expected sample at
-   `marker_onset + n × sample_rate × (1 + rate_correction)` instead of at
-   the host label.  The ticks are then found where the *signal* says the
-   seconds are, the host clock enters only as the coarse integer-second
-   name, and a walking host cannot pull the window off the tick.  Larger
-   change, touches the unified measurement path, and needs the marker
-   detection to be gated on SNR before it may anchor anything.
+Two rules keep the anchor honest:
 
-The second one follows MEASUREMENT_MODEL §7.1 — the tick label must not
-come from the clock the tick is meant to check — and I would take it.
-Either way, until one lands, a fusion cycle admitted while the verdict
-reads suspect or fault carries a d_clock that describes the window, not
-the tick; the gate keeps chrony from believing it, and nothing else does.  The authority history
-store keeps its columns for now; its canonical home moved to hamsci-dsp,
-and a column set change goes through that repo.
+- **The ticks confirm the marker.**  An anchored pass stands only when it
+  finds ≥ 10 ticks with per-tick scatter σ₁ ≤ 6 ms.  A marker locked on
+  a sidelobe (bee1, 2026-05-20: corr −370 ms, edge +15 ms) drags the grid
+  between the ticks; the grid then collects threshold-level junk with
+  σ₁ ≈ 11 ms and fails confirmation, the label-anchored pass runs as
+  before, and the engine's edge-versus-correlator override keeps its
+  teeth.  Count alone does not confirm: the first version of this test
+  passed a 370 ms-wrong anchor on count and failed on scatter.
+- **A label-anchored ensemble must look like ticks before it carries
+  timing.**  `TickEdgeDetector.timing_admissible` and
+  `MetrologyService.tick_measurement_admissible` refuse a host-label
+  ensemble whose σ₁ exceeds 6 ms: that scatter is the window's, not the
+  ticks'.  Neither synthetic-measurement path in the engine promotes
+  such an ensemble, and the L2 `tick_timing` row publishes no `d_clock`
+  for it.  `d_clock_source` now reads `edge_ensemble:minute_marker` or
+  `edge_ensemble:host_label`, so a consumer can tell the two apart
+  without a schema change.
 
-## Two things the day left open
-
-The learned reference gate cannot run while the T5 path is shut, and the
-T5 path shuts whenever the host clock disagrees with GPS by whole
-seconds.  So a wrong-peak lock that leads to a clock walk also disables
-the gate meant to catch the next wrong peak.  The verdict makes that
-visible.  It does not reopen the path.
-
-The first wrong-peak lock on B4, at 00:22Z, predates the clock walk.  The
-LAN stratum-1 held the clock to 100 µs until 02:00Z.  The walk explains
-the day's later phantom locks (raw values accepted "as-is" with no
-authority to contradict them) and does not explain the first.
+What this leaves: the marker search itself still centres on the label,
+with the adaptive window from `UNIFIED_MEASUREMENT_PATH.md` (3σ of the
+physics model, ~±100 ms by default).  A walk past that loses the marker,
+and with it the anchor; the minute then runs label-anchored and, under
+the scatter rule, publishes no timing.  That is the honest answer for a
+host clock a tenth of a second wrong — blind, and saying so — and it is
+where the T2 pair witness and the gate take over.

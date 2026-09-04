@@ -647,6 +647,32 @@ class MetrologyEngine:
         else:
             return 0.0  # Unknown station — skip
 
+    def _minute_marker_anchors(self, measurements) -> Dict[str, Tuple[int, float]]:
+        """Per station, the measured minute-marker onset as an anchor for the
+        per-second tick search: ``{station: (utc_second, onset_sample)}``.
+
+        Only a correlator detection of second 0 counts (not an edge synth):
+        ``arrival_ms`` is the leading-edge onset relative to buffer sample 0
+        after the long-tone correction in _measure_tone_at_known_time, and
+        the correlator ran ahead of the edge ensemble on this buffer.  The
+        highest-SNR marker wins if the loop tried more than one.
+        """
+        anchors: Dict[str, Tuple[int, float, float]] = {}
+        for m in measurements:
+            if not m.get('detected'):
+                continue
+            if str(m.get('detection_method', '')).startswith('edge_ensemble'):
+                continue
+            utc_sec = m.get('utc_second')
+            arrival_ms = m.get('arrival_ms')
+            if utc_sec is None or arrival_ms is None or int(utc_sec) % 60 != 0:
+                continue
+            snr = float(m.get('corr_snr_db', 0.0) or 0.0)
+            prev = anchors.get(m['station'])
+            if prev is None or snr > prev[2]:
+                anchors[m['station']] = (int(utc_sec), float(arrival_ms), snr)
+        return {s: (u, a * self.sample_rate / 1000.0) for s, (u, a, _snr) in anchors.items()}
+
     def _check_signal_presence(self, iq_samples: np.ndarray) -> bool:
         """Check whether any tick-frequency energy is present in this buffer.
         
@@ -1558,6 +1584,10 @@ class MetrologyEngine:
                         and current_utc_hour in self.bpm_discriminator.active_hours):
                     edge_station_freqs.append(('BPM', 1000))
             
+            # Step 0.5(b): the measured minute-marker onset anchors the
+            # per-second search grid (docs/design/HOST_CLOCK_INTEGRITY.md).
+            marker_anchors = self._minute_marker_anchors(measurements)
+
             for station_name, tone_freq in edge_station_freqs:
                 prop_delay_ms = expected_delays_by_station.get(station_name, 20.0)
                 prop_delay_sec = prop_delay_ms / 1000.0
@@ -1571,6 +1601,7 @@ class MetrologyEngine:
                         expected_delay_sec=prop_delay_sec,
                         is_dedicated_channel=is_dedicated,
                         iq_samples=iq_samples,
+                        anchor_onset=marker_anchors.get(station_name),
                     )
                 except Exception as e:
                     logger.warning(f"{self.channel_name}: Edge detection failed for "
@@ -1588,10 +1619,24 @@ class MetrologyEngine:
                     # template may still correlate with WWV's 5ms ticks.
                     # BPM edge results still feed the physics pipeline
                     # (tick_phase → Doppler → dTEC) via edge_results dict.
+                    timing_ok, timing_why = self.edge_detector.timing_admissible(edge_result)
                     if (station_name != 'BPM'
                             and station_name not in stations_with_corr
                             and edge_result.confidence >= 0.3
-                            and edge_result.ensemble_n_edges >= 5):
+                            and edge_result.ensemble_n_edges >= 5
+                            and not timing_ok):
+                        # The ensemble was found where the host clock said to
+                        # look and its scatter matches the window, not ticks.
+                        # No marker to anchor on, nothing to vouch for it:
+                        # publish no timing from it (hf-timestd#24 spirit).
+                        logger.warning(
+                            f"{self.channel_name}: {station_name} edge ensemble NOT "
+                            f"promoted to timing — {timing_why}")
+                    if (station_name != 'BPM'
+                            and station_name not in stations_with_corr
+                            and edge_result.confidence >= 0.3
+                            and edge_result.ensemble_n_edges >= 5
+                            and timing_ok):
                         
                         # The ensemble timing_error is relative to expected
                         # propagation delay.  Convert to arrival_ms from
@@ -1683,7 +1728,9 @@ class MetrologyEngine:
                             # synth gate above: tick-duration discrimination
                             # collapses on shared frequencies.
                             EDGE_CORR_OVERRIDE_MS = 50.0
+                            timing_ok, _ = self.edge_detector.timing_admissible(edge_result)
                             if (station_name != 'BPM'
+                                    and timing_ok
                                     and abs(delta) > EDGE_CORR_OVERRIDE_MS):
                                 mid_utc = (buf_start_utc + buf_end_utc) / 2.0
                                 utc_second = int(round(mid_utc))
