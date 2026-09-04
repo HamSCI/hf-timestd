@@ -16,11 +16,16 @@ source at -0.36 ms, and the station threw away its own metrology in favour of
 consensus among sources 40-100x worse.  `smd timing` said so directly —
 `flags chrony-rejected-FUSE:state=x` — and WSPR/GRAPE ran on the loser.
 
-`trust` exempts FUSE from that vote.  It is safe only because the authority
-polices itself: fusion publishes exclusively when
-`quality_ok and multi_station and consistent and discontinuity_ok`, and logs
-`Chrony feed GATED` with reasons when it will not.  These tests hold both ends
-of that bargain — the trust flag, and the self-gate that justifies it.
+`trust` exempted FUSE from that vote, on the argument that the authority
+polices itself (`quality_ok and multi_station and consistent and
+discontinuity_ok`).  ⛔ 2026-09-04 refuted the argument on both stations: the
+tick detector searches +-20 ms around the second the HOST clock names, so once
+the clock is more than 20 ms off it reports noise peaks as on-time ticks,
+fusion never gates, and chrony under `trust` follows the clock wherever it
+walks (B4 11.6 s, then 1.0 s more; ND 12 s on 09-03, 1.0 s on 09-04).  The
+majority vote the flag disabled is the one thing that stopped it: chronyd
+restarted without `trust` stepped both clocks back to their witnesses.  These
+tests now hold the flag OFF, and keep the self-gate honest for what it can see.
 """
 
 import re
@@ -46,11 +51,16 @@ def _refclock_lines() -> dict:
 
 class FuseDeclarationTest(unittest.TestCase):
 
-    def test_fuse_is_trusted_so_the_network_cannot_outvote_it(self):
+    def test_fuse_is_NOT_trusted_so_the_witnesses_can_outvote_a_walked_fuse(self):
+        # 2026-09-04: with `trust`, FUSE walked AC0G-B4 11.6 s and AC0G-ND 1.0 s
+        # while reporting itself within 0.1 ms; the tick detector cannot see a
+        # clock error past its +-20 ms window.  Four pool servers that agree are
+        # the backstop, and `trust` is what silenced them.
         line = _refclock_lines()["FUSE"]
-        self.assertIn(" trust", line,
-                      "without `trust`, four loose internet sources outvote "
-                      "the station's own metrology (AC0G-ND 2026-09-03)")
+        self.assertNotIn(" trust", line,
+                         "`trust` on FUSE let a blind fusion walk two stations' "
+                         "clocks by seconds (2026-09-04); the pool must be able "
+                         "to outvote it")
 
     def test_fuse_precision_matches_its_own_uncertainty_budget(self):
         # The comment above the line promises +/-0.3-1.0 ms and the writer

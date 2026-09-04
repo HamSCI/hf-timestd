@@ -492,6 +492,24 @@ This is the **host-clock-vs-UTC** watchdog, and is DISTINCT from `timestd-chrony
 
 #### `trust` on the FUSE refclock — the T3-only station
 
+> **⛔ Superseded 2026-09-04.** The argument below for `trust` stood for one day.
+> On 2026-09-04 AC0G-B4, with a GPS-governed ADC and a correct T6 anchor, walked
+> 11.6 s slow under `trust` between 02Z and 16Z while `chronyc tracking`
+> reported the clock within 0.1 ms, then walked another 1.0 s between 17:46Z
+> and 19:18Z after chrony marked the LAN stratum-1 a falseticker and selected
+> FUSE again. AC0G-ND walked 1.0 s in the same window. The mechanism, measured
+> on ND: the tick detector searches ±20 ms around the second the host clock
+> names (`tick_edge_detector.SEARCH_WINDOW_MS`); past that error the real tick
+> lies outside the window, the correlator returns a noise peak centred on the
+> expected sample, its timing error reads near zero, fusion admits what clears
+> 10 dB and never gates, and chrony under `trust` follows. Tick SNR fell
+> 13 → 9 dB as the clock error grew. The self-gating this section relies on
+> cannot see the error class that matters, and a governed ADC does not change
+> that. `trust` is removed from `config/chrony-timestd-refclocks.conf`; chrony's
+> majority vote stopped both walks at 19:17Z and 19:19Z the moment it was
+> allowed to. The text below stays as the record of the argument.
+> `docs/design/HOST_CLOCK_INTEGRITY.md` carries the measurements.
+
 Some stations have no higher authority than Fusion. No TS-1 injector, so no T6.
 No LBE-142x feeding a PPS, so no T5 — a bare frequency GPSDO such as the LBE-Mini
 disciplines the ADC but emits no pulse chrony can read. No stratum-1 server on
