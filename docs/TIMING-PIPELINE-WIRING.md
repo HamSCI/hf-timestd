@@ -869,3 +869,39 @@ hardening here is a defensive move, not a bug fix.
 Each step is independently verifiable. The first two are
 defensive; the third actively repairs; the fourth supports
 long-term science.
+
+## 11. The chunk sidecar's `timing` block is the schema v2 `state` record (2026-09-04)
+
+Each archive chunk's JSON sidecar carries a `timing` block frozen at chunk
+start. Since 2026-09-04 that block is the schema v2 `state` record of
+`docs/design/TIMING_PROVENANCE_MODEL.md` §3.1, built by
+`core/time_map_producer.py` from what the recorder knows and written by
+`BinaryArchiveWriter._chunk_timing_block`. A consumer reads three fields
+for the label, `n0`, `t0_utc_ns`, `f_s_hz`, and two for its trust,
+`u_epoch_ns` (with `k` and `p`, as of `measured_at`) and `stability_ns`.
+It never branches on `judge_tier`; the tier lives under `engineering`
+beside radiod's raw pair. `counter_epoch_id` (`pair-<gps_time_ns>`)
+changes when an adopted pair sits more than 0.5 s from the mapping in
+force, which is what a radiod restart looks like; no registration is
+extrapolated across it. `origin` names the chain, `native_anchor` or
+`sysclock`, or is null with a `reason`.
+
+**Phase 1 facts.** The BPSK PPS channel is provisioned with no archive, so
+no archived chunk is the T6 counter space; every archived channel
+registers the `sysclock@1` chain, whose `u_epoch_ns` is the larger of the
+pair's measured non-atomicity (8.03 ms p99 stand-in) and the host-clock
+verdict's largest disagreement. On 2026-09-04 at 15:00Z that record on
+AC0G-B4 would have read 11.7 s. Archive labels are unchanged; only the
+metadata gained the model.
+
+**The legacy mirror and its retirement.** The Offset Judge keys
+(`radiod_gps_time_ns`, `radiod_rtp_timesnap`, `offset_ns`,
+`offset_sigma_ns`, `judge_tier`, `judge_age_s`, `segment_id`, `rate_ppm`)
+stay at the block's top level for one release, and also appear under
+`engineering`, so `hamsci_physics.grape.decimation_pipeline.timing_from_sidecar`
+keeps working until Plan C reads `u_epoch_ns`. Retire the top-level mirror
+one release after hamsci-physics reads `u_epoch_ns` (a release = one `smd`
+bless of an image carrying the change; see METROLOGY.md §4.5 for the
+pattern). Without a provider the block is byte-for-byte the pre-2026-09-04
+one. The station's `chain` records are published separately at
+`/run/hf-timestd/timing_chain.json` (§3.2).
