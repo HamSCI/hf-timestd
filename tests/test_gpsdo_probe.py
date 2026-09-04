@@ -190,3 +190,56 @@ class TestGpsdoProbe(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestHostClockRateFromPpsStudy(unittest.TestCase):
+    """gpsdo-monitor times the GPSDO's PPS edges with the host's OS clock
+    and publishes the median period.  999.91 ms per true second means the
+    host loses 90 ppm — the number that sat in /run/gpsdo on AC0G-B4 all
+    of 2026-09-04 while chrony reported the clock within 0.1 ms."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.now = datetime(2026, 4, 24, 12, 0, 0, tzinfo=timezone.utc).timestamp()
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write(self, payload: dict, serial: str = "LBE1421-ABC123") -> None:
+        (self.tmp / f"{serial}.json").write_text(json.dumps(payload))
+
+    def _probe(self) -> GpsdoProbe:
+        return GpsdoProbe(run_dir=self.tmp, now_fn=lambda: self.now)
+
+    def test_slow_host_reports_negative_ppm(self) -> None:
+        rep = _report()
+        rep["pps_study"] = {"enabled": True, "window_sec": 60, "edges": 61,
+                            "period_ms_p50": 999.9099519918673}
+        self._write(rep)
+        ppm = self._probe().host_clock_rate_ppm()
+        self.assertAlmostEqual(ppm, -90.05, places=1)
+
+    def test_fast_host_reports_positive_ppm(self) -> None:
+        rep = _report()
+        rep["pps_study"] = {"enabled": True, "window_sec": 60, "edges": 60,
+                            "period_ms_p50": 1000.08}
+        self._write(rep)
+        self.assertAlmostEqual(self._probe().host_clock_rate_ppm(), 80.0, places=1)
+
+    def test_missing_study_reports_none(self) -> None:
+        self._write(_report())     # fixture's pps_study has no period
+        self.assertIsNone(self._probe().host_clock_rate_ppm())
+
+    def test_too_few_edges_reports_none(self) -> None:
+        rep = _report()
+        rep["pps_study"] = {"enabled": True, "window_sec": 60, "edges": 5,
+                            "period_ms_p50": 999.0}
+        self._write(rep)
+        self.assertIsNone(self._probe().host_clock_rate_ppm())
+
+    def test_stale_file_reports_none(self) -> None:
+        rep = _report(written_utc="2026-04-24T11:00:00.000Z")
+        rep["pps_study"] = {"enabled": True, "window_sec": 60, "edges": 60,
+                            "period_ms_p50": 999.9}
+        self._write(rep)
+        self.assertIsNone(self._probe().host_clock_rate_ppm())

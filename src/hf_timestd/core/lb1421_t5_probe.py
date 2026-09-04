@@ -117,6 +117,24 @@ class Lb1421Reading:
     pps_utc_sec: int
     host_monotonic_at_read: float
     valid_fix: bool
+    #: ``(host_now - fix_age) - pps_utc_sec`` at read time: the host clock's
+    #: disagreement with the GPS integer second, in seconds.  Normal values
+    #: sit in -0.5..+1.5 (RMC emission delay).  On 2026-09-04 AC0G-B4 read
+    #: -12 here for thirteen hours and nothing repeated the number, so
+    #: ``valid_fix=False`` looked like "no GPS fix".  Kept on every reading
+    #: so the recorder can publish it and the authority manager can judge
+    #: the host clock by it.
+    host_minus_gps_s: Optional[float] = None
+    #: Why ``valid_fix`` is False: ``"fix_stale"`` (the GPSDO lost the fix)
+    #: or ``"host_gps_inconsistent"`` (the HOST clock disagrees with GPS by
+    #: whole seconds).  None when valid.
+    invalid_reason: Optional[str] = None
+
+
+#: One WARNING per this many seconds while the host clock and the GPS second
+#: disagree.  The poller runs at 2 Hz; the number belongs in the journal,
+#: not 7,200 times an hour.
+INCONSISTENCY_WARN_INTERVAL_S = 60.0
 
 
 class Lb1421T5Probe:
@@ -145,6 +163,7 @@ class Lb1421T5Probe:
         self.file_max_age_s = float(file_max_age_s)
         self.nmea_max_age_s = float(nmea_max_age_s)
         self._latest: Optional[Lb1421Reading] = None
+        self._last_inconsistency_warn: Optional[float] = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -293,15 +312,35 @@ class Lb1421T5Probe:
         nmea_emission_delay = (host_now - effective_fix_age) - raw_pps_utc_sec
         host_gps_consistent = -0.5 <= nmea_emission_delay <= 1.5
 
-        valid_fix = (
-            effective_fix_age <= self.nmea_max_age_s
-            and host_gps_consistent
-        )
+        fix_fresh = effective_fix_age <= self.nmea_max_age_s
+        valid_fix = fix_fresh and host_gps_consistent
+        invalid_reason: Optional[str] = None
+        if not fix_fresh:
+            invalid_reason = "fix_stale"
+        elif not host_gps_consistent:
+            invalid_reason = "host_gps_inconsistent"
+            # Say the number.  This is the host clock disagreeing with the
+            # GPS integer second — the one witness on the station that needs
+            # neither network nor chrony — and silence here cost a day.
+            mono = time.monotonic()
+            last = self._last_inconsistency_warn
+            if last is None or mono - last >= INCONSISTENCY_WARN_INTERVAL_S:
+                self._last_inconsistency_warn = mono
+                logger.warning(
+                    "Lb1421T5Probe: host clock minus GPS second = %+.3f s "
+                    "(outside -0.5..+1.5 s emission window) — the HOST clock "
+                    "disagrees with GPS by whole seconds; reading marked "
+                    "invalid, T5 disambiguation withheld. Not a GPS-fix "
+                    "problem: fix_age %.1f s, pps_utc_sec %d.",
+                    nmea_emission_delay, effective_fix_age, raw_pps_utc_sec,
+                )
 
         return Lb1421Reading(
             pps_utc_sec=raw_pps_utc_sec,
             host_monotonic_at_read=time.monotonic(),
             valid_fix=valid_fix,
+            host_minus_gps_s=round(nmea_emission_delay, 3),
+            invalid_reason=invalid_reason,
         )
 
     def _pick_file(self) -> Optional[Path]:

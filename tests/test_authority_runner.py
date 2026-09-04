@@ -464,3 +464,45 @@ class TestBuildAuthorityRunnerPhase2BConfig(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HostClockWiringTests(unittest.TestCase):
+    """[timing.authority_manager.host_clock] and the gpsdo-monitor rate
+    witness reach the manager."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _build(self, auth_cfg: dict):
+        return build_authority_runner_from_config(
+            config={"timing": {"authority_manager": auth_cfg}},
+            fusion_status_path=self.tmp / "fusion_status.json",
+            authority_output_path=self.tmp / "authority.json",
+        )
+
+    def test_gpsdo_enabled_wires_the_pps_rate_witness(self) -> None:
+        runner = self._build({"gpsdo": {"enabled": True,
+                                        "run_dir": str(self.tmp / "gpsdo-empty")}})
+        provider = runner.manager.host_clock_rate_provider
+        self.assertIsNotNone(provider)
+        self.assertIsNone(provider(), "empty run_dir -> no rate witness, no error")
+
+    def test_gpsdo_disabled_leaves_no_rate_witness(self) -> None:
+        runner = self._build({"gpsdo": {"enabled": False}})
+        self.assertIsNone(runner.manager.host_clock_rate_provider)
+
+    def test_defaults(self) -> None:
+        m = self._build({}).manager
+        self.assertEqual(m.host_clock_fault_ms, 1000.0)
+        self.assertEqual(m.host_clock_rate_suspect_ppm, 50.0)
+        self.assertEqual(m._host_clock_alarm.repeat_sec, 3600.0)
+
+    def test_thresholds_read_from_config(self) -> None:
+        m = self._build({"host_clock": {"fault_ms": 500, "rate_suspect_ppm": 20,
+                                        "alarm_repeat_sec": 600}}).manager
+        self.assertEqual(m.host_clock_fault_ms, 500.0)
+        self.assertEqual(m.host_clock_rate_suspect_ppm, 20.0)
+        self.assertEqual(m._host_clock_alarm.repeat_sec, 600.0)

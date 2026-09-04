@@ -266,3 +266,52 @@ class TestBackgroundReader:
 
 def test_default_run_dir_is_run_gpsdo():
     assert DEFAULT_RUN_DIR == Path("/run/gpsdo")
+
+
+class TestHostGpsDisagreementIsExposed:
+    """2026-09-04, AC0G-B4: the host clock ran 12 s slow.  _read_once saw
+    (host_now - fix_age) - pps_utc_sec = -12 and returned valid_fix=False
+    with nothing else — downstream read that as "no GPS fix".  The number
+    is the best host-clock witness on the station and must survive."""
+
+    def test_inconsistent_reading_carries_the_delta_and_names_the_reason(self, tmp_path):
+        # GPS second 12 s AHEAD of the host clock, as on B4 at 15:53Z.
+        doc = _device_doc(pps_utc_sec=int(time.time()) + 12)
+        (tmp_path / "1421-TEST.json").write_text(json.dumps(doc))
+        probe = Lb1421T5Probe(run_dir=tmp_path)
+        r = probe._read_once()
+        assert r is not None
+        assert r.valid_fix is False
+        assert r.invalid_reason == "host_gps_inconsistent"
+        assert -13.5 < r.host_minus_gps_s < -11.0
+
+    def test_consistent_reading_has_delta_inside_the_window_and_no_reason(self, tmp_path):
+        doc = _device_doc()   # pps_utc_sec = now - 1 -> delta ~ +0.6
+        (tmp_path / "1421-TEST.json").write_text(json.dumps(doc))
+        probe = Lb1421T5Probe(run_dir=tmp_path)
+        r = probe._read_once()
+        assert r.valid_fix is True
+        assert r.invalid_reason is None
+        assert -0.5 <= r.host_minus_gps_s <= 1.5
+
+    def test_stale_fix_names_its_own_reason(self, tmp_path):
+        doc = _device_doc(fix_age_sec=30.0)
+        (tmp_path / "1421-TEST.json").write_text(json.dumps(doc))
+        probe = Lb1421T5Probe(run_dir=tmp_path, nmea_max_age_s=12.0)
+        r = probe._read_once()
+        assert r.valid_fix is False
+        assert r.invalid_reason == "fix_stale"
+
+    def test_inconsistency_is_logged_as_a_warning_with_the_number_once_per_minute(
+            self, tmp_path, caplog):
+        import logging
+        doc = _device_doc(pps_utc_sec=int(time.time()) + 12)
+        (tmp_path / "1421-TEST.json").write_text(json.dumps(doc))
+        probe = Lb1421T5Probe(run_dir=tmp_path)
+        with caplog.at_level(logging.WARNING, logger="hf_timestd.core.lb1421_t5_probe"):
+            probe._read_once()
+            probe._read_once()
+        warnings = [rec for rec in caplog.records if rec.levelno == logging.WARNING]
+        assert len(warnings) == 1, [w.getMessage() for w in warnings]
+        msg = warnings[0].getMessage()
+        assert "host" in msg.lower() and "GPS" in msg and "-12" in msg

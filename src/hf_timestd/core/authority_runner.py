@@ -238,25 +238,37 @@ def build_authority_runner_from_config(
     interval_sec = float(auth_cfg.get("interval_sec", 30.0))
     hysteresis = int(auth_cfg.get("upgrade_hysteresis", 3))
     a_level_cfg = auth_cfg.get("a_level", "A1")
+    # The gpsdo-monitor probe serves two readers: the A-level (below) and
+    # the host-clock PPS-rate witness (host_clock_integrity.py).  One
+    # instance, so both read the same file the same way.
+    gpsdo_probe: Optional[GpsdoProbe] = None
+    gpsdo_cfg = auth_cfg.get("gpsdo", {}) or {}
+    if gpsdo_cfg.get("enabled"):
+        gpsdo_probe = GpsdoProbe(
+            run_dir=Path(gpsdo_cfg.get("run_dir", "/run/gpsdo")),
+            serial=gpsdo_cfg.get("serial"),
+            staleness_factor=float(
+                gpsdo_cfg.get("staleness_factor",
+                              GpsdoProbe.DEFAULT_STALENESS_FACTOR)
+            ),
+        )
     if a_level_provider is None:
-        gpsdo_cfg = auth_cfg.get("gpsdo", {}) or {}
-        if gpsdo_cfg.get("enabled"):
+        if gpsdo_probe is not None:
             # Hand A-level off to the gpsdo-monitor daemon running on
             # this host. If the daemon isn't running or its files are
             # stale, GpsdoProbe.poll() returns "A0" — the authority
             # manager then treats this host as having no local GPSDO
             # witness, which is the correct degradation.
-            probe = GpsdoProbe(
-                run_dir=Path(gpsdo_cfg.get("run_dir", "/run/gpsdo")),
-                serial=gpsdo_cfg.get("serial"),
-                staleness_factor=float(
-                    gpsdo_cfg.get("staleness_factor",
-                                  GpsdoProbe.DEFAULT_STALENESS_FACTOR)
-                ),
-            )
-            a_level_provider = probe.poll
+            a_level_provider = gpsdo_probe.poll
         else:
             a_level_provider = lambda: a_level_cfg  # noqa: E731
+
+    # Host-clock verdict thresholds (host_clock_integrity.py).  `validate`
+    # checks these for sense; the manager takes them as given.
+    hc_cfg = auth_cfg.get("host_clock", {}) or {}
+    host_clock_fault_ms = float(hc_cfg.get("fault_ms", 1000.0))
+    host_clock_rate_suspect_ppm = float(hc_cfg.get("rate_suspect_ppm", 50.0))
+    host_clock_alarm_repeat_sec = float(hc_cfg.get("alarm_repeat_sec", 3600.0))
 
     # Governor-radiod identifier for the multi-radiod case
     # (METROLOGY.md §4.5.1). Default: read [ka9q].status (the
@@ -477,5 +489,10 @@ def build_authority_runner_from_config(
         frontend_probe=frontend_probe,
         demote_t6_on_breach=demote_t6_on_breach,
         demote_t6_on_breach_min_cycles=demote_t6_on_breach_min_cycles,
+        host_clock_rate_provider=(
+            gpsdo_probe.host_clock_rate_ppm if gpsdo_probe is not None else None),
+        host_clock_fault_ms=host_clock_fault_ms,
+        host_clock_rate_suspect_ppm=host_clock_rate_suspect_ppm,
+        host_clock_alarm_repeat_sec=host_clock_alarm_repeat_sec,
     )
     return AuthorityRunner(manager=manager, interval_sec=interval_sec)

@@ -29,7 +29,14 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, Tuple, TYPE_CHECKING
+
+from hf_timestd.core.host_clock_integrity import (
+    DEFAULT_FAULT_MS as HOST_CLOCK_DEFAULT_FAULT_MS,
+    DEFAULT_RATE_SUSPECT_PPM as HOST_CLOCK_DEFAULT_RATE_SUSPECT_PPM,
+    HostClockAlarm,
+    assess as assess_host_clock,
+)
 
 if TYPE_CHECKING:
     from hf_timestd.core.bootstrap_coordinator import BootstrapCoordinator, BootstrapState
@@ -176,6 +183,12 @@ class AuthorityState:
     stations_contributing: List[str]
     last_transition_utc: Optional[str]
     disagreement_flags: List[str]
+    #: The host-clock verdict (host_clock_integrity.HostClockVerdict.to_dict()
+    #: plus ``since_utc``).  Separate from the tier decision on purpose: a
+    #: system-clock witness disagreeing with a GPS-disciplined anchor says
+    #: the CLOCK drifted, and until 2026-09-04 that sentence ended at
+    #: ":advisory".  None only on the bootstrap-pending path.
+    host_clock: Optional[Dict[str, Any]] = None
 
 
 class AuthorityManager:
@@ -200,8 +213,25 @@ class AuthorityManager:
         frontend_probe: Optional["FrontendProbe"] = None,
         demote_t6_on_breach: bool = False,
         demote_t6_on_breach_min_cycles: int = 3,
+        host_clock_rate_provider: Optional[Callable[[], Optional[float]]] = None,
+        host_clock_fault_ms: float = HOST_CLOCK_DEFAULT_FAULT_MS,
+        host_clock_rate_suspect_ppm: float = HOST_CLOCK_DEFAULT_RATE_SUSPECT_PPM,
+        host_clock_alarm_repeat_sec: float = 3600.0,
     ):
         self.probes = list(probes)
+        # Host-clock integrity (host_clock_integrity.py).  Three witnesses
+        # feed one verdict: the cross-check's own sysclock-vs-rtp pair
+        # numbers, the LB-1421 host-versus-GPS gap riding in T5's detail,
+        # and the PPS-rate figure this provider returns (GpsdoProbe.
+        # host_clock_rate_ppm when gpsdo-monitor runs).  None = no rate
+        # witness.  The verdict never touches tier selection.
+        self.host_clock_rate_provider = host_clock_rate_provider
+        self.host_clock_fault_ms = float(host_clock_fault_ms)
+        self.host_clock_rate_suspect_ppm = float(host_clock_rate_suspect_ppm)
+        self._host_clock_alarm = HostClockAlarm(repeat_sec=host_clock_alarm_repeat_sec)
+        # (|delta_ms|, bound_ms) per sysclock witness of an rtp-frame active
+        # tier, gathered by _cross_check on each tick.
+        self._host_clock_pairs: Dict[str, Tuple[float, float]] = {}
         self.output_path = Path(output_path)
         # NOT created here.  Construction must be side-effect free: building
         # a manager to inspect it (which probes registered, what a config
@@ -321,7 +351,9 @@ class AuthorityManager:
                 flags = list(flags) + ["TIMING_DISAGREEMENT"]
 
         self._note_transition(active)
-        state = self._build_state(results, active, witnesses, flags, inflate_ns)
+        host_clock = self._assess_host_clock(results)
+        state = self._build_state(results, active, witnesses, flags, inflate_ns,
+                                  host_clock=host_clock)
         self._write_state(state)
         self._write_snapshot(state, results)
         self._apply_chrony_gate(state.t_level_active)
@@ -492,6 +524,7 @@ class AuthorityManager:
         """Returns (active, witnesses, disagreement_flags). May downgrade
         active per the majority-witness rule or the asymmetric T3↔T2 rule.
         """
+        self._host_clock_pairs = {}
         if active is None:
             return None, [], []
 
@@ -507,6 +540,19 @@ class AuthorityManager:
             # ProbeResult.witness_only.
             if (r.available or r.witness_only) and r.offset_ms is not None:
                 witnesses.append(lvl)
+                # A sysclock-frame witness against an rtp-frame active tier
+                # measures the HOST CLOCK's error, whatever it says about
+                # the anchor.  Keep the number for the host-clock verdict
+                # before the advisory tag below files it away.  Taken here,
+                # against the pre-demotion active, so AC0G-ND's
+                # "T3<->T2:4179ms ... demoted-to:none" still counts.
+                if (getattr(active_result, "frame", "sysclock") == "rtp"
+                        and getattr(r, "frame", "sysclock") == "sysclock"
+                        and active_result.offset_ms is not None):
+                    self._host_clock_pairs[lvl] = (
+                        abs(active_result.offset_ms - r.offset_ms),
+                        self._pair_threshold_ms(active, active_result, lvl, r),
+                    )
                 flag = self._check_pair(active, active_result, lvl, r)
                 if flag:
                     # Cross-frame disagreement against a GPS-disciplined
@@ -633,14 +679,22 @@ class AuthorityManager:
         if a_res.offset_ms is None or b_res.offset_ms is None:
             return None
         diff = abs(a_res.offset_ms - b_res.offset_ms)
+        threshold = self._pair_threshold_ms(a, a_res, b, b_res)
+        if diff > threshold:
+            return f"{a}<->{b}:{diff:.3f}ms>{threshold:.3f}ms"
+        return None
+
+    def _pair_threshold_ms(
+        self, a: str, a_res: ProbeResult, b: str, b_res: ProbeResult,
+    ) -> float:
+        """The combined 3-sigma CI of a pair, floored at its configured
+        per-pair threshold — the bound _check_pair judges |delta| against,
+        exposed so the host-clock verdict can cite the same number."""
         sa = a_res.sigma_ms if a_res.sigma_ms is not None else TRUST_SIGMA_MS.get(a, 1.0)
         sb = b_res.sigma_ms if b_res.sigma_ms is not None else TRUST_SIGMA_MS.get(b, 1.0)
         rss = 3.0 * (sa * sa + sb * sb) ** 0.5
         floor = self.pair_thresholds_ms.get(frozenset({a, b}), 0.0)
-        threshold = max(rss, floor)
-        if diff > threshold:
-            return f"{a}<->{b}:{diff:.3f}ms>{threshold:.3f}ms"
-        return None
+        return max(rss, floor)
 
     def _maybe_majority_downgrade(
         self,
@@ -727,6 +781,7 @@ class AuthorityManager:
         witnesses: List[str],
         disagreement_flags: List[str],
         inflate_ns: int = 0,
+        host_clock: Optional[Dict[str, Any]] = None,
     ) -> AuthorityState:
         available = [lvl for lvl in T_LEVELS_RANKED if results[lvl].available]
 
@@ -803,7 +858,64 @@ class AuthorityManager:
             stations_contributing=stations,
             last_transition_utc=self._last_transition_utc,
             disagreement_flags=disagreement_flags,
+            host_clock=host_clock,
         )
+
+    def _assess_host_clock(self, results: Dict[str, ProbeResult]) -> Dict[str, Any]:
+        """One verdict on the host clock from the witnesses this tick carried,
+        and the log line it earns.  See host_clock_integrity.py for why.
+
+        Never raises: a rate provider that fails counts as no rate witness.
+        Never touches tier selection.
+        """
+        gps_delta: Optional[float] = None
+        t5 = results.get("T5")
+        if t5 is not None and t5.detail:
+            raw = t5.detail.get("host_minus_gps_s")
+            if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+                gps_delta = float(raw)
+
+        rate_ppm: Optional[float] = None
+        if self.host_clock_rate_provider is not None:
+            try:
+                raw = self.host_clock_rate_provider()
+            except Exception as exc:
+                log.debug("host_clock_rate_provider raised: %s", exc)
+                raw = None
+            if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+                rate_ppm = float(raw)
+
+        verdict = assess_host_clock(
+            pair_disagreements=self._host_clock_pairs,
+            gps_second_delta_s=gps_delta,
+            rate_ppm=rate_ppm,
+            fault_ms=self.host_clock_fault_ms,
+            rate_suspect_ppm=self.host_clock_rate_suspect_ppm,
+        )
+        now = self.now_fn()
+        event = self._host_clock_alarm.update(verdict, now=now.timestamp())
+        since = self._host_clock_alarm.since
+        since_utc = (
+            _iso_z(datetime.fromtimestamp(since, tz=timezone.utc))
+            if since is not None else None
+        )
+        if event in ("enter", "repeat"):
+            log.critical(
+                "HOST CLOCK %s: %s — since %s. The tier decision stands "
+                "(the anchor is judged separately); this is the HOST clock, "
+                "which every sysclock-frame label and every consumer on this "
+                "station inherits. Witnesses: %s",
+                verdict.verdict.upper(), verdict.reason, since_utc,
+                ", ".join(
+                    f"{w.name}={w.value:+.3f}{'ms' if w.kind == 'pair_ms' else 's' if w.kind == 'gps_second_s' else 'ppm'}"
+                    for w in verdict.witnesses),
+            )
+        elif event == "clear":
+            log.info("HOST CLOCK cleared: %s", verdict.reason)
+
+        out = verdict.to_dict()
+        out["since_utc"] = since_utc
+        return out
 
     def _note_t6_authority(self, r: Optional[ProbeResult]) -> None:
         """Latch the T6 anchor-authority state from this tick's probe
@@ -871,6 +983,13 @@ class AuthorityManager:
             payload["t6_hpps_publishing"] = self._t6_hpps_publishing
             if getattr(self, "_t6_hpps_publish_mode", None) is not None:
                 payload["t6_hpps_publish_mode"] = self._t6_hpps_publish_mode
+
+        # Additive v1 extension: the host-clock verdict.  Present on every
+        # normal tick (verdict "unwitnessed" when nothing reported) so a
+        # consumer can tell "no witness" from "no such field".  Omitted on
+        # the bootstrap-pending path, where no probe ran.
+        if state.host_clock is not None:
+            payload["host_clock"] = state.host_clock
 
         # Additive v1 extension: governor_radiod names which radiod's
         # RTP timebase this Fusion offset is computed against (§4.5.1

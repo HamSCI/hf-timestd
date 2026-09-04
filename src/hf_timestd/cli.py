@@ -307,6 +307,60 @@ def retired_key_issues(cfg):
     return issues
 
 
+#: The PPS-rate witness is gpsdo-monitor's median PPS period timed by the
+#: host's OS clock: 1 ms over a 60 s window, so about 17 ppm of resolution.
+#: A threshold under that alarms on measurement noise.
+HOST_CLOCK_RATE_RESOLUTION_PPM = 17.0
+
+
+def host_clock_issues(cfg):
+    """Warn-level contract issues for ``[timing.authority_manager.host_clock]``.
+
+    The section tunes the host-clock verdict (host_clock_integrity.py):
+    ``fault_ms`` (a pair disagreement past this is a whole-second-class
+    fault), ``rate_suspect_ppm`` (host rate against the GPSDO PPS), and
+    ``alarm_repeat_sec`` (how often the CRITICAL line repeats while the
+    condition holds).  Absent keys take the defaults; present keys must be
+    positive numbers, and the rate threshold must sit above what the study
+    can resolve.
+    """
+    issues = []
+    timing = cfg.get('timing', {}) or {}
+    auth = timing.get('authority_manager', None)
+    if not isinstance(auth, dict):
+        return issues
+    hc = auth.get('host_clock', None)
+    if not isinstance(hc, dict):
+        return issues
+
+    def _warn(key, value, why):
+        issues.append({
+            'severity': 'warn',
+            'instance': 'default',
+            'message': (
+                f'[timing.authority_manager.host_clock] {key} = {value!r} {why}'
+            ),
+        })
+
+    for key in ('fault_ms', 'rate_suspect_ppm', 'alarm_repeat_sec'):
+        if key not in hc:
+            continue
+        value = hc[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            _warn(key, value, 'is not a number; the manager will refuse to start')
+            continue
+        if value <= 0:
+            _warn(key, value, 'must be positive; zero or negative alarms '
+                  'always or never')
+            continue
+        if key == 'rate_suspect_ppm' and value < HOST_CLOCK_RATE_RESOLUTION_PPM:
+            _warn(key, value,
+                  f'sits below the PPS study\'s ~{HOST_CLOCK_RATE_RESOLUTION_PPM:.0f} ppm '
+                  'resolution (OS-millisecond timing over a 60 s window) and '
+                  'would alarm on noise')
+    return issues
+
+
 def t6_group_delay_issue(cfg):
     """Contract issue about ``[timing.t6_pps].filter_group_delay_ns``.
 
@@ -553,6 +607,7 @@ def _handle_validate_contract(args):
                 issues.append(_gd)
             issues.extend(timing_axis_issues(cfg))
             issues.extend(retired_key_issues(cfg))
+            issues.extend(host_clock_issues(cfg))
 
             recorder = cfg.get('recorder', {}) or {}
             channels_count = sum(

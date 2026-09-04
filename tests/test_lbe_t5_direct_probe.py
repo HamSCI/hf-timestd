@@ -325,3 +325,44 @@ class LbeT5DirectProbePhase2BAnchorOffsetTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HostGpsDeltaRidesThroughTests(unittest.TestCase):
+    """The recorder publishes the LB-1421 host-versus-GPS gap beside
+    valid_fix.  The probe must forward it in ``detail`` whether or not T5
+    comes out available — an unavailable T5 whose reason is "the host clock
+    is 12 s off" is exactly the case the authority manager needs to hear."""
+
+    def test_delta_forwarded_when_fix_is_invalid(self):
+        from hf_timestd.core.lbe_t5_direct_probe import LbeT5DirectProbe
+        with tempfile.TemporaryDirectory() as d:
+            p = _write(_make_status(
+                t5_block={"enabled": True, "valid_fix": False,
+                          "age_sec": 0.5, "reason": "host_gps_inconsistent",
+                          "host_minus_gps_s": -12.1},
+            ), d)
+            probe = LbeT5DirectProbe(status_path=p, now_fn=lambda: NOW)
+            r = probe.poll()
+        self.assertFalse(r.available)
+        self.assertEqual(r.detail.get("host_minus_gps_s"), -12.1)
+        self.assertIn("host_gps_inconsistent", r.reason)
+
+    def test_delta_forwarded_when_available(self):
+        from hf_timestd.core.lbe_t5_direct_probe import LbeT5DirectProbe
+        with tempfile.TemporaryDirectory() as d:
+            block = _make_status()["t5_lbe1421"]
+            block["host_minus_gps_s"] = 0.42
+            p = _write(_make_status(t5_block=block), d)
+            probe = LbeT5DirectProbe(status_path=p, now_fn=lambda: NOW)
+            r = probe.poll()
+        self.assertTrue(r.available)
+        self.assertEqual(r.detail.get("host_minus_gps_s"), 0.42)
+
+    def test_absent_delta_stays_absent(self):
+        from hf_timestd.core.lbe_t5_direct_probe import LbeT5DirectProbe
+        with tempfile.TemporaryDirectory() as d:
+            p = _write(_make_status(), d)
+            probe = LbeT5DirectProbe(status_path=p, now_fn=lambda: NOW)
+            r = probe.poll()
+        self.assertTrue(r.available)
+        self.assertIsNone(r.detail.get("host_minus_gps_s"))

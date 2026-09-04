@@ -5195,6 +5195,74 @@ class CoreRecorderV2:
                     f"ok={result.pps_ok}, noise={result.pps_noise}"
                 )
 
+    def _t5_lbe1421_status(self) -> dict:
+        """The ``t5_lbe1421`` block of core-recorder-status.json.
+
+        Published so LbeT5DirectProbe (the authority manager's T5) and
+        sigmond-t6-stuck-watchdog can read T5's state without opening the
+        NMEA device.  Always emitted when the probe is attached, even with
+        no reading — the absence of a fix is itself the signal.
+
+        ``host_minus_gps_s`` and ``reason`` are the 2026-09-04 additions:
+        the probe knew the host clock sat 12 s from the GPS second and this
+        block said only ``valid_fix: false``, which every reader took for
+        "no GPS fix".  The gap now travels with the flag, and ``reason``
+        says which of the two failed — ``fix_stale`` (the GPSDO) or
+        ``host_gps_inconsistent`` (the HOST).
+        """
+        lb_probe = self._lb1421_probe
+        device = str(getattr(lb_probe, 'device', ''))
+        reading = lb_probe.get_latest(require_valid_fix=False)
+        if reading is None:
+            return {
+                'enabled': True,
+                'valid_fix': False,
+                'pps_utc_sec': None,
+                'age_sec': None,
+                'device': device,
+                'reason': 'no reading yet',
+                'host_minus_gps_s': None,
+                'anchor_offset_ns': None,
+                'anchor_offset_sigma_ns': None,
+                'rtp_anchor_grounded': False,
+                'anchor_age_sec': None,
+            }
+        block = {
+            'enabled': True,
+            'valid_fix': bool(reading.valid_fix),
+            'pps_utc_sec': int(reading.pps_utc_sec),
+            'age_sec': round(time.monotonic() - reading.host_monotonic_at_read, 3),
+            'device': device,
+            'host_minus_gps_s': getattr(reading, 'host_minus_gps_s', None),
+        }
+        invalid_reason = getattr(reading, 'invalid_reason', None)
+        if invalid_reason is not None:
+            block['reason'] = invalid_reason
+        # P2 (audit G5b): the RTP-substrate-grounded pairing product —
+        # anchor_offset_ns is the radiod-anchor UTC prediction minus
+        # GPS/NMEA truth (prediction − truth, the codebase-wide offset sign
+        # convention).  LbeT5DirectProbe forwards it as T5's offset_ms;
+        # before this the field was never emitted and the T6↔T5
+        # cross-check compared against a hardcoded 0.  Fields stay None
+        # (grounded=False) when the pairing has no fresh arrival/NMEA/pair
+        # — the probe then falls back to Phase-2A trust-tier semantics.
+        product = None
+        if reading.valid_fix:
+            try:
+                product = self._t5_bench_state()
+            except Exception as e:
+                logger.debug(f"T5 pairing compute failed: {e}")
+        block.update({
+            'anchor_offset_ns': (
+                int(product.anchor_offset_ns) if product is not None else None),
+            'anchor_offset_sigma_ns': (
+                int(round(product.sigma_ns)) if product is not None else None),
+            'rtp_anchor_grounded': product is not None,
+            'anchor_age_sec': (
+                round(product.arrival_age_s, 3) if product is not None else None),
+        })
+        return block
+
     def _write_status(self):
 
         """Write status to JSON file for web-ui monitoring."""
@@ -5428,63 +5496,8 @@ class CoreRecorderV2:
             # opening a second handle to /dev/lb1421-nmea.  Always emitted
             # when the lb1421 probe is attached, even when it has no
             # current reading — the absence of fix is itself the signal.
-            lb_probe = getattr(self, '_lb1421_probe', None)
-            if lb_probe is not None:
-                reading = lb_probe.get_latest(require_valid_fix=False)
-                if reading is not None:
-                    age_sec = round(time.monotonic() - reading.host_monotonic_at_read, 3)
-                    status['t5_lbe1421'] = {
-                        'enabled': True,
-                        'valid_fix': bool(reading.valid_fix),
-                        'pps_utc_sec': int(reading.pps_utc_sec),
-                        'age_sec': age_sec,
-                        'device': str(getattr(lb_probe, 'device', '')),
-                    }
-                    # P2 (audit G5b): the RTP-substrate-grounded pairing
-                    # product — anchor_offset_ns is the radiod-anchor
-                    # UTC prediction minus GPS/NMEA truth (prediction −
-                    # truth, the codebase-wide offset sign convention).
-                    # LbeT5DirectProbe:169-182 forwards it as T5's
-                    # offset_ms; before this the field was never emitted
-                    # and the T6↔T5 cross-check compared against a
-                    # hardcoded 0.  Fields stay None (grounded=False)
-                    # when the pairing has no fresh arrival/NMEA/pair —
-                    # the probe then falls back to Phase-2A trust-tier
-                    # semantics, exactly as before.
-                    product = None
-                    if reading.valid_fix:
-                        try:
-                            product = self._t5_bench_state()
-                        except Exception as e:
-                            logger.debug(f"T5 pairing compute failed: {e}")
-                    status['t5_lbe1421'].update({
-                        'anchor_offset_ns': (
-                            int(product.anchor_offset_ns)
-                            if product is not None else None
-                        ),
-                        'anchor_offset_sigma_ns': (
-                            int(round(product.sigma_ns))
-                            if product is not None else None
-                        ),
-                        'rtp_anchor_grounded': product is not None,
-                        'anchor_age_sec': (
-                            round(product.arrival_age_s, 3)
-                            if product is not None else None
-                        ),
-                    })
-                else:
-                    status['t5_lbe1421'] = {
-                        'enabled': True,
-                        'valid_fix': False,
-                        'pps_utc_sec': None,
-                        'age_sec': None,
-                        'device': str(getattr(lb_probe, 'device', '')),
-                        'reason': 'no reading yet',
-                        'anchor_offset_ns': None,
-                        'anchor_offset_sigma_ns': None,
-                        'rtp_anchor_grounded': False,
-                        'anchor_age_sec': None,
-                    }
+            if getattr(self, '_lb1421_probe', None) is not None:
+                status['t5_lbe1421'] = self._t5_lbe1421_status()
             # If no probe is attached, no t5_lbe1421 block at all —
             # LbeT5DirectProbe treats absence as "not configured".
 

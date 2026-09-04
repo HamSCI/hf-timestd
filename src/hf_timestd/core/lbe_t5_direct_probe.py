@@ -139,11 +139,20 @@ class LbeT5DirectProbe:
                 reason="t5_lbe1421 disabled",
             )
 
+        # The host-clock-versus-GPS-second gap rides through on EVERY
+        # result from here on, available or not.  An unavailable T5 whose
+        # reason is "the host clock is 12 s off" is precisely what the
+        # authority manager's host-clock verdict needs to hear
+        # (host_clock_integrity.py); dropping it with the fix was how the
+        # 2026-09-04 runaway went unnamed.
+        witness = {"host_minus_gps_s": _opt_float(t5.get("host_minus_gps_s"))}
+
         if not t5.get("valid_fix"):
             reason = t5.get("reason") or "no GPS fix"
             return ProbeResult(
                 self.t_level, available=False,
                 reason=f"no valid fix: {reason}",
+                detail=dict(witness),
             )
 
         nmea_age_raw = t5.get("age_sec")
@@ -198,6 +207,7 @@ class LbeT5DirectProbe:
             # otherwise we're at Phase 2A trust-tier defaults and
             # the manager should publish offset=0 with TRUST_SIGMA_MS.
             "rtp_anchor_grounded": anchor_offset_ns is not None,
+            **witness,
         }
         return ProbeResult(
             self.t_level,
@@ -207,6 +217,17 @@ class LbeT5DirectProbe:
             detail=detail,
             frame="rtp",  # anchor-vs-GPS-NMEA-truth (system-clock-independent)
         )
+
+
+def _opt_float(value: object) -> Optional[float]:
+    """A float, or None for absent / unparseable — never raise on a status
+    field the producer may not write yet."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _parse_iso(s: str) -> datetime:

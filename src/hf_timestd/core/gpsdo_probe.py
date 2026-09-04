@@ -167,6 +167,50 @@ class GpsdoProbe:
             "a_level_hint": data.get("a_level_hint"),
         }
 
+    #: Fewer PPS edges than this and the median period says little.  The
+    #: daemon's default window is 60 s at 1 Hz, so 30 asks for half a window.
+    MIN_PPS_EDGES = 30
+
+    def host_clock_rate_ppm(self) -> Optional[float]:
+        """The host clock's rate against the GPSDO PPS, in ppm, or None.
+
+        gpsdo-monitor timestamps each PPS edge with the host's OS clock and
+        publishes the median period (``pps_study.period_ms_p50``).  A true
+        second measured as 999.91 ms means the host clock LOSES 90 ppm;
+        1000.08 ms means it GAINS 80.  Positive = host fast.
+
+        Resolution is OS-millisecond over the study window, roughly 17 ppm
+        at 60 s: coarse, and honest about it — the daemon's own note calls
+        the study "not a metrology reference".  It is a host-clock WITNESS,
+        which is a different job: on 2026-09-04 this field read 999.91 on
+        AC0G-B4 while chrony reported the clock within 0.1 ms.
+
+        Returns the first fresh device's figure; None when no fresh file
+        carries a usable study.
+        """
+        for path in self._enumerate_files():
+            try:
+                data = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            if not isinstance(data, dict) or data.get("schema") != "v1":
+                continue
+            age_sec = self._age_seconds(data.get("written_utc"))
+            if age_sec is None or age_sec > self._max_age_sec(
+                    data.get("probe_interval_sec")):
+                continue
+            study = data.get("pps_study")
+            if not isinstance(study, dict):
+                continue
+            p50 = study.get("period_ms_p50")
+            edges = study.get("edges")
+            if not isinstance(p50, (int, float)) or isinstance(p50, bool):
+                continue
+            if not isinstance(edges, int) or edges < self.MIN_PPS_EDGES:
+                continue
+            return (float(p50) - 1000.0) / 1000.0 * 1e6
+        return None
+
     # --- internal -------------------------------------------------------
 
     def _enumerate_files(self) -> List[Path]:
