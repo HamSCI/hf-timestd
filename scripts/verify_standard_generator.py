@@ -12,13 +12,11 @@ from datetime import datetime, timedelta
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../src')))
 
 from hf_timestd.core.standard_signal_generator import StandardTimeSignalGenerator
-from hf_timestd.core.chu_fsk_decoder import CHUFSKDecoder
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 logging.getLogger().setLevel(logging.DEBUG)
-logging.getLogger('hf_timestd.core.chu_fsk_decoder').setLevel(logging.DEBUG)
 logging.getLogger('hf_timestd.core.standard_signal_generator').setLevel(logging.INFO)
 
 def verify_bpm_pulses():

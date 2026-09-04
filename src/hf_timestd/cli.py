@@ -269,6 +269,20 @@ RETIRED_KEYS = {
 # The diff-detector sidecar, its HFPS chrony feed and the persisted
 # chain-delay store (RESIDUE_AUDIT §3.4).  No template and no fleet
 # config ever set these.
+# CHU (NRC Ottawa) ceased transmitting; its FSK decoder, the coarse-time
+# producer it fed and the bootstrap coordinator that consumed coarse time
+# left the code on 2026-09-04.  Nothing steps the host clock from inside
+# hf-timestd any more (MEASUREMENT_MODEL §7.1: D_clock is derived and
+# handed to chrony; chrony steps).
+for _key in ('enabled', 'path'):
+    RETIRED_KEYS[('timing.coarse_time', _key)] = (
+        'retired 2026-09-04: CHU is off-air and its FSK decode was the only '
+        'coarse-time source; the producer is gone')
+for _key in ('enabled', 'coarse_time_path', 'threshold_sec', 'max_step_sec', 'dry_run'):
+    RETIRED_KEYS[('timing.authority_manager.bootstrap', _key)] = (
+        'retired 2026-09-04 with the CHU coarse-time producer; the bootstrap '
+        'coordinator and its chronyc makestep are gone — chrony steps the clock, '
+        'hf-timestd never does')
 for _section in ('timing.t6_pps', 'timing.l6_pps'):
     for _key in ('enable_diff_sidecar', 'diff_sidecar_path',
                  'diff_sidecar_threshold_factor', 'diff_to_shm_unit'):

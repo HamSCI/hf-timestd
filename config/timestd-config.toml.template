@@ -119,30 +119,10 @@ description = "WWV_20000"
 frequency_hz = 25000000
 description = "WWV_25000"
 
-# CHU (Ottawa) channels — DISABLED 2026-06-27: CHU has gone off-air.
-# Reception, the CHU FSK decode, and the CHU-fed coarse-time producer are
-# all gated on these channels existing, so commenting them out turns the
-# whole CHU path OFF.  The decode routines stay in the code
-# (core/chu_fsk_decoder.py, the CHU tick filters); to restore CHU if it
-# returns to air, uncomment the three blocks below AND re-enable
-# [timing.coarse_time] further down.
-# [[recorder.channel_group.timestd.channels]]
-# frequency_hz = 3330000
-# description = "CHU_3330"
-#
-# [[recorder.channel_group.timestd.channels]]
-# frequency_hz = 7850000
-# description = "CHU_7850"
-#
-# [[recorder.channel_group.timestd.channels]]
-# frequency_hz = 14670000
-# description = "CHU_14670"
+# CHU (NRC Ottawa) ceased transmitting in 2026.  Its channels, FSK decoder,
+# coarse-time producer and the bootstrap coordinator left the code on
+# 2026-09-04; archived CHU data stays readable through hamsci_dsp.stations.
 
-# (CHU FSK decode channels were already not requested as separate USB
-# channels — hf-timestd derives the 12 kHz audio internally from the
-# archived IQ buffers — so there is no [recorder.chu_fsk] block.)
-
-# =============================================================================
 # WWVB (60 kHz LF) — NIST Fort Collins, added to offset the loss of CHU.
 # See docs/WWVB-INTEGRATION.md.  A dedicated in-process consumer in the
 # core-recorder provisions the 60 kHz channel, decodes the phase-modulated
@@ -169,7 +149,7 @@ min_buffer_s = 65.0             # don't decode until the buffer holds >= this (s
 # Leave OFF until a nighttime live-tap run validates the decode chain on real
 # signal at this site.  When true, each accepted minute is written as an L1
 # metrology row under <data_root>/phase2/WWVB_60 and the timestd-fusion service
-# pools it with WWV/WWVH/CHU/BPM.  Requires [station] latitude/longitude (or
+# pools it with WWV/WWVH/BPM.  Requires [station] latitude/longitude (or
 # grid_square) so the propagation delay can be computed.
 feed_fusion = false
 # Optional GPS-learned propagation-delay override (ms) + 1-sigma (ms).  Until a
@@ -220,7 +200,7 @@ refresh_interval = 60
 #   test_signal (WWV/WWVH ionospheric sounding at minutes 8 and 44)
 #   detection_attempts (threshold-calibration diagnostics)
 #   all_arrivals (multi-path propagation paths)
-# The core timing pipeline (metrology_measurements, tick_timing, chu_fsk)
+# The core timing pipeline (metrology_measurements, tick_timing, )
 # is unaffected — Chrony discipline works identically with physics_products = false.
 physics_products = true
 
@@ -307,27 +287,6 @@ enabled = true
 #                            # do not go below that
 
 
-# === Coarse-time producer (bootstrap input) ===
-# The authority manager's bootstrap coordinator consumes
-# /run/hf-timestd/coarse_time.json to detect a wildly-wrong system
-# clock at startup.  MetrologyEngine emits this file whenever a CHU
-# channel produces a successful FSK decode (minute-precision UTC,
-# max_error_sec=60).  See METROLOGY.md §4.5.
-[timing.coarse_time]
-# DISABLED 2026-06-27: the only source is a successful CHU FSK decode, and
-# CHU is off-air (its channels are commented out above).  Re-enable together
-# with the CHU channels if CHU returns to air.
-enabled = false
-# path = "/run/hf-timestd/coarse_time.json"  # default; override only for tests
-
-# === Fusion loop metrics (measurement-phase instrumentation) ===
-# timestd-fusion emits a per-cycle schema-v1 JSON snapshot at
-# /run/hf-timestd/fusion_metrics.json plus a structured INFO line
-# to journald (prefix: fusion_metrics). Covers loop duration,
-# watchdog-budget consumption, per-phase times (fuse_l1/fuse_l2/
-# hdf5_read/kalman_apply/calibration_apply/shm_write/
-# fusion_status_write/chrony_stats), RSS, and discrete events.
-# See the fusion parsimony/stability audit.
 [timing.fusion_metrics]
 enabled = true
 # path = "/run/hf-timestd/fusion_metrics.json"  # default; override only for tests

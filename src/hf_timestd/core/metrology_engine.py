@@ -241,8 +241,6 @@ class MetrologyEngine:
         precise_lat: Optional[float] = None,
         precise_lon: Optional[float] = None,
         enable_physics_products: bool = True,  # False = timing-only, skip secondary-arrival search
-        enable_coarse_time: bool = True,
-        coarse_time_path: Optional[Path] = None,
     ):
         self.raw_buffer_dir = Path(raw_buffer_dir)
         self.output_dir = Path(output_dir)
@@ -260,27 +258,6 @@ class MetrologyEngine:
         self._envelope_buffer = np.empty(self._max_samples, dtype=np.float32)
         self.is_chu_channel = 'CHU' in channel_name.upper()
 
-        # CHU FSK coarse-time producer for the authority manager's
-        # bootstrap coordinator (METROLOGY.md §4.5). Only CHU channels
-        # carry the BCD/FSK burst, so non-CHU instances never publish.
-        # Best-effort init: a missing /run/hf-timestd directory (e.g.
-        # unit-test runs without the service unit's RuntimeDirectory=)
-        # logs a warning and leaves the writer None.
-        self._coarse_time_writer = None
-        if self.is_chu_channel and enable_coarse_time:
-            try:
-                from hf_timestd.core.coarse_time_writer import CoarseTimeWriter
-                if coarse_time_path is not None:
-                    self._coarse_time_writer = CoarseTimeWriter(path=coarse_time_path)
-                else:
-                    self._coarse_time_writer = CoarseTimeWriter()
-                logger.info(
-                    f"{channel_name}: coarse-time writer enabled "
-                    f"({self._coarse_time_writer.path})"
-                )
-            except Exception as e:
-                logger.warning(f"{channel_name}: coarse-time writer disabled: {e}")
-        
         # Initialize sub-components
         self._init_components()
         
@@ -312,16 +289,6 @@ class MetrologyEngine:
         # Edge detection results (per-second onset timing)
         self._last_edge_results: Dict[str, Any] = {}
         
-        # CHU FSK cross-validation state (populated by decode_minute results)
-        # These fields enable four downstream integrations:
-        #   1. Frame A UTC sanity check (detect broken RTP timing chain)
-        #   2. TAI-UTC leap second watch (detect upcoming leap seconds)
-        #   3. DUT1 for UT1 recovery (correct solar zenith in propagation model)
-        #   4. BER-based confidence weighting (degrade CHU weight during fading)
-        self._fsk_last_tai_utc: Optional[int] = None        # Last decoded TAI-UTC
-        self._fsk_last_dut1: Optional[float] = None          # Last decoded DUT1 (seconds)
-        self._fsk_tai_utc_changed: bool = False               # True when leap second detected
-        self._fsk_utc_mismatch_count: int = 0                 # Consecutive UTC mismatches
         
         # NOTE (§3.4 Low): a `bpm_calibration` dict + `_load_calibration`
         # / `_save_calibration` JSON round-trip lived here.  The dict was
@@ -396,14 +363,6 @@ class MetrologyEngine:
             else:
                 self.correlator_bank = None
                 
-            # 5. CHU FSK Decoder
-            if 'CHU' in self.channel_name.upper():
-                from hf_timestd.core.chu_fsk_decoder import CHUFSKDecoder
-                self.chu_fsk_decoder = CHUFSKDecoder(
-                    sample_rate=self.sample_rate,
-                    channel_name=self.channel_name
-                )
-            
             # 6. Tick Matched Filters for per-second timing (55+ estimates/minute)
             self.tick_filters: Dict[StationType, TickMatchedFilter] = {}
             self._init_tick_filters()
@@ -1998,17 +1957,6 @@ class MetrologyEngine:
         if doppler_info:
             doppler_metrics = doppler_info
             
-        # 2C. CHU FSK Time Code Decoding
-        # Decode directly from IQ buffer using AM demod + FSK discriminator.
-        # The IQ decimation filter attenuates FSK tones (2025/2225 Hz), but the
-        # AM-demodulated audio path recovers them via the envelope detector.
-        chu_metrics = {}
-        if self.is_chu_channel:
-            if hasattr(self, 'chu_fsk_decoder'):
-                chu_metrics = self._decode_fsk_from_iq(iq_samples, minute_boundary)
-            if chu_metrics:
-                self._cross_validate_fsk(chu_metrics, minute_boundary)
-        
         # === Step 2D: Per-Second Tick Phase Extraction (deferred physics) ===
         # The tick filter extracts carrier phase from per-second ticks for
         # ionospheric analysis (Doppler, TEC, scintillation). It does NOT
@@ -2290,9 +2238,6 @@ class MetrologyEngine:
         
         with self._lock:
             self.minutes_processed += 1
-        
-        # Store FSK data for caller to retrieve
-        self._last_chu_fsk_data = chu_metrics if chu_metrics else None
         
         # Store tick analysis results for caller to retrieve
         self._last_tick_results = tick_results if tick_results else None
@@ -2587,202 +2532,10 @@ class MetrologyEngine:
             self.ADMISSION_FLOOR_SIGMA,
         )
 
-    def _cross_validate_fsk(self, chu_metrics: dict, minute_boundary: int) -> None:
-        """Cross-validate CHU FSK decode against other metrology functions.
-        
-        Implements four integrations:
-        
-        1. **Frame A UTC sanity check**: Compare FSK-decoded minute against
-           RTP-derived minute_boundary. A mismatch indicates the RTP timing
-           chain (GPS → radiod → RTP counter → UTC) may be broken. This is
-           the only independent UTC source in the system.
-        
-        2. **TAI-UTC leap second watch**: Track TAI-UTC value across minutes.
-           When it changes (e.g. 37→38), a leap second insertion is imminent.
-           Sets _fsk_tai_utc_changed flag so fusion can hold off the Kalman
-           filter during the transition.
-        
-        3. **DUT1 tracking**: Store latest DUT1 (UT1-UTC) for use by the
-           propagation model's solar zenith calculation. UT1 = UTC + DUT1
-           gives the correct Earth rotation angle for ionospheric modeling.
-        
-        4. **BER confidence**: Degrade chu_metrics['fsk_confidence'] based on
-           frame decode rate (frames_decoded/9). Minutes with heavy fading
-           (few frames decoded) get lower confidence in fusion weighting.
-        """
-        from datetime import datetime, timezone
-        
-        # === 1. Frame A UTC Sanity Check ===
-        decoded_minute = chu_metrics.get('decoded_minute')
-        if decoded_minute is not None:
-            expected_minute = int((minute_boundary // 60) % 60)
-            if decoded_minute != expected_minute:
-                self._fsk_utc_mismatch_count += 1
-                if self._fsk_utc_mismatch_count >= 3:
-                    logger.error(
-                        f"{self.channel_name}: FSK UTC MISMATCH x{self._fsk_utc_mismatch_count}: "
-                        f"CHU says :{decoded_minute:02d} but RTP says :{expected_minute:02d} — "
-                        f"RTP timing chain may be broken!")
-                else:
-                    logger.warning(
-                        f"{self.channel_name}: FSK UTC mismatch: "
-                        f"CHU=:{decoded_minute:02d} vs RTP=:{expected_minute:02d} "
-                        f"(count={self._fsk_utc_mismatch_count})")
-            else:
-                if self._fsk_utc_mismatch_count > 0:
-                    logger.info(f"{self.channel_name}: FSK UTC sanity check OK "
-                               f"(cleared {self._fsk_utc_mismatch_count} prior mismatches)")
-                self._fsk_utc_mismatch_count = 0
-        
-        # === 2. TAI-UTC Leap Second Watch ===
-        tai_utc = chu_metrics.get('tai_utc')
-        if tai_utc is not None and isinstance(tai_utc, int) and tai_utc > 0:
-            if self._fsk_last_tai_utc is not None and tai_utc != self._fsk_last_tai_utc:
-                logger.warning(
-                    f"{self.channel_name}: *** TAI-UTC CHANGED: {self._fsk_last_tai_utc} → {tai_utc} *** "
-                    f"Leap second {'insertion' if tai_utc > self._fsk_last_tai_utc else 'deletion'} detected!")
-                self._fsk_tai_utc_changed = True
-            elif self._fsk_last_tai_utc is not None:
-                self._fsk_tai_utc_changed = False
-            self._fsk_last_tai_utc = tai_utc
-        
-        # === 3. DUT1 Tracking ===
-        dut1 = chu_metrics.get('dut1_seconds')
-        if dut1 is not None:
-            if self._fsk_last_dut1 is not None and abs(dut1 - self._fsk_last_dut1) > 0.05:
-                logger.info(f"{self.channel_name}: DUT1 changed: {self._fsk_last_dut1:+.1f}s → {dut1:+.1f}s")
-            self._fsk_last_dut1 = dut1
-        
-        # === 4. BER-Based Confidence Adjustment ===
-        frames_decoded = chu_metrics.get('fsk_frames_decoded', 0)
-        if frames_decoded > 0:
-            # Scale confidence by decode rate: 9/9 → 1.0, 2/9 → 0.22
-            decode_rate = frames_decoded / 9.0
-            raw_confidence = chu_metrics.get('fsk_confidence', 0.5)
-            adjusted_confidence = raw_confidence * decode_rate
-            chu_metrics['fsk_confidence'] = adjusted_confidence
-            chu_metrics['fsk_decode_rate'] = decode_rate
-            if decode_rate < 0.5:
-                logger.debug(f"{self.channel_name}: FSK confidence degraded: "
-                            f"{raw_confidence:.2f} → {adjusted_confidence:.2f} "
-                            f"(decode_rate={decode_rate:.2f})")
-
-
-    def _write_fsk_result(self, metrics: dict):
-        """Write CHU FSK result to shared JSON for real-time dashboard."""
-        from pathlib import Path
-        import time
-        try:
-            fsk_dir = Path('/dev/shm/timestd/fsk_results')
-            fsk_dir.mkdir(parents=True, exist_ok=True)
-            fsk_path = fsk_dir / f'{self.channel_name}.json'
-            
-            # Map metrics to what the dashboard expects
-            data = {
-                'written_at': time.time(),
-                'detected': metrics.get('fsk_valid', False),
-                'frames_decoded': metrics.get('fsk_frames_decoded', 0),
-                'decode_confidence': metrics.get('fsk_confidence', 0.0),
-                'decoded_day': metrics.get('decoded_day'),
-                'decoded_hour': metrics.get('decoded_hour'),
-                'decoded_minute': metrics.get('decoded_minute'),
-                'dut1_seconds': metrics.get('dut1_seconds'),
-                'tai_utc': metrics.get('tai_utc'),
-                'year': metrics.get('year'),
-                'timing_offset_ms': metrics.get('timing_offset_ms'),
-            }
-            with open(fsk_path, 'w') as f:
-                json.dump(data, f)
-        except Exception as e:
-            logger.warning(f"{self.channel_name}: Failed to write FSK result JSON: {e}")
-
-    def _decode_fsk_from_iq(self, iq_samples: np.ndarray, minute_boundary: int) -> dict:
-        """Decode CHU FSK directly from IQ buffer (live IQ-tapped path)."""
-        try:
-            result = self.chu_fsk_decoder.decode_minute(
-                iq_samples, float(minute_boundary), is_audio=False
-            )
-            if not result.detected:
-                logger.debug(f"{self.channel_name}: IQ-direct FSK: not detected")
-                return {}
-            # Publish minute-level UTC for the authority manager's bootstrap
-            # coordinator (METROLOGY.md §4.5). Best-effort — any failure is
-            # logged inside the helper and does not affect the decode path.
-            self._publish_coarse_time(result)
-            chu_metrics = {
-                'fsk_valid': True,
-                'fsk_frames_decoded': result.frames_decoded,
-                'fsk_confidence': result.decode_confidence,
-                'source': 'iq_direct',
-            }
-            if result.decoded_day is not None:
-                chu_metrics['decoded_day'] = result.decoded_day
-                chu_metrics['decoded_hour'] = result.decoded_hour
-                chu_metrics['decoded_minute'] = result.decoded_minute
-            if result.dut1_seconds is not None:
-                chu_metrics['dut1_seconds'] = result.dut1_seconds
-            if result.tai_utc is not None:
-                chu_metrics['tai_utc'] = result.tai_utc
-            if result.year is not None:
-                chu_metrics['year'] = result.year
-            if result.timing_offset_ms is not None:
-                chu_metrics['timing_offset_ms'] = result.timing_offset_ms
-            logger.info(f"{self.channel_name}: CHU FSK from IQ-direct - "
-                       f"frames={result.frames_decoded}/9, "
-                       f"DUT1={result.dut1_seconds}s, "
-                       f"TAI-UTC={result.tai_utc}s")
-            self._write_fsk_result(chu_metrics)
-            return chu_metrics
-        except Exception as e:
-            logger.warning(f"{self.channel_name}: IQ-direct FSK decode failed: {e}")
-            return {}
-
     def _station_from_channel_name(self) -> str:
         """Helper to guess station from name."""
         if 'CHU' in self.channel_name.upper(): return 'CHU'
         if 'WWVH' in self.channel_name.upper(): return 'WWVH'
         if 'WWV' in self.channel_name.upper(): return 'WWV'
         return 'UNKNOWN'
-
-    def _publish_coarse_time(self, result) -> None:
-        """Translate a successful CHU FSK decode into a coarse_time.json
-        record for the authority manager's bootstrap coordinator.
-
-        Precision is minute-level — Frame A of the FSK burst carries
-        (day_of_year, hour, minute) but the decode window does not tell
-        us which second inside the minute we are observing at write time.
-        `max_error_sec=60` reflects that; the bootstrap coordinator's
-        threshold must be > 60 s for the comparison to be meaningful
-        (METROLOGY.md §4.5 sets the default to 90 s).
-
-        Year resolution comes from Frame B (result.year). If Frame B
-        was not decoded this minute, we fall back to the current
-        system-clock year — still independent of the second-level clock
-        error that bootstrap exists to correct.
-        """
-        if self._coarse_time_writer is None:
-            return
-        try:
-            day = result.decoded_day
-            hour = result.decoded_hour
-            minute = result.decoded_minute
-            year = getattr(result, 'year', None)
-            if day is None or hour is None or minute is None:
-                return
-
-            from datetime import timedelta as _td
-            if year is None:
-                year = datetime.now(timezone.utc).year
-            coarse_utc = datetime(
-                int(year), 1, 1, 0, 0, 0, tzinfo=timezone.utc,
-            ) + _td(days=int(day) - 1, hours=int(hour), minutes=int(minute))
-
-            self._coarse_time_writer.publish(
-                source="FSK",
-                station=self._station_from_channel_name(),
-                coarse_utc=coarse_utc,
-                max_error_sec=60.0,
-            )
-        except Exception as e:
-            logger.warning(f"{self.channel_name}: coarse_time publish failed: {e}")
 

@@ -4,9 +4,9 @@ Timing Authority level per METROLOGY.md §4.5 / §4.6.
 
 The manager is the single writer of /run/hf-timestd/authority.json and
 the single policy layer above the existing chrony/NTP/mDNS transport.
-It does not mutate the system clock (except via the bootstrap path
-implemented in a later sub-commit); it only classifies, selects, and
-publishes.
+It never mutates the system clock; it only classifies, selects, and
+publishes.  D_clock is a derived quantity handed to chrony, and chrony
+steps (MEASUREMENT_MODEL.md §7.1).
 
 This module is intentionally free of service dependencies:
   - Probes are injected (anything matching the Probe protocol).
@@ -14,8 +14,8 @@ This module is intentionally free of service dependencies:
     live elsewhere.
   - The "now" source is injectable for deterministic testing.
 
-Concrete probes (FusionStatusProbe, chrony-based probes, BCD/FSK
-bootstrap probe) live in their own modules and are composed by the
+Concrete probes (FusionStatusProbe, chrony-based probes, the BPSK-PPS
+and LB-1421 probes) live in their own modules and are composed by the
 service entrypoint.
 """
 from __future__ import annotations
@@ -39,7 +39,6 @@ from hf_timestd.core.host_clock_integrity import (
 )
 
 if TYPE_CHECKING:
-    from hf_timestd.core.bootstrap_coordinator import BootstrapCoordinator, BootstrapState
     from hf_timestd.core.chrony_refclock_gate import ChronyRefclockGate
     from hf_timestd.core.mdns_fusion_advertiser import MdnsFusionAdvertiser
     from hf_timestd.io.authority_snapshot_store import AuthoritySnapshotStore
@@ -187,7 +186,7 @@ class AuthorityState:
     #: plus ``since_utc``).  Separate from the tier decision on purpose: a
     #: system-clock witness disagreeing with a GPS-disciplined anchor says
     #: the CLOCK drifted, and until 2026-09-04 that sentence ended at
-    #: ":advisory".  None only on the bootstrap-pending path.
+    #: ":advisory".  None when no probe ran this tick.
     host_clock: Optional[Dict[str, Any]] = None
 
 
@@ -205,7 +204,6 @@ class AuthorityManager:
         upgrade_hysteresis: int = 3,
         pair_thresholds_ms: Optional[Dict[frozenset, float]] = None,
         now_fn: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
-        bootstrap_coordinator: Optional["BootstrapCoordinator"] = None,
         chrony_gate: Optional["ChronyRefclockGate"] = None,
         governor_radiod_provider: Optional[Callable[[], Optional[str]]] = None,
         mdns_advertiser: Optional["MdnsFusionAdvertiser"] = None,
@@ -246,7 +244,6 @@ class AuthorityManager:
             else DEFAULT_PAIR_THRESHOLDS_MS
         )
         self.now_fn = now_fn
-        self.bootstrap_coordinator = bootstrap_coordinator
         self.chrony_gate = chrony_gate
         self.governor_radiod_provider = governor_radiod_provider
         self.mdns_advertiser = mdns_advertiser
@@ -276,7 +273,6 @@ class AuthorityManager:
         self._avail_counters: Dict[str, int] = {lvl: 0 for lvl in T_LEVELS_RANKED}
         self._t_active: Optional[str] = None
         self._last_transition_utc: Optional[str] = None
-        self._last_bootstrap: Optional["BootstrapState"] = None
         # Phase 2B — consecutive ticks where T6 was the picked tier
         # AND drift_monitor.sustained_breach was True.  Drives the
         # demote-on-breach hysteresis; resets when the breach clears
@@ -295,24 +291,7 @@ class AuthorityManager:
         hysteresis, select active, cross-check, publish. Intended to be
         called on a fixed cadence (default 30 s) from a service thread,
         or directly from tests.
-
-        When a bootstrap coordinator is attached and reports the system
-        clock is too far off to run normal probes, this method publishes
-        a bootstrap-pending state and returns early without polling. The
-        probes resume on the next tick once the coordinator reports
-        complete (either because the gap closed on its own or because a
-        chronyc makestep ran and brought us into range).
         """
-        if self.bootstrap_coordinator is not None:
-            self._last_bootstrap = self.bootstrap_coordinator.check_and_step(self.now_fn)
-            if not self._last_bootstrap.complete:
-                state = self._build_bootstrap_pending_state()
-                self._write_state(state)
-                self._write_snapshot(state, results=None)
-                self._apply_chrony_gate(state.t_level_active)
-                self._apply_mdns_advertiser(state)
-                return state
-
         results = self._poll_all()
         self._note_t6_authority(results.get("T6"))
         self._update_hysteresis(results)
@@ -410,22 +389,6 @@ class AuthorityManager:
                 "Chrony refclock gate unapplied: target=%s reason=%s",
                 result.target_state, result.reason,
             )
-
-    def _build_bootstrap_pending_state(self) -> AuthorityState:
-        """Authority state when the bootstrap coordinator has gated
-        normal probing. No active level, no offset, but A-level and
-        transition history preserved so consumers see continuity."""
-        return AuthorityState(
-            a_level=self.a_level_provider(),
-            t_level_active=None,
-            t_level_available=[],
-            t_level_witnesses=[],
-            rtp_to_utc_offset_ns=None,
-            sigma_ns=None,
-            stations_contributing=[],
-            last_transition_utc=self._last_transition_utc,
-            disagreement_flags=[],
-        )
 
     def _poll_all(self) -> Dict[str, ProbeResult]:
         results: Dict[str, ProbeResult] = {}
@@ -987,7 +950,7 @@ class AuthorityManager:
         # Additive v1 extension: the host-clock verdict.  Present on every
         # normal tick (verdict "unwitnessed" when nothing reported) so a
         # consumer can tell "no witness" from "no such field".  Omitted on
-        # the bootstrap-pending path, where no probe ran.
+        # any path where no probe ran.
         if state.host_clock is not None:
             payload["host_clock"] = state.host_clock
 
@@ -1004,19 +967,6 @@ class AuthorityManager:
             if governor:
                 payload["governor_radiod"] = str(governor)
 
-        # Additive v1 extension: include bootstrap block when the
-        # coordinator has touched anything this tick. Omit entirely
-        # when no coordinator is attached so legacy output is unchanged.
-        bs = self._last_bootstrap
-        if bs is not None:
-            payload["bootstrap"] = {
-                "complete": bs.complete,
-                "reason": bs.reason,
-                "delta_sec": bs.delta_sec,
-                "stepped": bs.stepped,
-                "coarse_source": bs.coarse.source if bs.coarse else None,
-                "coarse_station": bs.coarse.station if bs.coarse else None,
-            }
         try:
             self.output_path.parent.mkdir(parents=True, exist_ok=True)
             with tempfile.NamedTemporaryFile(
@@ -1057,7 +1007,7 @@ class AuthorityManager:
         missing row here is an observability gap, not a service
         failure.
 
-        ``results`` is ``None`` only on the bootstrap-pending path
+        ``results`` is ``None`` when no probe ran
         (no probes were polled).  In that case the snapshot still
         records the published state but the per-probe detail columns
         land as NULL.
@@ -1086,12 +1036,6 @@ class AuthorityManager:
                     snapshot["governor_radiod"] = str(governor)
             except Exception:
                 pass
-
-        bs = self._last_bootstrap
-        if bs is not None:
-            snapshot["bootstrap_complete"] = 1 if bs.complete else 0
-            snapshot["bootstrap_reason"] = bs.reason
-            snapshot["bootstrap_delta_sec"] = bs.delta_sec
 
         if self.frontend_probe is not None:
             try:

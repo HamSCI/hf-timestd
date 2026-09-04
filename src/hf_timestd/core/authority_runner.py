@@ -19,10 +19,8 @@ from hf_timestd.core.authority_manager import (
     AuthorityManager,
     Probe,
 )
-from hf_timestd.core.bootstrap_coordinator import BootstrapCoordinator
 from hf_timestd.core.bpsk_pps_probe import BpskPpsProbe
 from hf_timestd.core.chrony_refclock_gate import ChronyRefclockGate
-from hf_timestd.core.chrony_stepper import ChronyStepper
 from hf_timestd.core.mdns_fusion_advertiser import MdnsFusionAdvertiser
 from hf_timestd.core.chrony_tracking_probe import (
     ChronyTrackingProbe,
@@ -30,7 +28,6 @@ from hf_timestd.core.chrony_tracking_probe import (
     match_by_names,
     match_refclock,
 )
-from hf_timestd.core.coarse_time_source import CoarseTimeFileSource
 from hf_timestd.core.fusion_status_probe import FusionStatusProbe
 from hf_timestd.core.gpsdo_probe import GpsdoProbe
 from hf_timestd.core.lbe_t5_direct_probe import LbeT5DirectProbe
@@ -176,13 +173,6 @@ def build_authority_runner_from_config(
         [timing.authority_manager.t3]
         min_stations = 2
         freshness_sec = 60.0
-
-        [timing.authority_manager.bootstrap]
-        enabled = true
-        coarse_time_path = "/run/hf-timestd/coarse_time.json"
-        threshold_sec = 5.0
-        max_step_sec = 3600.0
-        dry_run = false          # if true, log but don't invoke chronyc
 
         [timing.authority_manager.chrony_gate]
         enabled = true
@@ -393,17 +383,6 @@ def build_authority_runner_from_config(
             max_error_ms=_opt_float(t2_cfg.get("max_error_ms")),
         ))
 
-    bootstrap_coordinator = None
-    boot_cfg = auth_cfg.get("bootstrap", {}) or {}
-    if boot_cfg.get("enabled"):
-        coarse_path = Path(boot_cfg.get("coarse_time_path", "/run/hf-timestd/coarse_time.json"))
-        bootstrap_coordinator = BootstrapCoordinator(
-            coarse_source=CoarseTimeFileSource(path=coarse_path),
-            stepper=ChronyStepper(dry_run=bool(boot_cfg.get("dry_run", False))),
-            threshold_sec=float(boot_cfg.get("threshold_sec", 90.0)),
-            max_step_sec=float(boot_cfg.get("max_step_sec", 3600.0)),
-        )
-
     chrony_gate = None
     gate_cfg = auth_cfg.get("chrony_gate", {}) or {}
     if gate_cfg.get("enabled"):
@@ -481,7 +460,6 @@ def build_authority_runner_from_config(
         output_path=authority_output_path,
         a_level_provider=a_level_provider,
         upgrade_hysteresis=hysteresis,
-        bootstrap_coordinator=bootstrap_coordinator,
         chrony_gate=chrony_gate,
         governor_radiod_provider=governor_radiod_provider,
         mdns_advertiser=mdns_advertiser,

@@ -188,14 +188,6 @@ class MetrologyService:
         lat = self.station_config.get('latitude')
         lon = self.station_config.get('longitude')
         
-        # Coarse-time producer (METROLOGY.md §4.5 / 2c). Only CHU
-        # channels emit, but the config knob is service-level so a
-        # single setting covers the whole host.
-        _coarse_cfg = (config.get('timing', {}) or {}).get('coarse_time', {}) or {}
-        _coarse_enabled = bool(_coarse_cfg.get('enabled', True))
-        _coarse_path_str = _coarse_cfg.get('path')
-        _coarse_path = Path(_coarse_path_str) if _coarse_path_str else None
-
         self.engine = MetrologyEngine(
             # raw_buffer_dir is a legacy constructor argument that the
             # engine stores but no longer reads.  Pass a placeholder so
@@ -209,8 +201,6 @@ class MetrologyService:
             precise_lat=lat,
             precise_lon=lon,
             enable_physics_products=self._physics_products,
-            enable_coarse_time=_coarse_enabled,
-            coarse_time_path=_coarse_path,
         )
         
         # Storage backend selection. Phase 1 of the HDF5 → SQLite
@@ -246,27 +236,6 @@ class MetrologyService:
         # that a producer restart during our startup does not race us.
         self._ring_reader: Optional[RingBufferReader] = None
 
-        # CHU FSK Writer (for CHU channels only)
-        self.fsk_writer = None
-        if 'CHU' in channel_name.upper():
-            fsk_output_dir = DataProductRegistry.get_data_dir(
-                channel_dir=self.output_dir,
-                product_level="L2",
-                product_name="chu_fsk",
-                create=True
-            )
-            self.fsk_writer = make_data_product_writer(
-                output_dir=fsk_output_dir,
-                product_level="L2",
-                product_name="chu_fsk",
-                channel=self.channel_name,
-                version="v1",
-                processing_version="1.0.0",
-                station_metadata=self.station_config,
-                storage_config=self._storage_config,
-            )
-            logger.info(f"CHU FSK writer initialized for {channel_name}")
-        
         # Test Signal Writer (for WWV/WWVH channels - minutes 8 and 44)
         # PHYSICS-OPTIONAL: ionospheric sounding product, not needed for Chrony.
         self.test_signal_writer = None
@@ -696,33 +665,6 @@ class MetrologyService:
                 
                 self.writer.write_measurement(rec)
                 
-            # Write CHU FSK data if available
-            if self.fsk_writer and hasattr(self.engine, '_last_chu_fsk_data'):
-                fsk_data = self.engine._last_chu_fsk_data
-                if fsk_data and fsk_data.get('fsk_valid'):
-                    fsk_rec = {
-                        'timestamp_utc': datetime.now(timezone.utc).isoformat(),
-                        'minute_boundary_utc': minute_boundary,
-                        'channel': self.channel_name,
-                        'fsk_valid': fsk_data.get('fsk_valid', False),
-                        'frames_decoded': fsk_data.get('fsk_frames_decoded', 0),
-                        'decode_confidence': fsk_data.get('fsk_confidence', 0.0),
-                        'decoded_day': fsk_data.get('decoded_day'),
-                        'decoded_hour': fsk_data.get('decoded_hour'),
-                        'decoded_minute': fsk_data.get('decoded_minute'),
-                        'dut1_seconds': fsk_data.get('dut1_seconds'),
-                        'tai_utc': fsk_data.get('tai_utc'),
-                        'year': fsk_data.get('year'),
-                        'timing_offset_ms': fsk_data.get('timing_offset_ms'),
-                        'processed_at': datetime.now(timezone.utc).isoformat(),
-                        'processing_version': "1.0.0"
-                    }
-                    try:
-                        self.fsk_writer.write_measurement(fsk_rec)
-                        logger.info(f"CHU FSK data written: DUT1={fsk_data.get('dut1_seconds')}s, TAI-UTC={fsk_data.get('tai_utc')}s")
-                    except Exception as fsk_err:
-                        logger.warning(f"Failed to write FSK data: {fsk_err}")
-            
             # Write tick timing data from TickEdgeDetector — the single source
             # for all three observables:
             #   - d_clock_ms: front-edge ensemble timing (AM-domain, UTC-referenced)
@@ -1062,7 +1004,7 @@ class MetrologyService:
                 logger.debug(f"Ring reader close: {_e}")
             self._ring_reader = None
         for _writer_attr in (
-            'writer', 'fsk_writer', 'test_signal_writer',
+            'writer', 'test_signal_writer',
             'tick_writer', 'attempts_writer', 'tick_phase_writer',
             'all_arrivals_writer',
         ):
