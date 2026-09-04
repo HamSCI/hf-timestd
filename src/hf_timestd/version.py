@@ -31,7 +31,6 @@ COMPONENT_VERSIONS = {
     'core_recorder': '2.0',
     'phase2_analytics': '2.0',
     'phase2_temporal_engine': '2.1.0',
-    'clock_convergence': '2.0',  # Kalman filter version
     'multi_broadcast_fusion': '1.1',  # Per-broadcast calibration
 }
 
