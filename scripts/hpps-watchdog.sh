@@ -55,7 +55,7 @@ log() { logger -t "$LOG_TAG" -- "$@"; echo "[$LOG_TAG] $*"; }
 # "for" it just bounces the raw-archive chunks every cooldown period
 # forever (observed on B4 2026-07-24: a 30-min core-recorder bounce loop
 # corrupting 10-min archive chunks; same flap that got the HFPS twin
-# retired 2026-06-28).  Accept both the canonical [timing.t6_pps] and
+# retired 2026-06-28 and deleted 2026-09-04 with the diff-detector feed).  Accept both the canonical [timing.t6_pps] and
 # the legacy [timing.l6_pps] section names; treat missing config or a
 # missing enabled key as disabled - a host that never configured T6
 # has no HPPS feed to guard.

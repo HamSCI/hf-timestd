@@ -167,11 +167,12 @@ units = [
     # Timers — listed here so `smd start/stop` toggles them too.
     "timestd-chrony-monitor.timer",
     "timestd-pipeline-watchdog.timer",
-    # timestd-hfps-watchdog.timer — DEPRECATED 2026-06-28: the HFPS (Method-5
-    # diff-detector) SHM feed is disabled (off-air / not in the chrony config),
-    # so the watchdog only flapped trying to restart the recorder for an absent
-    # feed.  Unit files + script retained (disable-not-delete); re-add this line
-    # and re-enable the timer if HFPS is brought back.
+    # timestd-hfps-watchdog.timer — retired 2026-06-28 (the HFPS diff-detector
+    # feed never reached the chrony config, so the watchdog only flapped,
+    # restarting the recorder for an absent feed) and deleted with the feed on
+    # 2026-09-04 (RESIDUE_AUDIT §3.4).  A station that still carries the
+    # hand-linked unit files should remove them: `systemctl disable --now
+    # timestd-hfps-watchdog.timer` and delete the two files.
     "timestd-hpps-watchdog.timer",
     "timestd-prune.timer",
     # GRAPE (grape-daily.timer, grape-upload-retry.timer) MOVED to

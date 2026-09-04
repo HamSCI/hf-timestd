@@ -74,6 +74,15 @@ class RetiredKeyIssueTests(unittest.TestCase):
             {'timing': {'t6_pps': {'use_matched_filter': False}}})
         self.assertEqual([i['severity'] for i in issues], ['warn'])
 
+    def test_diff_sidecar_keys_warn(self):
+        cfg = {'timing': {'t6_pps': {
+            'enabled': True, 'enable_diff_sidecar': True,
+            'diff_sidecar_path': '/tmp/x.csv',
+            'diff_sidecar_threshold_factor': 100.0, 'diff_to_shm_unit': 3}}}
+        issues = retired_key_issues(cfg)
+        self.assertEqual(len(issues), 4)
+        self.assertTrue(all('diff-detector sidecar' in i['message'] for i in issues))
+
     def test_warnings_never_fail_validation(self):
         cfg = {'timing': {'authority': 'fusion', 'rtp_expected_accuracy_ms': 0.001}}
         self.assertTrue(all(i['severity'] == 'warn' for i in retired_key_issues(cfg)))

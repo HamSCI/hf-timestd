@@ -65,71 +65,19 @@ class _FakeProbe:
         return self._reading
 
 
-class TestDiffLayerBGuard:
-    """Layer-B plausibility guard on the diff/HFPS path
-    (``_t6_diff_disambiguate_via_t5_lb1421``).
+class TestHppsLayerBGuard:
+    """Layer-B plausibility guard on the MF/HPPS path
+    (``_t6_disambiguate_via_t5_lb1421``).
 
     The guard exists to reject sidelobe/phantom-peak captures.  It
     must test the *derived* residual (``reported_residual_ns``), not
     the *asserted* constant (``effective_chain_delay_ns``) — the
     latter tracks ``chain_delay_calib_s`` and, at the default 0.0,
     can never exceed the bound on its own, which would silently
-    disable the guard.  These tests fail if that swap is reverted.
+    disable the guard.  (The mirrored diff/HFPS path and its tests
+    went with the sidecar on 2026-09-04 — RESIDUE_AUDIT §3.4.)
 
-    Reachable with only ``_lb1421_probe`` and
-    ``_t6_chain_delay_calib_s`` stubbed — the method touches neither
-    ``_t6_diff_calibrator`` nor ``_t6_channel_info``.
-    """
-
-    class _Fake:
-        T6_RESIDUAL_REPORT_PERIOD_SEC = 300.0
-        _t6_diff_disambiguate_via_t5_lb1421 = (
-            CoreRecorderV2._t6_diff_disambiguate_via_t5_lb1421)
-        _t6_resolve_chain_delay_ns = staticmethod(
-            CoreRecorderV2._t6_resolve_chain_delay_ns)
-        _t6_report_derived_residual = (
-            CoreRecorderV2._t6_report_derived_residual)
-
-        def __init__(self, pps_utc_sec):
-            self._lb1421_probe = _FakeProbe(_FakeReading(pps_utc_sec))
-            self._t6_chain_delay_calib_s = 0.0
-
-    def test_large_residual_trips_guard_even_with_zero_calib(self):
-        # 350 ms > the 250 ms bound, but chain_delay_calib_s is 0.0 so
-        # the ASSERTED value (effective_chain_delay_ns) is 0 — well
-        # inside the bound.  Only testing reported_residual_ns catches
-        # this.  A reverted swap would let this fall through to a
-        # (bogus) True.
-        pps_utc_sec = int(time.time())
-        fake = self._Fake(pps_utc_sec)
-        result = fake._t6_diff_disambiguate_via_t5_lb1421(
-            chain_delay_ns_raw=0,
-            raw_wall_time_sec=pps_utc_sec + 0.35,
-            edge_rtp=123,
-        )
-        assert result is False
-        assert not hasattr(fake, '_t6_diff_disambiguation_ns')
-
-    def test_small_residual_does_not_trip_guard(self):
-        # 30 ms is well inside the 250 ms bound: the guard must not
-        # fire and the method must run to completion.
-        pps_utc_sec = int(time.time())
-        fake = self._Fake(pps_utc_sec)
-        result = fake._t6_diff_disambiguate_via_t5_lb1421(
-            chain_delay_ns_raw=0,
-            raw_wall_time_sec=pps_utc_sec + 0.03,
-            edge_rtp=123,
-        )
-        assert result is True
-        # asserted (effective_chain_delay_ns) is 0 at calib=0.0
-        assert fake._t6_diff_disambiguation_ns == 0
-
-
-class TestHppsLayerBGuard:
-    """Same guard, mirrored on the MF/HPPS path
-    (``_t6_disambiguate_via_t5_lb1421``).
-
-    Unlike the diff/HFPS path, this method does consult
+    This method does consult
     ``_t6_calibrator`` (for ``_last_edge_rtp`` and, on the success
     path, ``sample_rate``) and ``_t6_channel_info`` (via the real
     ``ka9q.rtp_recorder.rtp_to_utc``, since the whole point of this

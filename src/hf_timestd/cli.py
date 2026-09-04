@@ -266,6 +266,17 @@ RETIRED_KEYS = {
     ('timing.l6_pps', 'filter_500hz_notch'):
         'retired 2026-09-04 with the legacy calibrator, the only reader',
 }
+# The diff-detector sidecar, its HFPS chrony feed and the persisted
+# chain-delay store (RESIDUE_AUDIT §3.4).  No template and no fleet
+# config ever set these.
+for _section in ('timing.t6_pps', 'timing.l6_pps'):
+    for _key in ('enable_diff_sidecar', 'diff_sidecar_path',
+                 'diff_sidecar_threshold_factor', 'diff_to_shm_unit'):
+        RETIRED_KEYS[(_section, _key)] = (
+            'retired 2026-09-04: the diff-detector sidecar, its HFPS chrony '
+            'feed and the persisted chain-delay store are gone; the matched '
+            'filter and the anchor inversion carry T6')
+del _section, _key
 
 
 def retired_key_issues(cfg):

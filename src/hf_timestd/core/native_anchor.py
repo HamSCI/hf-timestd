@@ -73,7 +73,7 @@ class NativeAnchor:
         return _BILLION * _WRAP_PERIOD_SAMPLES // self.sample_rate_hz
 
     def to_json(self) -> dict:
-        """Serialise to the schema-v2 ChainDelayStore overlay."""
+        """Serialise to a JSON-ready dict; ``from_json`` inverts it."""
         return {
             "anchor_rtp": int(self.anchor_rtp) & 0xFFFFFFFF,
             "anchor_utc_ns": int(self.anchor_utc_ns),

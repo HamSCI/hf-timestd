@@ -12,10 +12,8 @@ from pathlib import Path
 # NOTE: this repo's tests/ directory has no __init__.py and there is no
 # root conftest.py, so pytest's default (prepend) import mode only ever
 # puts tests/ itself on sys.path -- "tests" is never importable as a
-# package (see tests/test_bpsk_pps_calibrator_diff.py, which has the same
-# `from tests.<sibling> import ...` pattern and is broken the same way,
-# a known pre-existing environment issue). Insert the repo root too so
-# "tests" resolves as an implicit namespace package.
+# package.  Insert the repo root too so "tests" resolves as an implicit
+# namespace package.
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT / "tools"))
 sys.path.insert(0, str(_ROOT))

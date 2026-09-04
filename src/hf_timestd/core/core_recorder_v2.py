@@ -468,16 +468,6 @@ class CoreRecorderV2:
         # one-time deprecation warning (see config-key backward-compat
         # block in __init__).  Status JSON key is ``t6_pps``.
         self._t6_calibrator = None
-        # Differential-detector sidecar (offline A/B analysis).  Opt-in
-        # via t6_config['enable_diff_sidecar'] = True.  Runs alongside
-        # the main calibrator on every batch of T6 samples; dumps
-        # per-PPS edge timestamps to a CSV at
-        # t6_config['diff_sidecar_path'] (default
-        # /var/lib/timestd/debug/bpsk_diff_edges.csv) for later
-        # comparison against the MF detector's chain_delay history.
-        # Does NOT push to chrony or modify any T6 state.
-        self._t6_diff_calibrator = None
-        self._t6_diff_warned = False
         self._t6_stream = None  # RadiodStream for BPSK channel
         # T6 channel's ChannelInfo — saved during _start_t6_stream so that
         # rtp_to_wallclock can compute wall-time of detected edges for the
@@ -490,24 +480,11 @@ class CoreRecorderV2:
         self._t6_shm = None
         self._t6_last_pushed_rtp = None
 
-        # SHM unit 3 (HFPS): the diff-detector (Method 5) edge feed.
-        # Built only when t6_config['enable_diff_sidecar'] is True
-        # AND the operational SHM push is enabled.  Runs in parallel
-        # with TSL3 — chrony selects between them via its own
-        # selection algorithm (HFPS gets `prefer` in chrony.conf
-        # once validated).
-        self._t6_diff_shm = None
-        self._t6_diff_last_pushed_rtp = None
-        self._t6_diff_shm_push_count = 0
-        # Diagnostic counters for the T6 SHM push gate.  Pair with the
-        # periodic log line below — on the next "TSL3 dark while
-        # acquired=1" incident, the journal shows whether pushes are
-        # firing at the expected 1 Hz, stalling at 0 Hz, or running
-        # but rejected by chrony (cross-check via chronyc reach).
+        # Count of HPPS SHM pushes.  The periodic "T6 SHM diag" log line
+        # that once paired with it sat inside the diff-sidecar (HFPS)
+        # block, so it never ran on any station; it went with that
+        # block on 2026-09-04 (RESIDUE_AUDIT §3.4).
         self._t6_shm_push_count = 0
-        self._t6_shm_last_log_count = 0
-        self._t6_shm_last_log_wall = time.monotonic()
-        self._t6_shm_last_push_wall = None
         # Residual published by the cascade as T6's local_minus_source_ns
         # (the value chrony sees as TSL3 offset, computed at every SHM
         # update site).  Pattern B publication channel per
@@ -536,8 +513,7 @@ class CoreRecorderV2:
         # hf-timestd-native (RTP, UTC) anchor — the single source of
         # truth for T6 RTP→UTC labelling.  Captured once at first
         # BPSK PPS lock by pairing the matched-filter edge RTP with
-        # the LB-1421 USB-NMEA UTC second, or loaded from the schema-
-        # v2 ChainDelayStore at startup.  Pure arithmetic from this
+        # the LB-1421 USB-NMEA UTC second.  Pure arithmetic from this
         # anchor onward — no host-clock-derived projection, no
         # rtp_to_wallclock chain.  See
         # ``hf_timestd.core.native_anchor`` and the §1 substrate
@@ -564,7 +540,6 @@ class CoreRecorderV2:
         # physical-plausibility bound and the lock was refused.  Used only
         # to rate-limit the refusal warning; reset on every accept.
         self._t6_initial_accept_rejections = 0
-        self._t6_diff_initial_accept_rejections = 0
         # Wall clock (monotonic) of the last disambiguation walk attempted
         # while in refusal state — throttles the retry loop to
         # T6_DISAMBIG_RETRY_INTERVAL_SEC (initial-accept otherwise re-runs
@@ -588,56 +563,25 @@ class CoreRecorderV2:
         # offset added to every calibrator chain_delay report so all
         # measurements share a common disambiguated reference frame.
         self._t6_disambiguation_ns = 0
-        # Same idea, but for the diff detector (Method 5) chain_delay.
-        # The diff detector reports chain_delay_samples = edge_rtp mod
-        # SR, i.e. only the sub-second position of the observed
-        # polarity flip.  To turn that into a wall-clock offset chrony
-        # can use, we need to know WHICH integer-sample position
-        # within the second is the true PPS edge — same disambiguation
-        # the legacy MF does against T4 (LAN GPS).  Locked once on the
-        # first accepted diff edge; constant from then on (the RF chain
-        # delay is a property of the hardware, not a per-edge measurement).
-        self._t6_diff_disambiguation_ns = 0
-        self._t6_diff_disambiguated = False
-        # NMEA-anchored SHM math (Option 3, 2026-05-23 PM session):
-        # at T5 disambig we pair (NMEA integer GPS second, BPSK edge RTP).
-        # Per-edge SHM push then derives M_edge by edge-counting from this
-        # pair using GPSDO-accurate RTP deltas, and computes the host clock
-        # at the edge sample FRESH via clock_gettime() minus RTP-elapsed
-        # — never consults the stale ka9q anchor.  Bypasses the
-        # anchor-drift artifact (see project_hf_pps_t5_direct_2026-05-23).
-        self._t6_diff_M_disambig = None
-        self._t6_diff_edge_rtp_disambig = None
         # Physical chain_delay calibration — initialized to 0 here;
         # re-read from self._t6_config after that attribute is assigned
         # just below.
         self._t6_chain_delay_calib_s = 0.0
-        # Cross-restart disambiguation persistence — diff-detector
-        # sidecar only.  The MF path used to persist here too (each
-        # restart re-ran the T4 chrony comparison from scratch, which
-        # picked a different disambiguation every time); see
-        # bpsk_chain_delay_store.py for that rationale and
-        # docs/HF-PPS-CHRONY-TUNING.md §5 for the original symptom.
-        #
-        # Chain-delay persistence is retired on the T6 path (spec §6):
-        # under the anchor inversion no ms-scale fitted state exists to
-        # persist — the fine stage + authority re-derive the anchor
-        # from scratch in ~fine_fold_seconds after every re-lock.  A
-        # leftover store file from a pre-inversion build is ignored
-        # (logged once at INFO, not silently — see _t6_on_samples).
-        from .bpsk_chain_delay_store import ChainDelayStore
-        self._t6_mf_chain_delay_store = None
-        self._t6_diff_chain_delay_store = ChainDelayStore("diff")
+        # Chain-delay persistence retired on the T6 path (anchor
+        # inversion spec §6): under the inversion no ms-scale fitted
+        # state exists to persist — the fine stage + authority re-derive
+        # the anchor from scratch in ~fine_fold_seconds after every
+        # re-lock.  The store module (bpsk_chain_delay_store) went on
+        # 2026-09-04 with the diff-detector sidecar, its last user
+        # (RESIDUE_AUDIT §3.4).  A leftover store file from a
+        # pre-inversion build is ignored (logged once at INFO, not
+        # silently — see _t6_on_samples).
         # Durable anchor ledger (t6_anchor_ledger): every captured native
         # anchor, with its raw components, so recalibrating the asserted
         # chain-delay terms later is arithmetic over the ledger instead
         # of a lost cause (journal lines rotate).
         from .t6_anchor_ledger import T6AnchorLedger
         self._t6_anchor_ledger = T6AnchorLedger()
-        # Counters for save-cadence debouncing (write once per
-        # PERSIST_EVERY_N_EDGES accepted edges, not on every cycle).
-        self._t6_mf_saves_pending = 0
-        self._t6_diff_saves_pending = 0
         # T5 disambiguation reference (LB-1421 GPSDO NMEA over USB-CDC).
         # When wired, gives an integer-GPS-second reference for the
         # BPSK PPS disambiguation that bypasses chrony's discipline
@@ -786,8 +730,7 @@ class CoreRecorderV2:
             self._t6_config = _legacy_cfg
         else:
             self._t6_config = {}
-        # Apply chain_delay calibration knob now that _t6_config is set
-        # (referenced by HFPS NMEA-anchored SHM push).
+        # Apply chain_delay calibration knob now that _t6_config is set.
         self._t6_chain_delay_calib_s = resolve_chain_delay_calib_s(
             self._t6_config)
         if t6_chain_delay_uncalibrated(self._t6_config):
@@ -904,40 +847,6 @@ class CoreRecorderV2:
                          + fine_cfg['filter_group_delay_ns']) / 1e6,
                     )
 
-                # Differential-detector sidecar — opt-in via
-                # t6_config['enable_diff_sidecar'] = True.  Runs in
-                # parallel with the main calibrator on every batch;
-                # dumps per-PPS edge timestamps to a CSV for offline
-                # analysis.  DOES NOT push to chrony or touch any
-                # other T6 state.  See bpsk_pps_calibrator_diff.py.
-                if self._t6_config.get('enable_diff_sidecar', False):
-                    try:
-                        from hf_timestd.core.bpsk_pps_calibrator_diff import (
-                            BpskPpsCalibratorDiff,
-                        )
-                        diff_csv = self._t6_config.get(
-                            'diff_sidecar_path',
-                            '/var/lib/timestd/debug/bpsk_diff_edges.csv',
-                        )
-                        diff_thresh = self._t6_config.get(
-                            'diff_sidecar_threshold_factor', 100.0,
-                        )
-                        self._t6_diff_calibrator = BpskPpsCalibratorDiff(
-                            sample_rate=sr,
-                            output_path=diff_csv,
-                            threshold_factor=diff_thresh,
-                        )
-                        logger.info(
-                            f"T6 diff-detector sidecar initialised: "
-                            f"output={diff_csv}, threshold_factor={diff_thresh}"
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            f"T6 diff-detector sidecar init failed "
-                            f"(non-fatal, main calibrator continues): {e}"
-                        )
-                        self._t6_diff_calibrator = None
-
                 # Init TSL3 SHM feed (unit 2). Failure is non-fatal —
                 # calibration still drives chain_delay_correction_ns.
                 try:
@@ -953,39 +862,6 @@ class CoreRecorderV2:
                 except Exception as e:
                     logger.warning(f"T6 HPPS SHM init failed: {e}")
                     self._t6_shm = None
-
-                # Init HFPS SHM feed (unit 3) — optional chrony feed
-                # from the diff detector (Method 5).  Disabled by
-                # default; built only when `diff_to_shm_unit` is set in
-                # the [*.t6] config (not in the shipped config, so this
-                # branch is normally skipped).  When enabled it runs in
-                # parallel with HPPS (unit 2); chrony selects between
-                # them by its usual algorithm.
-                if (self._t6_diff_calibrator is not None
-                        and self._t6_config.get('diff_to_shm_unit', None)
-                        is not None):
-                    try:
-                        from hf_timestd.core.chrony_shm import ChronySHM
-                        diff_unit = int(
-                            self._t6_config.get('diff_to_shm_unit')
-                        )
-                        self._t6_diff_shm = ChronySHM(unit=diff_unit)
-                        if self._t6_diff_shm.connect():
-                            logger.info(
-                                f"T6 diff-detector SHM feed enabled "
-                                f"(unit={diff_unit}, expected refid HFPS)"
-                            )
-                        else:
-                            logger.warning(
-                                f"T6 diff-detector SHM unit={diff_unit} "
-                                f"connect failed; HFPS disabled"
-                            )
-                            self._t6_diff_shm = None
-                    except Exception as e:
-                        logger.warning(
-                            f"T6 diff-detector SHM init failed: {e}"
-                        )
-                        self._t6_diff_shm = None
 
         # --- WWVB consumer state ---
         # Dedicated RadiodStream + decode worker, plumbed exactly like T6
@@ -2310,19 +2186,6 @@ class CoreRecorderV2:
     # accept).  References (chronyc sigma) move on second timescales;
     # walking per sample batch is pure chronyc-subprocess + log churn.
     T6_DISAMBIG_RETRY_INTERVAL_SEC = 5.0
-    # Cadence for writing the persisted effective chain_delay to disk.
-    # At 1 PPS, 60 edges = one save per minute — bounded even if the
-    # rate later climbs.  See bpsk_chain_delay_store.py for the
-    # cross-restart story.
-    T6_PERSIST_EVERY_N_EDGES = 60
-    # Cadence of the T6-SHM diagnostic log line.  Every 60 s emits one
-    # INFO line with pushes-per-window + the gate-decision inputs
-    # (`last_edge_rtp` vs `_t6_last_pushed_rtp`, `result.locked`,
-    # `pps_consecutive`).  Operationally cheap (1 line/min); essential
-    # for pinning down the remaining "TSL3 dark while acquired=1"
-    # failure mode that the watchdog only recovers from, not
-    # diagnoses.
-    T6_SHM_LOG_INTERVAL_SEC = 60.0
     # Cadence for the T6 timing-anchor refresh thread.  Used to be
     # 5 s / 2 s but the SHM-push code reverted to `rtp_to_wallclock`
     # with the frozen ChannelInfo (the comment at the push site
@@ -2835,12 +2698,6 @@ class CoreRecorderV2:
         self._t6_disambiguation_ns = 0
         self._t6_wrap_rejections = 0
         self._t6_recent_raw.clear()
-        store = getattr(self, '_t6_mf_chain_delay_store', None)
-        if store is not None:
-            try:
-                store.path.unlink(missing_ok=True)
-            except OSError:
-                pass
 
     def _t5_implied_effective_chain_delay(self) -> Optional[float]:
         """Return T5-derived effective chain_delay (ns) for the current
@@ -4094,95 +3951,6 @@ class CoreRecorderV2:
             )
             return False
 
-    def _t6_diff_disambiguate_via_t5_lb1421(
-        self, chain_delay_ns_raw: int, raw_wall_time_sec: float,
-        edge_rtp: Optional[int] = None,
-    ) -> bool:
-        """T5 (LB-1421 NMEA) disambiguation for the HFPS / diff path.
-
-        Mirrors :meth:`_t6_disambiguate_via_t5_lb1421` for apples-to-
-        apples comparison with HPPS: both detectors anchor their
-        one-shot integer-second resolution to the same direct-GPS
-        reference, so any HFPS-vs-HPPS difference is attributable to
-        the detector (Method 5 vs Method 2), not to the disambig
-        reference precision.
-
-        Writes to ``self._t6_diff_disambiguation_ns`` on success.
-        """
-        probe = getattr(self, '_lb1421_probe', None)
-        if probe is None:
-            return False
-        reading = probe.get_latest()
-        if reading is None:
-            logger.debug(
-                "HFPS T5 disambig: no fresh LB-1421 NMEA reading "
-                "(stale, no fix, or device closed)"
-            )
-            return False
-        # Same integer-second alignment as the HPPS path — see the
-        # rationale in ``_t6_disambiguate_via_t5_lb1421``.  NMEA's
-        # ``pps_utc_sec`` is the GPS-truth attestation; the integer
-        # offset between it and the (possibly stale) MF edge wall-time
-        # is recovered by rounding, not used as a rejection signal.
-        delta_sec = raw_wall_time_sec - reading.pps_utc_sec
-        integer_offset = int(round(delta_sec))
-        effective_pps_utc_sec = int(reading.pps_utc_sec) + integer_offset
-        residual_sec = raw_wall_time_sec - effective_pps_utc_sec
-        if abs(residual_sec) > 0.5:
-            logger.warning(
-                f"HFPS T5 disambig: post-alignment residual "
-                f"{residual_sec:+.3f} s exceeds ±0.5 s "
-                f"(raw_wall={raw_wall_time_sec:.3f}, "
-                f"reading.pps_utc_sec={reading.pps_utc_sec}, "
-                f"integer_offset={integer_offset:+d}); "
-                f"falling back to T4."
-            )
-            return False
-        effective_chain_delay_ns, reported_residual_ns = (
-            self._t6_resolve_chain_delay_ns(
-                residual_sec, self._t6_chain_delay_calib_s))
-        self._t6_report_derived_residual(
-            "HFPS", reported_residual_ns, effective_chain_delay_ns)
-        # Layer B physical-plausibility guard — same rationale as
-        # the HPPS path; see ``_t6_disambiguate_via_t5_lb1421``.
-        T6_PHYSICAL_CHAIN_DELAY_MAX_NS = 250_000_000
-        if abs(reported_residual_ns) > T6_PHYSICAL_CHAIN_DELAY_MAX_NS:
-            logger.warning(
-                f"HFPS T5 disambig: implied chain_delay "
-                f"{reported_residual_ns/1e6:+.1f} ms exceeds "
-                f"physical-plausibility bound ±"
-                f"{T6_PHYSICAL_CHAIN_DELAY_MAX_NS/1e6:.0f} ms — "
-                f"sidelobe / phantom-peak capture.  Falling back "
-                f"to T4."
-            )
-            return False
-        self._t6_diff_disambiguation_ns = (
-            effective_chain_delay_ns - chain_delay_ns_raw
-        )
-        # Capture the (NMEA GPS second, BPSK edge RTP) pair for the
-        # NMEA-anchored SHM push path.  Subsequent edges count GPS
-        # seconds from this pair using GPSDO-accurate RTP deltas,
-        # bypassing the ka9q anchor.  Use the integer-aligned value
-        # (effective_pps_utc_sec), not the raw NMEA reading, so the
-        # pair refers to the MF edge's actual integer second.
-        if edge_rtp is not None:
-            self._t6_diff_M_disambig = int(effective_pps_utc_sec)
-            self._t6_diff_edge_rtp_disambig = int(edge_rtp) & 0xFFFFFFFF
-        logger.info(
-            f"HFPS chain_delay disambiguated against T5 (LB-1421 NMEA): "
-            f"raw={chain_delay_ns_raw} ns, "
-            f"raw_wall_time={raw_wall_time_sec:.6f}, "
-            f"NMEA_PPS_UTC={reading.pps_utc_sec} "
-            f"(integer-aligned to {effective_pps_utc_sec}, "
-            f"offset={integer_offset:+d} s), "
-            f"residual={residual_sec*1000:+.3f} ms, "
-            f"effective_chain_delay={effective_chain_delay_ns} ns "
-            f"(no integer-sample-shift step — direct GPS reference); "
-            f"NMEA-anchored pair: M={self._t6_diff_M_disambig}, "
-            f"edge_rtp={self._t6_diff_edge_rtp_disambig}"
-        )
-        return True
-
     def _t6_disambiguate_via_external_reference(self, result) -> None:
         """Fallback disambiguation path used when no fresh persisted
         chain_delay is available.  Walks the timing-tier hierarchy
@@ -4190,11 +3958,8 @@ class CoreRecorderV2:
         integer-sample shift that brings the calibrator's implied
         wall-time into agreement with the highest-rank available tier.
 
-        Pre-fresh-persistence-store this was the only path; today it
-        runs only on cold deploys, after staleness expiry, or when the
-        sample-rate has been changed.  See
-        :class:`bpsk_chain_delay_store.ChainDelayStore` for the
-        preferred persisted-value path.
+        With chain-delay persistence retired (anchor inversion spec §6)
+        this runs at every initial accept.
         """
         try:
             last_edge_rtp = getattr(self._t6_calibrator, '_last_edge_rtp', None)
@@ -4570,16 +4335,6 @@ class CoreRecorderV2:
                         snap['zero_samples'], snap['longest_run_samples'],
                         snap['longest_run_samples'] / 96.0,
                     )
-        # Defensive lazy-init for unit tests that bypass __init__ via
-        # ``CoreRecorderV2.__new__(CoreRecorderV2)``.  In production
-        # __init__ has already set these; in tests they are absent and
-        # we want the persistence layer to be a no-op rather than to
-        # crash the calibrator path.
-        if not hasattr(self, '_t6_mf_chain_delay_store'):
-            self._t6_mf_chain_delay_store = None
-            self._t6_diff_chain_delay_store = None
-            self._t6_mf_saves_pending = 0
-            self._t6_diff_saves_pending = 0
         # One-shot smoke log on the first batch so the journal records
         # whether quality.last_rtp_timestamp is flowing in shared mode.
         # Same hook helps confirm legacy-mode startup health.
@@ -4734,25 +4489,6 @@ class CoreRecorderV2:
                             f"once): {e}", exc_info=True)
                         self._t6_liveness_warned = True
 
-        # Differential-detector sidecar (offline A/B analysis).
-        # Failures here MUST NOT affect main calibrator state;
-        # swallow exceptions and log once per service lifetime.
-        # Use getattr so test fixtures that bypass __init__ stay safe.
-        diff_cal = getattr(self, '_t6_diff_calibrator', None)
-        if diff_cal is not None:
-            try:
-                diff_cal.process_samples(
-                    samples, quality.last_rtp_timestamp
-                )
-            except Exception as e:
-                if not getattr(self, '_t6_diff_warned', False):
-                    logger.warning(
-                        f"T6 diff-detector sidecar failed (will be "
-                        f"silent for remaining batches): {e}",
-                        exc_info=True,
-                    )
-                    self._t6_diff_warned = True
-
         # Stuck-recovery: cascade gate in the MF calibrator can keep
         # pps_consecutive pinned at 0 indefinitely if the underlying
         # operating point genuinely moved (e.g., Costas walked to a
@@ -4792,14 +4528,6 @@ class CoreRecorderV2:
             self._t6_wrap_rejections = 0
             self._t6_recent_raw.clear()
             self._t6_last_locked_wall = wall_now
-            # Persisted effective chain_delay reflected the old
-            # operating point that just got rejected; clear it so the
-            # next initial-accept re-disambiguates from scratch.
-            if self._t6_mf_chain_delay_store is not None:
-                try:
-                    self._t6_mf_chain_delay_store.path.unlink(missing_ok=True)
-                except OSError:
-                    pass
 
         if result is not None and result.locked:
             # Wrap-rejection: refuse jumps > 10 ms from the last accepted
@@ -4839,11 +4567,10 @@ class CoreRecorderV2:
                 # file left over from a pre-inversion build is ignored
                 # (logged once at INFO, not silently).
                 sr_local = self._t6_calibrator.sample_rate
-                if (self._t6_mf_chain_delay_store is None
-                        and not getattr(
-                            self, '_t6_mf_store_leftover_logged', False)):
-                    from .bpsk_chain_delay_store import ChainDelayStore
-                    _leftover_path = ChainDelayStore("MF").path
+                if not getattr(self, '_t6_mf_store_leftover_logged', False):
+                    # The path the retired bpsk_chain_delay_store wrote.
+                    _leftover_path = Path(
+                        "/var/lib/timestd/bpsk_mf_chain_delay.json")
                     if _leftover_path.exists():
                         logger.info(
                             f"T6: leftover chain-delay store "
@@ -4943,18 +4670,6 @@ class CoreRecorderV2:
                 self._t6_initial_accept_rejections = 0
                 self._t6_last_chain_delay_ns = effective
                 effective_chain_delay = effective
-                # Persist the just-locked effective value AND the
-                # native anchor (when present) so the next restart
-                # skips disambiguation entirely and restores the
-                # anchor verbatim.  See bpsk_chain_delay_store schema
-                # v2.
-                if self._t6_mf_chain_delay_store is not None:
-                    self._t6_mf_chain_delay_store.save(
-                        sample_rate=sr_local,
-                        effective_chain_delay_ns=effective,
-                        anchor=self._t6_native_anchor,
-                    )
-                    self._t6_mf_saves_pending = 0
                 logger.info(
                     f"T6 chain_delay initial accept: {result.chain_delay_ns} ns "
                     f"(effective with disambiguation: {effective} ns)"
@@ -5106,16 +4821,6 @@ class CoreRecorderV2:
                         self._t6_disambiguation_ns = 0
                         self._t6_wrap_rejections = 0
                         self._t6_recent_raw.clear()
-                        # Persisted effective chain_delay reflected the old
-                        # operating point that the step-recovery just admitted
-                        # was stale.  Clear it so the next initial-accept
-                        # re-disambiguates from scratch instead of re-applying
-                        # the previous (now-wrong) shift.
-                        if self._t6_mf_chain_delay_store is not None:
-                            try:
-                                self._t6_mf_chain_delay_store.path.unlink(missing_ok=True)
-                            except OSError:
-                                pass
                 else:
                     if self._t6_wrap_rejections == 1 or self._t6_wrap_rejections % 60 == 0:
                         logger.warning(
@@ -5144,19 +4849,6 @@ class CoreRecorderV2:
                 self._t6_wrap_rejections = 0
                 self._t6_recent_raw.clear()
                 effective_chain_delay = self._t6_last_chain_delay_ns
-                # Refresh persisted effective chain_delay every
-                # T6_PERSIST_EVERY_N_EDGES accepted cycles.  Disk I/O
-                # cadence ~ once/minute at 1 PPS — bounded even if the
-                # rate later climbs.
-                if self._t6_mf_chain_delay_store is not None:
-                    self._t6_mf_saves_pending += 1
-                    if self._t6_mf_saves_pending >= self.T6_PERSIST_EVERY_N_EDGES:
-                        self._t6_mf_chain_delay_store.save(
-                            sample_rate=self._t6_calibrator.sample_rate,
-                            effective_chain_delay_ns=self._t6_last_chain_delay_ns,
-                            anchor=self._t6_native_anchor,
-                        )
-                        self._t6_mf_saves_pending = 0
 
             # Record BPSK metadata in archive sidecars.  Per the
             # architectural separation (chain_delay is metrology, not
@@ -5465,381 +5157,18 @@ class CoreRecorderV2:
                             )
                         self._t6_last_pushed_rtp = last_edge_rtp
                         self._t6_shm_push_count += 1
-                        self._t6_shm_last_push_wall = time.monotonic()
                 except Exception as e:
                     # SHM push is non-fatal — log once per ~60 s of failures
                     if not getattr(self, '_t6_shm_warned', False):
                         logger.warning(f"T6 HPPS SHM push failed: {e}")
                         self._t6_shm_warned = True
 
-            # HFPS SHM feed (unit 3): push wall-time of the diff
-            # detector's (Method 5) latest accepted edge.  Runs in
-            # parallel with TSL3 above so chrony has both refclocks
-            # to choose between via its selection algorithm.  Uses
-            # the SAME channel_info (and therefore the same RTP →
-            # wall-time mapping) as TSL3; the difference is only in
-            # which detector produced `last_edge_rtp`.
-            diff_cal = getattr(self, '_t6_diff_calibrator', None)
-            diff_shm = getattr(self, '_t6_diff_shm', None)
-            if (diff_cal is not None and diff_shm is not None
-                    and self._t6_channel_info is not None):
-                try:
-                    diff_last_edge_rtp_full = getattr(
-                        diff_cal, 'chain_delay_samples', None
-                    )  # used for status; not the rtp itself
-                    diff_last_edge_rtp = getattr(
-                        diff_cal, '_last_edge_rtp', None
-                    )
-                    diff_edge_advanced = (
-                        diff_last_edge_rtp is not None
-                        and diff_last_edge_rtp != self._t6_diff_last_pushed_rtp
-                    )
-                    if diff_edge_advanced:
-                        self._t6_channel_info.chain_delay_correction_ns = None
-                        from ka9q.rtp_recorder import rtp_to_utc
-                        # Step 1: rtp_to_wallclock gives the local
-                        # wall time of the sample where we OBSERVED
-                        # the polarity flip.
-                        raw_wall_time_sec = rtp_to_utc(
-                            diff_last_edge_rtp, self._t6_channel_info
-                        )
-                        if raw_wall_time_sec is not None:
-                            sr_local = diff_cal.sample_rate
-                            chain_delay_ns_raw = int(round(
-                                diff_cal.chain_delay_samples
-                                * 1e9 / sr_local
-                            ))
-
-                            # Step 2: one-shot disambiguation on the
-                            # FIRST accepted diff edge.  Mirrors the
-                            # legacy MF's initial-accept logic.
-                            #
-                            # Preferred path: load the last-known-good
-                            # *effective* chain_delay from disk and
-                            # compute the integer-sample shift that
-                            # aligns the new raw value with it.  The
-                            # physical RF path is invariant across
-                            # restarts; this avoids the per-restart
-                            # drift that chrony-state-based
-                            # disambiguation suffers from.
-                            #
-                            # Fallback path: walk the timing-tier
-                            # hierarchy (T4 LAN GPS, then T3 fusion).
-                            if not self._t6_diff_disambiguated:
-                                persisted = (
-                                    self._t6_diff_chain_delay_store.load()
-                                    if self._t6_diff_chain_delay_store is not None
-                                    else None
-                                )
-                                if (persisted is not None
-                                        and persisted.sample_rate == sr_local):
-                                    from .bpsk_chain_delay_store import (
-                                        compute_disambiguation_ns,
-                                    )
-                                    self._t6_diff_disambiguation_ns = (
-                                        compute_disambiguation_ns(
-                                            raw_chain_delay_ns=chain_delay_ns_raw,
-                                            persisted_effective_chain_delay_ns=(
-                                                persisted.effective_chain_delay_ns
-                                            ),
-                                            sample_rate=sr_local,
-                                        )
-                                    )
-                                    self._t6_diff_disambiguated = True
-                                    age_s = time.time() - persisted.saved_at_unix
-                                    # Also capture an NMEA-anchored pair
-                                    # for the new SHM push math.  In the
-                                    # persistence-restored path we don't
-                                    # have a fresh T5 reading necessarily;
-                                    # derive M_disambig from the locally-
-                                    # computed wall_time (raw_wall_time −
-                                    # effective_chain_delay rounded to
-                                    # integer GPS second).  This is the
-                                    # SAME math the SHM push has always
-                                    # used for ref_time, so the estimate
-                                    # is reliable as long as anchor
-                                    # staleness < 0.5 s (always true in
-                                    # normal operation).
-                                    eff_ns = (
-                                        chain_delay_ns_raw
-                                        + self._t6_diff_disambiguation_ns
-                                    )
-                                    M_est = int(round(
-                                        raw_wall_time_sec - eff_ns / 1e9
-                                    ))
-                                    self._t6_diff_M_disambig = M_est
-                                    self._t6_diff_edge_rtp_disambig = (
-                                        int(diff_last_edge_rtp) & 0xFFFFFFFF
-                                    )
-                                    logger.info(
-                                        f"HFPS chain_delay disambiguated against "
-                                        f"persisted effective="
-                                        f"{persisted.effective_chain_delay_ns} ns "
-                                        f"({age_s:.0f}s old): raw="
-                                        f"{chain_delay_ns_raw} ns, shifting "
-                                        f"{self._t6_diff_disambiguation_ns} ns "
-                                        f"(skipping T4 chrony walk); "
-                                        f"NMEA-anchored pair: "
-                                        f"M={self._t6_diff_M_disambig}, "
-                                        f"edge_rtp={self._t6_diff_edge_rtp_disambig}"
-                                    )
-                                    # Eager refresh — the new
-                                    # disambiguation should survive a
-                                    # crash within the first minute.
-                                    if self._t6_diff_chain_delay_store is not None:
-                                        self._t6_diff_chain_delay_store.save(
-                                            sample_rate=sr_local,
-                                            effective_chain_delay_ns=(
-                                                chain_delay_ns_raw
-                                                + self._t6_diff_disambiguation_ns
-                                            ),
-                                        )
-                                        self._t6_diff_saves_pending = 0
-                                else:
-                                    if persisted is not None:
-                                        logger.warning(
-                                            f"HFPS persisted sample_rate "
-                                            f"{persisted.sample_rate} != current "
-                                            f"{sr_local}; falling back to T5/T4"
-                                        )
-                                    # T5 (LB-1421 NMEA) — direct GPS reference,
-                                    # mirroring the HPPS path so HFPS vs HPPS
-                                    # is a clean detector-only comparison.
-                                    # Falls through to T4 if T5 isn't wired
-                                    # or its reading is unavailable.
-                                    if self._t6_diff_disambiguate_via_t5_lb1421(
-                                            chain_delay_ns_raw, raw_wall_time_sec,
-                                            edge_rtp=diff_last_edge_rtp,
-                                    ):
-                                        self._t6_diff_disambiguated = True
-                                        # Eager refresh — disambiguation should
-                                        # survive a crash within the first minute.
-                                        if self._t6_diff_chain_delay_store is not None:
-                                            self._t6_diff_chain_delay_store.save(
-                                                sample_rate=sr_local,
-                                                effective_chain_delay_ns=(
-                                                    chain_delay_ns_raw
-                                                    + self._t6_diff_disambiguation_ns
-                                                ),
-                                            )
-                                            self._t6_diff_saves_pending = 0
-                                    else:
-                                        ref = self._get_disambiguation_reference()
-                                        if ref is None:
-                                            # Layer B physical-plausibility
-                                            # guard — same rationale as the
-                                            # MF initial-accept guard above:
-                                            # with no reference the raw value
-                                            # is ambiguous, and an implausible
-                                            # one is a sidelobe.  Refuse (do
-                                            # NOT mark disambiguated, do NOT
-                                            # push this edge); the next
-                                            # accepted edge retries the walk.
-                                            _HFPS_MAX_NS = 250_000_000
-                                            if abs(chain_delay_ns_raw) > _HFPS_MAX_NS:
-                                                self._t6_diff_initial_accept_rejections += 1
-                                                n = self._t6_diff_initial_accept_rejections
-                                                if n == 1 or n % 60 == 0:
-                                                    logger.warning(
-                                                        f"HFPS chain_delay initial "
-                                                        f"accept REFUSED: raw "
-                                                        f"{chain_delay_ns_raw/1e6:+.1f} ms "
-                                                        f"exceeds physical-plausibility "
-                                                        f"bound ±{_HFPS_MAX_NS/1e6:.0f} ms "
-                                                        f"and no usable non-T6 timing "
-                                                        f"authority is available "
-                                                        f"(consecutive refusals={n}); "
-                                                        f"will retry on the next "
-                                                        f"accepted edge."
-                                                    )
-                                                return
-                                            self._t6_diff_initial_accept_rejections = 0
-                                            logger.info(
-                                                "HFPS chain_delay initial accept: "
-                                                "no usable non-T6 timing authority "
-                                                "for disambiguation; accepting raw "
-                                                "value"
-                                            )
-                                            self._t6_diff_disambiguation_ns = 0
-                                            self._t6_diff_disambiguated = True
-                                        else:
-                                            ref_offset_ms, ref_sigma_ms, ref_tier = ref
-                                            wall_time_sec_initial = (
-                                                raw_wall_time_sec
-                                                - chain_delay_ns_raw / 1e9
-                                            )
-                                            ref_time_initial = round(
-                                                wall_time_sec_initial
-                                            )
-                                            offset_sec_initial = (
-                                                wall_time_sec_initial - ref_time_initial
-                                            )
-                                            disagreement_sec = (
-                                                offset_sec_initial
-                                                - ref_offset_ms / 1000.0
-                                            )
-                                            shift_samples = round(
-                                                disagreement_sec * sr_local
-                                            )
-                                            self._t6_diff_disambiguation_ns = int(round(
-                                                shift_samples * 1e9 / sr_local
-                                            ))
-                                            self._t6_diff_disambiguated = True
-                                            logger.info(
-                                                f"HFPS chain_delay disambiguated "
-                                                f"against {ref_tier} "
-                                                f"(offset={ref_offset_ms:+.3f} ms, "
-                                                f"sigma={ref_sigma_ms:.3f} ms): "
-                                                f"raw_chain_delay={chain_delay_ns_raw} "
-                                                f"ns; disagreement "
-                                                f"{disagreement_sec*1000:+.3f} ms; "
-                                                f"shift {shift_samples} samples "
-                                                f"({self._t6_diff_disambiguation_ns} ns)"
-                                            )
-                                            # Eager refresh so the next
-                                            # restart inherits the T4-derived
-                                            # shift instead of re-walking
-                                            # chrony from a different state.
-                                            if self._t6_diff_chain_delay_store is not None:
-                                                self._t6_diff_chain_delay_store.save(
-                                                    sample_rate=sr_local,
-                                                    effective_chain_delay_ns=(
-                                                        chain_delay_ns_raw
-                                                        + self._t6_diff_disambiguation_ns
-                                                    ),
-                                                )
-                                                self._t6_diff_saves_pending = 0
-
-                            # Step 3: compute system_time for chrony.
-                            #
-                            # NMEA-anchored path (Option 3 architectural
-                            # fix, 2026-05-23 PM session, revised):
-                            # if a T5 disambig captured (M_disambig,
-                            # edge_rtp_disambig), derive ref_time by
-                            # edge-counting on GPSDO-accurate RTP deltas
-                            # (NMEA truth, no host clock).  Keep using
-                            # rtp_to_wallclock for system_time — it gives
-                            # host clock at edge acquisition via the
-                            # 30s-refreshed anchor (B_anchor bounded by
-                            # refresh interval × slew rate ≈ few ms),
-                            # MUCH safer than clock_gettime at processing
-                            # time (which adds unknown packet/processing
-                            # latency, observed ~40 ms on bee1).
-                            #
-                            # The frozen-disambig `effective_chain_delay`
-                            # is replaced by `chain_delay_calib_s` — a
-                            # per-deployment config knob holding only the
-                            # PHYSICAL chain delay (no host clock bias).
-                            # Initial deploy uses 0; tune after observing
-                            # chrony's per-source bias for HFPS vs NTP.
-                            #
-                            # Math:
-                            #   offset = raw_wall_time − chain_delay_calib − M_edge
-                            #          = (true_chain_delay − chain_delay_calib) + B_anchor
-                            # With chain_delay_calib tuned: offset ≈ B_anchor ≈ B_now.
-                            #
-                            # Fallback: if M_disambig is None (T5 failed
-                            # at startup; only T4/persisted path
-                            # available), use the legacy anchor + frozen-
-                            # disambig math so SHM keeps working.
-                            effective_chain_delay_ns = (
-                                chain_delay_ns_raw
-                                + self._t6_diff_disambiguation_ns
-                            )
-                            if self._t6_diff_M_disambig is not None:
-                                edge_rtp_delta_from_disambig = (
-                                    (diff_last_edge_rtp
-                                     - self._t6_diff_edge_rtp_disambig)
-                                    & 0xFFFFFFFF
-                                )
-                                if edge_rtp_delta_from_disambig > 0x7FFFFFFF:
-                                    edge_rtp_delta_from_disambig -= 0x100000000
-                                edge_count = int(round(
-                                    edge_rtp_delta_from_disambig / sr_local
-                                ))
-                                M_edge = (
-                                    self._t6_diff_M_disambig + edge_count
-                                )
-                                ref_time = float(M_edge)
-                                wall_time_sec = (
-                                    raw_wall_time_sec
-                                    - self._t6_chain_delay_calib_s
-                                )
-                            else:
-                                wall_time_sec = (
-                                    raw_wall_time_sec
-                                    - effective_chain_delay_ns / 1e9
-                                )
-                                ref_time = float(round(wall_time_sec))
-                            diff_shm.update(
-                                reference_time=ref_time,
-                                system_time=wall_time_sec,
-                                # precision -20 ≈ 1 µs — claim closer to
-                                # the observed ~22 ns σ; lets chrony
-                                # weight HFPS appropriately.
-                                precision=-20,
-                            )
-                            self._t6_diff_last_pushed_rtp = diff_last_edge_rtp
-                            self._t6_diff_shm_push_count += 1
-                            # Refresh persisted effective chain_delay
-                            # every T6_PERSIST_EVERY_N_EDGES accepted
-                            # cycles so the next restart skips
-                            # disambiguation.  Disk I/O cadence ~ once
-                            # per minute at 1 PPS.
-                            if self._t6_diff_chain_delay_store is not None:
-                                self._t6_diff_saves_pending += 1
-                                if self._t6_diff_saves_pending >= self.T6_PERSIST_EVERY_N_EDGES:
-                                    self._t6_diff_chain_delay_store.save(
-                                        sample_rate=sr_local,
-                                        effective_chain_delay_ns=effective_chain_delay_ns,
-                                    )
-                                    self._t6_diff_saves_pending = 0
-                except Exception as e:
-                    if not getattr(self, '_t6_diff_shm_warned', False):
-                        logger.warning(
-                            f"T6 HFPS SHM push failed (will be silent "
-                            f"for remaining batches): {e}",
-                            exc_info=True,
-                        )
-                        self._t6_diff_shm_warned = True
-
-                # Diagnostic: T6 SHM has a known failure mode where chrony
-                # reach decays to 0 while the matched filter keeps
-                # reporting acquired=1, pps_consec>0 in the journal —
-                # observed on bee1 2026-05-12 ~07:01 UTC after ~5h
-                # uptime.  The cause isn't yet pinned down (`_last_edge_rtp`
-                # SHOULD advance every PPS per bpsk_pps_calibrator_mf.py:477,
-                # so the != gate above SHOULD fire).  Emit a periodic
-                # log line so the next incident's data tells us whether:
-                #   (a) the push code never runs (calibrator stops calling
-                #       this callback),
-                #   (b) `last_edge_rtp == _t6_last_pushed_rtp` keeps the
-                #       gate False (calibrator advance starvation), or
-                #   (c) the push runs but chrony rejects (excessive
-                #       offset / age).  This logging is paired with the
-                #       systemd-side tsl3-watchdog.sh which bounds the
-                #       outage at ~3 min until we know which it is.
-                now_mono = time.monotonic()
-                if now_mono - self._t6_shm_last_log_wall >= self.T6_SHM_LOG_INTERVAL_SEC:
-                    elapsed = now_mono - self._t6_shm_last_log_wall
-                    elapsed_since_push = (
-                        now_mono - self._t6_shm_last_push_wall
-                        if self._t6_shm_last_push_wall is not None
-                        else None
-                    )
-                    logger.info(
-                        f"T6 SHM diag: pushes_since_last_log="
-                        f"{self._t6_shm_push_count - self._t6_shm_last_log_count} "
-                        f"(window {elapsed:.0f}s), "
-                        f"last_push_age="
-                        f"{f'{elapsed_since_push:.1f}s' if elapsed_since_push is not None else 'never'}, "
-                        f"last_edge_rtp={last_edge_rtp}, "
-                        f"_t6_last_pushed_rtp={self._t6_last_pushed_rtp}, "
-                        f"locked={getattr(result, 'locked', None) if result is not None else None}, "
-                        f"pps_consec={getattr(result, 'pps_consecutive', None) if result is not None else None}"
-                    )
-                    self._t6_shm_last_log_count = self._t6_shm_push_count
-                    self._t6_shm_last_log_wall = now_mono
+            # The HFPS (diff-detector) SHM feed and the periodic "T6 SHM
+            # diag" log line stood here until 2026-09-04.  The feed was
+            # config-dead (enable_diff_sidecar never set anywhere); the
+            # diag line sat inside its gate, so it never ran either.
+            # Reviving the diag is a deliberate change, not a deletion
+            # (RESIDUE_AUDIT §3.4).
 
             # Log on first lock and periodically
             if result.pps_consecutive == self._t6_calibrator.consecutive_required:

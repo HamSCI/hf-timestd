@@ -1,18 +1,14 @@
 """Tests for the hf-timestd-native RTP→UTC anchor.
 
 These cover the pure function ``utc_ns_at_rtp`` and the
-``NativeAnchor`` dataclass.  Persistence-layer interactions
-(ChainDelayStore schema v2 round-trip, cross-schema compatibility)
-live in ``test_bpsk_chain_delay_store.py``.
+``NativeAnchor`` dataclass.  (The ChainDelayStore schema-v2 round-trip
+tests that once sat here went with the store on 2026-09-04 —
+RESIDUE_AUDIT §3.4.)
 """
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 import pytest
 
-from hf_timestd.core.bpsk_chain_delay_store import ChainDelayStore
 from hf_timestd.core.native_anchor import (
     NativeAnchor,
     pps_firing_utc_ns,
@@ -167,63 +163,3 @@ class TestNativeAnchorSerialisation:
 def test_pps_firing_utc_is_anchor_utc_minus_chain_delay():
     a = _anchor()
     assert pps_firing_utc_ns(a) == ANCHOR_UTC_NS  # which == anchor_utc_ns − chain_delay_ns
-
-
-# ---------------------------------------------------------------------
-# Persistence — schema v2 round-trip via ChainDelayStore
-# ---------------------------------------------------------------------
-
-
-class TestPersistenceV2:
-    def test_v2_save_then_load_yields_same_anchor(self, tmp_path: Path):
-        store = ChainDelayStore("MF", store_dir=tmp_path)
-        a = _anchor()
-        store.save(
-            sample_rate=a.sample_rate_hz,
-            effective_chain_delay_ns=a.chain_delay_ns,
-            anchor=a,
-        )
-        loaded = store.load()
-        assert loaded is not None
-        assert loaded.schema == "v2"
-        assert loaded.anchor == a
-
-    def test_v1_save_then_load_yields_anchor_none(self, tmp_path: Path):
-        store = ChainDelayStore("MF", store_dir=tmp_path)
-        store.save(sample_rate=SR_96K, effective_chain_delay_ns=CHAIN_DELAY_NS)
-        loaded = store.load()
-        assert loaded is not None
-        assert loaded.schema == "v1"
-        assert loaded.anchor is None
-
-    def test_unknown_schema_treated_as_absent(self, tmp_path: Path):
-        store = ChainDelayStore("MF", store_dir=tmp_path)
-        store.path.parent.mkdir(parents=True, exist_ok=True)
-        store.path.write_text(json.dumps({
-            "schema": "v999",
-            "saved_at_unix": 0.0,
-            "sample_rate": SR_96K,
-            "effective_chain_delay_ns": 0,
-            "source": "MF",
-        }))
-        assert store.load() is None
-
-    def test_v2_with_malformed_anchor_falls_back_to_v1_semantic(
-        self, tmp_path: Path,
-    ):
-        # Schema labelled v2 but missing anchor fields — the entry's
-        # chain_delay is still trusted (v1 semantic) but anchor=None.
-        store = ChainDelayStore("MF", store_dir=tmp_path)
-        store.path.parent.mkdir(parents=True, exist_ok=True)
-        store.path.write_text(json.dumps({
-            "schema": "v2",
-            "saved_at_unix": __import__("time").time(),
-            "sample_rate": SR_96K,
-            "effective_chain_delay_ns": CHAIN_DELAY_NS,
-            "source": "MF",
-            # anchor_rtp deliberately omitted → from_json raises
-        }))
-        loaded = store.load()
-        assert loaded is not None
-        assert loaded.anchor is None
-        assert loaded.effective_chain_delay_ns == CHAIN_DELAY_NS
