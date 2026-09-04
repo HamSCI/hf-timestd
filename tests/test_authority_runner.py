@@ -483,12 +483,27 @@ class HostClockWiringTests(unittest.TestCase):
             authority_output_path=self.tmp / "authority.json",
         )
 
-    def test_gpsdo_enabled_wires_the_pps_rate_witness(self) -> None:
-        runner = self._build({"gpsdo": {"enabled": True,
-                                        "run_dir": str(self.tmp / "gpsdo-empty")}})
+    def test_pps_rate_witness_is_opt_in(self) -> None:
+        """Deployed to AC0G-B4 2026-09-04 17:09Z with the rate witness on by
+        default, the verdict went SUSPECT at +83.7 ppm while the LAN
+        stratum-1 held the host within 12 us.  gpsdo-monitor's pps_study
+        stamps DCD edges with time.monotonic() after an ioctl wake and calls
+        itself "not a metrology reference"; it read -90 ppm during the
+        runaway and +84 ppm on a correct clock.  Not a witness by default."""
+        gpsdo = {"enabled": True, "run_dir": str(self.tmp / "gpsdo-empty")}
+        runner = self._build({"gpsdo": gpsdo})
+        self.assertIsNone(runner.manager.host_clock_rate_provider,
+                          "default: gpsdo enabled but no rate witness")
+        runner = self._build({"gpsdo": gpsdo,
+                              "host_clock": {"rate_witness_enabled": True}})
         provider = runner.manager.host_clock_rate_provider
         self.assertIsNotNone(provider)
         self.assertIsNone(provider(), "empty run_dir -> no rate witness, no error")
+
+    def test_rate_witness_needs_the_gpsdo_probe(self) -> None:
+        runner = self._build({"gpsdo": {"enabled": False},
+                              "host_clock": {"rate_witness_enabled": True}})
+        self.assertIsNone(runner.manager.host_clock_rate_provider)
 
     def test_gpsdo_disabled_leaves_no_rate_witness(self) -> None:
         runner = self._build({"gpsdo": {"enabled": False}})

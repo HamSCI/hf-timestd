@@ -294,9 +294,17 @@ enabled = true
 # fault_ms = 1000.0          # a sysclock witness this far from an rtp-frame
 #                            # active tier is a whole-second-class fault
 #                            # (suspect starts at the pair's own bound)
-# rate_suspect_ppm = 50.0    # host rate against the GPSDO PPS; the study
-#                            # resolves ~17 ppm, so do not go below that
 # alarm_repeat_sec = 3600.0  # CRITICAL repeats this often while it holds
+#
+# The PPS-rate witness (gpsdo-monitor pps_study.period_ms_p50 -> ppm) is
+# OFF by default.  Deployed on 2026-09-04 17:09Z it declared B4 SUSPECT at
+# +83.7 ppm while the LAN stratum-1 held the host within 12 us; it had read
+# -90 ppm during the runaway.  The study stamps DCD edges in Python after an
+# ioctl wake and says of itself "not a metrology reference".  Enable only
+# once someone has shown what the number tracks.
+# rate_witness_enabled = false
+# rate_suspect_ppm = 50.0    # when enabled: the study resolves ~17 ppm, so
+#                            # do not go below that
 
 
 # === Coarse-time producer (bootstrap input) ===

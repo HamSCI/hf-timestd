@@ -86,6 +86,31 @@ the OS millisecond over a 60 s window, so it resolves roughly 17 ppm.
 Coarse, and the daemon's own note calls it "not a metrology reference."
 As a witness to a 90 to 300 ppm walk it suffices.
 
+## What the first deploy taught, 17:09Z the same day
+
+B4 took the code with the rate witness on by default.  The manager
+declared SUSPECT within a minute: host rate +83.7 ppm against PPS.  At
+that moment the LAN stratum-1 held the host clock within 12 µs and chrony
+reported a steady −81 ppm frequency correction.  The LB-1421 gap read
+0.82 s, inside its window.  Two good witnesses said ok; the study said
+otherwise.
+
+The study had read 999.91 ms per second at 15:58Z, while the clock lost
+roughly 180 ppm, and 1000.08 ms at 17:09Z, while the clock sat correct.
+Neither figure tracks the disciplined clock, which chrony slews through
+`CLOCK_MONOTONIC` and which the study stamps with.  Neither tracks the
+raw oscillator, near +81 ppm both times.  The daemon's own docstring
+calls the study "a liveness plus gross-stability indicator, not a
+metrology reference," and hf-timestd's contract with it says "only to
+decide A1/A0, never as a clock correction."  This module read the field
+as a rate and broke that contract.
+
+So the rate witness became opt-in the same hour:
+`rate_witness_enabled = false` by default, the code kept, the number left
+unpublished until someone shows what it measures.  The pair witnesses and
+the LB-1421 gap carry the verdict.  Both saw the fault on the day; the
+study's agreement was a coincidence of sign.
+
 ## What it does not do
 
 It changes no tier, widens no sigma, and steps no clock.  Whether FUSE

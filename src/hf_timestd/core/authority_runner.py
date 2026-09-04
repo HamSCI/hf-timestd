@@ -489,8 +489,18 @@ def build_authority_runner_from_config(
         frontend_probe=frontend_probe,
         demote_t6_on_breach=demote_t6_on_breach,
         demote_t6_on_breach_min_cycles=demote_t6_on_breach_min_cycles,
+        # OPT-IN.  Deployed on by default to AC0G-B4 2026-09-04 17:09Z, the
+        # PPS-rate witness declared SUSPECT at +83.7 ppm while the LAN
+        # stratum-1 held the host within 12 us.  gpsdo-monitor's pps_study
+        # stamps DCD edges with time.monotonic() after an ioctl wake, and its
+        # own note reads "not a metrology reference": it showed -90 ppm during
+        # the runaway and +84 ppm on a correct clock, so it tracks neither the
+        # raw oscillator nor the disciplined clock.  Off until someone shows
+        # what it measures.  docs/design/HOST_CLOCK_INTEGRITY.md.
         host_clock_rate_provider=(
-            gpsdo_probe.host_clock_rate_ppm if gpsdo_probe is not None else None),
+            gpsdo_probe.host_clock_rate_ppm
+            if gpsdo_probe is not None and bool(hc_cfg.get("rate_witness_enabled", False))
+            else None),
         host_clock_fault_ms=host_clock_fault_ms,
         host_clock_rate_suspect_ppm=host_clock_rate_suspect_ppm,
         host_clock_alarm_repeat_sec=host_clock_alarm_repeat_sec,
