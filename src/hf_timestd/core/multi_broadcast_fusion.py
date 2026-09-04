@@ -4370,6 +4370,13 @@ def run_fusion_service(
         except Exception as _e:
             logger.warning(f"Could not re-read config for authority manager: {_e}")
         authority_runner = build_authority_runner_from_config(config=_auth_config)
+        # TIMING_PROVENANCE_MODEL §3.2: the station's chain records, for the
+        # GRAPE packager.  Best-effort; the timing chain outranks its provenance.
+        try:
+            from hf_timestd.core.timing_chain_publisher import chains_from_config, publish_chains
+            publish_chains(chains_from_config(_auth_config))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("timing chain not published: %s", exc)
         authority_runner.start()
         probe_levels = [p.t_level for p in authority_runner.manager.probes]
         logger.info(

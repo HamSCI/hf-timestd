@@ -375,6 +375,24 @@ def chrony_gate_issues(cfg):
     return issues
 
 
+def provenance_issues(cfg):
+    """Warn-level issues for ``[timing.provenance]`` budget overrides: every
+    term must obey BudgetTerm's rules (a value or a disposition; Type A
+    carries measured_on).  The station's declaration is part of the record."""
+    issues = []
+    prov = ((cfg.get('timing', {}) or {}).get('provenance', None))
+    if not isinstance(prov, dict):
+        return issues
+    from hamsci_dsp.timing_map import BudgetTerm
+    for raw in (prov.get('budget') or []):
+        try:
+            BudgetTerm.from_dict(raw)
+        except (ValueError, KeyError, TypeError) as exc:
+            issues.append({'severity': 'warn', 'instance': 'default',
+                           'message': f'[timing.provenance] budget term {raw.get("term", "?")!r}: {exc}'})
+    return issues
+
+
 def host_clock_issues(cfg):
     """Warn-level contract issues for ``[timing.authority_manager.host_clock]``.
 
@@ -670,6 +688,7 @@ def _handle_validate_contract(args):
             issues.extend(timing_axis_issues(cfg))
             issues.extend(retired_key_issues(cfg))
             issues.extend(host_clock_issues(cfg))
+            issues.extend(provenance_issues(cfg))
             issues.extend(chrony_gate_issues(cfg))
 
             recorder = cfg.get('recorder', {}) or {}

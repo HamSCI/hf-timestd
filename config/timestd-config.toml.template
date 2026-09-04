@@ -293,6 +293,23 @@ enabled = true
 # rate_suspect_ppm = 50.0    # when enabled: the study resolves ~17 ppm, so
 #                            # do not go below that
 
+# === Timing provenance — the station declares its plane and budget ===
+# docs/design/TIMING_PROVENANCE_MODEL.md §3.2.  Both chains ship as defaults;
+# override only the terms THIS station has measured.  A term states a value
+# or a disposition; a Type A term carries measured_on.  `hf-timestd validate`
+# checks each override.  The fusion service publishes the result at
+# /run/hf-timestd/timing_chain.json for the GRAPE packager.
+[timing.provenance]
+# measurand_plane = "antenna_terminals"
+# calibration_plane = "ts1_injection_point"
+# traceability_qualification = "antenna-to-injector path not declared; receiver front end not characterised"
+# [[timing.provenance.budget]]
+# term = "antenna_to_injector"
+# type = "B"
+# correction_ns = 41000
+# u_ns = 3000
+# method = "12.3 m LMR-400 at 0.85 VF + preamp datasheet, 2026-09-10"
+
 # The chrony refclock gate (core/chrony_refclock_gate.py; METROLOGY.md §4.6).
 # Every authority tick it sets `chronyc selectopts <refid> ±noselect` on the
 # FUSE refclock: offered (-noselect) while the active tier is T3 or T6,

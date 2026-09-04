@@ -45,3 +45,20 @@ class HostClockIssueTests(unittest.TestCase):
         issues = host_clock_issues(_cfg(alarm_repeat_sec='hourly'))
         self.assertEqual(len(issues), 1)
         self.assertIn('alarm_repeat_sec', issues[0]['message'])
+
+
+from hf_timestd.cli import provenance_issues  # noqa: E402
+
+
+def test_provenance_term_that_breaks_the_rule_is_warned():
+    cfg = {'timing': {'provenance': {'budget': [
+        {'term': 'edge_estimation', 'type': 'A', 'u_ns': 150, 'method': 'no measured_on'}]}}}
+    issues = provenance_issues(cfg)
+    assert len(issues) == 1 and 'measured_on' in issues[0]['message']
+
+
+def test_clean_provenance_is_clean():
+    assert provenance_issues({}) == []
+    assert provenance_issues({'timing': {'provenance': {'budget': [
+        {'term': 'gnss_antenna_feed', 'type': 'B', 'correction_ns': 62, 'u_ns': 5,
+         'method': '15 m at 0.82 VF'}]}}}) == []
