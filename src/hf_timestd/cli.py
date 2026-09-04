@@ -327,6 +327,54 @@ def retired_key_issues(cfg):
 HOST_CLOCK_RATE_RESOLUTION_PPM = 17.0
 
 
+def chrony_gate_issues(cfg):
+    """Warn-level contract issues for ``[timing.authority_manager.chrony_gate]``.
+
+    The gate (chrony_refclock_gate.py) offers or withdraws the FUSE
+    refclock through ``chronyc selectopts``.  Since 2026-09-04 it also
+    withdraws FUSE while the host-clock verdict reads suspect or fault
+    (HOST_CLOCK_INTEGRITY.md, step 0.5).  Warn when an enabled gate has
+    that rule switched off, when ``host_clock_clear_sec`` is not a
+    non-negative number, and when ``refid`` is not the four ASCII
+    characters chrony uses.
+    """
+    issues = []
+    timing = cfg.get('timing', {}) or {}
+    auth = timing.get('authority_manager', None)
+    if not isinstance(auth, dict):
+        return issues
+    gate = auth.get('chrony_gate', None)
+    if not isinstance(gate, dict):
+        return issues
+
+    def _warn(key, value, why):
+        issues.append({
+            'severity': 'warn',
+            'instance': 'default',
+            'message': (
+                f'[timing.authority_manager.chrony_gate] {key} = {value!r} {why}'
+            ),
+        })
+
+    enabled = bool(gate.get('enabled', False))
+    if enabled and gate.get('withdraw_on_host_clock', True) is False:
+        _warn('withdraw_on_host_clock', False,
+              'leaves FUSE selectable while the host-clock verdict reads '
+              'suspect/fault -- the 2026-09-04 walk guard is off')
+    if 'host_clock_clear_sec' in gate:
+        v = gate['host_clock_clear_sec']
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            _warn('host_clock_clear_sec', v, 'must be a number of seconds')
+        elif v < 0:
+            _warn('host_clock_clear_sec', v, 'must be >= 0')
+    if 'refid' in gate:
+        r = gate['refid']
+        if not isinstance(r, str) or len(r) != 4 or not r.isascii():
+            _warn('refid', r, 'must be the 4-character ASCII refid of the refclock line '
+                              '(FUSE in chrony-timestd-refclocks.conf)')
+    return issues
+
+
 def host_clock_issues(cfg):
     """Warn-level contract issues for ``[timing.authority_manager.host_clock]``.
 
@@ -622,6 +670,7 @@ def _handle_validate_contract(args):
             issues.extend(timing_axis_issues(cfg))
             issues.extend(retired_key_issues(cfg))
             issues.extend(host_clock_issues(cfg))
+            issues.extend(chrony_gate_issues(cfg))
 
             recorder = cfg.get('recorder', {}) or {}
             channels_count = sum(

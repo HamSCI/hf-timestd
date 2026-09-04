@@ -139,3 +139,102 @@ class TestChronyRefclockGate(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestHostClockWithdrawal(unittest.TestCase):
+    """Step 0.5 (HOST_CLOCK_INTEGRITY.md): the verdict withdraws FUSE.
+
+    2026-09-04: FUSE measured the clock chrony steered with it and both
+    stations walked seconds off UTC while chrony reported 0.1 ms.  The
+    verdict saw it from independent witnesses; the gate now acts on it."""
+
+    def _gate(self, clear_sec=600.0, **kw):
+        run, calls = _record_runner()
+        self.t = 1000.0
+        gate = ChronyRefclockGate(refid="FUSE", runner=run, chronyc_bin="/bin/chronyc",
+                                  host_clock_clear_sec=clear_sec,
+                                  now_fn=lambda: self.t, **kw)
+        return gate, calls
+
+    def test_fault_withdraws_even_at_t6(self) -> None:
+        gate, calls = self._gate()
+        gate.apply("T6", "ok")
+        r = gate.apply("T6", "fault")
+        self.assertEqual(r.target_state, "disabled")
+        self.assertTrue(r.applied)
+        self.assertIn("host_clock:fault", r.reason)
+        self.assertEqual(calls[-1], ("/bin/chronyc", "selectopts", "FUSE", "+noselect"))
+        self.assertTrue(gate.host_clock_withdrawn)
+
+    def test_suspect_withdraws_at_t3(self) -> None:
+        gate, calls = self._gate()
+        r = gate.apply("T3", "suspect")
+        self.assertEqual(r.target_state, "disabled")
+        self.assertIn("host_clock:suspect", r.reason)
+
+    def test_ok_must_hold_for_clear_sec_before_reoffering(self) -> None:
+        gate, calls = self._gate(clear_sec=600.0)
+        gate.apply("T3", "fault")
+        self.t += 60
+        r = gate.apply("T3", "ok")
+        self.assertEqual(r.target_state, "disabled")
+        self.assertIn("host_clock:clearing", r.reason)
+        self.t += 300
+        r = gate.apply("T3", "ok")
+        self.assertEqual(r.target_state, "disabled")
+        self.t += 300  # 600 s of ok held
+        r = gate.apply("T3", "ok")
+        self.assertEqual(r.target_state, "enabled")
+        self.assertTrue(r.applied)
+        self.assertIn("host_clock:cleared", r.reason)
+        self.assertEqual(calls[-1], ("/bin/chronyc", "selectopts", "FUSE", "-noselect"))
+        self.assertFalse(gate.host_clock_withdrawn)
+
+    def test_a_relapse_restarts_the_clear_timer(self) -> None:
+        gate, _ = self._gate(clear_sec=600.0)
+        gate.apply("T3", "fault")
+        self.t += 500
+        gate.apply("T3", "ok")
+        gate.apply("T3", "suspect")   # relapse
+        self.t += 500
+        r = gate.apply("T3", "ok")    # only 0 s of the new ok streak
+        self.assertEqual(r.target_state, "disabled")
+        self.t += 600
+        r = gate.apply("T3", "ok")
+        self.assertEqual(r.target_state, "enabled")
+
+    def test_unwitnessed_holds_the_current_state(self) -> None:
+        gate, calls = self._gate()
+        gate.apply("T3", "ok")
+        n = len(calls)
+        r = gate.apply("T3", "unwitnessed")
+        self.assertEqual(r.target_state, "enabled")
+        self.assertEqual(len(calls), n)
+        gate.apply("T3", "fault")
+        self.t += 10_000
+        r = gate.apply("T3", "unwitnessed")   # no ok seen: stays withdrawn
+        self.assertEqual(r.target_state, "disabled")
+        self.assertIn("host_clock:held", r.reason)
+
+    def test_tier_rule_still_applies_after_clear(self) -> None:
+        gate, _ = self._gate(clear_sec=0.0)
+        gate.apply("T3", "fault")
+        r = gate.apply("T4", "ok")
+        self.assertEqual(r.target_state, "disabled")   # cleared, but T4 disables anyway
+
+    def test_flag_off_ignores_the_verdict(self) -> None:
+        gate, _ = self._gate(withdraw_on_host_clock=False)
+        r = gate.apply("T3", "fault")
+        self.assertEqual(r.target_state, "enabled")
+        self.assertFalse(gate.host_clock_withdrawn)
+
+    def test_no_verdict_behaves_as_before(self) -> None:
+        gate, calls = self._gate()
+        r = gate.apply("T3")
+        self.assertEqual(r.target_state, "enabled")
+        self.assertEqual(r.reason, "applied -noselect")
+        r = gate.apply("T3")
+        self.assertEqual(r.reason, "no change")
+
+    def test_default_refid_is_the_live_fusion_refclock(self) -> None:
+        self.assertEqual(ChronyRefclockGate(dry_run=True).refid, "FUSE")

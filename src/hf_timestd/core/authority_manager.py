@@ -335,7 +335,7 @@ class AuthorityManager:
                                   host_clock=host_clock)
         self._write_state(state)
         self._write_snapshot(state, results)
-        self._apply_chrony_gate(state.t_level_active)
+        self._apply_chrony_gate(state.t_level_active, host_clock)
         self._apply_mdns_advertiser(state)
         return state
 
@@ -367,21 +367,27 @@ class AuthorityManager:
                 result.target_state, result.reason,
             )
 
-    def _apply_chrony_gate(self, t_level_active: Optional[str]) -> None:
-        """Update chrony's view of the Fusion SHM refclock based on the
-        current active T-level (§4.6)."""
+    def _apply_chrony_gate(
+        self,
+        t_level_active: Optional[str],
+        host_clock: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Update chrony's view of the Fusion SHM refclock from the active
+        T-level (§4.6) and the host-clock verdict (HOST_CLOCK_INTEGRITY.md,
+        step 0.5): a suspect or fault verdict withdraws the refclock
+        whatever the tier."""
         if self.chrony_gate is None:
             return
+        verdict = host_clock.get("verdict") if host_clock else None
         try:
-            result = self.chrony_gate.apply(t_level_active)
+            result = self.chrony_gate.apply(t_level_active, verdict)
         except Exception as e:
             log.exception("Chrony refclock gate raised: %s", e)
             return
         if result.applied:
-            log.info(
-                "Chrony refclock gate: %s (%s)", result.target_state, result.reason,
-            )
-        elif result.reason and result.reason != "no change":
+            level = log.warning if "host_clock:" in result.reason else log.info
+            level("Chrony refclock gate: %s (%s)", result.target_state, result.reason)
+        elif result.reason and not result.reason.startswith("no change"):
             # Soft failures (chronyc not found, timeout, permission denied)
             # are worth flagging once per transition; noisy in steady state
             # otherwise so we rely on the "no change" fast-path above.

@@ -286,6 +286,30 @@ enabled = true
 # rate_suspect_ppm = 50.0    # when enabled: the study resolves ~17 ppm, so
 #                            # do not go below that
 
+# The chrony refclock gate (core/chrony_refclock_gate.py; METROLOGY.md §4.6).
+# Every authority tick it sets `chronyc selectopts <refid> ±noselect` on the
+# FUSE refclock: offered (-noselect) while the active tier is T3 or T6,
+# withdrawn (+noselect) otherwise.  Since 2026-09-04 (step 0.5 of the
+# host-clock program, docs/design/HOST_CLOCK_INTEGRITY.md) it also withdraws
+# FUSE while the host_clock verdict above reads suspect or fault, whatever
+# the tier, and re-offers it only after `ok` has held for
+# host_clock_clear_sec.  FUSE measures the clock chrony steers with it; the
+# verdict comes from witnesses that do not.  Withdrawing FUSE lets chrony
+# follow them instead of the walk.
+#
+# Off by default: `chronyc selectopts` needs chrony's command socket, which
+# the timestd user does not have on a stock install.  Grant it (a sudoers
+# line for that one command, or run the authority unit with access to
+# /run/chrony/chronyd.sock) before enabling, then watch `chronyc sources`
+# for the FUSE line flipping between `#-`/`#*` and `#?` on transitions.
+[timing.authority_manager.chrony_gate]
+enabled = false
+# refid = "FUSE"                    # must match the refclock line in
+#                                   # chrony-timestd-refclocks.conf
+# dry_run = false                   # log the decision, call nothing
+# withdraw_on_host_clock = true     # step 0.5; false restores the pure tier rule
+# host_clock_clear_sec = 600.0      # `ok` must hold this long before FUSE returns
+
 
 [timing.fusion_metrics]
 enabled = true

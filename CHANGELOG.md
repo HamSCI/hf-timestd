@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — the host-clock verdict withdraws FUSE from chrony (2026-09-04)
+
+Step 0.5 of the host-clock program (`docs/design/HOST_CLOCK_INTEGRITY.md`).
+`ChronyRefclockGate.apply()` now takes the `host_clock` verdict beside the
+active tier: while it reads `suspect` or `fault` the gate sets `+noselect`
+on FUSE whatever the tier, and re-offers it only after `ok` has held for
+`host_clock_clear_sec` (600 s; a relapse restarts the count).
+`unwitnessed` changes nothing.  FUSE measures the clock chrony steers with
+it, so a walking host makes FUSE read "on time"; withdrawing it lets
+chrony follow the witnesses that measure the clock from outside.  New keys
+under `[timing.authority_manager.chrony_gate]`: `withdraw_on_host_clock`
+(default true) and `host_clock_clear_sec`; the section itself enters the
+template, off by default, because `chronyc selectopts` needs chrony's
+command socket.  The gate's default refid becomes `FUSE`, the live
+refclock (was the retired `HFSN`).  The detector half of step 0.5 (where
+the per-second search looks) stays open; the design note lays out the two
+options.
+
 ### Removed — CHU, the station (2026-09-04)
 
 CHU (NRC Ottawa) left the air on 2026-06-27.  Step 1 (`8b33ed5`) removed

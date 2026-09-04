@@ -113,11 +113,76 @@ study's agreement was a coincidence of sign.
 
 ## What it does not do
 
-It changes no tier, widens no sigma, and steps no clock.  Whether FUSE
-keeps `trust` in chrony remains an operator decision; this module gives
-the operator a number to decide on.  The verdict reaches the log and
-authority.json.  Acting on it, in `sigmond-t6-stuck-watchdog` and the
-alert units, belongs to sigmond and waits there.  The authority history
+It changes no tier, widens no sigma, and steps no clock.  `trust` came
+off the FUSE refclock on both stations the same evening (19:17Z ND,
+19:19Z B4) and out of the repo template (4617c5f); with a real witness
+in the pool again, both clocks stepped back.  The verdict reaches the
+log and authority.json.  Acting on it in `sigmond-t6-stuck-watchdog` and
+the alert units belongs to sigmond and waits there.
+
+## Step 0.5 — the verdict withdraws FUSE (2026-09-04, evening)
+
+Removing `trust` keeps FUSE from outvoting the pool.  It does not keep
+chrony from *selecting* FUSE when the pool is thin or noisy, and on a
+station with no LAN stratum-1 the pool loses to a refclock that reports
+0.1 ms every cycle.  ND selected FUSE again on merit twenty minutes after
+its clock was stepped.  A refclock that follows the clock will always
+look better than the servers that measure it.
+
+So the chrony refclock gate (`core/chrony_refclock_gate.py`, METROLOGY
+§4.6) now takes the verdict beside the tier.  While the verdict reads
+`suspect` or `fault` the gate sets `+noselect` on FUSE whatever the
+active tier; chrony keeps measuring the refclock and stops steering by
+it.  The gate re-offers FUSE only after `ok` has held for
+`host_clock_clear_sec` (default 600 s) — a relapse restarts the count.
+`unwitnessed` leaves the gate where it stands.  Config:
+`[timing.authority_manager.chrony_gate]`, `withdraw_on_host_clock`
+(default true once the gate is enabled) and `host_clock_clear_sec`.
+
+The gate does not step the clock.  It removes the one source that
+measures the clock from inside, so chrony can follow the sources that
+measure it from outside.  On the day, that would have handed B4 back to
+192.168.1.80 within one authority tick of the T2 pair crossing 60 ms,
+and ND back to its pool.
+
+Enabling it is a deploy step: `chronyc selectopts` needs the chrony
+command socket, which the timestd user lacks on a stock install; the
+gate is off in the template and absent from the station configs as of
+this writing.  The template section says what to grant.
+
+## Open: where the detector looks
+
+The walk mechanism (bus 18:09Z, `reference_fuse_walk_mechanism`) has a
+second half the gate does not touch.  `tick_edge_detector` searches
+±`SEARCH_WINDOW_MS` = 20 ms around the sample the *host-clock label*
+names for each second.  Past 20 ms of clock error the real tick leaves
+the window, the correlator returns threshold-level junk centred where it
+was told to look, and the timing error reads ≈ 0.  Fusion admits what
+clears 10 dB.  The withdrawal above stops chrony from acting on that
+number; it does not stop the number from being wrong.
+
+Two ways to make the detector honest, for Michael's call:
+
+1. **Widen the window.**  Search ±500 ms or more.  Cheap, but the window
+   exists to reject the sidelobes and the other station's tick; widening
+   it re-admits both, and on a shared channel WWV and WWVH ticks sit
+   tens of ms apart.  A wide window would need the CLEAN/sidelobe
+   machinery to hold the line the window used to hold.
+2. **Anchor the per-second search on the minute marker.**  The 800 ms
+   marker correlation already runs each minute and lands its own onset
+   sample; place every second's expected sample at
+   `marker_onset + n × sample_rate × (1 + rate_correction)` instead of at
+   the host label.  The ticks are then found where the *signal* says the
+   seconds are, the host clock enters only as the coarse integer-second
+   name, and a walking host cannot pull the window off the tick.  Larger
+   change, touches the unified measurement path, and needs the marker
+   detection to be gated on SNR before it may anchor anything.
+
+The second one follows MEASUREMENT_MODEL §7.1 — the tick label must not
+come from the clock the tick is meant to check — and I would take it.
+Either way, until one lands, a fusion cycle admitted while the verdict
+reads suspect or fault carries a d_clock that describes the window, not
+the tick; the gate keeps chrony from believing it, and nothing else does.  The authority history
 store keeps its columns for now; its canonical home moved to hamsci-dsp,
 and a column set change goes through that repo.
 

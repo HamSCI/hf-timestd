@@ -631,8 +631,9 @@ The live refids are 4-char ASCII `HPPS` (HF BPSK-PPS, SHM 2) and `FUSE` (HF mult
 |---|---|---|
 | T6 or T3 | `-noselect` | Refclock offered as upstream; may be used to discipline the local clock and served to LAN peers |
 | T5 / T4 / T2 / T1 / T0 or no active | `+noselect` | Refclock visible in `chronyc sources` for diagnostics; not used for discipline and not served to LAN |
+| any tier, `host_clock.verdict` ∈ {suspect, fault} | `+noselect` | Step 0.5 (2026-09-04, `docs/design/HOST_CLOCK_INTEGRITY.md`): FUSE measures the clock chrony steers with it, so a walking host clock makes FUSE read "on time"; the verdict sees the walk from independent witnesses and the gate withdraws FUSE until `ok` has held for `host_clock_clear_sec` (600 s) |
 
-The gate fires only on T-level transitions — steady state makes no `chronyc` calls. This gives us the critical safety property from §4.5: **if Fusion breaks, we stop offering our refclock as an authoritative source within one authority cycle, regardless of the static stratum**. A Fusion host that has lost its HF signals cannot silently poison consumers on the LAN.
+The gate fires only on transitions — steady state makes no `chronyc` calls. This gives us the critical safety property from §4.5: **if Fusion breaks, we stop offering our refclock as an authoritative source within one authority cycle, regardless of the static stratum**. A Fusion host that has lost its HF signals cannot silently poison consumers on the LAN.
 
 Dynamic stratum / refid mutation would require either multiple pre-configured refclock lines with different stratum values (switched via selectopts) or a chrony upstream feature that does not currently exist. Operators who want this behavior today can install multiple refclock lines (e.g., one at stratum 1 `HFSN` and one at stratum 2 `HFSN2` with the same SHM unit) and extend the gate to toggle between them; the current implementation supports a single refid and treats stratum as install-time.
 

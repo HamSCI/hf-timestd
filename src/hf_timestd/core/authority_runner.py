@@ -387,8 +387,10 @@ def build_authority_runner_from_config(
     gate_cfg = auth_cfg.get("chrony_gate", {}) or {}
     if gate_cfg.get("enabled"):
         chrony_gate = ChronyRefclockGate(
-            refid=str(gate_cfg.get("refid", "HFSN")),
+            refid=str(gate_cfg.get("refid", "FUSE")),
             dry_run=bool(gate_cfg.get("dry_run", False)),
+            withdraw_on_host_clock=bool(gate_cfg.get("withdraw_on_host_clock", True)),
+            host_clock_clear_sec=float(gate_cfg.get("host_clock_clear_sec", 600.0)),
         )
 
     mdns_advertiser = None
