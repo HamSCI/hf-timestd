@@ -37,6 +37,8 @@ Safety properties:
   - All chronyc failures are caught and surfaced in GateResult.reason
     without raising. The authority manager's tick() keeps running.
   - Respects dry_run for first-time deployments and CI.
+  - ``sudo=True`` prefixes ``sudo -n``: on a stock Debian install the
+    timestd user cannot open chrony's command socket (see __init__).
 
 Measurement-model note (docs/design/MEASUREMENT_MODEL.md §7.1): this
 module handles the HOST CLOCK.  Every offset it reads or writes — chrony's
@@ -80,9 +82,16 @@ class ChronyRefclockGate:
         withdraw_on_host_clock: bool = True,
         host_clock_clear_sec: float = 600.0,
         now_fn: Callable[[], float] = time.monotonic,
+        sudo: bool = False,
     ):
         self.refid = refid
         self.chronyc_bin = chronyc_bin or shutil.which("chronyc") or "chronyc"
+        # chrony 4 takes privileged commands (selectopts) only over its Unix
+        # command socket.  Debian 13 keeps /run/chrony at 0700 and chronyd
+        # makes chronyd.sock owner-only, so membership in _chrony does not
+        # reach it.  `sudo=True` runs chronyc through `sudo -n`; the grant is
+        # config/sudoers-timestd-chrony-gate (two exact commands, no wildcard).
+        self.sudo = bool(sudo)
         self.dry_run = bool(dry_run)
         self.timeout_sec = float(timeout_sec)
         self._run = runner or subprocess.run
@@ -145,13 +154,17 @@ class ChronyRefclockGate:
             return GateResult(target_state=target, applied=False, reason=f"dry_run:{flag}{suffix}")
 
         try:
+            argv = [self.chronyc_bin, "selectopts", self.refid, flag]
+            if self.sudo:
+                argv = ["sudo", "-n", *argv]
             proc = self._run(
-                [self.chronyc_bin, "selectopts", self.refid, flag],
+                argv,
                 capture_output=True, text=True,
                 timeout=self.timeout_sec, check=False,
             )
         except FileNotFoundError:
-            return GateResult(target_state=target, applied=False, reason="chronyc not found")
+            missing = "sudo" if self.sudo else "chronyc"
+            return GateResult(target_state=target, applied=False, reason=f"{missing} not found")
         except subprocess.TimeoutExpired:
             return GateResult(target_state=target, applied=False, reason="chronyc timeout")
         except OSError as e:

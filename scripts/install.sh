@@ -872,6 +872,21 @@ if [[ -n "$CHRONY_CONF" ]]; then
         log_info "Chrony FUSE/HPPS refclocks included in $CHRONY_CONF"
     fi
 
+    # sudoers grant for the chrony refclock gate.  chrony 4 takes selectopts
+    # only over /run/chrony/chronyd.sock; Debian keeps that directory 0700 and
+    # the socket owner-only, so the _chrony membership above cannot reach it.
+    # Two exact commands, no wildcard.  Inert until the operator sets
+    # `[timing.authority_manager.chrony_gate] enabled = true, sudo = true`.
+    if [[ -d /etc/sudoers.d ]] && command -v visudo &>/dev/null; then
+        if visudo -cqf "$PROJECT_DIR/config/sudoers-timestd-chrony-gate"; then
+            install -m 0440 -o root -g root "$PROJECT_DIR/config/sudoers-timestd-chrony-gate" \
+                /etc/sudoers.d/timestd-chrony-gate
+            log_info "sudoers grant for the chrony refclock gate installed (/etc/sudoers.d/timestd-chrony-gate)"
+        else
+            log_warn "config/sudoers-timestd-chrony-gate failed visudo -c; NOT installed"
+        fi
+    fi
+
     # Ensure chrony logging is enabled (may be missing on older installs)
     if ! grep -q "^log tracking measurements statistics" "$CHRONY_CONF" 2>/dev/null; then
         echo "log tracking measurements statistics" >> "$CHRONY_CONF"

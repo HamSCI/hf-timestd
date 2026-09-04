@@ -391,6 +391,7 @@ def build_authority_runner_from_config(
             dry_run=bool(gate_cfg.get("dry_run", False)),
             withdraw_on_host_clock=bool(gate_cfg.get("withdraw_on_host_clock", True)),
             host_clock_clear_sec=float(gate_cfg.get("host_clock_clear_sec", 600.0)),
+            sudo=bool(gate_cfg.get("sudo", False)),
         )
 
     mdns_advertiser = None

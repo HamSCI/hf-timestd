@@ -304,13 +304,20 @@ enabled = true
 # verdict comes from witnesses that do not.  Withdrawing FUSE lets chrony
 # follow them instead of the walk.
 #
-# Off by default: `chronyc selectopts` needs chrony's command socket, which
-# the timestd user does not have on a stock install.  Grant it (a sudoers
-# line for that one command, or run the authority unit with access to
-# /run/chrony/chronyd.sock) before enabling, then watch `chronyc sources`
-# for the FUSE line flipping between `#-`/`#*` and `#?` on transitions.
+# Off by default: `chronyc selectopts` needs chrony's command socket, and
+# the timestd user cannot reach it on a stock install.  Membership in
+# _chrony (which install.sh grants) does NOT help on Debian 13: the chrony
+# unit keeps /run/chrony at 0700 and chronyd makes chronyd.sock owner-only,
+# and chrony 4 takes privileged commands over that socket only.  The
+# supported path is `sudo = true` here plus the two-command grant
+# install.sh puts at /etc/sudoers.d/timestd-chrony-gate (refid FUSE is
+# spelled out in that file; a different refid needs a matching edit).
+# Then watch `chronyc sources` for the FUSE line flipping between
+# `#-`/`#*` and `#?` on transitions, and `chronyc selectdata` for the N
+# option on FUSE while withdrawn.
 [timing.authority_manager.chrony_gate]
 enabled = false
+# sudo = true                       # run chronyc through `sudo -n` (see above)
 # refid = "FUSE"                    # must match the refclock line in
 #                                   # chrony-timestd-refclocks.conf
 # dry_run = false                   # log the decision, call nothing

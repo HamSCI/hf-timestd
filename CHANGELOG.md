@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — the chrony refclock gate can run chronyc through sudo (2026-09-04)
+
+Enabling the gate on AC0G-B4 and AC0G-ND showed why it had stayed off:
+the timestd user sits in `_chrony`, and that reaches nothing.  Debian 13's
+chrony unit sets `RuntimeDirectoryMode=0700` on `/run/chrony`, chronyd
+4.6.1 makes `chronyd.sock` owner-only, and chrony 4 accepts privileged
+commands such as `selectopts` over that socket alone.  `chronyc` as
+timestd falls back to UDP and gets `501 Not authorised`.  The gate now
+takes `sudo = true` (`[timing.authority_manager.chrony_gate]`) and runs
+`sudo -n /usr/bin/chronyc selectopts FUSE ±noselect`; install.sh ships
+the matching grant, `config/sudoers-timestd-chrony-gate`, as
+`/etc/sudoers.d/timestd-chrony-gate` after `visudo -c` passes.  The grant
+names exactly the two commands the gate issues.  A refused sudo surfaces
+in the gate's reason and does not latch, so the next tick retries.
+
 ### Changed — the leap-second hold arms from the broadcasts' advance notice (2026-09-04)
 
 The CHU FSK TAI-UTC change was the hold's only witness and armed it after

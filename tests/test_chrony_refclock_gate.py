@@ -238,3 +238,49 @@ class TestHostClockWithdrawal(unittest.TestCase):
 
     def test_default_refid_is_the_live_fusion_refclock(self) -> None:
         self.assertEqual(ChronyRefclockGate(dry_run=True).refid, "FUSE")
+
+
+class TestSudoWrapper(unittest.TestCase):
+    """`sudo=True` runs chronyc through `sudo -n` (2026-09-04).
+
+    On Debian 13 the chrony unit keeps /run/chrony at 0700 and chronyd makes
+    the command socket owner-only, so the timestd user cannot reach it even as
+    a member of _chrony.  chrony 4 accepts selectopts only over that socket.
+    A two-line sudoers grant plus this prefix is the supported path.
+    """
+
+    def test_default_runs_chronyc_directly(self) -> None:
+        run, calls = _record_runner()
+        gate = ChronyRefclockGate(refid="FUSE", runner=run, chronyc_bin="/usr/bin/chronyc")
+        gate.apply("T6")
+        self.assertEqual(calls[0], ("/usr/bin/chronyc", "selectopts", "FUSE", "-noselect"))
+
+    def test_sudo_prefixes_non_interactive_sudo(self) -> None:
+        run, calls = _record_runner()
+        gate = ChronyRefclockGate(refid="FUSE", runner=run, chronyc_bin="/usr/bin/chronyc", sudo=True)
+        gate.apply("T6")
+        self.assertEqual(
+            calls[0],
+            ("sudo", "-n", "/usr/bin/chronyc", "selectopts", "FUSE", "-noselect"),
+        )
+        gate.apply("T4")
+        self.assertEqual(calls[1][-1], "+noselect")
+        self.assertEqual(calls[1][:2], ("sudo", "-n"))
+
+    def test_sudo_refusal_surfaces_in_reason_and_does_not_latch(self) -> None:
+        run, calls = _record_runner(rc=1, stderr="sudo: a password is required")
+        gate = ChronyRefclockGate(refid="FUSE", runner=run, chronyc_bin="/usr/bin/chronyc", sudo=True)
+        r1 = gate.apply("T6")
+        self.assertFalse(r1.applied)
+        self.assertIn("a password is required", r1.reason)
+        # Not latched: the next tick tries again rather than reporting "no change".
+        r2 = gate.apply("T6")
+        self.assertFalse(r2.applied)
+        self.assertEqual(len(calls), 2)
+
+    def test_dry_run_wins_over_sudo(self) -> None:
+        run, calls = _record_runner()
+        gate = ChronyRefclockGate(refid="FUSE", runner=run, sudo=True, dry_run=True)
+        r = gate.apply("T6")
+        self.assertFalse(r.applied)
+        self.assertEqual(calls, [])

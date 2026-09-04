@@ -1,0 +1,7 @@
+# hf-timestd: let the chrony refclock gate (core/chrony_refclock_gate.py,
+# run by timestd-fusion as user timestd) offer and withdraw the FUSE refclock.
+# chrony 4 accepts selectopts only over /run/chrony/chronyd.sock, which Debian
+# keeps owner-only; this grant covers exactly the two commands the gate issues.
+# Enable with `[timing.authority_manager.chrony_gate] enabled = true, sudo = true`.
+# Installed by scripts/install.sh as /etc/sudoers.d/timestd-chrony-gate (0440).
+timestd ALL=(root) NOPASSWD: /usr/bin/chronyc selectopts FUSE +noselect, /usr/bin/chronyc selectopts FUSE -noselect

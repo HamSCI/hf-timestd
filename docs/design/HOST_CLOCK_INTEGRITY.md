@@ -146,9 +146,17 @@ measure it from outside.  On the day, that would have handed B4 back to
 and ND back to its pool.
 
 Enabling it is a deploy step: `chronyc selectopts` needs the chrony
-command socket, which the timestd user lacks on a stock install; the
-gate is off in the template and absent from the station configs as of
-this writing.  The template section says what to grant.
+command socket, which the timestd user lacks on a stock install.  The
+first attempt (22:20Z) showed why the installer's `usermod -aG _chrony`
+never helped: Debian 13's chrony unit sets `RuntimeDirectoryMode=0700`
+on `/run/chrony`, chronyd 4.6.1 makes `chronyd.sock` owner-only, and
+chrony 4 takes privileged commands over that socket alone.  As timestd,
+chronyc falls back to UDP and reads `501 Not authorised`.  The gate
+therefore gained `sudo = true`, which runs
+`sudo -n /usr/bin/chronyc selectopts FUSE ±noselect`, and install.sh
+ships the two-command grant `config/sudoers-timestd-chrony-gate` to
+`/etc/sudoers.d/`.  Nothing else in the fusion unit changes; it carries
+no `NoNewPrivileges`, so sudo works from inside it.
 
 ## Step 0.5(b) — the ticks are looked for where the signal put them (2026-09-04, evening)
 
