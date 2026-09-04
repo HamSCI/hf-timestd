@@ -83,17 +83,29 @@ The RX888 covers 0–64 MHz with 16-bit ADC at 64.8 or 129.6 Msps.
 
 ### GPSDO (GPS-Disciplined Oscillator)
 
-A GPSDO provides the 10 MHz reference clock and PPS signal that ka9q-radio
-uses for sample-accurate timestamping.  Without it, all metrology is invalid.
+A GPSDO governs the ADC sample rate, which the measurement model calls the
+ruler (`MEASUREMENT_MODEL.md` §2).  Without it, every uncertainty this
+station publishes rests on a free-running TCXO at 0.5–2 ppm and no
+registration survives a coast.
+
+⚠ **The RX888 MkII takes a 27 MHz external reference, not 10 MHz.**  A unit
+that only emits 10 MHz will not clock it.  Program a synthesised GPSDO for
+27 MHz on the output feeding the RX888's clock input.
 
 Common choices:
-- **Leo Bodnar GPSDO** (mini, dual-output) — recommended for RX888
+- **Leo Bodnar GPSDO** (mini, dual-output) — recommended for RX888;
+  synthesised, so set the RX888 output to 27 MHz
 - **Jackson Labs Fury** — higher holdover stability
-- Any unit providing 10 MHz + PPS locked to GPS
+- Any unit that can deliver 27 MHz locked to GPS, plus PPS
 
-The GPSDO 10 MHz output connects to the RX888's external clock input.
-The PPS output connects to the host's PPS input (if available) or is
-used by chrony/gpsd for system time discipline.
+⚠ Drive level matters as much as frequency.  On AC0G-ND an LBE-Mini set to
+its 8 mA floor left the RX888 free-running at roughly 350 ppm — present, but
+not governing.  32 mA locked it.  Verify lock; do not infer it from a
+connected cable.
+
+The PPS output serves the host's system-clock discipline (chrony/gpsd) and
+does not label data.  Data labels come from the sample counter
+(`MEASUREMENT_MODEL.md` §7.2).
 
 ### Antenna
 

@@ -130,6 +130,15 @@ the ruler inherits the GPSDO's stability and nothing else. The ruler carries no
 information about time of day. It says how far apart two samples sit; it cannot
 say which second either one belongs to.
 
+**Concretely:** the RX888 MkII takes a **27 MHz** external reference — not
+10 MHz — and derives 64.8 or 129.6 Msps from it. Two failures therefore both
+present as a governed ruler that does not govern. A GPSDO emitting only 10 MHz
+never clocks the ADC at all. And a synthesised unit set correctly to 27 MHz but
+driven at too low a level leaves the RX888 free-running: AC0G-ND ran roughly
+350 ppm with an LBE-Mini at its 8 mA floor, and 32 mA locked it. Presence of a
+cable establishes nothing. §2's provenance rule exists for exactly this — the
+probe observes lock, or the level counts as assumed.
+
 **Uncertainty.** `u(f_s)/f_s`, in parts per million.
 
 | ruler state | `u(f_s)/f_s` | provenance |
