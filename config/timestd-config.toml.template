@@ -231,8 +231,11 @@ physics_products = true
 realtime_iono = true
 
 [timing]
-authority = "rtp"
-rtp_expected_accuracy_ms = 0.001  # L4 accuracy (GPS+PPS via LAN)
+# `authority` and `rtp_expected_accuracy_ms` retired 2026-09-04
+# (docs/design/RESIDUE_AUDIT_2026-09-04.md §3.5).  The station registers
+# radiod's GPS_TIME/RTP_TIMESNAP pair and the Offset Judge supplies the
+# correction; no mode switch remains.  `hf-timestd validate` warns on a
+# config that still carries either key.
 
 # === Authority manager ===
 # Declared here so the section is visible surface, not a hidden key

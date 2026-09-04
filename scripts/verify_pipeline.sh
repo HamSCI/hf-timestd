@@ -679,41 +679,16 @@ fi
 # =============================================================================
 section "Phase 5: Adaptive Calibration (System State)"
 
-# 5a. Timing Authority Check
-# As of v5.4.0, bootstrap is deprecated. Check timing authority mode instead.
-# CONFIG_FILE already set at top of script during engine detection
-TIMING_AUTHORITY="unknown"
-
-if [[ -f "$CONFIG_FILE" ]]; then
-    TIMING_AUTHORITY=$(grep -E '^authority\s*=' "$CONFIG_FILE" 2>/dev/null | sed 's/.*=\s*"\([^"]*\)".*/\1/' | head -1)
-    if [[ -z "$TIMING_AUTHORITY" ]]; then
-        TIMING_AUTHORITY="rtp"  # Default
-    fi
-fi
-
-if [[ "$TIMING_AUTHORITY" == "rtp" ]]; then
-    check_pass "Timing authority: RTP mode (GPS+PPS via radiod - authoritative)"
-    echo "  → Clock discipline via GPS+PPS, not HF fusion"
-elif [[ "$TIMING_AUTHORITY" == "fusion" ]]; then
-    # In Fusion mode, check if MetrologyEngine has achieved lock
-    # This is now internal to MetrologyEngine (FusionTimingState)
-    # We can check the metrology logs for lock status
-    FUSION_LOCKED=false
-    for logfile in /var/log/hf-timestd/phase2-*.log; do
-        if [[ -f "$logfile" ]] && grep -q "PROVISIONAL LOCK\|REFINED LOCK" "$logfile" 2>/dev/null; then
-            FUSION_LOCKED=true
-            break
-        fi
-    done
-    
-    if [[ "$FUSION_LOCKED" == "true" ]]; then
-        check_pass "Timing authority: Fusion mode (timing lock achieved)"
-    else
-        check_warn "Timing authority: Fusion mode (timing lock pending)"
-        echo "  → MetrologyEngine searching for timing lock"
-    fi
+# 5a. Retired timing-authority key
+# `[timing] authority` (rtp | fusion) retired 2026-09-04 with the FUSION
+# authority mode (RESIDUE_AUDIT_2026-09-04 §3.4-3.5).  The station
+# registers radiod's GPS_TIME/RTP_TIMESNAP pair and the Offset Judge
+# supplies the correction; `hf-timestd validate` warns on a config that
+# still carries the key, and so does this check.
+if [[ -f "$CONFIG_FILE" ]] && grep -qE '^authority\s*=' "$CONFIG_FILE" 2>/dev/null; then
+    check_warn "Config still carries the retired [timing] authority key — remove it"
 else
-    check_warn "Timing authority: $TIMING_AUTHORITY (unknown mode)"
+    check_pass "No retired [timing] authority key in config"
 fi
 
 # 5b. Broadcast Calibration State
@@ -753,72 +728,35 @@ if [[ "$MODE" == "production" ]]; then
     section "Chrony Integration"
     
     if command -v chronyc &>/dev/null; then
-        # In RTP mode, GPS+PPS disciplines the clock, not HF-timestd
-        # HF-timestd TSL sources may still be configured but aren't primary
-        if [[ "$TIMING_AUTHORITY" == "rtp" ]]; then
-            # Check for selected time source (marked with * = selected)
-            # Could be: refclock (#*), NTP server (^*), or pool member (^*)
-            # In RTP mode, we trust radiod's GPS+PPS - chrony source is informational
-            SELECTED_REF=$(chronyc sources 2>/dev/null | grep -E "^#\*" | awk '{print $2}')
-            SELECTED_NTP=$(chronyc sources 2>/dev/null | grep -E "^\^\*" | awk '{print $2}')
-            
-            if [[ -n "$SELECTED_REF" ]]; then
-                check_pass "Chrony using refclock: $SELECTED_REF"
-            elif [[ -n "$SELECTED_NTP" ]]; then
-                # Check if it's a stratum 1 source (likely GPS-disciplined)
-                STRATUM=$(chronyc sources 2>/dev/null | grep -E "^\^\*" | awk '{print $3}')
-                if [[ "$STRATUM" == "1" ]]; then
-                    check_pass "Chrony using stratum-1 NTP: $SELECTED_NTP (GPS-disciplined)"
-                else
-                    check_pass "Chrony using NTP source: $SELECTED_NTP (stratum $STRATUM)"
-                fi
+        # `[timing] authority` retired 2026-09-04; the one remaining path
+        # registers radiod's pair and treats chrony as a witness.
+        # Check for selected time source (marked with * = selected)
+        # Could be: refclock (#*), NTP server (^*), or pool member (^*)
+        # The station registers radiod's GPS_TIME/RTP_TIMESNAP pair; the chrony
+        # source is informational here.
+        SELECTED_REF=$(chronyc sources 2>/dev/null | grep -E "^#\*" | awk '{print $2}')
+        SELECTED_NTP=$(chronyc sources 2>/dev/null | grep -E "^\^\*" | awk '{print $2}')
+        
+        if [[ -n "$SELECTED_REF" ]]; then
+            check_pass "Chrony using refclock: $SELECTED_REF"
+        elif [[ -n "$SELECTED_NTP" ]]; then
+            # Check if it's a stratum 1 source (likely GPS-disciplined)
+            STRATUM=$(chronyc sources 2>/dev/null | grep -E "^\^\*" | awk '{print $3}')
+            if [[ "$STRATUM" == "1" ]]; then
+                check_pass "Chrony using stratum-1 NTP: $SELECTED_NTP (GPS-disciplined)"
             else
-                check_warn "Chrony has no selected time source"
-                echo "  → Check: chronyc sources"
-            fi
-            
-            echo -e "${BLUE}ℹ️  INFO${NC} RTP mode: radiod provides authoritative timing via GPS+PPS"
-            
-            # TSL sources are informational in RTP mode
-            if chronyc sources 2>/dev/null | grep -q "TSL"; then
-                echo -e "${BLUE}ℹ️  INFO${NC} HF-timestd TSL sources configured (secondary in RTP mode)"
+                check_pass "Chrony using NTP source: $SELECTED_NTP (stratum $STRATUM)"
             fi
         else
-            # Fusion mode - HF-timestd should discipline the clock
-            if chronyc sources 2>/dev/null | grep -q "TSL"; then
-                TSL_COUNT=$(chronyc sources 2>/dev/null | grep "TSL" | wc -l)
-                check_pass "Chrony HF-timestd feed configured ($TSL_COUNT sources: TSL1=L1, TSL2=L2)"
-                
-                # Check reachability
-                TSL1_REACH=$(chronyc sources 2>/dev/null | grep "TSL1" | awk '{print $5}')
-                TSL2_REACH=$(chronyc sources 2>/dev/null | grep "TSL2" | awk '{print $5}')
-                
-                if [[ "$TSL1_REACH" == "0" ]] && [[ "$TSL2_REACH" == "0" ]]; then
-                    check_fail "TSL sources not reachable (reach: TSL1=$TSL1_REACH, TSL2=$TSL2_REACH)"
-                    echo "  → Check fusion service: systemctl status timestd-fusion"
-                    echo "  → Check SHM permissions: ipcs -m | grep 0x4e54503"
-                elif [[ -n "$TSL1_REACH" ]] && [[ "$TSL1_REACH" != "0" ]] || [[ -n "$TSL2_REACH" ]] && [[ "$TSL2_REACH" != "0" ]]; then
-                    TSL1_DEC=$((8#$TSL1_REACH))
-                    TSL2_DEC=$((8#$TSL2_REACH))
-                    check_pass "TSL sources reachable (TSL1: $TSL1_REACH/$TSL1_DEC polls, TSL2: $TSL2_REACH/$TSL2_DEC polls)"
-                    
-                    # Check if chrony is using HF-timestd
-                    SELECTED=$(chronyc sources 2>/dev/null | grep "TSL" | grep -E "^#\*" | awk '{print $2}')
-                    if [[ -n "$SELECTED" ]]; then
-                        check_pass "Chrony using HF-timestd source: $SELECTED"
-                    else
-                        COMBINED=$(chronyc sources 2>/dev/null | grep "TSL" | grep -E "^#\+" | awk '{print $2}')
-                        if [[ -n "$COMBINED" ]]; then
-                            check_pass "Chrony combining HF-timestd source: $COMBINED"
-                        else
-                            check_warn "Chrony not yet using HF-timestd (sources still being evaluated)"
-                        fi
-                    fi
-                fi
-            else
-                check_fail "Chrony HF-timestd feed not configured (Fusion mode requires TSL sources)"
-                echo "  → Check: /etc/hf-timestd/chrony-timestd-refclocks.conf"
-            fi
+            check_warn "Chrony has no selected time source"
+            echo "  → Check: chronyc sources"
+        fi
+        
+        echo -e "${BLUE}ℹ️  INFO${NC} Registration: radiod's GPS_TIME/RTP_TIMESNAP pair, corrected by the Offset Judge"
+        
+        # hf-timestd refclocks (FUSE/HPPS) are witnesses here, not the registration
+        if chronyc sources 2>/dev/null | grep -qE "FUSE|HPPS|TSL"; then
+            echo -e "${BLUE}ℹ️  INFO${NC} hf-timestd refclocks configured (FUSE/HPPS)"
         fi
     else
         check_warn "chronyd not installed"

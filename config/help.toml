@@ -198,27 +198,12 @@ required       = false
 
 # --- Timing (internal — almost entirely tier 1) --------------------
 #
-# Authority "rtp" is the canonical RX888+GPSDO setup; the auto-
-# detected default has 160 ms/min drift per the wspr-recorder
-# comment that applies here too.  All authority_manager / coarse_time
-# / fusion_metrics / l6_pps tuning is internal algorithm state.
-
-[timing.always_run_fusion]
-hidden = true
-
-[timing.authority]
-hidden = true
+# All authority_manager / coarse_time / fusion_metrics / l6_pps tuning
+# is internal algorithm state.  (`authority`, `rtp_expected_accuracy_ms`,
+# `always_run_fusion`, `timing_snapshot_rate_hz` and
+# `validation_threshold_ms` retired 2026-09-04 — RESIDUE_AUDIT §3.5.)
 
 [timing.lb1421_nmea_device]
-hidden = true
-
-[timing.rtp_expected_accuracy_ms]
-hidden = true
-
-[timing.timing_snapshot_rate_hz]
-hidden = true
-
-[timing.validation_threshold_ms]
 hidden = true
 
 # --- Metrology feature flags ---------------------------------------

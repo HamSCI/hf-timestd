@@ -317,7 +317,11 @@ class TestBuildAuthorityRunnerFromConfig(unittest.TestCase):
         """Regression: if the deployed config sets `[timing] authority
         = "rtp"` (a scalar operator preference), the old code tried to
         call `.get(...)` on a string and raised AttributeError. Now we
-        detect the non-dict and fall back to defaults cleanly."""
+        detect the non-dict and fall back to defaults cleanly.
+
+        The key itself retired 2026-09-04 (RESIDUE_AUDIT §3.5), but
+        deployed configs carry it until their next edit, so the runner
+        must keep tolerating it."""
         cfg = {
             "timing": {
                 "authority": "rtp",  # scalar preference, NOT a sub-table

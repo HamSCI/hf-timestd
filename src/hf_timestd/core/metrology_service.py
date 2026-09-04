@@ -46,7 +46,6 @@ from hf_timestd.core.metrology_engine import MetrologyEngine
 from hf_timestd.models import L1MetrologyMeasurement
 from hf_timestd.io import make_data_product_writer
 from hf_timestd.data_product_registry import DataProductRegistry
-from hf_timestd.interfaces.data_models import TimingConfig, TimingAuthority
 from hf_timestd.core.ring_buffer import (
     RingBufferError,
     RingBufferOverrunError,
@@ -179,18 +178,10 @@ class MetrologyService:
         self._rtp_to_unix_offset = None
         self._offset_samples = []
         
-        # Timing Authority Configuration (2026-02-01)
-        # In RTP mode: start_system_time from metadata IS authoritative (GPS+PPS)
-        # In FUSION mode: bootstrap reference provides RTP-to-UTC mapping
-        self._timing_config = TimingConfig.from_config(config)
-        self._is_rtp_authority = self._timing_config.authority == TimingAuthority.RTP
-        if self._is_rtp_authority:
-            logger.info(f"[TIMING] RTP authority mode - using metadata start_system_time directly")
-        else:
-            logger.info(f"[TIMING] FUSION authority mode - engine handles timing lock internally")
-        
-        # NOTE (2026-02-03): Bootstrap functionality migrated into MetrologyEngine.
-        # The engine's fusion_state handles timing lock - no external bootstrap needed.
+        # The engine registers each buffer against radiod's start_system_time
+        # (the GPS_TIME / RTP_TIMESNAP pair); the Offset Judge supplies the
+        # correction.  The `[timing] authority` switch that once selected a
+        # FUSION alternative retired 2026-09-04 (RESIDUE_AUDIT §3.4-3.5).
         
         # Initialize Engine
         # Extract precise coords if available
@@ -217,7 +208,6 @@ class MetrologyService:
             sample_rate=config.get('sample_rate', 24000),
             precise_lat=lat,
             precise_lon=lon,
-            is_rtp_authority=self._is_rtp_authority,
             enable_physics_products=self._physics_products,
             enable_coarse_time=_coarse_enabled,
             coarse_time_path=_coarse_path,

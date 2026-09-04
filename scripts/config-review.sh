@@ -179,22 +179,14 @@ echo -e "    compression    = ${GREEN}${COMPRESSION:-none}${NC}"
 echo -e "    tiered_storage = ${GREEN}${TIERED:-false}${NC}"
 echo ""
 
-# Timing settings (critical - new in v5.4.0)
+# `[timing] authority` retired 2026-09-04 (RESIDUE_AUDIT §3.5); a config
+# still carrying it draws a warning from `hf-timestd validate`.
 AUTHORITY=$(get_toml_value "$PROD_CONFIG" "timing" "authority")
-
-echo -e "  ${BOLD}[timing]${NC}"
 if [[ -n "$AUTHORITY" ]]; then
-    if [[ "$AUTHORITY" == "rtp" ]]; then
-        echo -e "    authority = ${GREEN}$AUTHORITY${NC} (GPS+PPS via radiod - authoritative)"
-    elif [[ "$AUTHORITY" == "fusion" ]]; then
-        echo -e "    authority = ${YELLOW}$AUTHORITY${NC} (NTP only - HF fusion disciplines clock)"
-    else
-        echo -e "    authority = ${RED}$AUTHORITY${NC} (unknown mode!)"
-    fi
-else
-    echo -e "    ${RED}[timing] section MISSING${NC}"
+    echo -e "  ${BOLD}[timing]${NC}"
+    echo -e "    authority = ${YELLOW}$AUTHORITY${NC} (retired key — remove it; the station registers radiod's pair, the Offset Judge corrects)"
+    echo ""
 fi
-echo ""
 
 # Count channels
 CHANNEL_COUNT=$(grep -c '^\[\[recorder.channels\]\]' "$PROD_CONFIG" 2>/dev/null || echo "0")
@@ -273,10 +265,9 @@ if [[ "$INTERACTIVE" == "true" ]]; then
         echo "Which setting needs correction?"
         echo "  1) Station (callsign, grid, coordinates)"
         echo "  2) ka9q (status_address)"
-        echo "  3) Timing authority (rtp/fusion)"
-        echo "  4) Skip - I'll edit manually"
+        echo "  3) Skip - I'll edit manually"
         echo ""
-        read -p "Choice [1-4]: " -n 1 -r
+        read -p "Choice [1-3]: " -n 1 -r
         echo ""
         
         case $REPLY in
@@ -306,26 +297,6 @@ if [[ "$INTERACTIVE" == "true" ]]; then
                     sudo sed -i "s/^status_address = .*/status_address = \"$NEW_ADDR\"/" "$PROD_CONFIG"
                     CHANGES_MADE=true
                     log_info "ka9q settings updated"
-                fi
-                ;;
-            3)
-                echo ""
-                echo "  Timing authority options:"
-                echo "    rtp    - Radiod has GPS+PPS (authoritative timing)"
-                echo "    fusion - NTP only (HF fusion disciplines clock)"
-                echo ""
-                NEW_AUTH=$(prompt_value "  Authority" "${AUTHORITY:-rtp}")
-                if [[ "$NEW_AUTH" != "$AUTHORITY" ]]; then
-                    if grep -q '^\[timing\]' "$PROD_CONFIG"; then
-                        sudo sed -i "s/^authority = .*/authority = \"$NEW_AUTH\"/" "$PROD_CONFIG"
-                    else
-                        # Section doesn't exist, add it
-                        echo "" | sudo tee -a "$PROD_CONFIG" > /dev/null
-                        echo "[timing]" | sudo tee -a "$PROD_CONFIG" > /dev/null
-                        echo "authority = \"$NEW_AUTH\"" | sudo tee -a "$PROD_CONFIG" > /dev/null
-                    fi
-                    CHANGES_MADE=true
-                    log_info "Timing authority updated to: $NEW_AUTH"
                 fi
                 ;;
             *)

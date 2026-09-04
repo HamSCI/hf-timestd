@@ -102,7 +102,6 @@ def _handle_inventory(args):
         if cfg is not None:
             recorder = cfg.get('recorder', {}) or {}
             ka9q     = cfg.get('ka9q', {})     or {}
-            timing   = cfg.get('timing', {})   or {}
             station  = cfg.get('station', {})  or {}
 
             freqs = []
@@ -155,7 +154,7 @@ def _handle_inventory(args):
                 'data_destination':            data_destination,
                 'data_sinks':                  data_sinks,
                 'uses_timing_calibration':     False,
-                'provides_timing_calibration': bool(timing.get('authority')),
+                'provides_timing_calibration': provides_timing_calibration(cfg),
                 # CONTRACT-v0.7 §18 — hf-timestd is the *producer* of
                 # timing-authority annotations for other clients, not a
                 # subscriber to a peer authority. The applied-authority
@@ -219,6 +218,69 @@ def _handle_inventory(args):
         'issues': issues,
     }
     print(json.dumps(payload, indent=2))
+
+
+def provides_timing_calibration(cfg) -> bool:
+    """CONTRACT §18: does this instance run a timing authority?
+
+    The authority manager lives in the fusion service and writes
+    ``/run/hf-timestd/authority.json``, so the instance provides a timing
+    authority exactly when its service profile activates ``fusion``.
+    Until 2026-09-04 this read the presence of ``[timing] authority``, a
+    key the measurement model retired (RESIDUE_AUDIT_2026-09-04 §3.5); a
+    stale copy of that key in a deployed config no longer counts.
+    """
+    from .service_profile import ServiceProfile
+    return 'fusion' in ServiceProfile.from_config(cfg).active_services()
+
+
+# Keys the measurement model retired.  ``validate`` names each one it
+# meets and says what the station runs without it, so a config that
+# still carries one never goes quiet (RESIDUE_AUDIT_2026-09-04 §3.4-3.5).
+# Maps (dotted section, key) -> the note ``validate`` prints.
+RETIRED_KEYS = {
+    ('timing', 'authority'): (
+        'retired 2026-09-04: the station registers radiod\'s '
+        'GPS_TIME/RTP_TIMESNAP pair and the Offset Judge supplies the '
+        'correction; no FUSION alternative remains'),
+    ('timing', 'rtp_expected_accuracy_ms'): (
+        'retired 2026-09-04: nothing read it, and the pair it described '
+        'measured 2.31 ms median on AC0G-B4, not the 1 \u00b5s it asserted'),
+    ('timing', 'always_run_fusion'):
+        'retired 2026-09-04 with TimingConfig; nothing read it',
+    ('timing', 'validation_threshold_ms'):
+        'retired 2026-09-04 with TimingConfig; nothing read it',
+    ('timing', 'timing_snapshot_rate_hz'):
+        'retired 2026-09-04 with TimingConfig; nothing read it',
+}
+
+
+def retired_key_issues(cfg):
+    """Warn-level contract issues, one per retired key the config carries.
+
+    A table-valued ``[timing.authority]`` is the older spelling of
+    ``[timing.authority_manager]`` and stays the business of
+    :func:`_a_axis_provenance`; only the scalar form is the retired key.
+    """
+    issues = []
+    for (section, key), note in RETIRED_KEYS.items():
+        table = cfg
+        for part in section.split('.'):
+            table = table.get(part, None) if isinstance(table, dict) else None
+        if not isinstance(table, dict) or key not in table:
+            continue
+        value = table[key]
+        if isinstance(value, dict):
+            continue
+        issues.append({
+            'severity': 'warn',
+            'instance': 'default',
+            'message': (
+                f'[{section}] {key} = {value!r} is a retired key ({note}); '
+                f'remove it from the config'
+            ),
+        })
+    return issues
 
 
 def t6_group_delay_issue(cfg):
@@ -466,6 +528,7 @@ def _handle_validate_contract(args):
             if _gd is not None:
                 issues.append(_gd)
             issues.extend(timing_axis_issues(cfg))
+            issues.extend(retired_key_issues(cfg))
 
             recorder = cfg.get('recorder', {}) or {}
             channels_count = sum(

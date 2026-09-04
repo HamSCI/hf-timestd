@@ -37,7 +37,6 @@ from hf_timestd.models import (
     StationID
 )
 from hf_timestd.core.wwvh_discrimination import WWVHDiscriminator
-from hf_timestd.core.tone_detector import MultiStationToneDetector
 try:
     from hf_timestd.core.arrival_pattern_matrix import ArrivalPatternMatrix as ArrivalPatternMatrix
     _ARRIVAL_MATRIX_AVAILABLE = True
@@ -52,8 +51,6 @@ from hf_timestd.core.hop_geometry import (
     n_hops_for_distance,
 )
 from hf_timestd.core.snr import peak_snr_db_envelope
-from hf_timestd.core.fusion_timing_state import FusionTimingState, LockTier
-from hf_timestd.core.bootstrap_state import BootstrapStateWriter
 from hf_timestd.core.timing_consistency_validator import TimingConsistencyValidator
 # We keep discriminators as they are signal analysis, not physics modeling.
 
@@ -225,11 +222,12 @@ class MetrologyEngine:
     Metrology Engine: Pure DSP processing for Time-of-Arrival.
     Orchestrates Tone Detection and Channel Characterization.
     
-    Two operating modes:
-    - RTP Mode: Timing is authoritative (GPSDO + GPS+PPS). We KNOW when second 0 is.
-                No searching needed - directly measure signals at known times.
-    - Fusion Mode: Timing from NTP (uncertain). Bootstrap to find UTC offset first,
-                   then operate like RTP mode.
+    The engine measures each broadcast at its expected arrival on the
+    registered timeline (radiod's GPS_TIME/RTP_TIMESNAP pair; the Offset
+    Judge supplies the correction).  It knows where second 0 falls and
+    searches only the propagation window around it.  The FUSION mode that
+    once bootstrapped a UTC offset from HF before searching retired
+    2026-09-04 with the `[timing] authority` key (RESIDUE_AUDIT §3.4).
     """
     
     def __init__(
@@ -242,7 +240,6 @@ class MetrologyEngine:
         sample_rate: int = SAMPLE_RATE_FULL,
         precise_lat: Optional[float] = None,
         precise_lon: Optional[float] = None,
-        is_rtp_authority: bool = True,  # Default to RTP mode
         enable_physics_products: bool = True,  # False = timing-only, skip secondary-arrival search
         enable_coarse_time: bool = True,
         coarse_time_path: Optional[Path] = None,
@@ -256,7 +253,6 @@ class MetrologyEngine:
         self.sample_rate = sample_rate
         self.precise_lat = precise_lat
         self.precise_lon = precise_lon
-        self.is_rtp_authority = is_rtp_authority
         self.enable_physics_products = enable_physics_products
 
         # Pre-allocated buffers for zero-allocation DSP
@@ -335,29 +331,14 @@ class MetrologyEngine:
         # added it should land on a dedicated dataclass with explicit
         # consumers, not a free-floating dict.
         
-        # Fusion mode timing state (only used when is_rtp_authority=False)
-        # This replaces the separate BootstrapService
-        self.fusion_state: Optional[FusionTimingState] = None
-        self._bootstrap_state_writer: Optional[BootstrapStateWriter] = None
-        if not self.is_rtp_authority:
-            self.fusion_state = FusionTimingState(sample_rate=self.sample_rate)
-            self._bootstrap_state_writer = BootstrapStateWriter()
-            logger.info(f"{channel_name}: Fusion mode - timing lock required before narrow search")
-        
         logger.info(
             f"MetrologyEngine initialized for {channel_name} "
-            f"({self.frequency_mhz} MHz), mode={'RTP' if is_rtp_authority else 'FUSION'}")
+            f"({self.frequency_mhz} MHz)")
 
     def _init_components(self):
         """Initialize discriminators and detectors."""
         try:
-            # 1. Tone Detector
-            self.tone_detector = MultiStationToneDetector(
-                channel_name=self.channel_name,
-                sample_rate=self.sample_rate
-            )
-            
-            # 2. WWV/WWVH Discriminator (includes BCD and Doppler)
+            # 1. WWV/WWVH Discriminator (includes BCD and Doppler)
             self.discriminator = WWVHDiscriminator(
                 channel_name=self.channel_name,
                 receiver_grid=self.receiver_grid,
@@ -365,7 +346,7 @@ class MetrologyEngine:
             )
             self.discriminator.frequency_mhz = self.frequency_mhz
             
-            # 3. BPM Discriminator
+            # 2. BPM Discriminator
             bpm_active_hours = set(range(24))
             if abs(self.frequency_mhz - 2.5) < 0.1:
                 bpm_active_hours = {0} | set(range(8, 24))
@@ -394,7 +375,7 @@ class MetrologyEngine:
                 active_hours=bpm_active_hours
             )
 
-            # 4. Multi-Station Detector (Used for cross-freq guidance logic)
+            # 3. Multi-Station Detector (Used for cross-freq guidance logic)
             # Note: We are using it for DSP purposes (signal presence), not physics solving.
             from hf_timestd.core.multi_station_detector import MultiStationDetector
             self.multi_station_detector = MultiStationDetector(
@@ -403,7 +384,7 @@ class MetrologyEngine:
                 sample_rate=self.sample_rate
             )
             
-            # 5. Correlator Bank (Optional, if coords available)
+            # 4. Correlator Bank (Optional, if coords available)
             if self.precise_lat is not None and self.precise_lon is not None:
                 from hf_timestd.core.correlator_bank import CorrelatorBank
                 self.correlator_bank = CorrelatorBank(
@@ -415,7 +396,7 @@ class MetrologyEngine:
             else:
                 self.correlator_bank = None
                 
-            # 6. CHU FSK Decoder
+            # 5. CHU FSK Decoder
             if 'CHU' in self.channel_name.upper():
                 from hf_timestd.core.chu_fsk_decoder import CHUFSKDecoder
                 self.chu_fsk_decoder = CHUFSKDecoder(
@@ -423,17 +404,17 @@ class MetrologyEngine:
                     channel_name=self.channel_name
                 )
             
-            # 7. Tick Matched Filters for per-second timing (55+ estimates/minute)
+            # 6. Tick Matched Filters for per-second timing (55+ estimates/minute)
             self.tick_filters: Dict[StationType, TickMatchedFilter] = {}
             self._init_tick_filters()
             
-            # 8. Tick Edge Detector for per-second onset timing (57 edges/minute)
+            # 7. Tick Edge Detector for per-second onset timing (57 edges/minute)
             # Detects the onset step of each tick via differential envelope,
             # overcoming the intermod and low-processing-gain problems that
             # prevented use of 5ms WWV/WWVH ticks in the matched filter.
             self.edge_detector = TickEdgeDetector(sample_rate=self.sample_rate)
             
-            # 9. Decoder config and A/B comparison tracker
+            # 8. Decoder config and A/B comparison tracker
             self.decoder_config = get_decoder_config()
             self.pll_decoders = {}  # PLL flywheel decoders for A/B comparison
             if self.decoder_config.enable_ab_comparison:
@@ -1385,12 +1366,10 @@ class MetrologyEngine:
         """
         Process minute: Tone Detection + Channel Char -> L1 Measurements.
         
-        Unified detection path: both RTP and Fusion modes use the same
-        per-second correlator when BufferTiming is available.  In Fusion
-        mode, UTC estimate uncertainty from FusionTimingState is added
-        to the physics model uncertainty (quadrature).  Post-detection,
-        RTP mode logs GPS+PPS residuals; Fusion mode feeds the Kalman
-        filter and chrony SHM.
+        The per-second correlator runs whenever BufferTiming is available;
+        without it the 20 ms template search runs at each station's
+        expected arrival.  Post-detection the engine logs each residual
+        against the registered timeline (docs/design/MEASUREMENT_MODEL.md).
         
         See docs/design/UNIFIED_MEASUREMENT_PATH.md for full design.
         
@@ -1481,32 +1460,14 @@ class MetrologyEngine:
                 expected_delays_by_station[station] = expected_delay_ms
                 expected_uncertainty_by_station[station] = uncertainty_ms
         
-        # edge_results is populated in the RTP branch (Step 1 edge ensemble)
-        # and consumed later in Step 2D (tick phase extraction) regardless of mode.
+        # edge_results is populated by the Step 1 edge ensemble and consumed
+        # later in Step 2D (tick phase extraction).
         edge_results = {}
         
-        # === UNIFIED DETECTION PATH ===
-        # Both RTP and Fusion modes use the same per-second correlator when
-        # BufferTiming is available.  This ensures identical detection
-        # algorithms, enabling RTP mode to validate Fusion-mode metrology.
+        # === DETECTION PATH ===
+        # The per-second correlator runs whenever BufferTiming is available.
         # See docs/design/UNIFIED_MEASUREMENT_PATH.md for design rationale.
         #
-        # The only mode-dependent behavior:
-        #   - Fusion mode adds UTC estimate uncertainty to the search window
-        #   - Post-detection: RTP logs GPS+PPS residual; Fusion feeds Kalman
-        
-        mode_label = "RTP" if self.is_rtp_authority else "Fusion"
-        
-        # In Fusion mode, add UTC estimate uncertainty from FusionTimingState
-        # to the per-station physics model uncertainty (quadrature sum).
-        # In RTP mode, GPS+PPS gives ~50 µs — negligible.
-        utc_unc_ms = 0.0
-        if not self.is_rtp_authority and self.fusion_state is not None:
-            utc_unc_ms = self.fusion_state.get_search_window_ms() / 3.0  # Convert 3σ to 1σ
-            logger.info(f"{self.channel_name}: {mode_label} mode: "
-                       f"UTC uncertainty ±{utc_unc_ms:.0f}ms (1σ), "
-                       f"lock_tier={self.fusion_state.lock_tier.name}")
-        
         # Define station templates based on channel type.
         # Tone frequency is per-station; duration is per-second (set in loop).
         channel_upper = self.channel_name.upper()
@@ -1542,11 +1503,10 @@ class MetrologyEngine:
         )
         
         if use_per_second_correlator:
-            # === Per-Second Correlator (primary path, both modes) ===
+            # === Per-Second Correlator (primary path) ===
             # BufferTiming maps samples↔UTC.  Find which UTC seconds fall
             # within this buffer and measure tones there.
-            logger.debug(f"{self.channel_name}: {mode_label} mode - "
-                        f"per-second correlator with BufferTiming")
+            logger.debug(f"{self.channel_name}: per-second correlator with BufferTiming")
             n_samples = len(audio_signal)
             buf_start_utc = buffer_timing.sample0_utc
             buf_end_utc = buffer_timing.sample_to_utc(n_samples)
@@ -1630,12 +1590,10 @@ class MetrologyEngine:
                     
                     expected_ms_from_buf_start = onset_sample * 1000 / self.sample_rate
                     
-                    # Adaptive search window: physics model 1σ + UTC uncertainty
-                    # (quadrature), then take 3σ.
+                    # Adaptive search window: physics model 1σ, taken at 3σ.
                     station_unc_1sigma = expected_uncertainty_by_station.get(station_name)
                     if station_unc_1sigma is not None:
-                        combined_1sigma = math.sqrt(station_unc_1sigma**2 + utc_unc_ms**2)
-                        adaptive_window = combined_1sigma * 3.0
+                        adaptive_window = station_unc_1sigma * 3.0
                     else:
                         adaptive_window = None
                     
@@ -1685,15 +1643,15 @@ class MetrologyEngine:
                 if rejected_snrs:
                     snr_str = f", rejected SNRs: {min(rejected_snrs):.1f}–{max(rejected_snrs):.1f}dB"
                 
-                logger.info(f"{self.channel_name}: {mode_label} attempts={len(all_attempts)} "
+                logger.info(f"{self.channel_name}: attempts={len(all_attempts)} "
                            f"detected={n_detected} rejected={n_rejected} "
                            f"[{reason_str}]{snr_str}")
                 
                 if measurements:
                     secs = [m['utc_second'] % 60 for m in measurements]
-                    logger.info(f"{self.channel_name}: {mode_label} detected at seconds {secs}")
+                    logger.info(f"{self.channel_name}: detected at seconds {secs}")
             
-            # === Per-Second Edge Detection (both modes) ===
+            # === Per-Second Edge Detection ===
             # Run differential edge detector on all per-second ticks.
             # This provides up to 57 independent timing measurements per
             # minute from the tick onset edges, even when the minute marker
@@ -1911,52 +1869,8 @@ class MetrologyEngine:
             # Store edge results for caller to retrieve
             self._last_edge_results = edge_results
             
-        elif not self.is_rtp_authority:
-            # === Fusion fallback: tone_detector when BufferTiming unavailable ===
-            # Without BufferTiming we can't do per-second correlation.
-            # Fall back to the legacy MultiStationToneDetector.
-            logger.debug(f"{self.channel_name}: Fusion mode - tone_detector fallback "
-                        f"(no BufferTiming)")
-            
-            # Use adaptive search window based on physics model + UTC uncertainty
-            max_uncertainty_ms = 15.0
-            for station, delay in expected_delays_by_station.items():
-                _, _, unc = self._predict_geometric_delay(station, system_time)
-                max_uncertainty_ms = max(max_uncertainty_ms, unc)
-            
-            adaptive_window_ms = min(200.0, max(50.0, max_uncertainty_ms * 3))
-            
-            if self.fusion_state is not None:
-                adaptive_window_ms = self.fusion_state.get_search_window_ms()
-            
-            logger.info(f"{self.channel_name}: Fusion fallback search: "
-                       f"expected_delays={expected_delays_by_station}, "
-                       f"window=±{adaptive_window_ms:.0f}ms, "
-                       f"lock_tier={self.fusion_state.lock_tier.name if self.fusion_state else 'N/A'}")
-            
-            detections = self.tone_detector.process_samples(
-                timestamp=buffer_mid_time,
-                samples=iq_samples,
-                rtp_timestamp=rtp_timestamp,
-                original_sample_rate=self.sample_rate,
-                buffer_rtp_start=rtp_timestamp,
-                search_window_ms=adaptive_window_ms,
-                expected_delays_by_station=expected_delays_by_station
-            )
-            
-            if not detections:
-                logger.debug(f"{self.channel_name}: No detections for minute {minute_boundary}")
-                return []
-            
-            station_names = [det.station.value for det in detections]
-            logger.info(f"{self.channel_name}: Fusion fallback detected "
-                       f"{len(detections)} station(s): {station_names}")
-            # Skip the measurement→detection conversion below; tone_detector
-            # already returns ToneDetectionResult objects.  Jump to Step 2.
-            # (detections variable is already set)
-            
         else:
-            # RTP mode without BufferTiming — fall back to legacy method.
+            # No BufferTiming — fall back to the legacy method.
             # Without BufferTiming we don't know which second we're at,
             # so use a conservative 20ms template as before.
             for station_name, tone_freq in station_tone_freqs:
@@ -1976,89 +1890,87 @@ class MetrologyEngine:
         
         # === Convert measurements to ToneDetectionResult ===
         # The per-second correlator produces dicts; downstream needs ToneDetectionResult.
-        # The Fusion fallback path already has ToneDetectionResult objects.
-        if use_per_second_correlator or self.is_rtp_authority:
-            if not measurements:
-                logger.debug(f"{self.channel_name}: No signals detected at expected times")
-                return []
+        if not measurements:
+            logger.debug(f"{self.channel_name}: No signals detected at expected times")
+            return []
+        
+        # Select best measurement per station for timing use.
+        # Strategy: robust median consistency filter across per-second
+        # measurements, then highest-SNR from the consistent set.
+        # This rejects false peaks (multipath, fading) that would win
+        # a naive highest-SNR selection.
+        from collections import defaultdict
+        by_station = defaultdict(list)
+        for m in measurements:
+            by_station[m['station']].append(m)
+        
+        best_per_station = {}
+        for stn, stn_measurements in by_station.items():
+            errs = np.array([m['timing_error_ms'] for m in stn_measurements])
+            if len(errs) >= 3:
+                med = np.median(errs)
+                mad = np.median(np.abs(errs - med))
+                sigma = max(mad * 1.4826, 15.0)  # MAD->std, floor 15ms
+                threshold = max(30.0, 2.5 * sigma)
+                consistent = [m for m in stn_measurements
+                              if abs(m['timing_error_ms'] - med) <= threshold]
+                n_rejected = len(stn_measurements) - len(consistent)
+                if n_rejected:
+                    logger.debug(f"{self.channel_name}: {stn} consistency filter "
+                                 f"rejected {n_rejected}/{len(stn_measurements)} "
+                                 f"outliers (median={med:+.1f}ms, σ={sigma:.1f}ms)")
+                pool = consistent if consistent else stn_measurements
+            else:
+                pool = stn_measurements
+            best = max(pool, key=lambda m: m['snr_db'])
+            best_per_station[stn] = best
+        
+        best_keys = set()
+        for m in best_per_station.values():
+            best_keys.add((m['station'], m.get('utc_second', 0)))
+        
+        # Convert to ToneDetectionResult format for downstream
+        from ..interfaces.data_models import ToneDetectionResult, StationType
+        detections = []
+        for m in measurements:
+            station_type = StationType[m['station']] if m['station'] in StationType.__members__ else StationType.UNKNOWN
+            is_best = (m['station'], m.get('utc_second', 0)) in best_keys
             
-            # Select best measurement per station for timing use.
-            # Strategy: robust median consistency filter across per-second
-            # measurements, then highest-SNR from the consistent set.
-            # This rejects false peaks (multipath, fading) that would win
-            # a naive highest-SNR selection.
-            from collections import defaultdict
-            by_station = defaultdict(list)
-            for m in measurements:
-                by_station[m['station']].append(m)
+            if buffer_timing is not None and 'arrival_utc' in m:
+                timestamp_utc_val = m['arrival_utc']
+            else:
+                timestamp_utc_val = system_time + m['arrival_ms'] / 1000.0
+            sample_pos = int(m['arrival_ms'] * self.sample_rate / 1000)
             
-            best_per_station = {}
-            for stn, stn_measurements in by_station.items():
-                errs = np.array([m['timing_error_ms'] for m in stn_measurements])
-                if len(errs) >= 3:
-                    med = np.median(errs)
-                    mad = np.median(np.abs(errs - med))
-                    sigma = max(mad * 1.4826, 15.0)  # MAD->std, floor 15ms
-                    threshold = max(30.0, 2.5 * sigma)
-                    consistent = [m for m in stn_measurements
-                                  if abs(m['timing_error_ms'] - med) <= threshold]
-                    n_rejected = len(stn_measurements) - len(consistent)
-                    if n_rejected:
-                        logger.debug(f"{self.channel_name}: {stn} consistency filter "
-                                     f"rejected {n_rejected}/{len(stn_measurements)} "
-                                     f"outliers (median={med:+.1f}ms, σ={sigma:.1f}ms)")
-                    pool = consistent if consistent else stn_measurements
-                else:
-                    pool = stn_measurements
-                best = max(pool, key=lambda m: m['snr_db'])
-                best_per_station[stn] = best
-            
-            best_keys = set()
-            for m in best_per_station.values():
-                best_keys.add((m['station'], m.get('utc_second', 0)))
-            
-            # Convert to ToneDetectionResult format for downstream
-            from ..interfaces.data_models import ToneDetectionResult, StationType
-            detections = []
-            for m in measurements:
-                station_type = StationType[m['station']] if m['station'] in StationType.__members__ else StationType.UNKNOWN
-                is_best = (m['station'], m.get('utc_second', 0)) in best_keys
-                
-                if buffer_timing is not None and 'arrival_utc' in m:
-                    timestamp_utc_val = m['arrival_utc']
-                else:
-                    timestamp_utc_val = system_time + m['arrival_ms'] / 1000.0
-                sample_pos = int(m['arrival_ms'] * self.sample_rate / 1000)
-                
-                det = ToneDetectionResult(
-                    station=station_type,
-                    frequency_hz=m['frequency_hz'],
-                    duration_sec=m.get('tone_duration_sec', 0.02),
-                    timestamp_utc=timestamp_utc_val,
-                    timing_error_ms=m['timing_error_ms'],
-                    snr_db=m['snr_db'],
-                    confidence=max(0.0, min(1.0, m['snr_db'] / 20.0)),
-                    use_for_time_snap=is_best,
-                    correlation_peak=m.get('correlation_peak', 0.0),
-                    noise_floor=0.0,
-                    tone_power_db=m['snr_db'],
-                    sample_position_original=sample_pos,
-                    original_sample_rate=self.sample_rate
-                )
-                detections.append(det)
-            
-            n_best = len(best_per_station)
-            station_names = [m['station'] for m in measurements]
-            logger.info(f"{self.channel_name}: {mode_label} mode measured "
-                       f"{len(detections)} signal(s) "
-                       f"({n_best} best for timing): {station_names}")
+            det = ToneDetectionResult(
+                station=station_type,
+                frequency_hz=m['frequency_hz'],
+                duration_sec=m.get('tone_duration_sec', 0.02),
+                timestamp_utc=timestamp_utc_val,
+                timing_error_ms=m['timing_error_ms'],
+                snr_db=m['snr_db'],
+                confidence=max(0.0, min(1.0, m['snr_db'] / 20.0)),
+                use_for_time_snap=is_best,
+                correlation_peak=m.get('correlation_peak', 0.0),
+                noise_floor=0.0,
+                tone_power_db=m['snr_db'],
+                sample_position_original=sample_pos,
+                original_sample_rate=self.sample_rate
+            )
+            detections.append(det)
+        
+        n_best = len(best_per_station)
+        station_names = [m['station'] for m in measurements]
+        logger.info(f"{self.channel_name}: measured "
+                   f"{len(detections)} signal(s) "
+                   f"({n_best} best for timing): {station_names}")
 
-            # Time-of-arrival gate, logged BESIDE the existing verdict so
-            # the two can be compared on identical minutes rather than
-            # across hours with different propagation.  Reports only --
-            # nothing downstream consumes it yet.
-            self._log_arrival_gate(measurements, expected_delays_by_station,
-                                   buffer_timing)
+        # Time-of-arrival gate, logged BESIDE the existing verdict so
+        # the two can be compared on identical minutes rather than
+        # across hours with different propagation.  Reports only --
+        # nothing downstream consumes it yet.
+        self._log_arrival_gate(measurements, expected_delays_by_station,
+                               buffer_timing)
              
         # === Step 2: Channel Characterization ===
         # We need this for Station ID and Metrics
@@ -2363,25 +2275,6 @@ class MetrologyEngine:
             )
             results.append(meas)
             
-            # Feed ONLY the best detection per station to FusionTimingState.
-            # Multiple timing measurements from the same station would confuse
-            # the Kalman filter with correlated noise.
-            # Gate → likelihood: use physics_confidence threshold (0.1) instead
-            # of binary physics_valid.  Marginal detections feed the Kalman
-            # filter with low weight rather than being excluded entirely.
-            if self.fusion_state is not None and physics_confidence > 0.1 and det.use_for_time_snap:
-                lock_status = self.fusion_state.add_detection(
-                    station=det.station.value,
-                    timing_error_ms=det.timing_error_ms,
-                    frequency_mhz=self.frequency_mhz,
-                    snr_db=det.snr_db,
-                    confidence=det.confidence * physics_confidence,
-                    system_time=system_time
-                )
-                if lock_status:
-                    logger.info(f"{self.channel_name}: {lock_status}")
-                    self._write_bootstrap_state_on_lock()
-            
         # Safeguard 2: Record misses for stations with no validated detection.
         # This feeds the consecutive miss counter in BroadcastWindowState,
         # which forces the search window back to initial width after
@@ -2466,7 +2359,7 @@ class MetrologyEngine:
             validated_stations.add(stn)
         
         # Check all stations we expect on this channel for gaps.
-        # Derive from channel name (works in both RTP and fusion modes).
+        # Derive from channel name.
         channel_upper = self.channel_name.upper()
         if 'CHU' in channel_upper:
             expected_stations = ['CHU']
@@ -2693,38 +2586,6 @@ class MetrologyEngine:
             [round(a, 2) for a in verdict.unclaimed_ms],
             self.ADMISSION_FLOOR_SIGMA,
         )
-
-    def _write_bootstrap_state_on_lock(self):
-        """Write bootstrap state file when FusionTimingState achieves lock.
-        
-        This unblocks the fusion service which waits for bootstrap_state.json
-        before starting its main loop. Called on PROVISIONAL and REFINED lock
-        transitions.
-        """
-        if self._bootstrap_state_writer is None or self.fusion_state is None:
-            return
-        
-        if not self.fusion_state.is_locked:
-            return
-        
-        try:
-            offset_stats = self.fusion_state._compute_offset_stats()
-            lock_tier = self.fusion_state.lock_tier.name
-            d_clock_ms = offset_stats.get('median_ms', 0.0)
-            uncertainty_ms = offset_stats.get('std_ms', 50.0)
-            
-            self._bootstrap_state_writer.write_locked(
-                lock_tier=lock_tier,
-                d_clock_ms=d_clock_ms,
-                uncertainty_ms=uncertainty_ms,
-                sample_rate=self.sample_rate
-            )
-            logger.info(
-                f"{self.channel_name}: Bootstrap state written: {lock_tier}, "
-                f"D_clock={d_clock_ms:+.1f}ms ± {uncertainty_ms:.1f}ms"
-            )
-        except Exception as e:
-            logger.error(f"{self.channel_name}: Failed to write bootstrap state: {e}")
 
     def _cross_validate_fsk(self, chu_metrics: dict, minute_boundary: int) -> None:
         """Cross-validate CHU FSK decode against other metrology functions.

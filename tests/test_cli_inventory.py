@@ -44,8 +44,8 @@ frequency_hz = 2500000
 [[recorder.channel_group.wwv.channels]]
 frequency_hz = 5000000
 
-[timing]
-authority = "fusion"
+[services]
+profile = "full"
 """
 
 
@@ -101,34 +101,52 @@ class V07TimingAuthorityFieldTests(unittest.TestCase):
         self.assertIn('timing_authority_applied', inst)
         self.assertIsNone(inst['timing_authority_applied'])
 
-    def test_provides_timing_calibration_true_when_authority_configured(self):
+    def test_provides_timing_calibration_true_when_fusion_service_runs(self):
         """The producer-side declaration the contract has had since
         v0.2; v0.7 just gives it semantics ([[project_client_contract_v07]]).
-        hf-timestd with `[timing].authority` set declares itself a
-        producer."""
+        The authority manager lives in the fusion service and writes
+        /run/hf-timestd/authority.json, so a profile that activates
+        `fusion` declares the instance a producer.  (Until 2026-09-04
+        this keyed on the presence of `[timing] authority`, a key the
+        measurement model retired — RESIDUE_AUDIT_2026-09-04 §3.5.)"""
         payload = self._emit()
         inst = payload['instances'][0]
         self.assertTrue(inst['provides_timing_calibration'])
         self.assertFalse(inst['uses_timing_calibration'])
 
-    def test_provides_timing_calibration_false_when_no_authority(self):
-        """When `[timing].authority` is absent, hf-timestd is not a
-        timing producer for sigmond's purposes — provides_timing_-
-        calibration must report false honestly. (A station may run
-        hf-timestd purely for science products without serving any
-        timing authority.)"""
-        toml_no_auth = MINIMAL_TOML.replace(
-            '[timing]\nauthority = "fusion"\n', ''
+    def test_provides_timing_calibration_false_without_fusion_service(self):
+        """A profile without the fusion service runs no authority
+        manager, so provides_timing_calibration must report false
+        honestly.  The default profile is `rtp` (recorder, web API and
+        monitoring; no metrology, no fusion) — a station may run
+        hf-timestd purely for its archive without serving any timing
+        authority."""
+        toml_no_fusion = MINIMAL_TOML.replace(
+            '[services]\nprofile = "full"\n', ''
         )
         with tempfile.TemporaryDirectory() as d:
             cfg = Path(d) / "timestd-config.toml"
-            cfg.write_text(toml_no_auth)
+            cfg.write_text(toml_no_fusion)
             payload = _run_inventory(cfg)
         inst = payload['instances'][0]
         self.assertFalse(inst['provides_timing_calibration'])
         # timing_authority_applied stays null regardless — hf-timestd
         # is never a subscriber.
         self.assertIsNone(inst['timing_authority_applied'])
+
+    def test_retired_authority_key_does_not_make_a_producer(self):
+        """Deployed configs still carry `[timing] authority = "rtp"`
+        for a while after its retirement.  The stale key must not
+        resurrect the old derivation."""
+        toml_stale = MINIMAL_TOML.replace(
+            '[services]\nprofile = "full"\n',
+            '[timing]\nauthority = "rtp"\n'
+        )
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Path(d) / "timestd-config.toml"
+            cfg.write_text(toml_stale)
+            payload = _run_inventory(cfg)
+        self.assertFalse(payload['instances'][0]['provides_timing_calibration'])
 
 
 class StdoutCleanlinessTests(unittest.TestCase):

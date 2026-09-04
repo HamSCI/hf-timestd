@@ -425,35 +425,10 @@ prompt_choice KA9Q_SOURCE "Select source mode" \
     "phase-engine — Multi-antenna coherent beamformer"
 
 # =============================================================================
-# Section 4: Timing Authority
+# T6 BPSK PPS chain-delay calibration (advanced, requires WB6CXC injector)
 # =============================================================================
-echo ""
-echo -e "${BOLD}${BLUE}━━━ Section 4: Timing Authority ━━━${NC}"
-echo ""
-echo -e "  ${DIM}How does your radiod get its time reference?${NC}"
-echo ""
-
-prompt_choice TIMING_AUTHORITY "Select timing mode" \
-    "rtp — Radiod has GPS+PPS feed (most accurate, recommended)" \
-    "fusion — Radiod uses NTP only (HF fusion disciplines the clock)"
-
-RTP_ACCURACY="0.001"
-if [[ "$TIMING_AUTHORITY" == "rtp" ]]; then
-    echo ""
-    echo -e "  ${DIM}GPS+PPS accuracy depends on connection type:${NC}"
-    prompt_choice RTP_ACCURACY_CHOICE "GPS+PPS connection" \
-        "lan — GPS+PPS via LAN (1 us accuracy, most common)" \
-        "local — GPS+PPS directly connected (100 ns accuracy)" \
-        "ntp — GPS via NTP only (1 ms accuracy)"
-
-    case "$RTP_ACCURACY_CHOICE" in
-        local) RTP_ACCURACY="0.0001" ;;
-        lan)   RTP_ACCURACY="0.001" ;;
-        ntp)   RTP_ACCURACY="1.0" ;;
-    esac
-fi
-
-# L6 BPSK PPS chain-delay calibration (advanced, requires WB6CXC injector)
+# (The "Timing Authority" prompt that stood here — rtp vs fusion — retired
+# 2026-09-04 with the `[timing] authority` key; RESIDUE_AUDIT §3.5.)
 echo ""
 echo -e "  ${DIM}L6 chain-delay calibration uses a local BPSK PPS signal injected${NC}"
 echo -e "  ${DIM}into the RF front-end to measure and correct end-to-end timing.${NC}"
@@ -500,10 +475,10 @@ if [[ "$L6_PPS_ENABLED" == "true" && -z "$L6_PPS_FREQUENCY" ]]; then
 fi
 
 # =============================================================================
-# Section 5: GNSS VTEC (Optional)
+# Section 4: GNSS VTEC (Optional)
 # =============================================================================
 echo ""
-echo -e "${BOLD}${BLUE}━━━ Section 5: GNSS VTEC Monitoring (Optional) ━━━${NC}"
+echo -e "${BOLD}${BLUE}━━━ Section 4: GNSS VTEC Monitoring (Optional) ━━━${NC}"
 echo ""
 echo -e "  ${DIM}A dual-frequency GNSS receiver (e.g. ZED-F9P) provides real-time${NC}"
 echo -e "  ${DIM}ionospheric TEC measurements for improved L2 timing corrections.${NC}"
@@ -520,10 +495,10 @@ if [[ "$VTEC_ENABLED" == "true" ]]; then
 fi
 
 # =============================================================================
-# Section 6: Compression
+# Section 5: Compression
 # =============================================================================
 echo ""
-echo -e "${BOLD}${BLUE}━━━ Section 6: Storage Options ━━━${NC}"
+echo -e "${BOLD}${BLUE}━━━ Section 5: Storage Options ━━━${NC}"
 echo ""
 
 echo -e "  ${DIM}IQ archiving writes raw data to disk for physics post-processing.${NC}"
@@ -562,10 +537,6 @@ echo "    ka9q status:  $KA9Q_STATUS"
 echo "    Source mode:   $KA9Q_SOURCE"
 echo ""
 echo -e "  ${BOLD}Timing:${NC}"
-echo "    Authority:    $TIMING_AUTHORITY"
-if [[ "$TIMING_AUTHORITY" == "rtp" ]]; then
-echo "    RTP accuracy: ${RTP_ACCURACY} ms"
-fi
 if [[ "$L6_PPS_ENABLED" == "true" ]]; then
 echo "    L6 PPS:       enabled (${L6_PPS_FREQUENCY} Hz)"
 fi
@@ -625,8 +596,6 @@ export WIZ_INSTRUMENT_ID="$INSTRUMENT_ID"
 export WIZ_KA9Q_STATUS="$KA9Q_STATUS"
 export WIZ_KA9Q_SOURCE="$KA9Q_SOURCE"
 export WIZ_COMPRESSION="$COMPRESSION"
-export WIZ_TIMING_AUTHORITY="$TIMING_AUTHORITY"
-export WIZ_RTP_ACCURACY="$RTP_ACCURACY"
 export WIZ_VTEC_ENABLED="$VTEC_ENABLED"
 export WIZ_VTEC_HOST="$VTEC_HOST"
 export WIZ_VTEC_PORT="$VTEC_PORT"
@@ -794,12 +763,6 @@ set_str("recorder", "engine", e("WIZ_KA9Q_SOURCE"))
 # Recorder
 set_str("recorder", "mode", "production")
 set_str("recorder", "compression", e("WIZ_COMPRESSION"))
-
-# Timing
-set_str("timing", "authority", e("WIZ_TIMING_AUTHORITY"))
-rtp_acc = e("WIZ_RTP_ACCURACY")
-if rtp_acc:
-    set_bare("timing", "rtp_expected_accuracy_ms", rtp_acc)
 
 # L6 BPSK PPS calibration
 l6_enabled = e("WIZ_L6_PPS_ENABLED")

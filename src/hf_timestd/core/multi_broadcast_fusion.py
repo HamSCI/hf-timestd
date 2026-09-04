@@ -604,7 +604,6 @@ class MultiBroadcastFusion:
         receiver_lon: Optional[float] = None,
         sample_rate: Optional[int] = None,
         timing_authority_level: str = 'L5',
-        is_rtp_authority: bool = True,
         storage_config: Optional[Dict] = None
     ):
         """
@@ -616,9 +615,6 @@ class MultiBroadcastFusion:
             auto_calibrate: Whether to learn calibration from data
             reference_station: Station to use as timing reference
             timing_authority_level: Hardware timing level (L1-L6), affects grade thresholds
-            is_rtp_authority: True when GPS+PPS is available (RTP mode). In RTP mode
-                              TEC is a science observable, not a correction to apply.
-                              In Fusion mode (False) TEC correction improves D_clock.
         """
         self.data_root = Path(data_root)
         # Optional per-cycle metrics hook installed by run_fusion_service
@@ -632,7 +628,6 @@ class MultiBroadcastFusion:
         if self.timing_authority_level not in self.GRADE_THRESHOLDS:
             logger.warning(f"Unknown timing authority level '{timing_authority_level}', defaulting to L5")
             self.timing_authority_level = 'L5'
-        self.is_rtp_authority = is_rtp_authority
         self.phase2_dir = self.data_root / 'phase2'
         # [storage] config for make_data_product_reader (HDF5→SQLite
         # migration). None → HDF5-only, preserving today's behaviour.
@@ -3341,24 +3336,17 @@ class MultiBroadcastFusion:
                 logger.info(f"GNSS VTEC available: {vtec_tecu:.2f} TECU (age: {age_seconds:.1f}s)")
                 
                 # ================================================================
-                # GNSS VTEC IONOSPHERIC CORRECTION (v6.1 - 2026-01-24)
+                # GNSS VTEC CROSS-CHECK (v6.1 - 2026-01-24; check-only since
+                # the FUSION-authority branch retired 2026-09-04)
                 # ================================================================
-                # The propagation model computed D_clock using a MODELED TEC value.
-                # GNSS VTEC provides a DIRECT MEASUREMENT of the actual TEC.
-                # 
-                # Physics: τ_iono = 40.3 × TEC × n_hops / (c × f²) [seconds]
-                #        = 40.3 × TEC × n_hops / f² × 1000 [ms, f in Hz]
-                #
-                # Correction: D_clock_corrected = D_clock + (model_iono - gnss_iono)
-                #           = D_clock + 40.3 × (TEC_model - TEC_gnss) × n_hops / f² × 1000
-                #
-                # This is metrologically justified because:
-                # 1. GNSS VTEC is a direct measurement (not a model)
-                # 2. The 1/f² physics is well-established
-                # 3. We're correcting the model error, not adding new uncertainty
+                # The propagation model computed D_clock from a MODELED TEC.
+                # GNSS VTEC measures the actual TEC.  Their difference, through
+                #   τ_iono = 40.3 × TEC × n_hops / (c × f²),
+                # says how far the model sat from the sky it described.  The
+                # loop below logs that and tags the measurement GNSS_VALIDATED;
+                # it never moves D_clock (see the comment at the tag).
                 # ================================================================
                 
-                corrections_applied = 0
                 for m in measurements:
                     if m.station == 'GLOBAL_DIFF' or m.station == 'UNKNOWN':
                         continue
@@ -3392,48 +3380,23 @@ class MultiBroadcastFusion:
                         f_sq = m.frequency_mhz ** 2
                         delta_iono_ms = IONO_DELAY_CONSTANT_MS * tec_diff * n_hops * obliquity_factor / f_sq
                         
-                        # Store original for logging
-                        original_d_clock = m.d_clock_ms
-
-                        # In RTP mode (GPS+PPS authority) D_clock is already
-                        # pinned to ~50 us. Applying a model-derived TEC
-                        # correction there would inject ionospheric model noise
-                        # into a reference more accurate than the model — so
-                        # GNSS VTEC is used only as an independent cross-check,
-                        # never as a D_clock correction. The correction applies
-                        # only in Fusion mode (no GPS+PPS), where HF is the
-                        # primary timing source. See METROLOGY_PHYSICS_SPLIT.md.
-                        if self.is_rtp_authority:
-                            m.propagation_mode = f"{prediction.primary_mode}+GNSS_VALIDATED"
-                            m.confidence = min(1.0, m.confidence * 1.1)
-                            logger.debug(
-                                f"  {m.station} {m.frequency_mhz}MHz: GNSS TEC "
-                                f"cross-check only (RTP mode — ΔTEC={tec_diff:+.1f} TECU, "
-                                f"Δiono={delta_iono_ms:+.3f}ms NOT applied to D_clock)"
-                            )
-                        elif abs(delta_iono_ms) > 0.1:
-                            # Fusion mode, significant correction — apply it
-                            m.d_clock_ms = original_d_clock + delta_iono_ms
-                            m.propagation_mode = f"{prediction.primary_mode}+GNSS_TEC"
-                            m.confidence = min(1.0, m.confidence * 1.2)  # Boost confidence
-                            corrections_applied += 1
-
-                            logger.debug(
-                                f"  {m.station} {m.frequency_mhz}MHz: TEC correction "
-                                f"model={model_tec:.1f} gnss={vtec_tecu:.1f} ΔTEC={tec_diff:+.1f} TECU, "
-                                f"Δiono={delta_iono_ms:+.3f}ms, D_clock {original_d_clock:.3f}->{m.d_clock_ms:.3f}ms"
-                            )
-                        else:
-                            # Fusion mode, correction below threshold — validate only
-                            m.propagation_mode = f"{prediction.primary_mode}+GNSS_VALIDATED"
-                            m.confidence = min(1.0, m.confidence * 1.1)
-                            logger.debug(
-                                f"  {m.station} {m.frequency_mhz}MHz: TEC validated "
-                                f"(ΔTEC={tec_diff:+.1f} TECU, Δiono={delta_iono_ms:+.3f}ms < 0.1ms threshold)"
-                            )
-                
-                if corrections_applied > 0:
-                    logger.info(f"Applied GNSS TEC correction to {corrections_applied} measurements")
+                        # GNSS VTEC is a cross-check only, never a D_clock
+                        # correction.  The registration comes from radiod's
+                        # pair plus the judge's offset (MEASUREMENT_MODEL.md);
+                        # a model-derived TEC correction would inject
+                        # ionospheric model noise into a reference tighter
+                        # than the model.  M-H14 pins this
+                        # (tests/test_fusion_gnss_vtec_rtp_gate.py).  The
+                        # FUSION-authority branch that once applied the
+                        # correction retired 2026-09-04 with the
+                        # `[timing] authority` key (RESIDUE_AUDIT §3.4).
+                        m.propagation_mode = f"{prediction.primary_mode}+GNSS_VALIDATED"
+                        m.confidence = min(1.0, m.confidence * 1.1)
+                        logger.debug(
+                            f"  {m.station} {m.frequency_mhz}MHz: GNSS TEC "
+                            f"cross-check only (ΔTEC={tec_diff:+.1f} TECU, "
+                            f"Δiono={delta_iono_ms:+.3f}ms NOT applied to D_clock)"
+                        )
             else:
                 logger.debug(f"GNSS VTEC stale (age: {time.time()-vtec_ts:.1f}s), skipping")
 
@@ -4430,9 +4393,7 @@ def run_fusion_service(
             quality diagnostics.  Consumed by wd-ka9q-record to align wav
             start times.
     """
-    # Determine timing authority + [storage] backend selection from config
-    # (same logic as bootstrap gate below)
-    _is_rtp_authority = True
+    # [storage] backend selection from config
     _storage_config = {}
     try:
         import toml as _toml_fs
@@ -4440,18 +4401,14 @@ def run_fusion_service(
         if _cfg_path.exists():
             _cfg_fs = _toml_fs.load(_cfg_path)
             _storage_config = _cfg_fs.get('storage', {}) or {}
-            _auth = _cfg_fs.get('timing', {}).get('authority', 'rtp')
-            _is_rtp_authority = (_auth == 'rtp')
-            logger.info(f"[FUSION] Timing authority: {_auth} → is_rtp_authority={_is_rtp_authority}")
     except Exception as _e:
-        logger.warning(f"[FUSION] Could not read config for authority: {_e}")
+        logger.warning(f"[FUSION] Could not read config for [storage]: {_e}")
 
     fusion = MultiBroadcastFusion(
         data_root,
         receiver_lat=receiver_lat,
         receiver_lon=receiver_lon,
         timing_authority_level=timing_authority_level,
-        is_rtp_authority=_is_rtp_authority,
         storage_config=_storage_config
     )
     
@@ -4619,67 +4576,6 @@ def run_fusion_service(
     if SYSTEMD_AVAILABLE:
         systemd_daemon.notify('READY=1')
         logger.info("Notified systemd: READY")
-    
-    # ================================================================
-    # BOOTSTRAP LOCK GATE (v6.2) - Wait for bootstrap before fusion
-    # ================================================================
-    # Fusion should not run until bootstrap has established the RTP-to-UTC
-    # correspondence. Without this, D_clock calculations are meaningless.
-    #
-    # In RTP authority mode (GPS+PPS), timing is already authoritative
-    # so bootstrap lock is not needed - skip the gate entirely.
-    #
-    # In fusion authority mode, MetrologyEngine writes bootstrap_state.json
-    # when FusionTimingState achieves PROVISIONAL or REFINED lock.
-    _skip_bootstrap_gate = True  # Default: skip gate (RTP authority assumed)
-    try:
-        import toml as _toml
-        _config_path = Path('/etc/hf-timestd/timestd-config.toml')
-        if _config_path.exists():
-            with open(_config_path, 'r') as _f:
-                _cfg = _toml.load(_f)
-            _authority = _cfg.get('timing', {}).get('authority', 'rtp')
-            if _authority == 'rtp':
-                logger.info("[BOOTSTRAP] RTP authority mode (GPS+PPS) - skipping bootstrap gate")
-            else:
-                logger.info(f"[BOOTSTRAP] Authority mode '{_authority}' - bootstrap gate enabled")
-                _skip_bootstrap_gate = False
-        else:
-            logger.info("[BOOTSTRAP] No config file found - defaulting to RTP authority (skip gate)")
-    except Exception as e:
-        logger.warning(f"[BOOTSTRAP] Could not read config to check authority: {e} - defaulting to skip gate")
-    
-    if not _skip_bootstrap_gate:
-        try:
-            from .bootstrap_state import BootstrapStateWatcher
-            bootstrap_watcher = BootstrapStateWatcher()
-            
-            # Check if already locked (e.g., service restart after lock)
-            if not bootstrap_watcher.is_locked():
-                logger.info("[BOOTSTRAP] Waiting for bootstrap lock before starting fusion...")
-                # Wait indefinitely for bootstrap lock (with watchdog keepalive)
-                while running and not bootstrap_watcher.is_locked():
-                    if SYSTEMD_AVAILABLE:
-                        systemd_daemon.notify('WATCHDOG=1')
-                    time.sleep(1.0)
-                
-                if not running:
-                    logger.info("[BOOTSTRAP] Shutdown requested while waiting for lock")
-                    return
-            
-            state = bootstrap_watcher.get_state()
-            if state:
-                logger.info(
-                    f"[BOOTSTRAP] Lock confirmed: {state.lock_tier}, "
-                    f"D_clock={state.d_clock_ms:+.1f}ms ± {state.uncertainty_ms:.1f}ms"
-                )
-            else:
-                logger.info("[BOOTSTRAP] Lock detected (state file exists)")
-                
-        except ImportError as e:
-            logger.warning(f"[BOOTSTRAP] State watcher not available: {e}. Proceeding without gate.")
-        except Exception as e:
-            logger.warning(f"[BOOTSTRAP] Error checking lock state: {e}. Proceeding without gate.")
     
     # Data freshness alerting - track consecutive cycles with no measurements
     consecutive_empty_cycles = 0
