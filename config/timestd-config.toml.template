@@ -403,7 +403,6 @@ low_edge_hz = -25000
 high_edge_hz = 25000
 consecutive_required = 10         # valid edges before lock
 edge_tolerance_samples = 30       # scale with sample_rate: 5 @16k, 30 @96k
-use_matched_filter = true         # MF calibrator (fine stage rides this path)
 use_magnitude_correlation = false # Method 2 Re-projection; Method 4 magnitude
                                   # peak-pick FAILED twice (BPSK-PPS-DETECTION-
                                   # METHODS.md §4-5) — do not enable
@@ -437,12 +436,8 @@ description = "BPSK_PPS"
 #                                 # Set this key to that value in seconds, then
 #                                 # confirm the residual collapses toward zero.
 #
-# Calibrator selection:
-# use_matched_filter = false      # When true, use the textbook matched-filter
-#                                 # calibrator (Costas + integrate-and-dump MF +
-#                                 # parabolic interp). Default false keeps the
-#                                 # legacy per-sample-Δφ calibrator running until
-#                                 # explicitly opted in.
+# Calibrator tuning (the matched filter is the only calibrator since
+# 2026-09-04; `use_matched_filter` is a retired key — RESIDUE_AUDIT §3.4):
 # costas_loop_bw_hz = 1.0         # Loop bandwidth of the carrier-phase tracker
 #                                 # (matched-filter only). Default 1.0; the GPSDO
 #                                 # topology means residual carrier offset is
@@ -465,7 +460,7 @@ description = "BPSK_PPS"
 # Channel filter overrides (require ka9q-python ≥ 3.11):
 # low_edge_hz = -25000            # Channel filter low edge (Hz, relative to center).
 # high_edge_hz = 25000            # Channel filter high edge. Recommended ±25 kHz with
-#                                 # use_matched_filter=true: σ_t scales as 1/B for a
+#                                 # the matched filter: σ_t scales as 1/B for a
 #                                 # band-limited polarity-flip step, so wider is
 #                                 # better up to the receiver / aliasing limit.
 #                                 # Omit (or None) to use the iq preset's ±5 kHz default.

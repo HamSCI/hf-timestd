@@ -252,6 +252,19 @@ RETIRED_KEYS = {
         'retired 2026-09-04 with TimingConfig; nothing read it',
     ('timing', 'timing_snapshot_rate_hz'):
         'retired 2026-09-04 with TimingConfig; nothing read it',
+    # The legacy per-sample-Δφ calibrator behind `use_matched_filter =
+    # false` (RESIDUE_AUDIT §3.4).  `[timing.l6_pps]` is the older
+    # spelling of the section that the recorder still maps.
+    ('timing.t6_pps', 'use_matched_filter'):
+        'retired 2026-09-04: the matched-filter calibrator is the only '
+        'T6 calibrator; the legacy per-sample-\u0394\u03c6 calibrator is gone',
+    ('timing.t6_pps', 'filter_500hz_notch'):
+        'retired 2026-09-04 with the legacy calibrator, the only reader',
+    ('timing.l6_pps', 'use_matched_filter'):
+        'retired 2026-09-04: the matched-filter calibrator is the only '
+        'T6 calibrator; the legacy per-sample-\u0394\u03c6 calibrator is gone',
+    ('timing.l6_pps', 'filter_500hz_notch'):
+        'retired 2026-09-04 with the legacy calibrator, the only reader',
 }
 
 

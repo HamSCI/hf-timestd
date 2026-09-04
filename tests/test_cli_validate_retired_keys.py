@@ -40,17 +40,39 @@ class RetiredKeyIssueTests(unittest.TestCase):
         self.assertIn('2.31 ms', issues[0]['message'])
 
     def test_every_retired_key_warns_exactly_once(self):
-        cfg = {'timing': {key: 1 for (_section, key) in RETIRED_KEYS}}
+        cfg = {}
+        for (section, key) in RETIRED_KEYS:
+            table = cfg
+            for part in section.split('.'):
+                table = table.setdefault(part, {})
+            table[key] = 1
         issues = retired_key_issues(cfg)
         self.assertEqual(len(issues), len(RETIRED_KEYS))
-        for (_section, key) in RETIRED_KEYS:
+        for (section, key) in RETIRED_KEYS:
             self.assertEqual(
-                sum(1 for i in issues if f'] {key} =' in i['message']), 1, key)
+                sum(1 for i in issues if f'[{section}] {key} =' in i['message']),
+                1, (section, key))
 
     def test_table_valued_authority_is_not_the_retired_key(self):
         # The pre-authority_manager spelling; _a_axis_provenance reads it.
         cfg = {'timing': {'authority': {'a_level': 'A2'}}}
         self.assertEqual(retired_key_issues(cfg), [])
+
+    def test_use_matched_filter_warns_in_either_section_spelling(self):
+        for section in ('t6_pps', 'l6_pps'):
+            issues = retired_key_issues(
+                {'timing': {section: {'enabled': True, 'use_matched_filter': True}}})
+            self.assertEqual(len(issues), 1, section)
+            self.assertIn(f'[timing.{section}] use_matched_filter = True',
+                          issues[0]['message'])
+            self.assertIn('only T6 calibrator', issues[0]['message'])
+
+    def test_use_matched_filter_false_still_only_warns(self):
+        # The station runs the matched filter whatever the stale key says;
+        # validate must say so rather than fail.
+        issues = retired_key_issues(
+            {'timing': {'t6_pps': {'use_matched_filter': False}}})
+        self.assertEqual([i['severity'] for i in issues], ['warn'])
 
     def test_warnings_never_fail_validation(self):
         cfg = {'timing': {'authority': 'fusion', 'rtp_expected_accuracy_ms': 0.001}}

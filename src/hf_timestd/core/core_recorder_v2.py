@@ -807,115 +807,102 @@ class CoreRecorderV2:
             else:
                 sr = int(self._t6_config.get('sample_rate',
                          self.channel_defaults.get('sample_rate', 24000)))
-                # Calibrator selection. The matched-filter calibrator
-                # (textbook Costas + integrate-and-dump MF) replaces the
-                # legacy per-sample-Δφ heuristic; it expects a wider
-                # channel filter (±25 kHz at 96 kHz SR) for full benefit.
-                # Default False to keep deployed behaviour unchanged
-                # until a config bump explicitly opts in.
-                if self._t6_config.get('use_matched_filter', False):
-                    from hf_timestd.core.bpsk_pps_calibrator_mf import BpskPpsCalibratorMF
-                    self._t6_calibrator = BpskPpsCalibratorMF(
-                        sample_rate=sr,
-                        consecutive_required=self._t6_config.get('consecutive_required', 10),
-                        edge_tolerance_samples=self._t6_config.get('edge_tolerance_samples', 30),
-                        costas_loop_bw_hz=self._t6_config.get('costas_loop_bw_hz', 1.0),
-                        # Diagnostic capture (opt-in).  When
-                        # debug_dump_path is set, the MF calibrator
-                        # records the matched-filter output ``y``,
-                        # detected peak metadata, and Costas phase per
-                        # batch to a single NPZ for offline analysis.
-                        # Used to investigate the cascade re-lock
-                        # against secondary candidates ~60 samples
-                        # away from the real PPS edge.
-                        debug_dump_path=self._t6_config.get('debug_dump_path'),
-                        debug_dump_seconds=self._t6_config.get('debug_dump_seconds', 60.0),
-                        debug_dump_subthreshold_factor=self._t6_config.get(
-                            'debug_dump_subthreshold_factor', 0.2
-                        ),
-                        # Periodic Costas-phase log (0 disables).
-                        # Default off; enable in TOML for investigation
-                        # of the ~13-second phase excursions.
-                        phase_log_period_batches=self._t6_config.get(
-                            'phase_log_period_batches', 0
-                        ),
-                        # Magnitude-correlation detection (opt-in).
-                        # When True the matched filter runs on the
-                        # COMPLEX signal and peak-picks on |y| — no
-                        # Costas dependency.  Eliminates the
-                        # carrier-recovery instability and the
-                        # per-restart chain_delay disambiguation drift
-                        # that the Re(s_rot) path inherits from
-                        # Costas's choice of operating point.  See
-                        # docs/HF-PPS-CHRONY-TUNING.md §5.2.
-                        use_magnitude_correlation=self._t6_config.get(
-                            'use_magnitude_correlation', False
-                        ),
-                    )
-                    logger.info(f"T6 BPSK PPS calibrator (matched-filter) initialized: "
-                                f"freq={freq_hz/1e6:.6f} MHz, sr={sr}")
+                # The matched-filter calibrator (textbook Costas +
+                # integrate-and-dump MF).  It expects a wider channel
+                # filter (±25 kHz at 96 kHz SR) for full benefit.  The
+                # `use_matched_filter` switch and the legacy per-sample-Δφ
+                # calibrator behind its `false` value retired 2026-09-04
+                # (RESIDUE_AUDIT §3.4): the template, B4 and ND all ran
+                # `true`, and the fine stage only ever rode this path.
+                from hf_timestd.core.bpsk_pps_calibrator_mf import BpskPpsCalibratorMF
+                self._t6_calibrator = BpskPpsCalibratorMF(
+                    sample_rate=sr,
+                    consecutive_required=self._t6_config.get('consecutive_required', 10),
+                    edge_tolerance_samples=self._t6_config.get('edge_tolerance_samples', 30),
+                    costas_loop_bw_hz=self._t6_config.get('costas_loop_bw_hz', 1.0),
+                    # Diagnostic capture (opt-in).  When
+                    # debug_dump_path is set, the MF calibrator
+                    # records the matched-filter output ``y``,
+                    # detected peak metadata, and Costas phase per
+                    # batch to a single NPZ for offline analysis.
+                    # Used to investigate the cascade re-lock
+                    # against secondary candidates ~60 samples
+                    # away from the real PPS edge.
+                    debug_dump_path=self._t6_config.get('debug_dump_path'),
+                    debug_dump_seconds=self._t6_config.get('debug_dump_seconds', 60.0),
+                    debug_dump_subthreshold_factor=self._t6_config.get(
+                        'debug_dump_subthreshold_factor', 0.2
+                    ),
+                    # Periodic Costas-phase log (0 disables).
+                    # Default off; enable in TOML for investigation
+                    # of the ~13-second phase excursions.
+                    phase_log_period_batches=self._t6_config.get(
+                        'phase_log_period_batches', 0
+                    ),
+                    # Magnitude-correlation detection (opt-in).
+                    # When True the matched filter runs on the
+                    # COMPLEX signal and peak-picks on |y| — no
+                    # Costas dependency.  Eliminates the
+                    # carrier-recovery instability and the
+                    # per-restart chain_delay disambiguation drift
+                    # that the Re(s_rot) path inherits from
+                    # Costas's choice of operating point.  See
+                    # docs/HF-PPS-CHRONY-TUNING.md §5.2.
+                    use_magnitude_correlation=self._t6_config.get(
+                        'use_magnitude_correlation', False
+                    ),
+                )
+                logger.info(f"T6 BPSK PPS calibrator (matched-filter) initialized: "
+                            f"freq={freq_hz/1e6:.6f} MHz, sr={sr}")
 
-                    # ── T6 anchor inversion (spec: docs/design/
-                    # T6_ANCHOR_INVERSION_DESIGN.md) ────────────────────
-                    # Fine-stage sub-sample edge localisation + the
-                    # anchor-authority state machine.  Rides only the
-                    # matched-filter calibrator path — the legacy
-                    # per-sample-Δφ calibrator has no fold buffer to
-                    # localise against.
-                    fine_cfg = self._t6_fine_settings(self._t6_config)
-                    # Recorded in every ledger row: its absence is
-                    # exactly what made the 2026-08-25 15:00-15:07
-                    # content window indistinguishable afterwards.
-                    self._t6_labeling_convention = fine_cfg.get(
-                        'labeling_convention')
-                    self._t6_fine_stage = None
-                    self._t6_authority = None
-                    self._t6_authority_last_decision = None
-                    if fine_cfg['fine_stage_enabled']:
-                        from hf_timestd.core.bpsk_edge_fine_stage import (
-                            BpskEdgeFineStage,
-                        )
-                        from hf_timestd.core.t6_anchor_authority import (
-                            T6AnchorAuthority,
-                        )
-                        self._t6_fine_stage = BpskEdgeFineStage(
-                            sr, fold_seconds=fine_cfg['fine_fold_seconds'])
-                        self._t6_authority = T6AnchorAuthority(
-                            sr,
-                            fine_cfg['delay_budget_ns'],
-                            filter_group_delay_ns=fine_cfg[
-                                'filter_group_delay_ns'],
-                            edge_period_tolerance_ns=fine_cfg[
-                                'edge_period_tolerance_ns'],
-                            fine_coarse_max_ms=fine_cfg['fine_coarse_max_ms'],
-                            degraded_unlock_after_sec=fine_cfg[
-                                'degraded_unlock_after_sec'],
-                            # Liveness: the authority needs to know the
-                            # expected estimate cadence to tell "quiet"
-                            # from "dead" (spec §6).
-                            fine_fold_seconds=fine_cfg['fine_fold_seconds'],
-                        )
-                        logger.info(
-                            "T6 anchor inversion armed: fold=%ds "
-                            "delay_budget=%d ns filter_group_delay=%d ns "
-                            "(asserted chain delay %.3f ms; spec: "
-                            "docs/design/T6_ANCHOR_INVERSION_DESIGN.md)",
-                            fine_cfg['fine_fold_seconds'],
-                            fine_cfg['delay_budget_ns'],
-                            fine_cfg['filter_group_delay_ns'],
-                            (fine_cfg['delay_budget_ns']
-                             + fine_cfg['filter_group_delay_ns']) / 1e6,
-                        )
-                else:
-                    from hf_timestd.core.bpsk_pps_calibrator import BpskPpsCalibrator
-                    self._t6_calibrator = BpskPpsCalibrator(
-                        sample_rate=sr,
-                        consecutive_required=self._t6_config.get('consecutive_required', 10),
-                        edge_tolerance_samples=self._t6_config.get('edge_tolerance_samples', 10),
-                        enable_notch_500hz=self._t6_config.get('filter_500hz_notch', False),
+                # ── T6 anchor inversion (spec: docs/design/
+                # T6_ANCHOR_INVERSION_DESIGN.md) ────────────────────
+                # Fine-stage sub-sample edge localisation + the
+                # anchor-authority state machine.
+                fine_cfg = self._t6_fine_settings(self._t6_config)
+                # Recorded in every ledger row: its absence is
+                # exactly what made the 2026-08-25 15:00-15:07
+                # content window indistinguishable afterwards.
+                self._t6_labeling_convention = fine_cfg.get(
+                    'labeling_convention')
+                self._t6_fine_stage = None
+                self._t6_authority = None
+                self._t6_authority_last_decision = None
+                if fine_cfg['fine_stage_enabled']:
+                    from hf_timestd.core.bpsk_edge_fine_stage import (
+                        BpskEdgeFineStage,
                     )
-                    logger.info(f"T6 BPSK PPS calibrator (legacy) initialized: "
-                                f"freq={freq_hz/1e6:.6f} MHz, sr={sr}")
+                    from hf_timestd.core.t6_anchor_authority import (
+                        T6AnchorAuthority,
+                    )
+                    self._t6_fine_stage = BpskEdgeFineStage(
+                        sr, fold_seconds=fine_cfg['fine_fold_seconds'])
+                    self._t6_authority = T6AnchorAuthority(
+                        sr,
+                        fine_cfg['delay_budget_ns'],
+                        filter_group_delay_ns=fine_cfg[
+                            'filter_group_delay_ns'],
+                        edge_period_tolerance_ns=fine_cfg[
+                            'edge_period_tolerance_ns'],
+                        fine_coarse_max_ms=fine_cfg['fine_coarse_max_ms'],
+                        degraded_unlock_after_sec=fine_cfg[
+                            'degraded_unlock_after_sec'],
+                        # Liveness: the authority needs to know the
+                        # expected estimate cadence to tell "quiet"
+                        # from "dead" (spec §6).
+                        fine_fold_seconds=fine_cfg['fine_fold_seconds'],
+                    )
+                    logger.info(
+                        "T6 anchor inversion armed: fold=%ds "
+                        "delay_budget=%d ns filter_group_delay=%d ns "
+                        "(asserted chain delay %.3f ms; spec: "
+                        "docs/design/T6_ANCHOR_INVERSION_DESIGN.md)",
+                        fine_cfg['fine_fold_seconds'],
+                        fine_cfg['delay_budget_ns'],
+                        fine_cfg['filter_group_delay_ns'],
+                        (fine_cfg['delay_budget_ns']
+                         + fine_cfg['filter_group_delay_ns']) / 1e6,
+                    )
 
                 # Differential-detector sidecar — opt-in via
                 # t6_config['enable_diff_sidecar'] = True.  Runs in
@@ -3131,9 +3118,9 @@ class CoreRecorderV2:
     def _t6_ref_tracker(self):
         """The learned-reference gate, or None when it is switched off.
 
-        OPT-IN, default off, matching the ``use_matched_filter`` convention:
-        this changes which locks T6 accepts, so it must not alter a deployed
-        station's behaviour until a config bump explicitly asks for it.
+        OPT-IN, default off: this changes which locks T6 accepts, so it
+        must not alter a deployed station's behaviour until a config bump
+        explicitly asks for it.
 
         Why it exists: the Layer B guard below bounds |chain_delay| at
         ±250 ms, which is WIDER than the first sidelobe cluster it cites

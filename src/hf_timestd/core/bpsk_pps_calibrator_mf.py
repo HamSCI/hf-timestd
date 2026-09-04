@@ -1,8 +1,9 @@
 """BPSK PPS calibrator — matched-filter implementation.
 
-Drop-in replacement for ``bpsk_pps_calibrator.BpskPpsCalibrator`` with a
-textbook signal-processing chain instead of the per-sample-Δφ heuristic
-inherited from Scott Newell's wd-record port:
+The T6 calibrator.  A textbook signal-processing chain replaced the
+per-sample-Δφ heuristic inherited from Scott Newell's wd-record port
+(that legacy calibrator, selected by ``use_matched_filter = false``,
+retired 2026-09-04 — RESIDUE_AUDIT §3.4):
 
   1. Single-shot Costas-style carrier phase recovery per batch
      (square-and-halve-angle, low-pass filtered across batches as the
@@ -40,9 +41,8 @@ Expected timing precision at the recommended config: per-edge raw
 σ_t ~30 ns; chrony-combined ~5–10 ns (below LB-1421's PPS jitter
 floor, so we end up measuring the GPSDO).
 
-The output dataclass is the same ``PpsCalibrationResult`` exported
-from the legacy module — a downstream consumer can switch between the
-two implementations via a config flag.
+The output dataclass ``PpsCalibrationResult`` lives here; it kept the
+shape it had in the legacy module so downstream consumers saw no change.
 
 Requires: numpy
 """
@@ -56,13 +56,25 @@ from typing import List, Optional
 
 import numpy as np
 
-from hf_timestd.core.bpsk_pps_calibrator import PpsCalibrationResult
+from dataclasses import dataclass
+
 from hf_timestd.core.rtp_domain import RtpUnwrapper
 
 
 logger = logging.getLogger(__name__)
 
-__all__ = ['BpskPpsCalibratorMF']
+__all__ = ['BpskPpsCalibratorMF', 'PpsCalibrationResult']
+
+
+@dataclass
+class PpsCalibrationResult:
+    """Result from a successful PPS calibration measurement."""
+    chain_delay_ns: int        # Measured chain delay (nanoseconds)
+    chain_delay_samples: float # Measured chain delay (fractional samples)
+    pps_ok: int                # Cumulative valid edge count
+    pps_noise: int             # Cumulative noise/rejected edge count
+    pps_consecutive: int       # Current consecutive valid edge streak
+    locked: bool               # True when consecutive >= lock threshold
 
 
 # Costas lock-quality detector — Layer A of the TSL3 Costas-drift fix
