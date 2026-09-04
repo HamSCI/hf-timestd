@@ -272,6 +272,32 @@ enabled = true
 #                        # default, since the cross-check layer already catches
 #                        # a witness whose offset has drifted.
 
+# === Host-clock integrity — the verdict beside the tier decision ===
+#
+# 2026-09-04, AC0G-B4 (governed RX888, T6 present): the host clock ran 11.6 s
+# slow for thirteen hours while `chronyc tracking` showed it within 0.1 ms.
+# FUSE carries `trust`, its product follows the host clock, so chrony had
+# nothing to disagree with.  Three other measurements on the host saw it —
+# the T2 pair check ("T6<->T2:11679ms ... :advisory"), the LB-1421 probe's
+# host-versus-GPS gap (-12 s, returned as "no fix"), and gpsdo-monitor's PPS
+# study (999.91 ms per second) — and none of them said so.  The same walk
+# had hit AC0G-ND the day before (see the T2 note above); the ADC was blamed
+# then, and the ADC was governed this time.
+#
+# The authority manager now folds those three into one `host_clock` block in
+# authority.json (verdict ok / suspect / fault / unwitnessed) and logs
+# CRITICAL on entry and once per `alarm_repeat_sec` while it holds.  Tier
+# selection is untouched: the anchor was right both days.  This block only
+# tunes the verdict; the witnesses register themselves.
+# See docs/design/HOST_CLOCK_INTEGRITY.md.
+[timing.authority_manager.host_clock]
+# fault_ms = 1000.0          # a sysclock witness this far from an rtp-frame
+#                            # active tier is a whole-second-class fault
+#                            # (suspect starts at the pair's own bound)
+# rate_suspect_ppm = 50.0    # host rate against the GPSDO PPS; the study
+#                            # resolves ~17 ppm, so do not go below that
+# alarm_repeat_sec = 3600.0  # CRITICAL repeats this often while it holds
+
 
 # === Coarse-time producer (bootstrap input) ===
 # The authority manager's bootstrap coordinator consumes

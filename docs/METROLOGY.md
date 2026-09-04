@@ -379,6 +379,21 @@ Transitions are logged and stamped in sidecars:
 | `chrony-rejected-<refid>:state=<s>` | chrony has rejected (falseticker/unselectable) the SHM segment hf-timestd feeds for the active tier (V7 self-feedback check). |
 | `chrony-missing-<refid>` | the SHM refid hf-timestd feeds isn't present in chrony's source list (chrony not configured to consume it, or no first sample yet). Informational on hosts without the SHM refclock wired. |
 
+**The host-clock verdict (`host_clock`, added 2026-09-04).** The `:advisory` rule above states the truth about the anchor and, until this date, ended the sentence there.  On 2026-09-04 AC0G-B4's host clock ran 11.6 s slow for thirteen hours behind a correct T6 anchor: the manager wrote `T6<->T2:11679.507ms>60.000ms:advisory` on every tick, `chronyc tracking` reported the clock within 0.1 ms (FUSE, `trust`, a host-clock-relative product), and every consumer on the station labelled seconds off UTC.  A drifting host clock now gets its own verdict, separate from the tier decision.  Three witnesses feed it, each a measurement that already existed: the pair check's own `|Δ|` for any `sysclock` witness of an `rtp`-frame active tier, taken *before* the advisory tag and before any demotion; the LB-1421 probe's host-versus-GPS-second gap, published by the recorder as `t5_lbe1421.host_minus_gps_s` and forwarded in T5's detail whether or not T5 is available; and gpsdo-monitor's PPS period timed by the host clock, read as a rate in ppm.  `verdict` is `ok`, `suspect` (a pair past its bound, or the rate past `rate_suspect_ppm`), `fault` (a pair past `fault_ms`, or the GPS second outside its emission window), or `unwitnessed` (no witness reported — distinct from the field being absent).  The manager logs CRITICAL on entry and once per `alarm_repeat_sec` while the verdict holds, and INFO when it clears.  It changes no tier, widens no sigma, steps no clock.  Thresholds live in `[timing.authority_manager.host_clock]`; the logic in `core/host_clock_integrity.py`; the account in `docs/design/HOST_CLOCK_INTEGRITY.md`.
+
+```json
+"host_clock": {
+  "verdict": "fault",
+  "reason": "T2 disagrees by 11679.5 ms (> 1000 ms)",
+  "witnesses": {
+    "T2":       {"kind": "pair_ms",      "value": 11679.507, "bound": 60.0, "exceeded": true},
+    "lb1421":   {"kind": "gps_second_s", "value": -12.1,     "bound": 1.0,  "exceeded": true},
+    "pps_rate": {"kind": "rate_ppm",     "value": -90.4,     "bound": 50.0, "exceeded": true}
+  },
+  "since_utc": "2026-09-04T02:47:12.000000Z"
+}
+```
+
 #### Published Authority State (schema v1)
 
 Every hf-timestd host continuously publishes its authority state at `/run/hf-timestd/authority.json`. This file is the single published contract between the authority manager and every consumer (sidecar writers, chrony SHM feeder, mDNS advertiser, wspr-recorder, psk-recorder, LAN peers, sigmond watchdog).
