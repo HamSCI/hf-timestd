@@ -40,6 +40,10 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
+#: MEASUREMENT_MODEL §3 — an adopted radiod pair this far from the mapping in
+#: force means the counter was re-based (a restart renumbers by seconds).
+COUNTER_EPOCH_STEP_S = 0.5
+
 # Constants
 BYTES_PER_SAMPLE = 8  # complex64 = 2 x float32
 
@@ -197,6 +201,16 @@ class BinaryArchiveWriter:
         # ensure_channel().
         self._offset_judge = offset_judge
         self._judge_source_key = source_key
+        # MEASUREMENT_MODEL §3 — the counter epoch.  radiod renumbers samples
+        # on restart; a registration carried across that errs by seconds.
+        # A new epoch opens when an adopted pair disagrees with the mapping
+        # in force by more than COUNTER_EPOCH_STEP_S.
+        self._counter_epoch_id: Optional[str] = None
+        self._counter_epoch_pair: Optional[tuple] = None   # (gps_time_ns, rtp_timesnap, sample_rate)
+        # TIMING_PROVENANCE_MODEL §3.1 — the per-chunk timing block publishes
+        # the registration in force.  Late-bound by the recorder.
+        self._time_map_provider = None
+        self._time_map_counter_space: Optional[str] = None
         
         if config.use_tiered_storage:
             from .tiered_storage import get_tiered_storage_manager
@@ -363,6 +377,93 @@ class BinaryArchiveWriter:
         if gps_ns is not None and rtp_snap is not None:
             self._judge_register_pair(gps_ns, rtp_snap)
 
+
+    @property
+    def counter_epoch_id(self) -> str:
+        return self._counter_epoch_id or "unregistered"
+
+    def _note_counter_epoch(self, gps_time_ns: int, rtp_timesnap: int, sample_rate: int) -> str:
+        """Open a new counter epoch when the adopted pair disagrees with the
+        mapping in force by more than COUNTER_EPOCH_STEP_S; else keep it."""
+        prev = self._counter_epoch_pair
+        if prev is not None:
+            p_gps, p_rtp, p_sr = prev
+            delta = (int(rtp_timesnap) - int(p_rtp)) & 0xFFFFFFFF
+            if delta > 0x7FFFFFFF:
+                delta -= 0x1_0000_0000
+            predicted_ns = int(p_gps) + 1_000_000_000 * delta // int(p_sr)
+            if abs(int(gps_time_ns) - predicted_ns) <= COUNTER_EPOCH_STEP_S * 1e9:
+                self._counter_epoch_pair = (int(gps_time_ns), int(rtp_timesnap), int(sample_rate))
+                return self.counter_epoch_id
+            logger.warning(
+                f"{getattr(self.config, 'channel_name', '?')}: adopted pair sits "
+                f"{(int(gps_time_ns) - predicted_ns) / 1e9:+.3f} s from the mapping in force — "
+                f"counter re-based; opening a new counter epoch")
+        self._counter_epoch_pair = (int(gps_time_ns), int(rtp_timesnap), int(sample_rate))
+        self._counter_epoch_id = f"pair-{int(gps_time_ns)}"
+        return self._counter_epoch_id
+
+    def set_time_map_provider(self, provider, counter_space: str) -> None:
+        """Late-bind the TimeMap provider (a callable TimeMapInputs -> TimeMap)
+        and this channel's counter-space name."""
+        self._time_map_provider = provider
+        self._time_map_counter_space = str(counter_space)
+
+    def _legacy_timing_keys(self, verdict) -> dict:
+        return {
+            'radiod_gps_time_ns': self._gps_time_ns_raw,
+            'radiod_rtp_timesnap': self._rtp_timesnap,
+            'offset_ns': float(verdict.offset_ns),
+            'offset_sigma_ns': float(verdict.sigma_ns),
+            'judge_tier': verdict.tier,
+            'judge_age_s': float(verdict.judge_age_s),
+            'segment_id': int(verdict.segment_id),
+            # P3 (spec §10): the source's current segment rate estimate —
+            # RECORDED metadata only, never resampled, never folded into
+            # the labels (spec §11, audit G7).  None until the estimator
+            # reaches its minimum span.
+            'rate_ppm': (float(verdict.rate_ppm)
+                         if getattr(verdict, 'rate_ppm', None) is not None else None),
+        }
+
+    def _chunk_timing_block(self, verdict, chunk_boundary_utc_ns: int) -> Optional[dict]:
+        """The `timing` block of a chunk's JSON sidecar.
+
+        With a provider: the schema v2 `state` record (TIMING_PROVENANCE_MODEL
+        §3.1) with the legacy Offset Judge keys mirrored at top level for one
+        release, so hamsci-physics' timing_from_sidecar keeps reading until
+        it moves to u_epoch_ns.  Without a provider: the legacy block alone.
+        Never raises."""
+        legacy = self._legacy_timing_keys(verdict) if verdict is not None else None
+        provider = self._time_map_provider
+        if provider is None:
+            return legacy
+        from hf_timestd.core.time_map_producer import TimeMapInputs
+        from hamsci_dsp.timing_map import null_map
+        eng = dict(legacy) if legacy is not None else {
+            'radiod_gps_time_ns': self._gps_time_ns_raw,
+            'radiod_rtp_timesnap': self._rtp_timesnap}
+        inputs = TimeMapInputs(
+            counter_space=self._time_map_counter_space or self.config.channel_name,
+            counter_epoch_id=self.counter_epoch_id,
+            f_s_hz=int(self.config.sample_rate),
+            measured_at_utc_ns=int(chunk_boundary_utc_ns),
+            gps_time_ns=self._gps_time_ns_raw, rtp_timesnap=self._rtp_timesnap,
+            judge_tier=(verdict.tier if verdict is not None else None),
+            engineering=eng,
+        )
+        try:
+            tmap = provider(inputs)
+        except Exception as exc:  # noqa: BLE001 — provenance never disturbs recording
+            logger.warning(f"{self.config.channel_name}: time map provider failed: {exc}")
+            tmap = null_map(counter_space=inputs.counter_space, counter_epoch_id=inputs.counter_epoch_id,
+                            f_s_hz=inputs.f_s_hz, measured_at_utc_ns=inputs.measured_at_utc_ns,
+                            reason=f"provider error: {exc}", engineering=eng)
+        block = tmap.to_state_record(int(chunk_boundary_utc_ns))
+        if legacy is not None:
+            block.update(legacy)      # top-level mirror, one release
+        return block
+
     def _judge_register_pair(self, gps_time_ns: int, rtp_timesnap: int) -> None:
         """Forward an adopted radiod pair to the judge (never raises)."""
         judge, key = self._offset_judge, self._judge_source_key
@@ -526,6 +627,7 @@ class BinaryArchiveWriter:
             self._gps_time_unix = gps_unix_sec
             self._gps_time_ns_raw = gps_time_ns
             self._rtp_timesnap = rtp_timesnap
+            self._note_counter_epoch(gps_time_ns, rtp_timesnap, self.config.sample_rate)
 
             # Anchor adoption point: register the pair with the Offset
             # Judge (spec §3 — estimated "at every radiod anchor
@@ -654,26 +756,8 @@ class BinaryArchiveWriter:
         # verdict here is the one that positioned this chunk's boundary.
         # The raw radiod pair is captured alongside so the sidecar is
         # fully self-describing (raw mapping + applied correction).
-        judge_timing = None
-        if verdict is not None:
-            judge_timing = {
-                'radiod_gps_time_ns': self._gps_time_ns_raw,
-                'radiod_rtp_timesnap': self._rtp_timesnap,
-                'offset_ns': float(verdict.offset_ns),
-                'offset_sigma_ns': float(verdict.sigma_ns),
-                'judge_tier': verdict.tier,
-                'judge_age_s': float(verdict.judge_age_s),
-                'segment_id': int(verdict.segment_id),
-                # P3 (spec §10): the source's current segment rate
-                # estimate — RECORDED metadata only, never resampled,
-                # never folded into the labels (spec §11, audit G7).
-                # None until the estimator reaches its minimum span.
-                'rate_ppm': (
-                    float(verdict.rate_ppm)
-                    if getattr(verdict, 'rate_ppm', None) is not None
-                    else None
-                ),
-            }
+        judge_timing = self._chunk_timing_block(
+            verdict, chunk_boundary_utc_ns=int(round(float(chunk_boundary) * 1e9)))
 
         buffer = MinuteBuffer(
             minute_boundary=chunk_boundary,
