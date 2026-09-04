@@ -13,9 +13,14 @@ decoded frame's `leap_second` now rides on the L1 metrology row as
 optional column, the writer migrates existing tables), and fusion arms
 `_leap_second_hold_until` from 5 min before the month-end boundary to
 10 min after it when a recent row announces one.  Outside that window
-fusion reads nothing extra.  WWV/WWVH BCD second 3 (`wwv_bcd_decoder`
-already decodes it; nothing calls that decoder yet) is the second witness
-to wire, which would give AC0G-ND, with no WWVB path, a notice of its own.
+fusion reads nothing extra.  WWV BCD second 3 is the second witness: on
+the dedicated WWV channels (20/25 MHz) the engine runs `wwv_bcd_decoder`
+once per minute after a WWV detection and the service puts the warning
+bit on that minute's WWV row (`[metrology] bcd_leap_notice`, default on).
+WWV's format carries no sign, so its notice reads `positive`; the hold
+treats both signs alike.  That gives AC0G-ND, with no WWVB path, a notice
+of its own.  Shared channels stay out: WWV and WWVH both key the 100 Hz
+subcarrier there.
 
 ### Changed — the per-second tick search is anchored on the minute marker (2026-09-04)
 

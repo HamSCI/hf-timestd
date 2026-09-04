@@ -210,6 +210,13 @@ physics_products = true
 # is slightly degraded (inflated u_propagation_model_ms, typically <5 ms).
 realtime_iono = true
 
+# Decode the WWV BCD time code's leap-second warning (second 3) on the
+# dedicated WWV channels (20/25 MHz) and publish it as leap_second_notice on
+# that minute's WWV L1 row.  Fusion arms its leap-second Kalman hold from the
+# notice as the month end approaches (docs/design/HOST_CLOCK_INTEGRITY.md).
+# WWVB carries the same notice on its own row.  One 60 s decode per minute.
+# bcd_leap_notice = true
+
 [timing]
 # `authority` and `rtp_expected_accuracy_ms` retired 2026-09-04
 # (docs/design/RESIDUE_AUDIT_2026-09-04.md §3.5).  The station registers

@@ -214,6 +214,7 @@ class MetrologyService:
             precise_lat=lat,
             precise_lon=lon,
             enable_physics_products=self._physics_products,
+            bcd_leap_notice=bool(_metrology_cfg.get('bcd_leap_notice', True)),
         )
         
         # Storage backend selection. Phase 1 of the HDF5 → SQLite
@@ -671,6 +672,13 @@ class MetrologyService:
                 # Pydantic v2 model_dump(mode='json') converts Enums to values.
                 
                 rec = res.model_dump(mode='json')
+
+                # Leap-second advance notice decoded from this station's
+                # time code this minute (WWV BCD second 3 on dedicated WWV
+                # channels; WWVB carries its own on the recorder side).
+                notices = getattr(self.engine, '_last_leap_second_notice', None) or {}
+                if rec.get('leap_second_notice') is None and rec.get('station_id') in notices:
+                    rec['leap_second_notice'] = notices[rec['station_id']]
                 
                 # Schema expects 'processed_at', 'processing_version'
                 rec['processed_at'] = datetime.now(timezone.utc).isoformat()

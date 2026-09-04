@@ -46,6 +46,7 @@ except Exception:
 from hf_timestd.core.tick_matched_filter import TickMatchedFilter, StationType
 from hf_timestd.core.decoder_config import get_decoder_config, DecoderConfig, DecoderComparisonTracker
 from hf_timestd.core.tick_edge_detector import TickEdgeDetector
+from hf_timestd.core.wwv_bcd_decoder import WWVBCDDecoder
 from hf_timestd.core.hop_geometry import (
     hop_geometry,
     n_hops_for_distance,
@@ -241,6 +242,7 @@ class MetrologyEngine:
         precise_lat: Optional[float] = None,
         precise_lon: Optional[float] = None,
         enable_physics_products: bool = True,  # False = timing-only, skip secondary-arrival search
+        bcd_leap_notice: bool = True,  # decode WWV BCD second 3 (leap-second warning) on dedicated WWV channels
     ):
         self.raw_buffer_dir = Path(raw_buffer_dir)
         self.output_dir = Path(output_dir)
@@ -252,6 +254,14 @@ class MetrologyEngine:
         self.precise_lat = precise_lat
         self.precise_lon = precise_lon
         self.enable_physics_products = enable_physics_products
+        # WWV/WWVH BCD leap-second warning (second 3) -> L1 leap_second_notice.
+        # Runs only on the dedicated WWV channels (20/25 MHz): on shared
+        # channels WWV and WWVH both key the 100 Hz subcarrier and the pulse
+        # widths overlap.  Decoder built lazily on first use.
+        self.bcd_leap_notice_enabled = bool(bcd_leap_notice)
+        self._bcd_leap_decoder: Optional[WWVBCDDecoder] = None
+        self._last_leap_second_notice: Dict[str, str] = {}
+        self._last_logged_leap_notice: Optional[str] = None
 
         # Pre-allocated buffers for zero-allocation DSP
         self._max_samples = 65 * self.sample_rate
@@ -646,6 +656,48 @@ class MetrologyEngine:
         
         else:
             return 0.0  # Unknown station — skip
+
+    def _decode_leap_second_notice(
+        self,
+        iq_samples: np.ndarray,
+        is_dedicated: bool,
+        measurements,
+        expected_delays_by_station: Dict[str, float],
+    ) -> Dict[str, str]:
+        """``{'WWV': 'positive'|'none'}`` from the BCD leap-second warning
+        bit (second 3) this minute, or ``{}``.
+
+        Only on a dedicated WWV channel, only when WWV was detected this
+        minute (so the 60 s buffer really holds its time code), and only
+        from a decode that recovered the minute and hour with confidence
+        >= 0.6 -- a flipped bit 3 alone must not announce a leap second.
+        WWV's format carries the warning without a sign; the hold treats
+        positive and negative alike, so the notice reads 'positive'.
+        """
+        if not (self.bcd_leap_notice_enabled and is_dedicated):
+            return {}
+        if not any(m.get('station') == 'WWV' and m.get('detected') for m in measurements):
+            return {}
+        try:
+            if self._bcd_leap_decoder is None:
+                self._bcd_leap_decoder = WWVBCDDecoder(
+                    sample_rate=self.sample_rate, channel_name=self.channel_name)
+            delay_ms = float(expected_delays_by_station.get('WWV', 0.0) or 0.0)
+            offset = int(round(delay_ms / 1000.0 * self.sample_rate))
+            res = self._bcd_leap_decoder.decode_minute(iq_samples, second_offset_samples=offset)
+        except Exception as exc:
+            logger.debug(f"{self.channel_name}: BCD leap decode failed: {exc}")
+            return {}
+        if not res.detected or res.decode_confidence < 0.6 or res.leap_second_pending is None:
+            return {}
+        notice = 'positive' if res.leap_second_pending else 'none'
+        if notice != self._last_logged_leap_notice:
+            self._last_logged_leap_notice = notice
+            (logger.warning if notice != 'none' else logger.info)(
+                f"{self.channel_name}: WWV BCD leap-second warning bit = "
+                f"{int(res.leap_second_pending)} (conf {res.decode_confidence:.2f}) "
+                f"-> leap_second_notice={notice}")
+        return {'WWV': notice}
 
     def _minute_marker_anchors(self, measurements) -> Dict[str, Tuple[int, float]]:
         """Per station, the measured minute-marker onset as an anchor for the
@@ -1794,6 +1846,13 @@ class MetrologyEngine:
             
             # Store edge results for caller to retrieve
             self._last_edge_results = edge_results
+
+            # Leap-second advance notice from the WWV BCD time code
+            # (second 3) on dedicated WWV channels.  The service attaches it
+            # to this minute's WWV L1 row; fusion arms the Kalman hold from it.
+            self._last_leap_second_notice = self._decode_leap_second_notice(
+                iq_samples, is_dedicated, measurements, expected_delays_by_station
+            )
             
         else:
             # No BufferTiming — fall back to the legacy method.
