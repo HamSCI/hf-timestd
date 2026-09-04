@@ -50,7 +50,7 @@ Before the radio starts, compute expected arrivals for all (station, frequency) 
 │                                                                     │
 │  Inputs (all deterministic):                                        │
 │    • Receiver location (lat/lon)                                    │
-│    • Station locations (WWV, WWVH, CHU, BPM)                        │
+│    • Station locations (WWV, WWVH, BPM)                        │
 │    • Great circle distances                                         │
 │    • IRI-2020 ionospheric model                                     │
 │    • Current UTC time                                               │

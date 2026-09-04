@@ -56,12 +56,12 @@ class TestSingleOutlierPass(unittest.TestCase):
         self.assertFalse(hasattr(MultiBroadcastFusion, '_reject_outliers'))
 
     def test_gross_outlier_is_rejected(self) -> None:
-        # Three broadcasts cluster near 2 ms; CHU is a gross 50 ms outlier.
+        # Three broadcasts cluster near 2 ms; WWVH 15 MHz is a gross 50 ms outlier.
         result = _fuse([
             _measurement('WWV', 10.0, 2.0),
             _measurement('WWV', 15.0, 2.1),
             _measurement('WWVH', 10.0, 1.9),
-            _measurement('CHU', 7.85, 50.0),
+            _measurement('WWVH', 15.0, 50.0),
         ])
         self.assertIsNotNone(result)
         # The single calibrated-residual pass rejects the outlier ...

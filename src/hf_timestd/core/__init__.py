@@ -1,7 +1,7 @@
 """HF Time Standard Analysis - Core Module
 
 This package provides core components for recording and analyzing
-WWV/WWVH/CHU time station signals for precise timing measurements.
+WWV/WWVH/BPM time station signals for precise timing measurements.
 
 Architecture (v5.4.0):
 ======================
@@ -48,7 +48,6 @@ Note: Phase2AnalyticsService and PipelineOrchestrator archived 2026-01-22.
 # they had not been importable for months.
 
 _LAZY = {
-    'AFSKCorrelationResult': ('.signal_templates', 'AFSKCorrelationResult'),
     'BCDCorrelationResult': ('.signal_templates', 'BCDCorrelationResult'),
     'BCDTemplateGenerator': ('.signal_templates', 'BCDTemplateGenerator'),
     'BPMCorrelationResult': ('.signal_templates', 'BPMCorrelationResult'),
@@ -60,8 +59,6 @@ _LAZY = {
     'BinaryArchiveConfig': ('.binary_archive_writer', 'BinaryArchiveConfig'),
     'BinaryArchiveReader': ('.binary_archive_writer', 'BinaryArchiveReader'),
     'BinaryArchiveWriter': ('.binary_archive_writer', 'BinaryArchiveWriter'),
-    'CHUAFSKTemplateGenerator': ('.signal_templates', 'CHUAFSKTemplateGenerator'),
-    'CHU_TEMPLATE': ('.tick_matched_filter', 'CHU_TEMPLATE'),
     'CombinedUTCResult': ('.transmission_time_solver', 'CombinedUTCResult'),
     'ComparisonMetrics': ('.decoder_config', 'ComparisonMetrics'),
     'CoreRecorder': ('.core_recorder_v2', 'CoreRecorderV2'),
@@ -115,7 +112,6 @@ _LAZY = {
     'WWVTestSignalDetector': ('.wwv_test_signal', 'WWVTestSignalDetector'),
     'WWV_TEMPLATE': ('.tick_matched_filter', 'WWV_TEMPLATE'),
     'calculate_hot_minutes': ('.tiered_storage', 'calculate_hot_minutes'),
-    'create_afsk_generator': ('.signal_templates', 'create_afsk_generator'),
     'create_bcd_generator': ('.signal_templates', 'create_bcd_generator'),
     'create_bpm_generator': ('.signal_templates', 'create_bpm_generator'),
     'create_correlator': ('.signal_templates', 'create_correlator'),
@@ -132,7 +128,6 @@ _LAZY = {
 }
 
 __all__ = [
-    'AFSKCorrelationResult',
     'BCDCorrelationResult',
     'BCDTemplateGenerator',
     'BPMCorrelationResult',
@@ -144,8 +139,6 @@ __all__ = [
     'BinaryArchiveConfig',
     'BinaryArchiveReader',
     'BinaryArchiveWriter',
-    'CHUAFSKTemplateGenerator',
-    'CHU_TEMPLATE',
     'CombinedUTCResult',
     'ComparisonMetrics',
     'CoreRecorder',
@@ -196,7 +189,6 @@ __all__ = [
     'WWVTestSignalDetector',
     'WWV_TEMPLATE',
     'calculate_hot_minutes',
-    'create_afsk_generator',
     'create_bcd_generator',
     'create_bpm_generator',
     'create_correlator',

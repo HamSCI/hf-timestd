@@ -1579,12 +1579,12 @@ See docs/PHARLAP_RAYTRACING.md for the model and worked examples.
 
 Examples:
   hf-timestd raytrace WWV 10.0
-  hf-timestd raytrace CHU 7.85 --time 2026-06-22T07:30 --json
+  hf-timestd raytrace WWVH 15.0 --time 2026-06-22T07:30 --json
   hf-timestd raytrace BPM 10.0 --rx-lat 38.94 --rx-lon -92.12
 ''',
         formatter_class=argparse.RawDescriptionHelpFormatter)
     raytrace_parser.add_argument('station',
-        help='Transmitter: WWV, WWVH, CHU, or BPM')
+        help='Transmitter: WWV, WWVH, or BPM')
     raytrace_parser.add_argument('frequency', type=float,
         help='Carrier frequency in MHz (e.g. 10.0)')
     raytrace_parser.add_argument('--config', '-c',

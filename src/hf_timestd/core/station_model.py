@@ -5,7 +5,7 @@ Station Model - Physics-Based Multi-Station Detection Framework
 ================================================================================
 PURPOSE
 ================================================================================
-Define physics-based models for each time standard station (WWV, WWVH, BPM, CHU).
+Define physics-based models for each time standard station (WWV, WWVH, BPM).
 Each model encapsulates:
 
 1. Signal characteristics (tone frequency, tick duration, timing offset)
@@ -64,8 +64,7 @@ from .wwv_constants import (
     WWV_LAT, WWV_LON,
     WWVH_LAT, WWVH_LON,
     BPM_LAT, BPM_LON,
-    CHU_LAT, CHU_LON,
-    WWV_TICK_FREQ, WWVH_TICK_FREQ, BPM_TICK_FREQ, CHU_TICK_FREQ,
+    WWV_TICK_FREQ, WWVH_TICK_FREQ, BPM_TICK_FREQ,
     BPM_UTC_TICK_DURATION, BPM_UT1_TICK_DURATION,
     BPM_UT1_MINUTES, BPM_PURE_CARRIER_MINUTES,
     WWV_ONLY_TONE_MINUTES, WWVH_ONLY_TONE_MINUTES,
@@ -86,7 +85,6 @@ class StationID(Enum):
     WWV = "WWV"
     WWVH = "WWVH"
     BPM = "BPM"
-    CHU = "CHU"
 
 
 @dataclass
@@ -98,7 +96,7 @@ class StationModel:
     that enable MLE-based component decomposition on shared frequencies.
     
     Attributes:
-        station: Station identifier (WWV, WWVH, BPM, CHU)
+        station: Station identifier (WWV, WWVH, BPM)
         tone_frequency_hz: Primary timing tone frequency
         tick_duration_sec: Duration of timing tick (varies for BPM by mode)
         timing_offset_ms: Offset from UTC second (BPM = -20ms, others = 0)
@@ -247,19 +245,16 @@ class ChannelAssignment:
     wwv_component_power_db: Optional[float] = None
     wwvh_component_power_db: Optional[float] = None
     bpm_component_power_db: Optional[float] = None
-    chu_component_power_db: Optional[float] = None
     
     # Per-station ToA (ms from minute boundary)
     wwv_toa_ms: Optional[float] = None
     wwvh_toa_ms: Optional[float] = None
     bpm_toa_ms: Optional[float] = None
-    chu_toa_ms: Optional[float] = None
     
     # Per-station confidence (0-1)
     wwv_confidence: float = 0.0
     wwvh_confidence: float = 0.0
     bpm_confidence: float = 0.0
-    chu_confidence: float = 0.0
     
     # Residual after component subtraction
     residual_noise_db: float = 0.0
@@ -303,11 +298,6 @@ class ChannelAssignment:
             self.bpm_component_power_db >= min_power_db):
             usable.append('BPM')
             
-        if (self.chu_confidence >= min_confidence and
-            self.chu_component_power_db is not None and
-            self.chu_component_power_db >= min_power_db):
-            usable.append('CHU')
-            
         return usable
     
     def get_best_station(self) -> Optional[str]:
@@ -320,7 +310,6 @@ class ChannelAssignment:
             'WWV': self.wwv_confidence,
             'WWVH': self.wwvh_confidence,
             'BPM': self.bpm_confidence if self.bpm_usable_for_timing else 0.0,
-            'CHU': self.chu_confidence,
         }
         
         return max(usable, key=lambda s: confidences.get(s, 0.0))
@@ -334,15 +323,12 @@ class ChannelAssignment:
             'wwv_component_power_db': self.wwv_component_power_db,
             'wwvh_component_power_db': self.wwvh_component_power_db,
             'bpm_component_power_db': self.bpm_component_power_db,
-            'chu_component_power_db': self.chu_component_power_db,
             'wwv_toa_ms': self.wwv_toa_ms,
             'wwvh_toa_ms': self.wwvh_toa_ms,
             'bpm_toa_ms': self.bpm_toa_ms,
-            'chu_toa_ms': self.chu_toa_ms,
             'wwv_confidence': self.wwv_confidence,
             'wwvh_confidence': self.wwvh_confidence,
             'bpm_confidence': self.bpm_confidence,
-            'chu_confidence': self.chu_confidence,
             'residual_noise_db': self.residual_noise_db,
             'cross_validation_passed': self.cross_validation_passed,
             'cross_validation_error_ms': self.cross_validation_error_ms,
@@ -377,7 +363,6 @@ class StationModelFactory:
             StationID.WWV: self._haversine(receiver_lat, receiver_lon, WWV_LAT, WWV_LON),
             StationID.WWVH: self._haversine(receiver_lat, receiver_lon, WWVH_LAT, WWVH_LON),
             StationID.BPM: self._haversine(receiver_lat, receiver_lon, BPM_LAT, BPM_LON),
-            StationID.CHU: self._haversine(receiver_lat, receiver_lon, CHU_LAT, CHU_LON),
         }
         
         logger.info(f"StationModelFactory initialized at ({receiver_lat:.4f}, {receiver_lon:.4f})")
@@ -411,8 +396,6 @@ class StationModelFactory:
             tx_lat, tx_lon, freq = WWVH_LAT, WWVH_LON, 10000000
         elif station == StationID.BPM:
             tx_lat, tx_lon, freq = BPM_LAT, BPM_LON, 10000000
-        elif station == StationID.CHU:
-            tx_lat, tx_lon, freq = CHU_LAT, CHU_LON, 7850000
         else:
             return 0.0
             
@@ -535,27 +518,6 @@ class StationModelFactory:
             exclusion_zones=exclusion_zones
         )
     
-    def create_chu_model(self) -> StationModel:
-        """Create CHU station model."""
-        delay = self._estimate_propagation_delay(StationID.CHU)
-        bounds = PROPAGATION_BOUNDS_MS.get('CHU', (3.0, 40.0))
-        
-        return StationModel(
-            station=StationID.CHU,
-            tone_frequency_hz=CHU_TICK_FREQ,
-            tick_duration_sec=0.5,  # 500 ms (300 ms for regular ticks)
-            timing_offset_ms=0.0,
-            location=(CHU_LAT, CHU_LON),
-            expected_delay_ms=delay,
-            delay_uncertainty_ms=5.0,
-            distance_km=self.distances[StationID.CHU],
-            calibration_minutes=set(),  # CHU has unique frequencies
-            ground_truth_minutes=set(range(60)),  # CHU always alone on its frequencies
-            ut1_minutes=set(),
-            pure_carrier_minutes=set(),
-            delay_bounds_ms=bounds,
-        )
-    
     def create_all_models(self) -> Dict[StationID, StationModel]:
         """
         Create models for all stations (Default configuration).
@@ -566,7 +528,6 @@ class StationModelFactory:
             StationID.WWV: self.create_wwv_model(),
             StationID.WWVH: self.create_wwvh_model(),
             StationID.BPM: self.create_bpm_model(frequency_mhz=10.0),
-            StationID.CHU: self.create_chu_model(),
         }
     
     def get_models_for_frequency(self, frequency_mhz: float) -> List[StationModel]:
@@ -587,9 +548,6 @@ class StationModelFactory:
             15.0: [StationID.WWV, StationID.WWVH, StationID.BPM],
             20.0: [StationID.WWV],
             25.0: [StationID.WWV],
-            3.33: [StationID.CHU],
-            7.85: [StationID.CHU],
-            14.67: [StationID.CHU],
         }
         
         # Round frequency for lookup
@@ -605,8 +563,6 @@ class StationModelFactory:
             elif sid == StationID.BPM:
                 # Pass frequency to get correct schedule
                 models.append(self.create_bpm_model(frequency_mhz))
-            elif sid == StationID.CHU:
-                models.append(self.create_chu_model())
         
         return models
 

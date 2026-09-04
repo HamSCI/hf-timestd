@@ -23,8 +23,7 @@ class _StubResult:
     n_broadcasts: int = 24
     n_stations: int = 2
     wwv_count: int = 12
-    wwvh_count: int = 0
-    chu_count: int = 12
+    wwvh_count: int = 12
     bpm_count: int = 0
     single_station_mode: bool = False
     kalman_state: Optional[str] = "LOCKED"
@@ -67,19 +66,19 @@ class TestFusionStatusWriter(unittest.TestCase):
         self.assertEqual(fusion["n_broadcasts"], 24)
         self.assertEqual(fusion["n_stations"], 2)
         # Only stations with count > 0 should be listed, in fixed order
-        self.assertEqual(fusion["stations_used"], ["WWV", "CHU"])
+        self.assertEqual(fusion["stations_used"], ["WWV", "WWVH"])
         self.assertEqual(fusion["kalman_state"], "LOCKED")
         self.assertEqual(fusion["quality_grade"], "A")
 
     def test_stations_used_order_and_filtering(self) -> None:
         result = _StubResult(
-            wwv_count=0, wwvh_count=5, chu_count=3, bpm_count=1,
-            n_stations=3, n_broadcasts=9,
+            wwv_count=0, wwvh_count=5, bpm_count=1,
+            n_stations=2, n_broadcasts=6,
         )
         self.writer.update(result=result, chrony_fed=True, skip_reasons=[])
         self.assertEqual(
             self._read()["fusion"]["stations_used"],
-            ["WWVH", "CHU", "BPM"],
+            ["WWVH", "BPM"],
         )
 
     def test_result_none_marks_fusion_unavailable(self) -> None:

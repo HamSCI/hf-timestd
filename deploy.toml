@@ -9,7 +9,7 @@
 [package]
 name             = "hf-timestd"
 version          = "7.1.0"
-description      = "HF Time Standard Analysis — WWV/WWVH/CHU/BPM timing via ka9q-radio"
+description      = "HF Time Standard Analysis — WWV/WWVH/BPM timing via ka9q-radio"
 contract_version = "0.8"
 license          = "MIT"
 
@@ -219,7 +219,7 @@ per_instance = false
 # Receiver Channels screen reads the absolute config_path rather than
 # the per-instance /etc/<client>/<instance>.toml convention.
 [client_features.receiver_channels]
-description     = "WWV/WWVH/CHU/BPM time-standard channels (per [recorder.channel_group.*])"
+description     = "WWV/WWVH/BPM time-standard channels (per [recorder.channel_group.*])"
 per_instance    = false
 singleton_label = "(singleton)"
 config_path     = "/etc/hf-timestd/timestd-config.toml"

@@ -13,12 +13,7 @@ modulation patterns beyond simple timing ticks:
    - 200ms (0), 500ms (1), 800ms (marker) pulses on 100 Hz subcarrier
    - Identical on both stations - used for dual-peak delay measurement
 
-2. CHU AFSK (Bell 103)
-   - 2225 Hz mark, 2025 Hz space at 300 baud
-   - Transmitted seconds 31-39 of each minute
-   - Provides precise 500ms timing boundary
-
-3. BPM Patterns (China)
+2. BPM Patterns (China)
    - 1000 Hz ticks with minute-dependent duration
    - 10ms (UTC minutes) vs 100ms (UT1 minutes)
    - 300ms minute marker
@@ -27,7 +22,7 @@ modulation patterns beyond simple timing ticks:
 ================================================================================
 THEORY: MATCHED FILTERING FOR MODULATION PATTERNS
 ================================================================================
-For complex modulation patterns (BCD, FSK), matched filtering provides:
+For complex modulation patterns (BCD, BPM ticks), matched filtering provides:
 
 1. OPTIMAL DETECTION: Maximum SNR for known signal in AWGN
    SNR_out = 2E/N₀ where E = signal energy
@@ -271,194 +266,6 @@ class BCDTemplateGenerator:
 
 
 # =============================================================================
-# CHU AFSK TEMPLATE (Bell 103)
-# =============================================================================
-
-@dataclass
-class AFSKCorrelationResult:
-    """Result from CHU AFSK template correlation"""
-    second: int                      # FSK second (31-39)
-    timing_offset_ms: float          # Offset from expected 500ms boundary
-    correlation_peak: float          # Normalized correlation peak
-    snr_db: float                    # Signal-to-noise ratio
-    mark_power_db: float             # 2225 Hz power
-    space_power_db: float            # 2025 Hz power
-    fsk_quality: float               # FSK signal quality (0-1)
-
-
-class CHUAFSKTemplateGenerator:
-    """
-    Generate CHU AFSK (Bell 103) templates for matched filtering.
-    
-    CHU transmits FSK time code during seconds 31-39:
-    - Mark frequency: 2225 Hz (logic 1)
-    - Space frequency: 2025 Hz (logic 0)
-    - Baud rate: 300 bps
-    - Frame: 1 start + 8 data + 2 stop = 11 bits/byte
-    
-    Timing structure per FSK second:
-    - 0-10ms: 1000 Hz tick
-    - 10-133ms: Mark tone (sync)
-    - 133-500ms: Data stream
-    - 500ms: Precise timing boundary
-    """
-    
-    MARK_FREQ = 2225.0   # Hz
-    SPACE_FREQ = 2025.0  # Hz
-    BAUD_RATE = 300      # bps
-    
-    FSK_SECONDS = [31, 32, 33, 34, 35, 36, 37, 38, 39]
-    
-    # Timing within each FSK second (ms)
-    TICK_END_MS = 10.0
-    MARK_START_MS = 10.0
-    DATA_START_MS = 133.33
-    DATA_END_MS = 500.0
-    
-    def __init__(self, sample_rate: int = 20000):
-        self.sample_rate = sample_rate
-        self.samples_per_bit = int(sample_rate / self.BAUD_RATE)
-        
-    def generate_mark_template(self, duration_ms: float) -> np.ndarray:
-        """Generate mark tone (2225 Hz) template."""
-        n_samples = int(duration_ms * self.sample_rate / 1000)
-        t = np.arange(n_samples) / self.sample_rate
-        template = np.sin(2 * np.pi * self.MARK_FREQ * t)
-        return template * tukey(n_samples, alpha=0.1)
-    
-    def generate_space_template(self, duration_ms: float) -> np.ndarray:
-        """Generate space tone (2025 Hz) template."""
-        n_samples = int(duration_ms * self.sample_rate / 1000)
-        t = np.arange(n_samples) / self.sample_rate
-        template = np.sin(2 * np.pi * self.SPACE_FREQ * t)
-        return template * tukey(n_samples, alpha=0.1)
-    
-    def generate_fsk_second_template(
-        self,
-        second: int,
-        include_tick: bool = False
-    ) -> np.ndarray:
-        """
-        Generate template for one FSK second (31-39).
-        
-        Args:
-            second: Second number (31-39)
-            include_tick: Include 1000 Hz tick at start
-            
-        Returns:
-            500ms template (up to data end boundary)
-        """
-        # Template covers 0-500ms (the precise timing boundary)
-        duration_ms = self.DATA_END_MS
-        n_samples = int(duration_ms * self.sample_rate / 1000)
-        template = np.zeros(n_samples, dtype=np.float32)
-        
-        # 1000 Hz tick (0-10ms) - optional
-        if include_tick:
-            tick_end = int(self.TICK_END_MS * self.sample_rate / 1000)
-            t_tick = np.arange(tick_end) / self.sample_rate
-            template[:tick_end] = np.sin(2 * np.pi * 1000 * t_tick)
-        
-        # Mark sync tone (10-133ms)
-        mark_start = int(self.MARK_START_MS * self.sample_rate / 1000)
-        data_start = int(self.DATA_START_MS * self.sample_rate / 1000)
-        t_mark = np.arange(data_start - mark_start) / self.sample_rate
-        template[mark_start:data_start] = np.sin(2 * np.pi * self.MARK_FREQ * t_mark)
-        
-        # Data stream (133-500ms) - alternating mark/space pattern
-        # Use a generic pattern since actual data varies
-        data_samples = n_samples - data_start
-        t_data = np.arange(data_samples) / self.sample_rate
-        
-        # Generate alternating FSK pattern (approximation)
-        # Real data would need actual frame content
-        bit_duration = 1.0 / self.BAUD_RATE
-        for i, t in enumerate(t_data):
-            bit_idx = int(t / bit_duration)
-            if bit_idx % 2 == 0:
-                template[data_start + i] = np.sin(2 * np.pi * self.MARK_FREQ * t)
-            else:
-                template[data_start + i] = np.sin(2 * np.pi * self.SPACE_FREQ * t)
-        
-        # Normalize
-        energy = np.sqrt(np.sum(template**2))
-        if energy > 0:
-            template /= energy
-        
-        return template
-    
-    def generate_fsk_window_template(
-        self,
-        start_second: int = 31,
-        end_second: int = 40
-    ) -> np.ndarray:
-        """
-        Generate template spanning multiple FSK seconds.
-        
-        Args:
-            start_second: First FSK second (31-39)
-            end_second: Last FSK second + 1
-            
-        Returns:
-            Multi-second FSK template
-        """
-        templates = []
-        for sec in range(start_second, min(end_second, 40)):
-            if sec in self.FSK_SECONDS:
-                templates.append(self.generate_fsk_second_template(sec))
-        
-        if not templates:
-            return np.array([])
-        
-        # Concatenate with 500ms gaps (remaining half of each second)
-        gap_samples = int(500 * self.sample_rate / 1000)
-        full_template = []
-        
-        for t in templates:
-            full_template.append(t)
-            full_template.append(np.zeros(gap_samples))
-        
-        result = np.concatenate(full_template[:-1])  # Remove last gap
-        
-        # Normalize
-        energy = np.sqrt(np.sum(result**2))
-        if energy > 0:
-            result /= energy
-        
-        return result
-    
-    def generate_quadrature_templates(
-        self,
-        duration_ms: float,
-        frequency: float
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Generate quadrature (I/Q) templates for phase-invariant detection.
-        
-        Args:
-            duration_ms: Template duration
-            frequency: Tone frequency (MARK_FREQ or SPACE_FREQ)
-            
-        Returns:
-            Tuple of (sin_template, cos_template)
-        """
-        n_samples = int(duration_ms * self.sample_rate / 1000)
-        t = np.arange(n_samples) / self.sample_rate
-        window = tukey(n_samples, alpha=0.1)
-        
-        sin_template = np.sin(2 * np.pi * frequency * t) * window
-        cos_template = np.cos(2 * np.pi * frequency * t) * window
-        
-        # Normalize to unit energy
-        energy = np.sqrt(np.sum(sin_template**2))
-        if energy > 0:
-            sin_template /= energy
-            cos_template /= energy
-        
-        return sin_template, cos_template
-
-
-# =============================================================================
 # BPM PATTERN TEMPLATES (China)
 # =============================================================================
 
@@ -648,13 +455,12 @@ class SignalTemplateCorrelator:
     Unified correlation engine for all signal templates.
     
     Provides consistent interface for correlating received signals
-    against BCD, AFSK, and BPM templates with overlapping windows.
+    against BCD and BPM templates with overlapping windows.
     """
     
     def __init__(self, sample_rate: int = 20000):
         self.sample_rate = sample_rate
         self.bcd_generator = BCDTemplateGenerator(sample_rate)
-        self.afsk_generator = CHUAFSKTemplateGenerator(sample_rate)
         self.bpm_generator = BPMTemplateGenerator(sample_rate)
     
     def correlate_bcd(
@@ -703,55 +509,6 @@ class SignalTemplateCorrelator:
             result = self._analyze_bcd_correlation(
                 corr, start_sec, window_seconds
             )
-            if result:
-                results.append(result)
-        
-        return results
-    
-    def correlate_afsk(
-        self,
-        iq_samples: np.ndarray,
-        fsk_seconds: List[int] = None
-    ) -> List[AFSKCorrelationResult]:
-        """
-        Correlate received signal with CHU AFSK templates.
-        
-        Args:
-            iq_samples: Complex IQ samples (60 seconds)
-            fsk_seconds: Which FSK seconds to analyze (default: 31-39)
-            
-        Returns:
-            List of AFSKCorrelationResult for each FSK second
-        """
-        if fsk_seconds is None:
-            fsk_seconds = self.afsk_generator.FSK_SECONDS
-        
-        # AM demodulate
-        audio = np.abs(iq_samples)
-        audio = audio - np.mean(audio)
-        
-        results = []
-        
-        for sec in fsk_seconds:
-            # Extract second's audio
-            start_sample = sec * self.sample_rate
-            end_sample = start_sample + int(0.5 * self.sample_rate)  # 500ms
-            
-            if end_sample > len(audio):
-                break
-            
-            sec_audio = audio[start_sample:end_sample]
-            
-            # Generate template for this second
-            template = self.afsk_generator.generate_fsk_second_template(sec)
-            
-            if len(template) > len(sec_audio):
-                template = template[:len(sec_audio)]
-            
-            # Correlate
-            corr = correlate(sec_audio, template, mode='full')
-            
-            result = self._analyze_afsk_correlation(corr, sec)
             if result:
                 results.append(result)
         
@@ -900,38 +657,6 @@ class SignalTemplateCorrelator:
             detection_type=detection_type
         )
     
-    def _analyze_afsk_correlation(
-        self,
-        correlation: np.ndarray,
-        second: int
-    ) -> Optional[AFSKCorrelationResult]:
-        """Analyze AFSK correlation for timing and quality."""
-        peak_idx = np.argmax(np.abs(correlation))
-        peak_val = np.abs(correlation[peak_idx])
-        
-        # Expected peak at center
-        center = len(correlation) // 2
-        offset_samples = peak_idx - center
-        offset_ms = offset_samples / self.sample_rate * 1000
-        
-        # SNR estimate
-        noise_region = np.concatenate([
-            correlation[:center-100],
-            correlation[center+100:]
-        ])
-        noise_std = np.std(noise_region) if len(noise_region) > 0 else 1.0
-        snr_db = 20 * np.log10(peak_val / noise_std) if noise_std > 0 else 0
-        
-        return AFSKCorrelationResult(
-            second=second,
-            timing_offset_ms=float(offset_ms),
-            correlation_peak=float(peak_val / np.max(np.abs(correlation))),
-            snr_db=float(snr_db),
-            mark_power_db=0.0,  # Would need separate measurement
-            space_power_db=0.0,
-            fsk_quality=min(1.0, peak_val / (noise_std * 10)) if noise_std > 0 else 0
-        )
-    
     def _analyze_bpm_correlation(
         self,
         envelope: np.ndarray,
@@ -978,11 +703,6 @@ class SignalTemplateCorrelator:
 def create_bcd_generator(sample_rate: int = 20000) -> BCDTemplateGenerator:
     """Create BCD template generator for WWV/WWVH."""
     return BCDTemplateGenerator(sample_rate)
-
-
-def create_afsk_generator(sample_rate: int = 20000) -> CHUAFSKTemplateGenerator:
-    """Create AFSK template generator for CHU."""
-    return CHUAFSKTemplateGenerator(sample_rate)
 
 
 def create_bpm_generator(sample_rate: int = 20000) -> BPMTemplateGenerator:

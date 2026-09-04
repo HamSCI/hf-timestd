@@ -53,7 +53,7 @@ The fact that we achieve **±0.5 ms, not ±0.08 ms**, proves the ionosphere—no
 
 ### 3.1 Different Paths, Uncorrelated Errors
 
-Each of the 17 broadcasts traverses a **different ionospheric path**:
+Each of the 14 broadcasts traverses a **different ionospheric path**:
 
 | Broadcast | Azimuth | Distance | Reflection Region |
 |-----------|---------|----------|-------------------|
@@ -71,7 +71,7 @@ Each of the 17 broadcasts traverses a **different ionospheric path**:
 
 ### 3.2 Inverse-Variance Weighting
 
-When we fuse 17 broadcasts with inverse-variance weighting:
+When we fuse 14 broadcasts with inverse-variance weighting:
 
 ```
 σ_fused² = 1 / Σ(1/σᵢ²)
@@ -186,7 +186,7 @@ And if they remain skeptical:
 This document embodies the **Living Documentation** philosophy:
 
 1. **Argument:** Multi-broadcast fusion reduces uncertainty because ionospheric errors are uncorrelated across paths
-2. **Implementation:** The fusion service applies inverse-variance weighting across 17 broadcasts
+2. **Implementation:** The fusion service applies inverse-variance weighting across 14 broadcasts
 3. **Data:** Live widgets show the actual uncertainty achieved and dispersion ratios observed
 4. **Validation:** If the data supports the argument, the implementation is correct. If not, either the argument or the implementation needs correction.
 

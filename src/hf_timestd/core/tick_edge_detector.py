@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Tick Edge Detector — Per-Second Matched Filter Timing for WWV/WWVH/CHU/BPM
-============================================================================
+Tick Edge Detector — Per-Second Matched Filter Timing for WWV/WWVH/BPM
+========================================================================
 
 Extracts UTC timing from per-second ticks using the approach proven by the
 ntpd Type 36 driver (refclock_wwv.c, D.L. Mills, University of Delaware):
@@ -9,7 +9,6 @@ ntpd Type 36 driver (refclock_wwv.c, D.L. Mills, University of Delaware):
 1. **Matched filter** for the exact tick shape:
    - WWV:  5 cycles of 1000 Hz (5.0 ms)
    - WWVH: 6 cycles of 1200 Hz (5.0 ms)
-   - CHU:  300 cycles of 1000 Hz (300 ms)
    - BPM:  10 cycles of 1000 Hz (10 ms)
 
 2. **Front-edge back-calculation**: The correlation peak corresponds to the
@@ -120,7 +119,7 @@ def is_clean_minute(station: str, minute: int) -> bool:
         # WWVH ticks are clean when WWV has no audio tone
         return minute in WWV_SILENT_AUDIO_MINUTES
     else:
-        # CHU/BPM: no intermod concern from WWV/WWVH
+        # BPM: no intermod concern from WWV/WWVH
         return True
 
 
@@ -214,19 +213,16 @@ class EdgeEnsembleResult:
 STATION_TICK_FREQ: Dict[str, float] = {
     'WWV': 1000.0,
     'WWVH': 1200.0,
-    'CHU': 1000.0,
     'BPM': 1000.0,
 }
 
 # Number of cycles in the tick (defines the matched filter template)
 # WWV: 5 cycles of 1000 Hz = 5.0 ms
 # WWVH: 6 cycles of 1200 Hz = 5.0 ms
-# CHU: 300 cycles of 1000 Hz = 300 ms (regular seconds)
 # BPM: 10 cycles of 1000 Hz = 10 ms
 STATION_TICK_CYCLES: Dict[str, int] = {
     'WWV': 5,
     'WWVH': 6,
-    'CHU': 300,
     'BPM': 10,
 }
 
@@ -234,7 +230,6 @@ STATION_TICK_CYCLES: Dict[str, int] = {
 STATION_SKIP_SECONDS: Dict[str, frozenset] = {
     'WWV': frozenset({29, 59}),
     'WWVH': frozenset({29, 59}),
-    'CHU': frozenset({0, 29}),
     'BPM': frozenset(),
 }
 
@@ -242,7 +237,6 @@ STATION_SKIP_SECONDS: Dict[str, frozenset] = {
 STATION_TICK_DURATION_MS: Dict[str, float] = {
     'WWV': 5.0,
     'WWVH': 5.0,
-    'CHU': 300.0,
     'BPM': 10.0,
 }
 
@@ -298,7 +292,7 @@ class TickEdgeDetector:
     CLEAN_MIN_SNR_DB = 8.0     # Minimum SNR for a CLEAN component to be kept
     CLEAN_PRIMARY_MIN_SNR_DB = 15.0  # Primary must be this strong before running CLEAN
     # Only apply CLEAN for templates shorter than this (ms).
-    # 5ms WWV/WWVH and 10ms BPM benefit; 300ms CHU does not.
+    # 5ms WWV/WWVH and 10ms BPM benefit; long tones do not.
     CLEAN_MAX_TEMPLATE_MS = 15.0
 
     def __init__(self, sample_rate: int = 24000):
@@ -514,7 +508,7 @@ class TickEdgeDetector:
         
         Args:
             audio_signal: AM-demodulated audio (real-valued, magnitude - mean)
-            station: Station name ('WWV', 'WWVH', 'CHU', 'BPM')
+            station: Station name ('WWV', 'WWVH', 'BPM')
             minute_number: Minute within hour (0-59), for audio tone schedule
             buffer_timing: BufferTiming object for UTC↔sample conversion
             expected_delay_sec: Expected propagation delay in seconds
@@ -572,10 +566,7 @@ class TickEdgeDetector:
                 continue
             
             # Expected onset sample (integer!)
-            # CHU 300ms tones start ~74ms after utc_sec + prop_delay.
-            # See metrology_engine.py for full evidence chain.
-            chu_tx_onset_sec = 0.074 if station == 'CHU' else 0.0
-            onset_utc = utc_sec + expected_delay_sec + chu_tx_onset_sec
+            onset_utc = utc_sec + expected_delay_sec
             expected_sample = int(round(buffer_timing.utc_to_sample(onset_utc)))
             
             # Check buffer bounds

@@ -17,7 +17,7 @@
 
 ## 1. Executive Summary
 
-**hf-timestd** is a dual-purpose HF time transfer and ionospheric measurement system. It receives WWV/WWVH/CHU/BPM time signal broadcasts via a GPSDO-disciplined SDR and operates in two complementary modes:
+**hf-timestd** is a dual-purpose HF time transfer and ionospheric measurement system. It receives WWV/WWVH/BPM time signal broadcasts via a GPSDO-disciplined SDR and operates in two complementary modes:
 
 **RTP Mode (Physics Pathway):** With GPS+PPS providing authoritative timing (~50 μs accuracy via radiod's RTP timestamps), the system uses the known transmission times and measured arrival times to **study the ionosphere**. The propagation delay residuals reveal carrier-phase differential TEC (dTEC, the primary ionospheric product, anchored by GNSS VTEC), traveling ionospheric disturbances (TIDs), and space weather effects.
 
@@ -149,7 +149,7 @@ By adding geography (WWV vs WWVH vs CHU vs BPM), you sound the ionosphere from d
 | **Multi-Frequency Dispersion** | Vertical Shift (Path Delay) | Calibrates the zero-point for each station |
 | **Multi-Station Fusion** | Integrity (Validation) | Ensures the zero-point is consistent across the hemisphere |
 
-**Key Insight**: The combined regression of 17 broadcasts doesn't just average noise — it **solves the geometry** of the ionosphere to find the true UTC origin point.
+**Key Insight**: The combined regression of 14 broadcasts doesn't just average noise — it **solves the geometry** of the ionosphere to find the true UTC origin point.
 
 ---
 
@@ -273,7 +273,7 @@ Ranked from highest authority (most accurate, most independent of external state
 | **T6** | hf-timestd detects TS-1 HF-injected BPSK-PPS in the RX path (sample-precise from the IQ stream) | TS-1 injector present + detection lock; anchor = named second + µs-class `delay_budget_ns` (**content-time convention**, 2026-08-24: the label is the antenna instant, so pipeline latency is *not* folded in — see [CONTENT_TIME_LABELING_CONVENTION.md](design/CONTENT_TIME_LABELING_CONVENTION.md)) | ~ns *precision*; accuracy bounded by the analog term ε and the cross-bench gate | ~tens of μs (per-tick; drifts between ticks at TCXO rate) |
 | **T5** | GPS+PPS delivered over USB to the radiod host (LBE-1421 USB-NMEA, optionally USB-PPS on the same channel); consumed for second-of-day disambig under T6, or as the standalone source when T6 is unavailable | A1 + LBE-1421 USB connected to host | ~µs–few ms (USB-bus-jitter floored) | *not available* |
 | **T4** | system clock chronyed to LAN GPS+PPS timeserver via NTP | reachable GPS-backed peer | ~100 μs – few ms | ~1–5 ms (adds TCXO drift between syncs) |
-| **T3** | hf-timestd recovers UTC from WWV/WWVH/CHU tick Fusion | ≥2 stations detected + ionospheric model | ~0.5–2 ms | ~5–10 ms |
+| **T3** | hf-timestd recovers UTC from WWV/WWVH tick Fusion | ≥2 stations detected + ionospheric model | ~0.5–2 ms | ~5–10 ms |
 | **T2** | system clock chronyed to public NTP via WAN | internet reachability; stratum ≤3 | ~1–50 ms | ~5–50 ms (NTP dominates; TCXO negligible at this scale) |
 | **T1** | A1 only — ADC rate locked but no UTC discipline beyond last RTP_TIMESNAP | A1 | const offset at snapshot + 0 drift | *not available* |
 | **T0** | free-running system clock, no GPSDO | none | *not available* | unbounded |
@@ -1238,11 +1238,11 @@ Where:
 - `T_transmit_i` — scheduled transmission time (known by definition)
 - `ε_i` — residual error (ionospheric + noise)
 
-**Key insight:** All 17 broadcasts share the **same unknown** (offset_to_UTC). The ionospheric paths are **nuisance parameters** we must estimate to extract the quantity of interest.
+**Key insight:** All 14 broadcasts share the **same unknown** (offset_to_UTC). The ionospheric paths are **nuisance parameters** we must estimate to extract the quantity of interest.
 
 ### 12.3 Layer 1: Per-Broadcast Kalman Filter
 
-**Purpose:** Track ionospheric path dynamics for each of the 17 broadcasts.
+**Purpose:** Track ionospheric path dynamics for each of the 14 broadcasts.
 
 **State vector:**
 ```
@@ -1450,7 +1450,7 @@ UTC(NIST/NRC) → HF transmitter → Ionosphere → Receiver → ADC → Detecti
 
 | Source | Magnitude | Notes |
 |--------|-----------|-------|
-| **Transmitter timing** | < 1 µs | WWV/WWVH/CHU traceable to UTC(NIST)/UTC(NRC) |
+| **Transmitter timing** | < 1 µs | WWV/WWVH traceable to UTC(NIST)/UTC(NRC) |
 | **Ionospheric propagation** | 3–15 ms variation | Dominant error. Diurnal, seasonal, solar cycle |
 | **Multipath/mode structure** | 1–5 ms | Multiple ionospheric modes arrive at different times |
 | **ADC clock accuracy** | 0.1–10 ppm | TCXO: 1–2 ppm. Cheap crystal: 10–50 ppm |
@@ -1517,7 +1517,7 @@ Each row summarizes the **published Fusion offset's uncertainty** at one T-level
 | **T6** | TS-1 HF-injected BPSK-PPS via RX-888 ADC | ~ns (post-§8) | ~ns | ~tens μs per detection | ~100 μs¹ | §8 chain-delay calibration stability; BPSK-PPS SNR + coverage |
 | **T5** | LBE-1421 USB-delivered GPS+PPS → system clock | ~µs–few ms | ~µs (chrony averaging) | — | — | USB bus jitter + chrony PLL |
 | **T4** | LAN GPS timeserver via NTP → system clock | 100 μs – few ms | ~300 μs | 1–5 ms | ~1.5 ms | LAN NTP jitter (+ TCXO drift between syncs at A0) |
-| **T3** | HF tick Fusion of WWV/WWVH/CHU | 3–15 ms | 0.3–1.0 ms | 5–20 ms | 1–3 ms | σ_iono single-cycle; A-level × window length for fused |
+| **T3** | HF tick Fusion of WWV/WWVH | 3–15 ms | 0.3–1.0 ms | 5–20 ms | 1–3 ms | σ_iono single-cycle; A-level × window length for fused |
 | **T2** | Public NTP via WAN → system clock | 1–50 ms | ~10 ms | 5–50 ms | ~15 ms | NTP wander dominates; A-level invisible at this scale |
 | **T1** | GPSDO-coast from last good RTP_TIMESNAP | const offset + ~0 drift² | — (not applicable) | — | — | Snapshot age + accumulated A1 rate error (ppb × hours) |
 | **T0** | *(no UTC alignment available)* | — (offset unavailable) | — | — | — | Terminal — data tagged `no_utc_alignment_available` |

@@ -5,21 +5,19 @@ Tick Matched Filter - Station-Specific Timing and Phase Extraction
 ================================================================================
 PURPOSE
 ================================================================================
-Extract timing and carrier phase from WWV/WWVH/CHU/BPM using IQ-domain
+Extract timing and carrier phase from WWV/WWVH/BPM using IQ-domain
 matched filtering with station-specific templates.
 
 Two-tier detection hierarchy:
 
 1. MINUTE MARKER (primary timing):
    - WWV/WWVH: 800ms tone at second 0 (1000/1200 Hz)
-   - CHU: 500ms tone at second 0
    - BPM: 300ms tone at second 0
    - 160× more energy than 5ms ticks → robust under fading
    - Single high-SNR timing anchor per minute
 
 2. PER-SECOND TICKS (phase extraction, augments timing when present):
    - WWV/WWVH: 5ms ticks (1000/1200 Hz)
-   - CHU: 300ms regular, 10ms FSK/voice
    - BPM: 10ms UTC, 100ms UT1
    - Primary value: carrier phase time series for ionospheric analysis
    - Timing augmentation only when SNR > 8 dB
@@ -69,13 +67,6 @@ WWVH (Kauai, HI):
     - 1200 Hz, 5ms per-second ticks, 800ms minute marker
     - Silent: seconds 29, 59
 
-CHU (Ottawa, Canada):
-    - 1000 Hz, variable duration
-    - Regular seconds: 300ms tones
-    - FSK seconds (31-39): 10ms ticks
-    - Voice seconds (50-59): 10ms ticks
-    - Second 0: 500ms marker; second 29: silent
-
 BPM (China):
     - 1000 Hz, minute-dependent duration
     - UTC minutes: 10ms ticks
@@ -105,7 +96,6 @@ class StationType(Enum):
     """Time signal station types"""
     WWV = "WWV"
     WWVH = "WWVH"
-    CHU = "CHU"
     BPM = "BPM"
 
 
@@ -124,13 +114,6 @@ class TickTemplate:
     # Minute marker at second 0 (primary timing source)
     minute_marker_duration_ms: float = 800.0
     
-    # CHU-specific: variable duration by second
-    fsk_seconds: Set[int] = field(default_factory=set)
-    fsk_duration_ms: float = 10.0
-    voice_seconds: Set[int] = field(default_factory=set)
-    voice_duration_ms: float = 10.0
-    regular_duration_ms: float = 300.0
-    
     # BPM-specific: UT1 minutes have different tick duration
     ut1_minutes: Set[int] = field(default_factory=set)
     ut1_tick_duration_ms: float = 100.0
@@ -138,7 +121,7 @@ class TickTemplate:
 
 # Pre-defined station templates
 # NOTE: second 0 is NOT in skip_seconds — it carries the minute marker,
-# our primary timing source (800ms for WWV/WWVH, 500ms CHU, 300ms BPM).
+# our primary timing source (800ms for WWV/WWVH, 300ms BPM).
 # Only truly silent seconds are skipped.
 WWV_TEMPLATE = TickTemplate(
     station=StationType.WWV,
@@ -156,19 +139,6 @@ WWVH_TEMPLATE = TickTemplate(
     minute_marker_duration_ms=800.0,
 )
 
-CHU_TEMPLATE = TickTemplate(
-    station=StationType.CHU,
-    frequency_hz=1000.0,
-    tick_duration_ms=300.0,  # Default for regular seconds
-    skip_seconds={29},
-    minute_marker_duration_ms=500.0,
-    fsk_seconds=set(range(31, 40)),
-    fsk_duration_ms=10.0,
-    voice_seconds=set(range(50, 60)),
-    voice_duration_ms=10.0,
-    regular_duration_ms=300.0,
-)
-
 BPM_TEMPLATE = TickTemplate(
     station=StationType.BPM,
     frequency_hz=1000.0,
@@ -182,7 +152,6 @@ BPM_TEMPLATE = TickTemplate(
 STATION_TEMPLATES = {
     StationType.WWV: WWV_TEMPLATE,
     StationType.WWVH: WWVH_TEMPLATE,
-    StationType.CHU: CHU_TEMPLATE,
     StationType.BPM: BPM_TEMPLATE,
 }
 
@@ -282,7 +251,7 @@ class TickMatchedFilter:
         Initialize tick matched filter.
         
         Args:
-            station: Station type (WWV, WWVH, CHU, BPM)
+            station: Station type (WWV, WWVH, BPM)
             sample_rate: Sample rate in Hz
             window_seconds: Number of seconds per detection window
             overlap_seconds: Overlap between adjacent windows (1 = max overlap)
@@ -326,12 +295,6 @@ class TickMatchedFilter:
     def _build_templates(self) -> None:
         """Build quadrature matched filter templates for each tick duration."""
         durations_ms = {self.template_config.tick_duration_ms}
-        
-        # CHU has multiple durations
-        if self.station == StationType.CHU:
-            durations_ms.add(self.template_config.fsk_duration_ms)
-            durations_ms.add(self.template_config.voice_duration_ms)
-            durations_ms.add(self.template_config.regular_duration_ms)
         
         # BPM has UT1 duration
         if self.station == StationType.BPM:
@@ -378,11 +341,6 @@ class TickMatchedFilter:
         durations_ms = {self.template_config.tick_duration_ms}
         durations_ms.add(self.template_config.minute_marker_duration_ms)
         
-        if self.station == StationType.CHU:
-            durations_ms.add(self.template_config.fsk_duration_ms)
-            durations_ms.add(self.template_config.voice_duration_ms)
-            durations_ms.add(self.template_config.regular_duration_ms)
-        
         if self.station == StationType.BPM:
             durations_ms.add(self.template_config.ut1_tick_duration_ms)
         
@@ -426,11 +384,6 @@ class TickMatchedFilter:
         
         # Minute marker (primary timing source)
         durations_ms.add(self.template_config.minute_marker_duration_ms)
-        
-        if self.station == StationType.CHU:
-            durations_ms.add(self.template_config.fsk_duration_ms)
-            durations_ms.add(self.template_config.voice_duration_ms)
-            durations_ms.add(self.template_config.regular_duration_ms)
         
         if self.station == StationType.BPM:
             durations_ms.add(self.template_config.ut1_tick_duration_ms)
@@ -476,15 +429,7 @@ class TickMatchedFilter:
         if second == 0:
             return self.template_config.minute_marker_duration_ms
         
-        if self.station == StationType.CHU:
-            if second in self.template_config.fsk_seconds:
-                return self.template_config.fsk_duration_ms
-            elif second in self.template_config.voice_seconds:
-                return self.template_config.voice_duration_ms
-            else:
-                return self.template_config.regular_duration_ms
-        
-        elif self.station == StationType.BPM:
+        if self.station == StationType.BPM:
             if minute in self.template_config.ut1_minutes:
                 return self.template_config.ut1_tick_duration_ms
             else:
@@ -644,7 +589,7 @@ class TickMatchedFilter:
     def _am_demodulate(self, iq_samples: np.ndarray) -> np.ndarray:
         """AM demodulation bridge: IQ → audio envelope.
         
-        WWV/WWVH/CHU/BPM use standard AM (DSB).  The timing information
+        WWV/WWVH/BPM use standard AM (DSB).  The timing information
         (tick on/off keying) is encoded in the magnitude of the carrier.
         
         Two-stage envelope process:
@@ -1331,7 +1276,7 @@ def create_tick_filter(
     Factory function to create a tick matched filter.
     
     Args:
-        station: Station name ('WWV', 'WWVH', 'CHU', 'BPM')
+        station: Station name ('WWV', 'WWVH', 'BPM')
         sample_rate: Sample rate in Hz
         window_seconds: Seconds per detection window
         overlap_seconds: Overlap between windows

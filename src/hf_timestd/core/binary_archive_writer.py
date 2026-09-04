@@ -557,7 +557,7 @@ class BinaryArchiveWriter:
     def _sanitize_channel_name(self) -> str:
         """Convert channel name to filesystem-safe format.
         
-        Preserves dots in frequency (e.g., CHU_7.85_MHz) for consistency
+        Preserves dots in frequency (e.g., WWV_2.5_MHz) for consistency
         with analytics scripts and web UI.
         """
         return self.config.channel_name.replace(' ', '_')

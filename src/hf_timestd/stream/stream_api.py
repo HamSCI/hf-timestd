@@ -259,7 +259,7 @@ def subscribe_batch(
     Subscribe to multiple streams with the same parameters.
     
     Efficient batch creation for applications like hf-timestd that need
-    many simultaneous channels (e.g. all WWV/CHU frequencies).
+    many simultaneous channels (e.g. all WWV frequencies).
     
     Args:
         radiod: radiod address

@@ -7,7 +7,7 @@ the ka9q stack.  The core-recorder decode loop supplies the runtime plumbing
 that decides *what number to emit* lives here.
 
 Timing convention (must match the HF metrology workers so the Fusion combiner
-can pool WWVB with WWV/WWVH/CHU/BPM):
+can pool WWVB with WWV/WWVH/BPM):
 
     timing_error_ms = (T_arrival_utc - decoded_minute_utc) * 1000
                       - expected_delay_ms

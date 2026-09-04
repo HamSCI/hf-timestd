@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-WWV/WWVH/CHU Shared Constants - Central Reference for Phase 2 Analytics
+WWV/WWVH/BPM Shared Constants - Central Reference for Phase 2 Analytics
 
 ================================================================================
 PURPOSE
@@ -28,13 +28,6 @@ WWVH - NIST Radio Station, Kekaha, Kauai, Hawaii, USA
     Timing Tone: 1200 Hz, 800ms duration at second 0
     Power: 10 kW (all frequencies)
 
-CHU - NRC Radio Station, Ottawa, Ontario, Canada
-    Coordinates: see STATION_CATALOG — this module derives them below and
-    does not restate them, which is how the last stale copy got here.
-    Frequencies: 3.33, 7.85, 14.67 MHz
-    Timing Tone: 1000 Hz, 500ms duration (1000ms at hour)
-    Special: FSK time code at seconds 31-39 (Bell 103 AFSK)
-
 BPM - NTSC, Pucheng County, Shaanxi, China
     Coordinates: 34.9489°N, 109.5430°E
     Frequencies: 2.5, 5, 10, 15 MHz
@@ -54,9 +47,6 @@ SHARED (require discrimination):
 UNIQUE (no discrimination needed):
     20 MHz   - WWV only
     25 MHz   - WWV only
-    3.33 MHz - CHU only
-    7.85 MHz - CHU only
-    14.67 MHz - CHU only
 
 ================================================================================
 GROUND TRUTH MINUTES
@@ -99,14 +89,12 @@ IONOSPHERIC DELAY:
 PLAUSIBLE PROPAGATION DELAY RANGES (continental US):
     WWV:  2-35 ms  (Fort Collins relatively close)
     WWVH: 12-60 ms (Hawaii much farther)
-    CHU:  3-40 ms  (Ottawa intermediate)
 
 ================================================================================
 REFERENCES
 ================================================================================
 - NIST Special Publication 432, "NIST Time and Frequency Services" (2012)
 - NIST Special Publication 250-67, "NIST Time and Frequency Radio Stations"
-- NRC CHU Technical Specifications
 - BPM (Time Service) Wikipedia / NTSC Publications
 - ITU-R P.531-14, "Ionospheric propagation data and prediction methods"
 
@@ -114,6 +102,7 @@ REFERENCES
 REVISION HISTORY
 ================================================================================
 2025-12-07: Added comprehensive documentation
+2026-09-04: CHU removed (off-air since 2026-06-27)
 2025-11-15: Added CHU FSK parameters
 2025-10-20: Initial constants extracted from analysis modules
 """
@@ -138,7 +127,6 @@ SAMPLE_RATE_LEGACY = 16000  # Hz - Legacy 16 kHz mode (deprecated)
 from hamsci_dsp.stations import BUILTIN_CATALOG as STATION_CATALOG
 WWV_FREQUENCIES = list(STATION_CATALOG.get('WWV').frequencies_mhz)
 WWVH_FREQUENCIES = list(STATION_CATALOG.get('WWVH').frequencies_mhz)  # NOT 20/25 MHz
-CHU_FREQUENCIES = list(STATION_CATALOG.get('CHU').frequencies_mhz)
 BPM_FREQUENCIES = list(STATION_CATALOG.get('BPM').frequencies_mhz)
 
 # Shared frequencies requiring discrimination (WWV vs WWVH vs BPM) — derived
@@ -148,11 +136,9 @@ SHARED_FREQUENCIES = sorted(
 )
 
 # Station-specific frequencies (no discrimination needed)
-# Maps frequency (MHz) to station name.  CHU shares no frequency with the
-# other stations, so all of its channels are station-specific.
+# Maps frequency (MHz) to station name.
 STATION_SPECIFIC_FREQ = {
-    **{f: 'WWV' for f in WWV_FREQUENCIES if f not in SHARED_FREQUENCIES},
-    **{f: 'CHU' for f in CHU_FREQUENCIES},
+    f: 'WWV' for f in WWV_FREQUENCIES if f not in SHARED_FREQUENCIES
 }
 
 # Minutes where only one station broadcasts 500/600 Hz tones (ground truth)
@@ -268,7 +254,6 @@ STANDARD_CHANNELS = [
     'WWV 2.5 MHz', 'WWV 5 MHz', 'WWV 10 MHz', 'WWV 15 MHz', 
     'WWV 20 MHz', 'WWV 25 MHz',
     'WWVH 2.5 MHz', 'WWVH 5 MHz', 'WWVH 10 MHz', 'WWVH 15 MHz',
-    'CHU 3.33 MHz', 'CHU 7.85 MHz', 'CHU 14.67 MHz',
     'BPM 2.5 MHz', 'BPM 5 MHz', 'BPM 10 MHz', 'BPM 15 MHz'
 ]
 
@@ -287,8 +272,6 @@ STANDARD_CHANNELS = [
 #        time-distribution/radio-station-wwv) states: 40° 40' 50.5" N, 105° 02' 26.6" W
 # - WWVH: NIST website (https://www.nist.gov/pml/time-and-frequency-division/
 #         time-distribution/radio-station-wwvh) states: 21° 59' 14" N, 159° 45' 49" W
-# - CHU: NRC Canada (https://nrc.canada.ca/en/certifications-evaluations-standards/
-#        canadas-official-time/nrc-shortwave-station-chu) states: 45° 17' 43" N, 75° 45' 16" W
 # =============================================================================
 
 # Station coordinates are RE-EXPORTED from the hamsci-dsp station catalog
@@ -296,6 +279,7 @@ STANDARD_CHANNELS = [
 # this module keeps timing schedules/tones/thresholds).  The NIST/NRC
 # provenance notes and dd°mm'ss" derivations moved with the data — see
 # hamsci_dsp/stations.py and its tests, which pin the exact values.
+# CHU (off-air, catalogue active=False) is no longer re-exported here.
 # (STATION_CATALOG is imported once, in the STATION BROADCAST SCHEDULES
 # section above.)
 
@@ -303,8 +287,6 @@ WWV_LAT = STATION_CATALOG.get('WWV').lat
 WWV_LON = STATION_CATALOG.get('WWV').lon
 WWVH_LAT = STATION_CATALOG.get('WWVH').lat
 WWVH_LON = STATION_CATALOG.get('WWVH').lon
-CHU_LAT = STATION_CATALOG.get('CHU').lat
-CHU_LON = STATION_CATALOG.get('CHU').lon
 BPM_LAT = STATION_CATALOG.get('BPM').lat
 BPM_LON = STATION_CATALOG.get('BPM').lon
 WWVB_LAT = STATION_CATALOG.get('WWVB').lat
@@ -313,7 +295,6 @@ WWVB_LON = STATION_CATALOG.get('WWVB').lon
 # Convenience tuples for programmatic access
 WWV_COORDINATES = STATION_CATALOG.get('WWV').coordinates
 WWVH_COORDINATES = STATION_CATALOG.get('WWVH').coordinates
-CHU_COORDINATES = STATION_CATALOG.get('CHU').coordinates
 BPM_COORDINATES = STATION_CATALOG.get('BPM').coordinates
 WWVB_COORDINATES = STATION_CATALOG.get('WWVB').coordinates
 
@@ -326,39 +307,7 @@ STATION_LOCATIONS = STATION_CATALOG.locations()
 # Fundamental timing markers
 WWV_TICK_FREQ = 1000   # Hz - WWV uses 1000 Hz tick
 WWVH_TICK_FREQ = 1200  # Hz - WWVH uses 1200 Hz tick
-CHU_TICK_FREQ = 1000   # Hz - CHU uses 1000 Hz tick
 BPM_TICK_FREQ = 1000   # Hz - BPM uses 1000 Hz tick
-
-# =============================================================================
-# CHU TIMING STRUCTURE (Reference: NRC CHU Technical Specifications)
-# =============================================================================
-
-# CHU 1000 Hz tone pattern per minute:
-# - Second 00: 0.5s tone (minute marker) - 1.0s at top of hour
-# - Seconds 01-08: 0.3s tones (or DUT1 split tones for positive DUT1)
-# - Seconds 09-16: 0.3s tones (or DUT1 split tones for negative DUT1)
-# - Seconds 17-28: 0.3s tones (regular)
-# - Second 29: ALWAYS SILENT (distinguishes CHU from WWV)
-# - Second 30: 0.3s tone
-# - Seconds 31-39: 10ms ticks only (FSK digital time code transmitted)
-# - Seconds 40-49: 0.3s tones (regular)
-# - Seconds 50-59: 10ms ticks only (voice announcements)
-
-CHU_MINUTE_MARKER_DURATION = 0.5   # seconds (0.5s at :00, 1.0s at top of hour)
-CHU_REGULAR_TONE_DURATION = 0.3    # seconds
-CHU_TICK_DURATION = 0.01           # seconds (10ms during FSK/voice)
-CHU_SILENT_SECOND = 29             # Always omitted
-CHU_FSK_SECONDS = set(range(31, 40))    # Digital time code (Bell 103 AFSK)
-CHU_VOICE_SECONDS = set(range(50, 60))  # Voice announcements
-
-# DUT1 encoding seconds (split tones: 0.1s + 0.1s silence + 0.1s)
-CHU_DUT1_POSITIVE_SECONDS = set(range(1, 9))   # +0.1s to +0.8s
-CHU_DUT1_NEGATIVE_SECONDS = set(range(9, 17))  # -0.1s to -0.8s
-
-# CHU FSK parameters (Bell 103 AFSK)
-CHU_FSK_MARK_FREQ = 2225   # Hz (bit 1)
-CHU_FSK_SPACE_FREQ = 2025  # Hz (bit 0)
-CHU_FSK_BAUD_RATE = 300    # bits per second
 
 # Extended tones for discrimination
 TONE_440_HZ = 440
@@ -440,7 +389,6 @@ STATION_SEPARATION_MS = 15.0
 # Station                Distance (typical US)    Plausible delay range
 # ------                 --------------------     ---------------------
 # WWV (Fort Collins)     500-3000 km             3-25 ms
-# CHU (Ottawa)           1000-4000 km            5-30 ms  
 # WWVH (Hawaii)          4000-6000 km            15-50 ms
 
 # Propagation delay bounds by station (ms)
@@ -456,7 +404,6 @@ STATION_SEPARATION_MS = 15.0
 PROPAGATION_BOUNDS_MS_BOOTSTRAP = {
     'WWV': (-10.0, 80.0),    # Fort Collins: 500-3000km → 3-25ms + margin + investigation
     'WWVH': (0.0, 100.0),    # Hawaii: 4000-6000km → 15-50ms + margin + investigation
-    'CHU': (-10.0, 80.0),    # Ottawa: 1000-4000km → 5-30ms + margin + investigation
     'BPM': (30.0, 150.0),    # China: 10960km → 36ms light + iono = 40-100ms multi-hop
                              # FIXED 2026-02-05: Was (10.0, 150.0) which accepted WWV/WWVH signals
 }
@@ -474,34 +421,11 @@ DEFAULT_PROPAGATION_BOUNDS_MS = (0.0, 100.0)
 # about which station is being detected. Prefer these during bootstrap.
 #
 # WWV-only frequencies: 20 MHz, 25 MHz (WWVH doesn't transmit)
-# CHU: All frequencies (3.33, 7.85, 14.67 MHz) - unique station
 #
 UNAMBIGUOUS_BOOTSTRAP_CHANNELS = {
     'WWV_20.0': 'WWV',
-    'WWV_25.0': 'WWV', 
-    'CHU_3.33': 'CHU',
-    'CHU_7.85': 'CHU',
-    'CHU_14.67': 'CHU',
+    'WWV_25.0': 'WWV',
 }
-
-# =============================================================================
-# CROSS-STATION GEOGRAPHIC CONSISTENCY
-# =============================================================================
-# Stations at similar distances should have similar propagation delays.
-# These pairs should agree within the specified tolerance (accounting for
-# ionospheric variation and path differences).
-#
-# Format: ((station1, freq1), (station2, freq2), max_difference_ms)
-#
-GEOGRAPHIC_CONSISTENCY_PAIRS = [
-    # Similar distance pairs (daytime, stable ionosphere)
-    # WWV 5 MHz and CHU 3.33 MHz: both ~1000-2000km, should be within ~10ms
-    (('WWV', 5.0), ('CHU', 3.33), 15.0),
-    # WWV 15 MHz and CHU 14.67 MHz: similar frequency, similar distance
-    (('WWV', 15.0), ('CHU', 14.67), 15.0),
-    # WWV 10 MHz and CHU 7.85 MHz: mid-band comparison
-    (('WWV', 10.0), ('CHU', 7.85), 15.0),
-]
 
 # Maximum calibration offset allowed (ms)
 # Any offset larger than this indicates a systematic error, not real propagation

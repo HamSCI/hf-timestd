@@ -239,7 +239,7 @@ class MetrologyService:
         # Test Signal Writer (for WWV/WWVH channels - minutes 8 and 44)
         # PHYSICS-OPTIONAL: ionospheric sounding product, not needed for Chrony.
         self.test_signal_writer = None
-        if self._physics_products and 'CHU' not in channel_name.upper():
+        if self._physics_products:
             test_signal_output_dir = DataProductRegistry.get_data_dir(
                 channel_dir=self.output_dir,
                 product_level="L2",

@@ -41,7 +41,7 @@ This document explains **WHY** the hf-timestd system is designed the way it is. 
 
 ## Executive Summary
 
-**hf-timestd** is a dual-purpose HF monitoring system for receiving and analyzing time standard broadcasts from WWV, WWVH, CHU, and BPM. Using a GPSDO-disciplined SDR receiver with GPS+PPS authoritative timing (~50 μs via radiod RTP timestamps), the system operates in two modes: **RTP Mode** uses the known-accurate timestamps to study ionospheric propagation, while **Fusion Mode** attempts to recover UTC from the broadcasts alone. The system extracts **D_clock = T_system - T_UTC** measurements for both ionospheric science and time transfer research.
+**hf-timestd** is a dual-purpose HF monitoring system for receiving and analyzing time standard broadcasts from WWV, WWVH, and BPM. Using a GPSDO-disciplined SDR receiver with GPS+PPS authoritative timing (~50 μs via radiod RTP timestamps), the system operates in two modes: **RTP Mode** uses the known-accurate timestamps to study ionospheric propagation, while **Fusion Mode** attempts to recover UTC from the broadcasts alone. The system extracts **D_clock = T_system - T_UTC** measurements for both ionospheric science and time transfer research.
 
 ### Core Mission
 
@@ -67,7 +67,7 @@ The system serves a **dual purpose**:
 5. **Carrier-phase dTEC** - Differential TEC with GNSS VTEC anchoring (~6 mTECU/min sensitivity)
 6. **TID detection** - Cross-path correlation for traveling ionospheric disturbances
 
-### Channel Configuration (17 broadcasts)
+### Channel Configuration (14 broadcasts)
 
 | Station | Location | Frequencies | Notes |
 |---------|----------|-------------|-------|
@@ -364,7 +364,7 @@ inter-service data exchange (Phase 2 -> Phase 3).
 │                                                                 │
 │  Input:  Binary IQ files from Phase 1 raw_buffer               │
 │  Process:                                                       │
-│    1. Tone Detection (WWV/WWVH/CHU @ 1000/1200 Hz)             │
+│    1. Tone Detection (WWV/WWVH @ 1000/1200 Hz)             │
 │    2. Time_snap Management (GPS-quality timestamp anchors)     │
 │    3. WWV/WWVH Discrimination (cross-freq gate + voting)       │
 │    4. D_clock Computation (propagation mode estimation)        │
@@ -882,7 +882,7 @@ The v6.5 release introduces physics-based validation that replaces historical ca
 
 ### ArrivalPatternMatrix
 
-Pre-computes expected arrival times for all 17 broadcasts based on:
+Pre-computes expected arrival times for all 14 broadcasts based on:
 - **Geography:** Receiver and station locations (fixed)
 - **Frequency:** Affects ionospheric reflection height  
 - **UTC time:** Affects ionospheric conditions via IRI-2020 model

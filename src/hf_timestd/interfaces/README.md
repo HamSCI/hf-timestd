@@ -142,7 +142,7 @@ Every gap must be logged for scientific data integrity.
 
 ---
 
-### 5. `ToneDetectionResult` - WWV/WWVH/CHU Detection
+### 5. `ToneDetectionResult` - WWV/WWVH Detection
 
 **Output of Function 3 (tone discrimination)**
 
@@ -312,7 +312,7 @@ if wwv_result.use_for_time_snap:
     print(f"Updating time_snap from {wwv_result.station.value}")
     print(f"Timing error: {wwv_result.timing_error_ms:+.1f}ms")
 
-if wwv_result.is_wwv_or_chu() and wwvh_result.is_wwvh():
+if wwv_result.is_timing_reference() and wwvh_result.is_wwvh():
     # Calculate differential propagation delay
     differential_delay = wwv_result.timing_error_ms - wwvh_result.timing_error_ms
     print(f"WWV-WWVH differential delay: {differential_delay:+.1f}ms")

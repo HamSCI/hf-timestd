@@ -33,7 +33,7 @@
         │                │                │               │
         ▼                ▼                ▼               │
 ┌───────────────┐ ┌──────────────┐ ┌─────────────┐      │
-│  16 kHz NPZ   │ │ WWV/WWVH/CHU │ │  10 Hz      │      │
+│  16 kHz NPZ   │ │ WWV/WWVH │ │  10 Hz      │      │
 │  Compressed   │ │ Detections   │ │  Digital RF │──────┘
 │  Archive      │ │              │ │  HDF5       │ Queue for upload
 │               │ │ time_snap ✓  │ │             │
@@ -71,7 +71,7 @@ Key Data Models (Shared Across All Functions):
 └─────────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────┐
-│ ToneDetectionResult - WWV/WWVH/CHU discrimination                       │
+│ ToneDetectionResult - WWV/WWVH discrimination                       │
 │   • station: StationType (WWV | WWVH | CHU)                             │
 │   • frequency_hz: 1000 or 1200                                          │
 │   • timing_error_ms, snr_db, confidence                                 │

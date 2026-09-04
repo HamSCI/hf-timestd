@@ -29,8 +29,8 @@ LAYER 2: Single Station, Multiple Frequencies — "The Dispersion Anchor"
     - Calculate TEC → compute ionospheric delay → subtract it
     - Result: Characterizes PATH PHYSICS, moves floating ruler toward UTC
 
-LAYER 3: Multiple Stations (17 Broadcasts) — "The Geometry Lock"
-    - Geography (WWV vs WWVH vs CHU) sounds ionosphere from different angles
+LAYER 3: Multiple Stations (14 Broadcasts) — "The Geometry Lock"
+    - Geography (WWV vs WWVH vs BPM) sounds ionosphere from different angles
     - Cancels localized anomalies ("Weather") — solar flares affect paths differently
     - Result: "Triangulates" ionosphere globally, provides INTEGRITY (validation)
 
@@ -51,13 +51,11 @@ The hf-timestd system monitors up to 17 time signal broadcasts:
     --------|----------------------------------------------------
     WWV     | 2.5, 5, 10, 15, 20, 25 MHz (6 broadcasts)
     WWVH    | 2.5, 5, 10, 15 MHz (4 broadcasts, shared with WWV)
-    CHU     | 3.33, 7.85, 14.67 MHz (3 broadcasts, unique)
     BPM     | 2.5, 5, 10, 15 MHz (4 broadcasts, shared with WWV/WWVH)
 
 SHARED vs UNIQUE FREQUENCIES:
     - Shared (WWV + WWVH + BPM): 2.5, 5, 10, 15 MHz → 12 broadcasts (need discrimination)
     - WWV-only: 20, 25 MHz → 2 broadcasts
-    - CHU-only: 3.33, 7.85, 14.67 MHz → 3 broadcasts (FSK timing reference)
 
 BPM SPECIAL HANDLING:
     - Minutes 25-29, 55-59: UT1 timing (DO NOT USE for UTC without DUT1 correction)
@@ -107,11 +105,10 @@ CALIBRATION UPDATE (Exponential Moving Average):
     
 Where α = max(0.5, 20/n_samples) for fast initial convergence.
 
-CHU AS REFERENCE:
-    CHU's FSK time code provides precise 500ms boundary alignment,
-    making it the most trusted reference. However, all stations are
-    calibrated to converge to 0 (not to match CHU), since the goal
-    is UTC(NIST) alignment.
+CALIBRATION TARGET:
+    All stations are calibrated to converge to 0 (UTC(NIST) alignment).
+    No station serves as a reference for the others; the per-broadcast
+    ``hardware_offset_ms`` is the only calibration arithmetic.
 
 ================================================================================
 OUTLIER REJECTION
@@ -158,6 +155,7 @@ Programmatic usage:
 ================================================================================
 REVISION HISTORY
 ================================================================================
+2026-09-04: CHU removed (off-air since 2026-06-27); vestigial reference_station field retired
 2025-12-07: Added comprehensive theoretical documentation
 2025-11-20: Improved calibration to target UTC(NIST) = 0
 2025-11-01: Initial implementation with CHU reference
@@ -226,7 +224,6 @@ from hf_timestd.models import (
     FusionQualityFlag,
     FusionConsistencyFlag,
     FusionKalmanState,
-    ReferenceStation
 )
 
 # Systemd watchdog support
@@ -270,14 +267,13 @@ def broadcast_key(station: str, frequency_mhz: float) -> str:
       * the inline f-string at the calibration-history merge used ``.2f``;
       * :meth:`MultiBroadcastFusion._get_broadcast_key` used ``.1f``.
 
-    For CHU's fractional-MHz channels (3.330 / 7.850 / 14.670 MHz) the
-    ``.1f`` format aliases or mis-rounds them, so calibration writes
-    landed on a different key than reads.  Routing every site through
-    this helper makes that impossible.
+    For fractional-MHz channels (CHU's 3.330 / 7.850 / 14.670 MHz, when
+    it was on air) the ``.1f`` format aliased or mis-rounded them, so
+    calibration writes landed on a different key than reads.  Routing
+    every site through this helper makes that impossible.
 
-    ``.2f`` is the chosen precision: it preserves CHU's 0.01 MHz
-    granularity (3.33 / 7.85 / 14.67) while leaving WWV/WWVH integer
-    frequencies unchanged in display.  ``frequency_mhz <= 0`` falls back
+    ``.2f`` is the chosen precision: it preserves 0.01 MHz granularity
+    while leaving WWV/WWVH integer frequencies unchanged in display.  ``frequency_mhz <= 0`` falls back
     to the station name alone (the only synthetic measurement that hits
     this path is the GLOBAL_DIFF anchor at frequency 0.0).
     """
@@ -290,7 +286,7 @@ def broadcast_key(station: str, frequency_mhz: float) -> str:
 class BroadcastMeasurement:
     """Single D_clock measurement from one broadcast."""
     timestamp: float           # Unix time of measurement
-    station: str              # WWV, WWVH, CHU, BPM
+    station: str              # WWV, WWVH, BPM
     frequency_mhz: float      # Broadcast frequency
     d_clock_ms: float         # Raw D_clock measurement
     propagation_delay_ms: float
@@ -314,7 +310,7 @@ class BroadcastMeasurement:
 
     # GPSDO lock state at the time the L1/L2 measurement was taken
     # (M-M10).  Defaults to True so synthetic measurements (GLOBAL_DIFF,
-    # tick, CHU-FSK) and any path that doesn't yet propagate this flag
+    # tick) and any path that doesn't yet propagate this flag
     # stay safe — but the dead `hasattr(m, 'gpsdo_locked')` guards
     # downstream now resolve unconditionally instead of being silently
     # bypassed.
@@ -355,13 +351,12 @@ class BroadcastCalibration:
     UT1 minutes (25-29, 55-59) are excluded from calibration unless
     DUT1 correction is applied.
     """
-    station: str              # WWV, WWVH, CHU, BPM
+    station: str              # WWV, WWVH, BPM
     frequency_mhz: float      # Broadcast frequency (key for correlation)
     offset_ms: float          # Total calibration offset (backward compat)
     uncertainty_ms: float     # Uncertainty in offset
     n_samples: int            # Number of samples used
     last_updated: float       # Unix time of last update
-    reference_station: str    # Station used as reference (CHU)
     hardware_offset_ms: float = 0.0   # Hardware-only component (converges to constant)
     hardware_converged: bool = False   # True once hardware offset has stabilized
     
@@ -396,16 +391,13 @@ class FusedResult:
     # Per-station breakdown
     wwv_mean_ms: Optional[float] = None
     wwvh_mean_ms: Optional[float] = None
-    chu_mean_ms: Optional[float] = None
     bpm_mean_ms: Optional[float] = None
     wwv_count: int = 0
     wwvh_count: int = 0
-    chu_count: int = 0
     bpm_count: int = 0
     
     # Calibration applied
     calibration_applied: bool = False
-    reference_station: str = 'CHU'
     
     # Quality
     outliers_rejected: int = 0
@@ -414,7 +406,6 @@ class FusedResult:
     # Consistency checks (same-station should be tight, inter-station can vary)
     wwv_intra_std_ms: Optional[float] = None   # Std dev within WWV frequencies
     wwvh_intra_std_ms: Optional[float] = None  # Std dev within WWVH frequencies
-    chu_intra_std_ms: Optional[float] = None   # Std dev within CHU frequencies
     bpm_intra_std_ms: Optional[float] = None   # Std dev within BPM frequencies
     inter_station_spread_ms: Optional[float] = None  # Spread between station means
     consistency_flag: str = 'OK'  # OK, INTRA_ANOMALY, INTER_ANOMALY, DISCRIMINATION_SUSPECT
@@ -565,10 +556,7 @@ class AllanDeviationTracker:
 
 class MultiBroadcastFusion:
     """
-    Fuse D_clock estimates from all 17 broadcasts (WWV/WWVH/CHU/BPM).
-    
-    Uses CHU FSK-verified timing as the reference for calibration,
-    since CHU FSK provides exact 500ms boundary alignment.
+    Fuse D_clock estimates from all 14 broadcasts (WWV/WWVH/BPM).
     
     BPM handling:
     - Automatically filters out UT1 minutes (25-29, 55-59)
@@ -579,7 +567,7 @@ class MultiBroadcastFusion:
     # Per-broadcast calibration (Issue 3.2) accounts for frequency-dependent delays.
     #
     # The old hardcoded values were:
-    #   'WWV': 2.5, 'WWVH': 2.5, 'CHU': 1.0
+    #   'WWV': 2.5, 'WWVH': 2.5
     # These are now replaced by learned values from ground truth validation.
     DEFAULT_CALIBRATION = {}  # Empty - all calibration is learned
     
@@ -599,7 +587,6 @@ class MultiBroadcastFusion:
         data_root: Path,
         calibration_file: Optional[Path] = None,
         auto_calibrate: bool = True,
-        reference_station: str = 'CHU',
         receiver_lat: Optional[float] = None,
         receiver_lon: Optional[float] = None,
         sample_rate: Optional[int] = None,
@@ -613,7 +600,6 @@ class MultiBroadcastFusion:
             data_root: Root directory containing phase2/{CHANNEL}/ subdirs
             calibration_file: Optional file to persist calibration
             auto_calibrate: Whether to learn calibration from data
-            reference_station: Station to use as timing reference
             timing_authority_level: Hardware timing level (L1-L6), affects grade thresholds
         """
         self.data_root = Path(data_root)
@@ -637,7 +623,6 @@ class MultiBroadcastFusion:
         self.calibration_trust_level = 1.0  # Trust level from loaded calibration (1.0 = full trust)
         self.calibration_age_hours = 0.0    # Age of loaded calibration in hours
         self.auto_calibrate = auto_calibrate
-        self.reference_station = reference_station
 
         from .wwv_constants import SAMPLE_RATE_FULL
         self.sample_rate = int(sample_rate if sample_rate is not None else SAMPLE_RATE_FULL)
@@ -728,24 +713,20 @@ class MultiBroadcastFusion:
 
         self._load_calibration()
         
-        # CHU FSK auxiliary state (populated during FSK timing integration)
-        # DUT1: UT1-UTC correction for propagation model solar zenith
-        # TAI-UTC: leap second awareness for Kalman hold
-        self._fsk_dut1: Optional[float] = None
-        self._fsk_tai_utc: Optional[int] = None
+        # Leap-second Kalman hold.
         # M-M11: hold-window expiry time (unix seconds), not a per-cycle
-        # boolean.  Set when a TAI-UTC change is observed; cleared by
-        # time elapsing past it.  Previously a one-shot boolean that
-        # cleared the next cycle (as soon as the TAI-UTC field was seen
-        # unchanged) — so the Kalman coast never actually persisted
-        # across the leap second.
-        self._fsk_leap_second_hold_until: float = 0.0
+        # boolean.  Armed when a TAI-UTC change is observed; cleared by
+        # time elapsing past it.  The only arming path was the CHU FSK
+        # Frame B decode, retired 2026-09-04 with CHU; the coast stays so
+        # a future TAI-UTC witness (e.g. the WWV BCD leap-second warning
+        # bit) can arm it.  Today nothing sets this past 0.0.
+        self._leap_second_hold_until: float = 0.0
         # Length of the post-leap-second coast window (seconds).  10 min
         # comfortably covers chrony's reaction time + the broadcast-
         # specific Kalman re-acquisition tail; shorter than the
         # propagation cycle period so a single window can't span more
         # than one leap second.
-        self._fsk_leap_second_hold_seconds: float = 10 * 60.0
+        self._leap_second_hold_seconds: float = 10 * 60.0
 
         # Fusion output
         self.fusion_dir = self.data_root / 'phase2' / 'fusion'
@@ -820,7 +801,7 @@ class MultiBroadcastFusion:
         # ====================================================================
         # LONG-TERM DRIFT ESTIMATOR (2026-01-16)
         # ====================================================================
-        # Key metrological insight: WWV/CHU/BPM transmit EXACTLY on UTC.
+        # Key metrological insight: WWV/WWVH/BPM transmit EXACTLY on UTC.
         # Ionospheric propagation variations are ZERO-MEAN over long periods.
         # Therefore, the long-term average of ANY single broadcast converges
         # to the true GPSDO drift rate as N → ∞.
@@ -858,7 +839,6 @@ class MultiBroadcastFusion:
         logger.info(f"MultiBroadcastFusion initialized")
         logger.info(f"  Data root: {data_root}")
         logger.info(f"  Channels: {len(self.channels)}")
-        logger.info(f"  Reference station: {reference_station}")
         logger.info(f"  Auto-calibrate: {auto_calibrate}")
 
     def _leap_second_hold_active(self, now: Optional[float] = None) -> bool:
@@ -867,14 +847,14 @@ class MultiBroadcastFusion:
 
         ``now`` defaults to wall-clock time.  The hold-window expires
         on a fixed timestamp set when a TAI-UTC change was last
-        observed via CHU-FSK (see the M-M11 history note on
-        :attr:`_fsk_leap_second_hold_until`), so a single observation
+        observed (see the M-M11 history note on
+        :attr:`_leap_second_hold_until`), so a single observation
         coasts the Kalman through the entire transition rather than
         clearing on the next cycle.
         """
         if now is None:
             now = time.time()
-        return now < self._fsk_leap_second_hold_until
+        return now < self._leap_second_hold_until
 
     def _discover_channels(self) -> List[str]:
         """
@@ -1047,7 +1027,6 @@ class MultiBroadcastFusion:
                         uncertainty_ms=cal_data['uncertainty_ms'],
                         n_samples=cal_data['n_samples'],
                         last_updated=cal_data['last_updated'],
-                        reference_station=cal_data.get('reference_station', 'CHU'),
                         hardware_offset_ms=cal_data.get('hardware_offset_ms', 0.0),
                         hardware_converged=cal_data.get('hardware_converged', False)
                     )
@@ -1090,8 +1069,7 @@ class MultiBroadcastFusion:
         Instead of hardcoded guesses, we start with zero offset and high
         uncertainty. The system learns proper calibration from:
         1. Ground truth validation (GPS PPS, silent minutes)
-        2. CHU FSK verified timing
-        3. Cross-validation between broadcasts
+        2. Cross-validation between broadcasts
         """
         # No default offsets - all calibration is learned from data
         # The calibration dict will be populated as measurements arrive
@@ -1146,7 +1124,7 @@ class MultiBroadcastFusion:
 
         Args:
             broadcast_id: Unique broadcast identifier (e.g., "WWV_10000")
-            station: Station name (WWV, WWVH, CHU, BPM)
+            station: Station name (WWV, WWVH, BPM)
             frequency_mhz: Frequency in MHz
             feed: 'l1' or 'l2' — selects the independent per-feed bank
 
@@ -1192,7 +1170,7 @@ class MultiBroadcastFusion:
         - The Kalman tracks ionospheric path dynamics (ToF)
         - Glitches are rejected, real dynamics are preserved
 
-        Leap-second hold (S3): when a CHU-FSK-detected TAI-UTC change is in
+        Leap-second hold (S3): when an observed TAI-UTC change is in
         effect, every measurement is stepped by ~1 s. Feeding that to the
         per-broadcast Kalmans would corrupt their state, so the filters coast
         — predict() (advance the motion model) instead of update() (incorporate
@@ -1352,7 +1330,6 @@ class MultiBroadcastFusion:
                 'uncertainty_ms': cal.uncertainty_ms,
                 'n_samples': cal.n_samples,
                 'last_updated': cal.last_updated,
-                'reference_station': cal.reference_station,
                 'hardware_offset_ms': cal.hardware_offset_ms,
                 'hardware_converged': cal.hardware_converged
             }
@@ -1488,14 +1465,6 @@ class MultiBroadcastFusion:
                                 'timing_ms': float(hdf5_meas['wwvh_timing_ms'])
                             })
                         
-                        # Extract CHU timing
-                        if hdf5_meas.get('chu_detected') and hdf5_meas.get('chu_timing_ms') is not None:
-                            per_minute[minute_boundary].append({
-                                'station': 'CHU',
-                                'frequency_mhz': freq_mhz,
-                                'timing_ms': float(hdf5_meas['chu_timing_ms'])
-                            })
-                        
                         # Extract BPM timing (with UT1 filtering)
                         if hdf5_meas.get('bpm_detected') and hdf5_meas.get('bpm_timing_ms') is not None:
                             dt = datetime.fromtimestamp(minute_boundary, tz=timezone.utc)
@@ -1604,79 +1573,6 @@ class MultiBroadcastFusion:
         
         return by_channel
 
-    def _read_chu_fsk_timing(
-        self,
-        lookback_minutes: int = 10
-    ) -> Dict[int, Dict]:
-        """
-        Read CHU FSK timing observations from L2 chu_fsk HDF5 files.
-        
-        CHU FSK provides precise 500ms boundary alignment - the most accurate
-        timing reference available from HF broadcasts.
-        
-        Returns FSK timing keyed by minute boundary.
-        """
-        from datetime import datetime, timezone
-        
-        now = time.time()
-        cutoff = now - (lookback_minutes * 60)
-        
-        start_dt = datetime.fromtimestamp(cutoff, timezone.utc)
-        end_dt = datetime.fromtimestamp(now, timezone.utc)
-        start_iso = start_dt.isoformat().replace('+00:00', 'Z')
-        end_iso = end_dt.isoformat().replace('+00:00', 'Z')
-        
-        fsk_by_minute: Dict[int, Dict] = {}
-        
-        # Find CHU channels
-        chu_channels = [ch for ch in self.channels if 'CHU' in ch.upper()]
-        
-        for channel in chu_channels:
-            channel_dir = self.phase2_dir / channel
-            if not channel_dir.exists():
-                continue
-            
-            try:
-                reader = make_data_product_reader(
-                    data_dir=channel_dir,
-                    product_level='L2',
-                    product_name='chu_fsk',
-                    channel=channel,
-                    storage_config=self._storage_config,
-                )
-                
-                fsk_measurements = reader.read_time_range(start=start_iso, end=end_iso)
-                
-                for fsk_meas in fsk_measurements:
-                    try:
-                        minute_boundary = fsk_meas.get('minute_boundary_utc', 0)
-                        if minute_boundary < cutoff:
-                            continue
-                        
-                        # Only use valid FSK decodes with timing
-                        if fsk_meas.get('fsk_valid') and fsk_meas.get('timing_offset_ms') is not None:
-                            fsk_by_minute[minute_boundary] = {
-                                'channel': channel,
-                                'timing_offset_ms': fsk_meas.get('timing_offset_ms'),
-                                'decode_confidence': fsk_meas.get('decode_confidence', 0),
-                                'frames_decoded': fsk_meas.get('frames_decoded', 0),
-                                'dut1_seconds': fsk_meas.get('dut1_seconds'),
-                                'tai_utc': fsk_meas.get('tai_utc'),
-                                'source': 'chu_fsk'
-                            }
-                    except (ValueError, KeyError):
-                        continue
-                        
-            except FileNotFoundError:
-                pass
-            except Exception as e:
-                logger.debug(f"Error reading CHU FSK for {channel}: {e}")
-        
-        if fsk_by_minute:
-            logger.info(f"Read {len(fsk_by_minute)} CHU FSK timing observations")
-        
-        return fsk_by_minute
-
     def _run_global_differential_solve(
         self,
         lookback_minutes: int
@@ -1743,13 +1639,6 @@ class MultiBroadcastFusion:
                 f"Global solve context: target_minute={target_minute} obs={len(best_obs)} mix={station_mix}"
             )
 
-        has_nist = any(s.startswith('WWV-') or s.startswith('WWVH-') for s in station_mix)
-        has_chu = any(s.startswith('CHU-') for s in station_mix)
-        if has_nist and has_chu:
-            logger.info(
-                f"Global solve: cross-agency triangulation active (NIST+NRC) target_minute={target_minute} "
-                f"obs={len(best_obs)} mix={station_mix}"
-            )
 
         if len(best_obs) < 2:
             return None, len(best_obs)
@@ -2138,7 +2027,7 @@ class MultiBroadcastFusion:
         }
         
         # STATION PRIORITY (2026-02-07): Primary timing anchors only
-        # CHU, WWV, WWVH are the primary timing anchors - shorter paths, better characterized
+        # WWV, WWVH are the primary timing anchors - shorter paths, better characterized
         # BPM is EXCLUDED from fusion (weight=0) due to:
         #   - Very long path (~11,000 km) with 18-36 ms cross-station disagreement
         #   - Multi-hop propagation introduces unmodeled uncertainty
@@ -2146,7 +2035,6 @@ class MultiBroadcastFusion:
         #   - Dominates inter-station spread, preventing grade improvement
         # BPM data is still collected and logged for ionospheric science.
         station_priority = {
-            'CHU': 1.0,    # Primary anchor - unique frequencies, FSK verification
             'WWV': 1.0,    # Primary anchor - closest station, well-characterized
             'WWVH': 0.9,   # Primary anchor - longer path but reliable
             'BPM': 0.0,    # EXCLUDED from fusion - kept for ionospheric science only
@@ -2196,7 +2084,7 @@ class MultiBroadcastFusion:
             mode_scale_factor = mode_scale.get(base_mode, 0.7)
             
             if hasattr(self, 'physics_model') and self.physics_model is not None and \
-               m.station not in ('GLOBAL_DIFF', 'UNKNOWN', 'TICK', 'CHU_FSK'):
+               m.station not in ('GLOBAL_DIFF', 'UNKNOWN', 'TICK'):
                 try:
                     from datetime import datetime, timezone as tz
                     prediction = self.physics_model.predict(
@@ -2233,7 +2121,7 @@ class MultiBroadcastFusion:
             w = base_weight * trust
             
             # BOOTSTRAP PREFERENCE (2026-01-24): Boost unambiguous channels during bootstrap
-            # WWV 20/25 MHz and all CHU frequencies have no station ambiguity
+            # WWV 20/25 MHz have no station ambiguity
             # BPM is excluded from bootstrap entirely - too distant for reliable calibration
             if is_bootstrap:
                 if m.station == 'BPM':
@@ -2249,7 +2137,7 @@ class MultiBroadcastFusion:
                     is_unambiguous = any(
                         bcast_key.startswith(prefix.replace('.', ''))
                         for prefix in UNAMBIGUOUS_BOOTSTRAP_CHANNELS.keys()
-                    ) or m.station == 'CHU' or m.frequency_mhz in (20.0, 25.0)
+                    ) or m.frequency_mhz in (20.0, 25.0)
 
                     if is_unambiguous:
                         # 3x weight boost for unambiguous channels during bootstrap
@@ -2294,8 +2182,8 @@ class MultiBroadcastFusion:
         Keys by (station, frequency) for frequency-dependent calibration.
         Thin wrapper around the module-level :func:`broadcast_key` (M-M9)
         — previously this used ``.1f`` while every other call site used
-        ``.2f``, so CHU's fractional MHz channels (3.330, 7.850, 14.670)
-        ended up under one key on writes and another on reads.
+        ``.2f``, so fractional-MHz channels ended up under one key on
+        writes and another on reads.
         """
         return broadcast_key(station, frequency_mhz)
     
@@ -2520,7 +2408,6 @@ class MultiBroadcastFusion:
                 uncertainty_ms=broadcast_std / np.sqrt(len(d_clocks)),  # Standard error
                 n_samples=cumulative_n,
                 last_updated=datetime.now(timezone.utc).isoformat(),
-                reference_station=self.reference_station,
                 hardware_offset_ms=new_hw_offset,
                 hardware_converged=hw_converged
             )
@@ -2539,7 +2426,7 @@ class MultiBroadcastFusion:
         """
         Update long-term sufficient statistics for drift estimation.
         
-        Key metrological insight: WWV/CHU/BPM transmit EXACTLY on UTC.
+        Key metrological insight: WWV/WWVH/BPM transmit EXACTLY on UTC.
         Ionospheric propagation variations are ZERO-MEAN over long periods.
         Therefore, the long-term linear fit of ANY single broadcast converges
         to the true GPSDO drift rate as N → ∞.
@@ -2771,7 +2658,7 @@ class MultiBroadcastFusion:
         
         RATIONALE:
         ----------
-        Different stations (WWV, WWVH, CHU, BPM) should agree on UTC time within
+        Different stations (WWV, WWVH, BPM) should agree on UTC time within
         ±200µs after accounting for:
         - Propagation delays (already corrected in D_clock)
         - Calibration offsets (already applied)
@@ -2836,14 +2723,13 @@ class MultiBroadcastFusion:
         
         # Threshold: ±1.0ms (increased from 0.2ms)
         # Real propagation differences between stations can be 0.5-1.0ms due to:
-        # - Different ionospheric paths (CHU vs WWV = 2000+ km)
+        # - Different ionospheric paths (WWVH vs WWV = 5000+ km)
         # - Different propagation modes (1E vs 1F)
         # CRITICAL FIX: Adaptive cross-station threshold based on conditions
         # Bootstrap-aware threshold: relaxed during calibration convergence, strict after
         # 
         # BOOTSTRAP PHASE (calibration not yet validated):
         #   - 5.0ms base threshold accommodates real systematic differences
-        #   - CHU/WWV have ~4.3ms persistent offset (different propagation paths)
         #   - This is the measured reality - calibration learns to compensate
         #   - Cross-station disagreement is expected during convergence (30-60 minutes)
         # 
@@ -2868,7 +2754,7 @@ class MultiBroadcastFusion:
             sum(self.recent_validations) / len(self.recent_validations) > 0.8
         )
         
-        base_threshold = 5.0 if not calibration_converged else 3.5  # ms (raised from 2.5: CHU-WWVH path difference routinely 2.5-5ms)
+        base_threshold = 5.0 if not calibration_converged else 3.5  # ms (raised from 2.5: inter-station path difference routinely 2.5-5ms)
         
         # Time of day factor (nighttime more variable)
         from datetime import datetime, timezone
@@ -3230,85 +3116,6 @@ class MultiBroadcastFusion:
                         logger.info(f"Integrated {tick_count} tick timing measurements into fusion")
         except Exception as e:
             logger.debug(f"Tick timing integration failed: {e}")
-        
-        # ====================================================================
-        # CHU FSK TIMING INTEGRATION (Precise 500ms boundary)
-        # ====================================================================
-        # CHU FSK provides the most precise timing reference from HF broadcasts.
-        # The 500ms boundary is decoded from the FSK time code with ~0.1ms precision.
-        #
-        # Confidence is scaled by BER (frames_decoded/9):
-        #   9/9 frames → full confidence (clean channel)
-        #   2/9 frames → 22% confidence (heavy fading, marginal decode)
-        #
-        # DUT1 and TAI-UTC are passed through to self for downstream use:
-        #   - DUT1: corrects solar zenith in propagation model (UT1 = UTC + DUT1)
-        #   - TAI-UTC: leap second awareness (hold Kalman during transition)
-        try:
-            fsk_timing = self._read_chu_fsk_timing(lookback_minutes)
-            if fsk_timing:
-                # Get the most recent FSK timing
-                latest_fsk_minute = max(fsk_timing.keys())
-                fsk_data = fsk_timing[latest_fsk_minute]
-                
-                # BER-weighted confidence: decode_confidence × (frames/9)
-                frames = fsk_data.get('frames_decoded', 0)
-                decode_rate = frames / 9.0 if frames > 0 else 0.0
-                raw_confidence = fsk_data.get('decode_confidence', 0.5)
-                confidence = min(0.95, raw_confidence * decode_rate)
-                
-                measurements.append(
-                    BroadcastMeasurement(
-                        timestamp=latest_fsk_minute,
-                        station='CHU',
-                        frequency_mhz=7.85,  # Primary CHU frequency
-                        d_clock_ms=fsk_data.get('timing_offset_ms', 0.0),
-                        propagation_delay_ms=0.0,
-                        propagation_mode='FSK',
-                        confidence=confidence,
-                        snr_db=20.0,
-                        quality_grade='A' if decode_rate > 0.5 else 'B',
-                        channel_name=fsk_data.get('channel', 'CHU')
-                    )
-                )
-                logger.info(f"Integrated CHU FSK timing: {fsk_data.get('timing_offset_ms', 0.0):+.2f}ms "
-                           f"(confidence={confidence:.2f}, frames={frames}/9, "
-                           f"decode_rate={decode_rate:.2f})")
-                
-                # Pass through DUT1 and TAI-UTC for downstream use.
-                # When Frame B fails to decode, metrology writes dut1_seconds=None,
-                # which HDF5 stores as NaN (hdf5_writer.py:597). Treat NaN as
-                # missing here so we don't poison set_dut1. DUT1 drifts <1 ms/day,
-                # so we cache the last good value in self._fsk_dut1 and replay it
-                # to the propagation model on every cycle — Frame B can stay
-                # broken for hours and propagation modelling still has a sane DUT1.
-                dut1 = fsk_data.get('dut1_seconds')
-                tai_utc = fsk_data.get('tai_utc')
-                if dut1 is not None and not np.isnan(dut1):
-                    self._fsk_dut1 = dut1
-                if self._fsk_dut1 is not None:
-                    if self.physics_model is not None and hasattr(self.physics_model, 'set_dut1'):
-                        self.physics_model.set_dut1(self._fsk_dut1)
-                if tai_utc is not None:
-                    # M-M11: on a TAI-UTC change, arm the timestamp-based
-                    # hold window.  The old boolean cleared on the very
-                    # next cycle (the moment the table reported the new
-                    # value unchanged), so the Kalman coast never spanned
-                    # the leap second.  Now the window stays armed for
-                    # `_fsk_leap_second_hold_seconds` past `time.time()`,
-                    # and only natural time elapsing clears it.
-                    if self._fsk_tai_utc is not None and self._fsk_tai_utc != tai_utc:
-                        logger.warning(
-                            f"Fusion: TAI-UTC changed {self._fsk_tai_utc} → {tai_utc} "
-                            f"— arming {self._fsk_leap_second_hold_seconds / 60:.0f}-min "
-                            f"Kalman hold window"
-                        )
-                        self._fsk_leap_second_hold_until = (
-                            time.time() + self._fsk_leap_second_hold_seconds
-                        )
-                    self._fsk_tai_utc = tai_utc
-        except Exception as e:
-            logger.debug(f"CHU FSK timing integration failed: {e}")
         
         # Calculate weights
         weights = self._calculate_weights(measurements)
@@ -3692,13 +3499,13 @@ class MultiBroadcastFusion:
         # - Quality sets the uncertainty of the fused estimate
         is_valid_multi_station = (n_stations_now >= 2 and n_broadcasts_now >= 2)
 
-        # Leap-second hold: a TAI-UTC change (detected via CHU FSK) injects a
+        # Leap-second hold: an observed TAI-UTC change injects a
         # 1-second UTC step. Force holdover so the fused output coasts on the
         # last LOCKED value instead of emitting the stepped raw measurement.
         # M-M11: timestamp-windowed (was a one-cycle boolean).
         leap_second_hold = self._leap_second_hold_active()
         if leap_second_hold:
-            logger.warning("Fusion HELD: leap second transition detected via CHU FSK TAI-UTC change")
+            logger.warning("Fusion HELD: leap second transition (TAI-UTC change observed)")
 
         if is_valid_multi_station and not leap_second_hold:
             # ============================================================
@@ -3820,7 +3627,7 @@ class MultiBroadcastFusion:
 
             # Determine reason for holdover
             if leap_second_hold:
-                reason = "leap-second hold (CHU FSK TAI-UTC change)"
+                reason = "leap-second hold (TAI-UTC change)"
             elif n_stations_now < 2:
                 reason = f"single-station ({n_stations_now})"
             elif n_broadcasts_now < 2:
@@ -3842,13 +3649,11 @@ class MultiBroadcastFusion:
         # always fail and the grade always D.
         wwv_cal = [d for m, d in zip(measurements, calibrated_d_clocks) if m.station == 'WWV']
         wwvh_cal = [d for m, d in zip(measurements, calibrated_d_clocks) if m.station == 'WWVH']
-        chu_cal = [d for m, d in zip(measurements, calibrated_d_clocks) if m.station == 'CHU']
         bpm_cal = [d for m, d in zip(measurements, calibrated_d_clocks) if m.station == 'BPM']
         
         # Per-station means for reporting (also calibrated)
         wwv_m = wwv_cal
         wwvh_m = wwvh_cal
-        chu_m = chu_cal
         bpm_m = bpm_cal
         
 
@@ -3866,7 +3671,6 @@ class MultiBroadcastFusion:
         # Intra-station std dev (should be small, ~1-3ms for ionospheric variation)
         wwv_intra_std = np.std(wwv_cal) if len(wwv_cal) > 1 else None
         wwvh_intra_std = np.std(wwvh_cal) if len(wwvh_cal) > 1 else None
-        chu_intra_std = np.std(chu_cal) if len(chu_cal) > 1 else None
         bpm_intra_std = np.std(bpm_cal) if len(bpm_cal) > 1 else None
         
         # Inter-station spread (difference between station means)
@@ -3880,9 +3684,6 @@ class MultiBroadcastFusion:
         if wwvh_cal:
             station_means['WWVH'] = np.mean(wwvh_cal)
             station_means_all['WWVH'] = station_means['WWVH']
-        if chu_cal:
-            station_means['CHU'] = np.mean(chu_cal)
-            station_means_all['CHU'] = station_means['CHU']
         if bpm_cal:
             station_means_all['BPM'] = np.mean(bpm_cal)  # Report only, not in spread
         inter_station_spread = (max(station_means.values()) - min(station_means.values())) if len(station_means) > 1 else None
@@ -3898,7 +3699,7 @@ class MultiBroadcastFusion:
         INTRA_THRESHOLD_MS = 5.0  # Same-station should agree within 5ms (ionospheric limit)
         
         # Check for intra-station anomalies (same station, different frequencies disagree)
-        intra_stds = [s for s in [wwv_intra_std, wwvh_intra_std, chu_intra_std, bpm_intra_std] if s is not None]
+        intra_stds = [s for s in [wwv_intra_std, wwvh_intra_std, bpm_intra_std] if s is not None]
         suspect_count = 0
         
         # Consistency flag already calculated above (before Kalman update)
@@ -3917,10 +3718,6 @@ class MultiBroadcastFusion:
                 if m.station == 'WWVH' and wwvh_intra_std and wwvh_intra_std > INTRA_THRESHOLD_MS:
                     wwvh_mean = station_means.get('WWVH', 0)
                     if abs(raw_val - wwvh_mean) > 2 * wwvh_intra_std:
-                        is_suspect = True
-                if m.station == 'CHU' and chu_intra_std and chu_intra_std > INTRA_THRESHOLD_MS:
-                    chu_mean = station_means.get('CHU', 0)
-                    if abs(raw_val - chu_mean) > 2 * chu_intra_std:
                         is_suspect = True
                 if m.station == 'BPM' and bpm_intra_std and bpm_intra_std > INTRA_THRESHOLD_MS:
                     bpm_mean = station_means.get('BPM', 0)
@@ -3950,11 +3747,10 @@ class MultiBroadcastFusion:
             
             wwv_str = f"{wwv_intra_std:.1f}" if wwv_intra_std is not None else "N/A"
             wwvh_str = f"{wwvh_intra_std:.1f}" if wwvh_intra_std is not None else "N/A"
-            chu_str = f"{chu_intra_std:.1f}" if chu_intra_std is not None else "N/A"
             bpm_str = f"{bpm_intra_std:.1f}" if bpm_intra_std is not None else "N/A"
             logger.warning(
                 f"High intra-station spread: WWV σ={wwv_str}ms, "
-                f"WWVH σ={wwvh_str}ms, CHU σ={chu_str}ms, BPM σ={bpm_str}ms | "
+                f"WWVH σ={wwvh_str}ms, BPM σ={bpm_str}ms | "
                 f"{suspect_count} suspect measurements"
             )
         
@@ -4082,19 +3878,15 @@ class MultiBroadcastFusion:
             global_solve_n_obs=int(getattr(global_result, 'n_observations', global_n_obs)) if global_result is not None else 0,
             wwv_mean_ms=np.mean(wwv_m) if wwv_m else None,
             wwvh_mean_ms=np.mean(wwvh_m) if wwvh_m else None,
-            chu_mean_ms=np.mean(chu_m) if chu_m else None,
             bpm_mean_ms=np.mean(bpm_m) if bpm_m else None,
             wwv_count=len(wwv_m),
             wwvh_count=len(wwvh_m),
-            chu_count=len(chu_m),
             bpm_count=len(bpm_m),
             calibration_applied=True,
-            reference_station=self.reference_station,
             outliers_rejected=n_rejected,
             quality_grade=grade,
             wwv_intra_std_ms=wwv_intra_std,
             wwvh_intra_std_ms=wwvh_intra_std,
-            chu_intra_std_ms=chu_intra_std,
             bpm_intra_std_ms=bpm_intra_std,
             inter_station_spread_ms=inter_station_spread,
             consistency_flag=consistency_flag,
@@ -4157,8 +3949,6 @@ class MultiBroadcastFusion:
                 stations.append('WWV')
             if result.wwvh_count > 0:
                 stations.append('WWVH')
-            if result.chu_count > 0:
-                stations.append('CHU')
             if result.bpm_count > 0:
                 stations.append('BPM')
             stations_used = ','.join(stations) if stations else 'NONE'
@@ -4184,17 +3974,14 @@ class MultiBroadcastFusion:
                 # Per-station statistics
                 wwv_mean_ms=float(result.wwv_mean_ms) if result.wwv_mean_ms is not None else None,
                 wwvh_mean_ms=float(result.wwvh_mean_ms) if result.wwvh_mean_ms is not None else None,
-                chu_mean_ms=float(result.chu_mean_ms) if result.chu_mean_ms is not None else None,
                 bpm_mean_ms=float(result.bpm_mean_ms) if result.bpm_mean_ms is not None else None,
                 
                 wwv_count=int(result.wwv_count),
                 wwvh_count=int(result.wwvh_count),
-                chu_count=int(result.chu_count),
                 bpm_count=int(result.bpm_count),
                 
                 wwv_intra_std_ms=float(result.wwv_intra_std_ms) if result.wwv_intra_std_ms is not None else None,
                 wwvh_intra_std_ms=float(result.wwvh_intra_std_ms) if result.wwvh_intra_std_ms is not None else None,
-                chu_intra_std_ms=float(result.chu_intra_std_ms) if result.chu_intra_std_ms is not None else None,
                 bpm_intra_std_ms=float(result.bpm_intra_std_ms) if result.bpm_intra_std_ms is not None else None,
                 
                 inter_station_spread_ms=float(result.inter_station_spread_ms) if result.inter_station_spread_ms is not None else None,
@@ -4212,7 +3999,6 @@ class MultiBroadcastFusion:
                 
                 # Metadata
                 calibration_applied=bool(result.calibration_applied),
-                reference_station=ReferenceStation(result.reference_station),
                 outliers_rejected=int(result.outliers_rejected),
                 quality_grade=FusionQualityGrade(result.quality_grade),
                 kalman_state=FusionKalmanState(kalman_state),
@@ -4346,7 +4132,6 @@ class MultiBroadcastFusion:
         return {
             'channels': self.channels,
             'n_channels': len(self.channels),
-            'reference_station': self.reference_station,
             'auto_calibrate': self.auto_calibrate,
             'calibration': {
                 station: {
@@ -4762,8 +4547,6 @@ def run_fusion_service(
                     intra_stds.append(f"WWV={result.wwv_intra_std_ms:.1f}")
                 if result.wwvh_intra_std_ms is not None:
                     intra_stds.append(f"WWVH={result.wwvh_intra_std_ms:.1f}")
-                if result.chu_intra_std_ms is not None:
-                    intra_stds.append(f"CHU={result.chu_intra_std_ms:.1f}")
                 
                 if intra_stds:
                     logger.debug(

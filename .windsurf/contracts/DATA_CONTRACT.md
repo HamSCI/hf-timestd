@@ -92,7 +92,7 @@ These are **defined** in `data_dictionary.json`. As of 2026-05-17 they are docum
 | CR-6 | `propagation_delay_ms > 0` | ERROR |
 | CR-7 | `raw_arrival_time_ms >= light_travel_time_ms` | ERROR |
 
-**CR-2 is intentionally WARNING, not ERROR (settled 2026-05-17).** True TEC is non-negative, but a negative `tec_tecu` *estimate* is a normal noisy realization — group-delay TEC is below the noise floor for WWV/WWVH/CHU/BPM (see the `tec_tecu` `noise_floor_analysis` in `data_dictionary.json`). Rejecting or clamping records on TEC sign censors the estimator and biases every downstream aggregate (mean TEC, climatology) high, worst when true TEC is genuinely low. Negative `tec_tecu` must be **retained as-is** and flagged MARGINAL; aggregation must use the value with its uncertainty, never by discarding. Once `tec_uncertainty_tecu` exists (Physics Contract / review P-H2), significance should be judged value-vs-uncertainty rather than by sign.
+**CR-2 is intentionally WARNING, not ERROR (settled 2026-05-17).** True TEC is non-negative, but a negative `tec_tecu` *estimate* is a normal noisy realization — group-delay TEC is below the noise floor for WWV/WWVH/BPM (see the `tec_tecu` `noise_floor_analysis` in `data_dictionary.json`). Rejecting or clamping records on TEC sign censors the estimator and biases every downstream aggregate (mean TEC, climatology) high, worst when true TEC is genuinely low. Negative `tec_tecu` must be **retained as-is** and flagged MARGINAL; aggregation must use the value with its uncertainty, never by discarding. Once `tec_uncertainty_tecu` exists (Physics Contract / review P-H2), significance should be judged value-vs-uncertainty rather than by sign.
 
 ### Raw Buffer Format
 

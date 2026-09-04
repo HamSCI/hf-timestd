@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Tests for signal_templates.py - BCD, AFSK, and BPM modulation pattern templates.
+Tests for signal_templates.py - BCD and BPM modulation pattern templates.
 """
 
 import unittest
@@ -9,13 +9,10 @@ from datetime import datetime
 from hf_timestd.core import (
     BCDTemplateGenerator,
     BCDCorrelationResult,
-    CHUAFSKTemplateGenerator,
-    AFSKCorrelationResult,
     BPMTemplateGenerator,
     BPMCorrelationResult,
     SignalTemplateCorrelator,
     create_bcd_generator,
-    create_afsk_generator,
     create_bpm_generator,
     create_correlator,
 )
@@ -105,76 +102,6 @@ class TestBCDTemplateGenerator(unittest.TestCase):
         self.assertAlmostEqual(peak_freq, 100, delta=5)
 
 
-class TestCHUAFSKTemplateGenerator(unittest.TestCase):
-    """Test CHU AFSK (Bell 103) template generation"""
-    
-    def setUp(self):
-        self.sample_rate = 20000
-        self.generator = create_afsk_generator(self.sample_rate)
-    
-    def test_mark_frequency(self):
-        """Mark frequency should be 2225 Hz"""
-        self.assertEqual(self.generator.MARK_FREQ, 2225.0)
-    
-    def test_space_frequency(self):
-        """Space frequency should be 2025 Hz"""
-        self.assertEqual(self.generator.SPACE_FREQ, 2025.0)
-    
-    def test_baud_rate(self):
-        """Baud rate should be 300 bps"""
-        self.assertEqual(self.generator.BAUD_RATE, 300)
-    
-    def test_fsk_seconds(self):
-        """FSK seconds should be 31-39"""
-        expected = [31, 32, 33, 34, 35, 36, 37, 38, 39]
-        self.assertEqual(self.generator.FSK_SECONDS, expected)
-    
-    def test_mark_template_frequency(self):
-        """Mark template should have 2225 Hz component"""
-        template = self.generator.generate_mark_template(duration_ms=100)
-        fft = np.abs(np.fft.rfft(template))
-        freqs = np.fft.rfftfreq(len(template), 1/self.sample_rate)
-        
-        peak_idx = np.argmax(fft)
-        peak_freq = freqs[peak_idx]
-        self.assertAlmostEqual(peak_freq, 2225, delta=50)
-    
-    def test_space_template_frequency(self):
-        """Space template should have 2025 Hz component"""
-        template = self.generator.generate_space_template(duration_ms=100)
-        fft = np.abs(np.fft.rfft(template))
-        freqs = np.fft.rfftfreq(len(template), 1/self.sample_rate)
-        
-        peak_idx = np.argmax(fft)
-        peak_freq = freqs[peak_idx]
-        self.assertAlmostEqual(peak_freq, 2025, delta=50)
-    
-    def test_fsk_second_template_length(self):
-        """FSK second template should be 500ms (to timing boundary)"""
-        template = self.generator.generate_fsk_second_template(second=31)
-        expected_samples = int(500 * self.sample_rate / 1000)
-        self.assertEqual(len(template), expected_samples)
-    
-    def test_quadrature_templates(self):
-        """Quadrature templates should be orthogonal"""
-        sin_t, cos_t = self.generator.generate_quadrature_templates(
-            duration_ms=100, frequency=2225
-        )
-        # Orthogonality: dot product should be near zero
-        dot_product = np.abs(np.dot(sin_t, cos_t))
-        self.assertLess(dot_product, 0.1)
-    
-    def test_quadrature_templates_normalized(self):
-        """Quadrature templates should have unit energy"""
-        sin_t, cos_t = self.generator.generate_quadrature_templates(
-            duration_ms=100, frequency=2225
-        )
-        sin_energy = np.sqrt(np.sum(sin_t**2))
-        cos_energy = np.sqrt(np.sum(cos_t**2))
-        self.assertAlmostEqual(sin_energy, 1.0, places=5)
-        self.assertAlmostEqual(cos_energy, 1.0, places=5)
-
-
 class TestBPMTemplateGenerator(unittest.TestCase):
     """Test BPM (China) template generation"""
     
@@ -262,9 +189,8 @@ class TestSignalTemplateCorrelator(unittest.TestCase):
         self.correlator = create_correlator(self.sample_rate)
     
     def test_correlator_has_generators(self):
-        """Correlator should have all three generators"""
+        """Correlator should have both generators"""
         self.assertIsInstance(self.correlator.bcd_generator, BCDTemplateGenerator)
-        self.assertIsInstance(self.correlator.afsk_generator, CHUAFSKTemplateGenerator)
         self.assertIsInstance(self.correlator.bpm_generator, BPMTemplateGenerator)
     
     def test_extract_100hz_band(self):
@@ -299,17 +225,6 @@ class TestSignalTemplateCorrelator(unittest.TestCase):
         # Should get some results
         self.assertGreater(len(results), 0)
         self.assertIsInstance(results[0], BCDCorrelationResult)
-    
-    def test_correlate_afsk_returns_results(self):
-        """AFSK correlation should return results"""
-        # Generate 60 seconds of noise (placeholder)
-        signal = 0.1 * np.random.randn(60 * self.sample_rate)
-        
-        results = self.correlator.correlate_afsk(signal)
-        
-        # Should get results for FSK seconds
-        self.assertEqual(len(results), 9)  # Seconds 31-39
-        self.assertIsInstance(results[0], AFSKCorrelationResult)
     
     def test_correlate_bpm_returns_results(self):
         """BPM correlation should return results"""
@@ -346,12 +261,6 @@ class TestFactoryFunctions(unittest.TestCase):
         """Factory should create BCD generator"""
         gen = create_bcd_generator(sample_rate=16000)
         self.assertIsInstance(gen, BCDTemplateGenerator)
-        self.assertEqual(gen.sample_rate, 16000)
-    
-    def test_create_afsk_generator(self):
-        """Factory should create AFSK generator"""
-        gen = create_afsk_generator(sample_rate=16000)
-        self.assertIsInstance(gen, CHUAFSKTemplateGenerator)
         self.assertEqual(gen.sample_rate, 16000)
     
     def test_create_bpm_generator(self):

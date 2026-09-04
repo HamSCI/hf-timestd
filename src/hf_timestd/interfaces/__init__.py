@@ -4,7 +4,7 @@ HF Time Standard API Interfaces
 Defines the contracts between core functions:
 1. Quality & time_snap analysis (producer)
 2. Full-bandwidth archive storage
-3. WWV/WWVH/CHU tone discrimination  
+3. WWV/WWVH tone discrimination  
 
 Note: Functions 4-6 (decimation, Digital RF, upload) are not part of hf-timestd.
 

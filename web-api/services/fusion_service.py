@@ -96,7 +96,6 @@ class FusionService:
                 'consistency_flag': latest.get('consistency_flag'),
                 'outliers_rejected': latest.get('outliers_rejected'),
                 'kalman_state': latest.get('kalman_state'),
-                'reference_station': latest.get('reference_station'),
                 'calibration_applied': latest.get('calibration_applied'),
                 'processing_version': latest.get('processing_version'),
                 'global_solve_verified': latest.get('global_solve_verified'),
@@ -105,17 +104,14 @@ class FusionService:
                 # Per-station means
                 'wwv_mean_ms': clean_float(latest.get('wwv_mean_ms')),
                 'wwvh_mean_ms': clean_float(latest.get('wwvh_mean_ms')),
-                'chu_mean_ms': clean_float(latest.get('chu_mean_ms')),
                 'bpm_mean_ms': clean_float(latest.get('bpm_mean_ms')),
                 # Per-station counts
                 'wwv_count': latest.get('wwv_count'),
                 'wwvh_count': latest.get('wwvh_count'),
-                'chu_count': latest.get('chu_count'),
                 'bpm_count': latest.get('bpm_count'),
                 # Per-station intra-station std
                 'wwv_intra_std_ms': clean_float(latest.get('wwv_intra_std_ms')),
                 'wwvh_intra_std_ms': clean_float(latest.get('wwvh_intra_std_ms')),
-                'chu_intra_std_ms': clean_float(latest.get('chu_intra_std_ms')),
                 # L1 vs L2 comparison (v6.2 metrological tracking)
                 'd_clock_l1_ms': clean_float(latest.get('d_clock_l1_ms')),
                 'd_clock_l2_ms': clean_float(latest.get('d_clock_l2_ms')),

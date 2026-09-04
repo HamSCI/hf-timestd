@@ -1,8 +1,8 @@
 """
 Tone Detection Interface (Function 3)
 
-Defines the contract for WWV/WWVH/CHU discrimination.
-Separates timing reference (WWV/CHU) from propagation study (WWVH).
+Defines the contract for WWV/WWVH discrimination.
+Separates timing reference (WWV) from propagation study (WWVH).
 """
 
 from abc import ABC, abstractmethod
@@ -13,12 +13,11 @@ from .data_models import ToneDetectionResult, StationType
 
 class ToneDetector(ABC):
     """
-    Interface for Function 3: WWV/WWVH/CHU Tone Discrimination
+    Interface for Function 3: WWV/WWVH Tone Discrimination
     
     Detects and discriminates time standard radio station tones:
     - WWV (Fort Collins): 1000 Hz, 0.8s → TIME_SNAP REFERENCE
     - WWVH (Hawaii): 1200 Hz, 0.8s → PROPAGATION STUDY ONLY
-    - CHU (Ottawa): 1000 Hz, 0.5s → TIME_SNAP REFERENCE
     
     CRITICAL: The use_for_time_snap flag separates timing corrections
     from propagation analysis. Never mix these purposes!
@@ -104,7 +103,6 @@ class ToneDetector(ABC):
             dict with:
             - 'wwv_detections': int
             - 'wwvh_detections': int  
-            - 'chu_detections': int
             - 'total_attempts': int
             - 'detection_rate_pct': float
             
@@ -173,7 +171,7 @@ class ToneDetector(ABC):
         """
         Get timing accuracy statistics for time_snap-eligible stations.
         
-        Only includes WWV and CHU (not WWVH).
+        Only includes WWV (not WWVH).
         
         Returns:
             dict with:
@@ -223,7 +221,7 @@ class MultiStationToneDetector(ToneDetector):
         Get recent detections for specific station.
         
         Args:
-            station: Which station to retrieve (WWV, WWVH, or CHU)
+            station: Which station to retrieve (WWV or WWVH)
             
         Returns:
             List of recent detections for that station (e.g., last hour)
@@ -272,17 +270,16 @@ class MultiStationToneDetector(ToneDetector):
         """
         Configure station priorities for time_snap selection.
         
-        When multiple time_snap-eligible stations detected (WWV + CHU),
+        When multiple time_snap-eligible stations are detected,
         use priority to determine which to use.
         
         Args:
             priorities: Dict mapping StationType to priority (higher = preferred)
             
         Example:
-            # Prefer WWV over CHU for time_snap
+            # Prefer WWV for time_snap
             detector.configure_station_priorities({
                 StationType.WWV: 100,
-                StationType.CHU: 50,
                 StationType.WWVH: 0  # Not used for time_snap anyway
             })
         """

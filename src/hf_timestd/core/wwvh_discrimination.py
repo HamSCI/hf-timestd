@@ -86,21 +86,12 @@ class WWVHDiscriminator:
         self.channel_name = channel_name
         self.sample_rate = sample_rate
         
-        # Initialize BCD encoder for template generation (WWV/WWVH only)
-        # CHU doesn't use BCD encoding
-        self.is_chu_channel = 'CHU' in channel_name.upper()
-        if not self.is_chu_channel:
-            self.bcd_encoder = WWVBCDEncoder(sample_rate=sample_rate)
-        else:
-            self.bcd_encoder = None
+        # BCD encoder for template generation (WWV/WWVH)
+        self.bcd_encoder = WWVBCDEncoder(sample_rate=sample_rate)
         
-        # Initialize test signal detector for minute 8/48 discrimination (WWV/WWVH only)
-        # CHU doesn't broadcast test signals
-        if not self.is_chu_channel:
-            self.test_signal_detector = WWVTestSignalDetector(sample_rate=sample_rate)
-            logger.info(f"{channel_name}: Test signal detector initialized for minutes 8/48 @ {sample_rate} Hz")
-        else:
-            self.test_signal_detector = None
+        # Test signal detector for minute 8/48 discrimination (WWV/WWVH)
+        self.test_signal_detector = WWVTestSignalDetector(sample_rate=sample_rate)
+        logger.info(f"{channel_name}: Test signal detector initialized for minutes 8/48 @ {sample_rate} Hz")
         
         # Initialize geographic predictor if grid square provided
         self.geo_predictor: Optional[WWVGeographicPredictor] = None
@@ -218,7 +209,7 @@ class WWVHDiscriminator:
             # Carrier Phase Extraction
             # ------------------------
             # Logic:
-            # 1. "Safe Bands": WWV 20/25 MHz and CHU (all). Use raw IQ for true RF Carrier Phase.
+            # 1. "Safe Bands": WWV 20/25 MHz. Use raw IQ for true RF Carrier Phase.
             # 2. "Shared Bands": WWV/H 2.5, 5, 10, 15 MHz. Use AM Envelope DC (0 Hz).
             
             frequency_mhz = self.frequency_mhz if hasattr(self, 'frequency_mhz') and self.frequency_mhz else 0.0
@@ -1222,10 +1213,6 @@ class WWVHDiscriminator:
             60-second BCD template as numpy array, or None if generation fails
         """
         try:
-            # BCD encoder not available for CHU channels
-            if self.bcd_encoder is None:
-                return None
-            
             # Use the encoder instance that was created during __init__
             template = self.bcd_encoder.encode_minute(minute_timestamp, envelope_only=envelope_only)
             return template

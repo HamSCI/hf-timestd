@@ -256,7 +256,6 @@ class MetrologyEngine:
         # Pre-allocated buffers for zero-allocation DSP
         self._max_samples = 65 * self.sample_rate
         self._envelope_buffer = np.empty(self._max_samples, dtype=np.float32)
-        self.is_chu_channel = 'CHU' in channel_name.upper()
 
         # Initialize sub-components
         self._init_components()
@@ -465,19 +464,10 @@ class MetrologyEngine:
         Creates filters for stations that can be received on this channel:
         - SHARED channels: WWV, WWVH, BPM
         - WWV-only channels (20, 25 MHz): WWV only
-        - CHU channels: CHU only
         """
         channel_upper = self.channel_name.upper()
         
-        if 'CHU' in channel_upper:
-            # CHU-only channels (3.33, 7.85, 14.67 MHz)
-            self.tick_filters[StationType.CHU] = TickMatchedFilter(
-                station=StationType.CHU,
-                sample_rate=self.sample_rate
-            )
-            logger.info(f"{self.channel_name}: CHU tick filter initialized (58 ticks/min)")
-            
-        elif 'WWV_20' in channel_upper or 'WWV_25' in channel_upper:
+        if 'WWV_20' in channel_upper or 'WWV_25' in channel_upper:
             # WWV-only channels (20, 25 MHz)
             self.tick_filters[StationType.WWV] = TickMatchedFilter(
                 station=StationType.WWV,
@@ -634,12 +624,6 @@ class MetrologyEngine:
             Others:    0.0     (5ms ticks DROPPED: ±50ms jitter, confounded
                                 by 2nd harmonics of 500/600 Hz tones)
             
-        CHU (unique channels):
-            Second 0:  0.500s  (minute marker — PRIMARY timing anchor)
-            Seconds 1-28, 30, 40-49: 0.300s  (300ms tones — excellent)
-            Seconds 31-39: 0.0  (FSK seconds — no tone)
-            Seconds 50-59: 0.0  (voice seconds — no tone)
-            
         BPM:
             Second 0:  0.300s  (minute marker)
             UT1 minutes (25-29, 55-59): 0.100s  (100ms ticks — usable)
@@ -651,16 +635,6 @@ class MetrologyEngine:
             else:
                 return 0.0    # Drop 5ms ticks: ±50ms jitter, confounded by
                               # 2nd harmonics of 500/600 Hz tones on shared channels
-        
-        elif station_name == 'CHU':
-            if sec_in_minute == 0:
-                return 0.500  # Minute marker — PRIMARY timing anchor
-            elif sec_in_minute in range(31, 40):
-                return 0.0    # FSK seconds — no tone to correlate
-            elif sec_in_minute in range(50, 60):
-                return 0.0    # Voice seconds — no tone to correlate
-            else:
-                return 0.300  # 300ms tones — excellent timing source
         
         elif station_name == 'BPM':
             if sec_in_minute == 0:
@@ -703,9 +677,7 @@ class MetrologyEngine:
             
             # Check each tick frequency used on this channel
             channel_upper = self.channel_name.upper()
-            if 'CHU' in channel_upper:
-                freqs = [1000]
-            elif 'SHARED' in channel_upper:
+            if 'SHARED' in channel_upper:
                 freqs = [1000, 1200]  # WWV + WWVH
             else:
                 freqs = [1000]
@@ -859,7 +831,7 @@ class MetrologyEngine:
             audio_signal: AM-demodulated audio (magnitude - mean)
             expected_delay_ms: Expected arrival time from buffer start (ms)
             tone_freq_hz: Tone frequency (1000 or 1200 Hz)
-            tone_duration_sec: Expected tone duration (0.8s WWV, 0.5s CHU)
+            tone_duration_sec: Expected tone duration (0.8s WWV/WWVH, 0.3s BPM)
             station_name: Station identifier for logging
             search_window_ms: Search window half-width in ms from physics model.
                 If None, uses legacy fixed window based on tone duration.
@@ -1187,23 +1159,12 @@ class MetrologyEngine:
         #     Correlating a sinusoidal template against a rectangular pulse: the peak
         #     lands at the CENTRE of the pulse (half_template after onset).
         #     → Subtract half_template to recover the leading edge.
-        #
-        #   CHU: Transmits AM-compatible USB (carrier + upper sideband).  The 1000 Hz
-        #     tone is amplitude modulation on the carrier.  The AM envelope after mean
-        #     subtraction is a GATED SINUSOID (not a rectangular pulse).  Correlating
-        #     a sinusoidal template against a gated sinusoid: the peak lands at the
-        #     ONSET of the tone (0 ms offset from leading edge).
-        #     → No correction needed; applying -half_template gives the -74ms bias.
-        #
-        # Verified by simulation: gated sinusoid → peak at onset regardless of phase.
         half_template_samples = n_template / 2.0
-        if tone_duration_sec >= 0.3 and station_name != 'CHU':
+        if tone_duration_sec >= 0.3:
             leading_edge_idx = precise_peak_idx - half_template_samples
             precise_peak_idx = leading_edge_idx
             logger.debug(f"{station_name}: Leading edge correction applied "
                         f"(-{half_template_samples/self.sample_rate*1000:.1f}ms for {tone_duration_sec*1000:.0f}ms tone)")
-        elif station_name == 'CHU':
-            logger.debug(f"CHU: No leading-edge correction (gated sinusoid, peak=onset)")
         
         # Convert to arrival time (ms from minute boundary)
         # For mode='valid', peak_idx=0 means template starts at sample 0 of measurement_region
@@ -1217,7 +1178,7 @@ class MetrologyEngine:
         
         # PROPAGATION BOUNDS VALIDATION (2026-02-05, updated 2026-02-09)
         # Validate that the measured arrival time is within tolerance of expected.
-        # expected_delay_ms already includes tx_offset (e.g., 1000ms for CHU second 1).
+        # expected_delay_ms already includes any per-station tx_offset.
         # RTP timestamps are authoritative (no wall-clock calibration bias).
         # Allow ±500ms to accommodate multi-hop ionospheric paths on lower
         # frequencies.  The physics validation downstream (arrival matrix with
@@ -1393,13 +1354,6 @@ class MetrologyEngine:
         # assumes the correlation peak lands at the tone center, which is only
         # true for AM envelope detection.
         #
-        # CHU transmits USB with preserved carrier, but for timing purposes
-        # the AM envelope (|IQ| - DC) is correct: the 1000 Hz tone keying
-        # appears as amplitude modulation and the envelope peak is at the
-        # tone center regardless of carrier phase.  Using np.real(IQ) instead
-        # produces a carrier-phase-dependent peak offset that caused the
-        # observed -77 ms systematic on all CHU channels.
-        #
         # The raw IQ (iq_samples) is still passed to the edge detector for
         # carrier phase / Doppler extraction, which correctly uses IQ mixing.
         audio_signal = envelope - np.mean(envelope)
@@ -1430,9 +1384,7 @@ class MetrologyEngine:
         # Define station templates based on channel type.
         # Tone frequency is per-station; duration is per-second (set in loop).
         channel_upper = self.channel_name.upper()
-        if 'CHU' in channel_upper:
-            station_tone_freqs = [('CHU', 1000)]
-        elif 'WWV_20' in channel_upper or 'WWV_25' in channel_upper:
+        if 'WWV_20' in channel_upper or 'WWV_25' in channel_upper:
             station_tone_freqs = [('WWV', 1000)]
         else:
             # SHARED channels: WWV and WWVH only.
@@ -1488,39 +1440,10 @@ class MetrologyEngine:
                 for utc_sec in range(first_utc_sec, last_utc_sec + 1):
                     sec_in_minute = utc_sec % 60
                     # Skip silent seconds
-                    if station_name == 'CHU' and sec_in_minute == 29:
-                        continue
                     if station_name in ('WWV', 'WWVH') and sec_in_minute in (29, 59):
                         continue
                     
-                    # CHU regular-second 300ms tones start ~74ms after the
-                    # UTC second boundary + propagation delay.
-                    #
-                    # Evidence chain (definitive):
-                    # 1. Direct AM envelope measurement (3ms energy windows,
-                    #    BP 950-1050Hz): 1000Hz pip onset at +68-80ms from
-                    #    utc_sec (= +62-74ms from utc_sec + prop_delay).
-                    # 2. Same measurement for 2225Hz FSK mark tone (seconds
-                    #    31-39, NRC spec: T+10ms): onset at +87ms from
-                    #    utc_sec (= +71ms from expected T+prop+10ms).
-                    # 3. Both 1000Hz and 2225Hz are delayed by ~74ms through
-                    #    the IDENTICAL receiver pipeline. WWV shows 0ms
-                    #    offset through the same pipeline. The delay is
-                    #    CHU-specific and in the transmitted signal.
-                    # 4. Root cause: CHU uses H3E (USB + full carrier). The
-                    #    transmitter's analog sideband filter introduces a
-                    #    group delay of ~74ms on all audio content. NRC's
-                    #    ≤1μs spec refers to the atomic clock accuracy, not
-                    #    the audio onset relative to the second marker.
-                    # 5. FSK stop-bit (T+500ms, phase transition) gives
-                    #    timing_offset=+6ms → CHU clock offset is +6ms.
-                    #    Using 0.074 gives timing_error ≈ +6ms, consistent.
-                    # Second 0 (minute marker, 500ms) starts at 0ms.
-                    chu_tx_onset_sec = 0.0
-                    if station_name == 'CHU' and sec_in_minute != 0:
-                        chu_tx_onset_sec = 0.074
-
-                    tone_arrival_utc = utc_sec + prop_delay_sec + chu_tx_onset_sec
+                    tone_arrival_utc = utc_sec + prop_delay_sec
                     tone_end_utc = tone_arrival_utc + margin_sec
                     
                     onset_sample = buffer_timing.utc_to_sample(tone_arrival_utc)
@@ -1575,10 +1498,7 @@ class MetrologyEngine:
                         arrival_utc = buffer_timing.sample_to_utc(
                             result['arrival_ms'] * self.sample_rate / 1000
                         )
-                        # Expected arrival UTC includes CHU tx_onset offset
-                        # so timing_error_ms reflects the true clock offset.
-                        chu_tx = 0.074 if (station_name == 'CHU' and utc_sec % 60 != 0) else 0.0
-                        expected_utc = utc_sec + prop_delay_sec + chu_tx
+                        expected_utc = utc_sec + prop_delay_sec
                         result['timing_error_ms'] = (arrival_utc - expected_utc) * 1000
                         result['arrival_utc'] = arrival_utc
                         measurements.append(result)
@@ -1991,7 +1911,7 @@ class MetrologyEngine:
                                     f"tick_std={tick_analysis.tick_std_offset_ms:.1f}ms")
                         
                         # A/B Comparison: Only valid for WWV/WWVH (continuous 1000/1200 Hz tones)
-                        # CHU uses FSK, BPM has different tone pattern — PLL is meaningless for those
+                        # BPM has a different tone pattern — PLL is meaningless there
                         #
                         # MF baseline uses the EDGE ENSEMBLE (robust median of ~57 per-second
                         # tick front-edge detections) rather than TickMatchedFilter.d_clock_ms,
@@ -2149,7 +2069,7 @@ class MetrologyEngine:
                     # (noise correlation peak), not a real arrival with model error.
                     # The 5σ hard cutoff preserves false-positive suppression for
                     # WWV/WWVH shared frequencies while allowing model-error-affected
-                    # real detections (e.g. CHU systematic offset) through.
+                    # real detections (e.g. a station-systematic offset) through.
                     HARD_REJECT_SIGMA = 5.0
                     if deviation_sigma > HARD_REJECT_SIGMA:
                         physics_valid = False
@@ -2306,9 +2226,7 @@ class MetrologyEngine:
         # Check all stations we expect on this channel for gaps.
         # Derive from channel name.
         channel_upper = self.channel_name.upper()
-        if 'CHU' in channel_upper:
-            expected_stations = ['CHU']
-        elif 'WWV_20' in channel_upper or 'WWV_25' in channel_upper:
+        if 'WWV_20' in channel_upper or 'WWV_25' in channel_upper:
             expected_stations = ['WWV']
         else:
             expected_stations = ['WWV', 'WWVH', 'BPM']
@@ -2534,7 +2452,6 @@ class MetrologyEngine:
 
     def _station_from_channel_name(self) -> str:
         """Helper to guess station from name."""
-        if 'CHU' in self.channel_name.upper(): return 'CHU'
         if 'WWVH' in self.channel_name.upper(): return 'WWVH'
         if 'WWV' in self.channel_name.upper(): return 'WWV'
         return 'UNKNOWN'

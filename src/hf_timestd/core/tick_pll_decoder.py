@@ -798,7 +798,7 @@ def create_pll_decoder(station: str, fs: int = 24000) -> TickPLL:
     Factory function to create appropriate PLL for station.
     
     Args:
-        station: "WWV", "WWVH", "CHU", "BPM"
+        station: "WWV", "WWVH", "BPM"
         fs: Sample rate
         
     Returns:

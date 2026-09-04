@@ -33,7 +33,6 @@ from .fusion import (
     FusionQualityFlag,
     FusionConsistencyFlag,
     FusionKalmanState,
-    ReferenceStation
 )
 
 from .broadcast import (
@@ -64,7 +63,6 @@ __all__ = [
     "FusionQualityFlag",
     "FusionConsistencyFlag",
     "FusionKalmanState",
-    "ReferenceStation",
     # Broadcast registry (station-centric architecture)
     "BroadcastStation",
     "Broadcast",

@@ -16,7 +16,7 @@ GPS validation is **entirely optional** and only needed if you want to validate 
 
 - ✅ **Multi-frequency TEC**: 3-6 frequencies per station (2.5-25 MHz)
 - ✅ **1-minute cadence**: Real-time ionospheric monitoring
-- ✅ **Multi-station coverage**: WWV, WWVH, CHU, BPM
+- ✅ **Multi-station coverage**: WWV, WWVH, BPM
 - ✅ **Automatic processing**: No manual intervention required
 - ✅ **Obliquity corrections**: Geometric adjustments for slant-to-vertical TEC
 
@@ -125,7 +125,7 @@ GPS validation is **entirely optional** and only needed if you want to validate 
 
 ✅ **Multi-station Analysis**
 
-- Compare TEC across stations (WWV, WWVH, CHU, BPM)
+- Compare TEC across stations (WWV, WWVH, BPM)
 - Detect ionospheric events (TIDs, solar flares)
 - Analyze diurnal TEC variations
 - Monitor propagation conditions

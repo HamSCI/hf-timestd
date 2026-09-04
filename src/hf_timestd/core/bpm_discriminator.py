@@ -6,7 +6,7 @@ BPM Station Discriminator - UT1/UTC Handling and Signal Processing
 PURPOSE
 ================================================================================
 Handle the unique characteristics of BPM (China) time signal broadcasts that
-differ from WWV/WWVH/CHU:
+differ from WWV/WWVH:
 
 1. UT1/UTC ALTERNATION:
    - Minutes 0-24, 30-54: UTC timing (10ms ticks)

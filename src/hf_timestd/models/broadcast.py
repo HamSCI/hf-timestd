@@ -2,12 +2,12 @@
 Broadcast Registry - Station-Centric Data Model
 
 This module provides the core data structures for the station-centric architecture:
-- BroadcastStation: A time signal transmitter (WWV, WWVH, CHU, BPM)
-- Broadcast: A single station+frequency combination (17 total)
+- BroadcastStation: A time signal transmitter (WWV, WWVH, BPM)
+- Broadcast: A single station+frequency combination (14 total)
 - BroadcastRegistry: Registry of all broadcasts with computed geometry
 
 The registry is the foundation for:
-- Channel derivation (radiod: 9 channels, phase-engine: 17 channels)
+- Channel derivation (radiod: 9 channels, phase-engine: 14 channels)
 - Station-centric API endpoints
 - Per-station D_clock aggregation
 - TEC computation grouping
@@ -37,7 +37,6 @@ class TonePattern(str, Enum):
     """Tone pattern for station discrimination."""
     WWV_1000HZ = "1000Hz"       # WWV: 1000 Hz tone
     WWVH_1200HZ = "1200Hz"      # WWVH: 1200 Hz tone
-    CHU_BCD_FSK = "BCD_FSK"     # CHU: Bell 103 AFSK BCD
     BPM_1000HZ = "1000Hz_BPM"   # BPM: 1000 Hz (similar to WWV, different BCD)
 
 
@@ -46,7 +45,7 @@ class BroadcastStation:
     """
     A time signal transmitter station.
     
-    This represents the physical station (WWV, WWVH, CHU, BPM) with its
+    This represents the physical station (WWV, WWVH, BPM) with its
     location and broadcast frequencies.
     """
     name: str
@@ -82,10 +81,9 @@ class Broadcast:
     """
     A single broadcast: station + frequency combination.
     
-    There are 17 broadcasts total:
+    There are 14 broadcasts total:
     - WWV: 6 frequencies (2.5, 5, 10, 15, 20, 25 MHz)
     - WWVH: 4 frequencies (2.5, 5, 10, 15 MHz)
-    - CHU: 3 frequencies (3.33, 7.85, 14.67 MHz)
     - BPM: 4 frequencies (2.5, 5, 10, 15 MHz)
     """
     station: str
@@ -162,14 +160,6 @@ DEFAULT_STATIONS = [
         longitude=_CATALOG.get("WWVH").lon,
         frequencies_hz=[2500000, 5000000, 10000000, 15000000],
         tone_pattern=TonePattern.WWVH_1200HZ,
-    ),
-    BroadcastStation(
-        name="CHU",
-        location="Ottawa, ON",
-        latitude=_CATALOG.get("CHU").lat,
-        longitude=_CATALOG.get("CHU").lon,
-        frequencies_hz=[3330000, 7850000, 14670000],
-        tone_pattern=TonePattern.CHU_BCD_FSK,
     ),
     BroadcastStation(
         name="BPM",

@@ -13,7 +13,6 @@ from hf_timestd.core import (
     create_tick_filter,
     WWV_TEMPLATE,
     WWVH_TEMPLATE,
-    CHU_TEMPLATE,
     BPM_TEMPLATE,
     STATION_TEMPLATES,
 )
@@ -39,17 +38,6 @@ class TestTickTemplates(unittest.TestCase):
         self.assertEqual(WWVH_TEMPLATE.minute_marker_duration_ms, 800.0)
         self.assertNotIn(0, WWVH_TEMPLATE.skip_seconds)  # sec 0 = minute marker
         self.assertIn(29, WWVH_TEMPLATE.skip_seconds)
-    
-    def test_chu_template(self):
-        """CHU: 1000 Hz, variable duration, skip 0/29"""
-        self.assertEqual(CHU_TEMPLATE.frequency_hz, 1000.0)
-        self.assertIn(29, CHU_TEMPLATE.skip_seconds)
-        self.assertEqual(CHU_TEMPLATE.fsk_duration_ms, 10.0)
-        self.assertEqual(CHU_TEMPLATE.regular_duration_ms, 300.0)
-        # FSK seconds 31-39
-        self.assertEqual(CHU_TEMPLATE.fsk_seconds, set(range(31, 40)))
-        # Voice seconds 50-59
-        self.assertEqual(CHU_TEMPLATE.voice_seconds, set(range(50, 60)))
     
     def test_bpm_template(self):
         """BPM: 1000 Hz, 10ms UTC / 100ms UT1"""
@@ -79,13 +67,6 @@ class TestTickMatchedFilterCreation(unittest.TestCase):
         self.assertEqual(f.station, StationType.WWVH)
         self.assertEqual(f.sample_rate, 16000)
     
-    def test_create_chu_filter(self):
-        """Create CHU filter"""
-        f = create_tick_filter('CHU')
-        self.assertEqual(f.station, StationType.CHU)
-        # CHU should have multiple template durations
-        self.assertGreater(len(f._templates), 1)
-    
     def test_create_bpm_filter(self):
         """Create BPM filter"""
         f = create_tick_filter('BPM', window_seconds=3, overlap_seconds=1)
@@ -111,16 +92,6 @@ class TestTickDurationSelection(unittest.TestCase):
         for sec in range(1, 60):
             if sec not in WWV_TEMPLATE.skip_seconds:
                 self.assertEqual(f._get_tick_duration_ms(sec), 5.0)
-    
-    def test_chu_variable_duration(self):
-        """CHU returns different durations by second"""
-        f = create_tick_filter('CHU')
-        # Regular second
-        self.assertEqual(f._get_tick_duration_ms(5), 300.0)
-        # FSK second (31-39)
-        self.assertEqual(f._get_tick_duration_ms(35), 10.0)
-        # Voice second (50-59)
-        self.assertEqual(f._get_tick_duration_ms(55), 10.0)
     
     def test_bpm_minute_dependent(self):
         """BPM returns different durations by minute"""
@@ -402,17 +373,17 @@ class TestPhaseContinuity(unittest.TestCase):
         
         n_samples = 60 * sample_rate
         
-        # Pure carrier with ticks (CHU-like: USB with preserved carrier)
+        # Pure carrier with ticks (WWV-like on an unambiguous 20/25 MHz channel)
         carrier = 1.0 * np.exp(1j * carrier_phase)
-        tick_duration = int(0.300 * sample_rate)  # 300ms CHU ticks
+        tick_duration = int(0.005 * sample_rate)    # 5 ms WWV ticks
+        marker_duration = int(0.800 * sample_rate)  # 800 ms minute marker
         tone_signal = np.zeros(n_samples, dtype=np.complex128)
         for sec in range(60):
-            if sec in {0, 29}:
+            if sec in {29, 59}:
                 continue
-            if sec in range(31, 40) or sec in range(50, 60):
-                continue  # FSK/voice seconds — short ticks, skip for simplicity
             start = sec * sample_rate
-            t_tick = np.arange(min(tick_duration, sample_rate)) / sample_rate
+            n_tick = marker_duration if sec == 0 else tick_duration
+            t_tick = np.arange(min(n_tick, sample_rate)) / sample_rate
             tone_signal[start:start + len(t_tick)] = 0.3 * np.exp(
                 1j * (2 * np.pi * 1000.0 * (sec + t_tick) + carrier_phase)
             )
@@ -422,7 +393,7 @@ class TestPhaseContinuity(unittest.TestCase):
               noise_level * (np.random.randn(n_samples) + 1j * np.random.randn(n_samples)))
         iq = iq.astype(np.complex64)
         
-        f = create_tick_filter('CHU', sample_rate=sample_rate)
+        f = create_tick_filter('WWV', sample_rate=sample_rate)
         result = f.process_minute(iq, minute_number=0, min_snr_db=3.0)
         
         if result.valid_windows < 10:

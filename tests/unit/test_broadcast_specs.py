@@ -1,10 +1,10 @@
 """
 Unit tests for hf_timestd.core.broadcast_specs
 
-Authoritative registry of all 17 HF time-standard broadcasts. Tests cover:
+Authoritative registry of all 14 HF time-standard broadcasts. Tests cover:
 - Module-level invariants (frequency partitions, expected counts per station)
 - ToneSchedule helpers (get_expected_duration_ms, ticks_per_minute,
-  is_special_second, CHU hour-marker special case)
+  is_special_second)
 - BroadcastSpec properties (broadcast_id, frequency_mhz, is_unique/shared,
   has_feature, get_expected_duration_ms, to_dict)
 - Lookup functions (get_broadcast_spec, get_broadcasts_for_frequency,
@@ -20,9 +20,6 @@ from hf_timestd.core.broadcast_specs import (
     BPM_FREQUENCIES_KHZ,
     BPM_TONE_SCHEDULE,
     BROADCAST_SPECS,
-    CHU_FEATURES,
-    CHU_FREQUENCIES_KHZ,
-    CHU_TONE_SCHEDULE,
     PROPAGATION_BOUNDS_MS,
     SHARED_FREQUENCIES_KHZ,
     STATION_COORDINATES,
@@ -57,9 +54,9 @@ from hf_timestd.core.broadcast_specs import (
 
 
 class TestModuleInvariants:
-    def test_total_broadcast_count_is_17(self):
-        # 6 WWV + 4 WWVH + 3 CHU + 4 BPM = 17
-        assert len(BROADCAST_SPECS) == 17
+    def test_total_broadcast_count_is_14(self):
+        # 6 WWV + 4 WWVH + 4 BPM = 14
+        assert len(BROADCAST_SPECS) == 14
 
     def test_per_station_counts(self):
         counts = {s.value: 0 for s in Station}
@@ -67,7 +64,6 @@ class TestModuleInvariants:
             counts[spec.station.value] += 1
         assert counts['WWV'] == 6
         assert counts['WWVH'] == 4
-        assert counts['CHU'] == 3
         assert counts['BPM'] == 4
 
     def test_shared_and_unique_partition(self):
@@ -95,7 +91,7 @@ class TestModuleInvariants:
             assert s in STATION_COORDINATES
 
     def test_features_have_no_invalid_entries(self):
-        for features in (WWV_FEATURES, WWVH_FEATURES, CHU_FEATURES, BPM_FEATURES):
+        for features in (WWV_FEATURES, WWVH_FEATURES, BPM_FEATURES):
             for f in features:
                 assert isinstance(f, FeatureType)
 
@@ -113,27 +109,6 @@ class TestToneSchedule:
         assert WWV_TONE_SCHEDULE.get_expected_duration_ms(29) is None
         assert WWV_TONE_SCHEDULE.get_expected_duration_ms(59) is None
 
-    def test_chu_second_zero_is_always_silent(self):
-        # CHU's second 0 is in skip_seconds. The skip check fires before the
-        # hour-marker special case, so second 0 always returns None — even
-        # at the top of the hour. (The hour marker is actually transmitted
-        # at second 59.5 of the previous minute; the docstring captures this.)
-        assert CHU_TONE_SCHEDULE.get_expected_duration_ms(0, minute=0) is None
-        assert CHU_TONE_SCHEDULE.get_expected_duration_ms(0, minute=30) is None
-
-    def test_chu_skip_seconds(self):
-        # CHU has second 0 and second 29 silent
-        assert CHU_TONE_SCHEDULE.get_expected_duration_ms(0) is None
-        assert CHU_TONE_SCHEDULE.get_expected_duration_ms(29) is None
-
-    def test_chu_fsk_seconds_return_10ms(self):
-        for sec in range(31, 40):
-            assert CHU_TONE_SCHEDULE.get_expected_duration_ms(sec) == 10.0
-
-    def test_chu_voice_seconds_return_10ms(self):
-        for sec in range(50, 60):
-            assert CHU_TONE_SCHEDULE.get_expected_duration_ms(sec) == 10.0
-
     def test_bpm_no_skip_seconds(self):
         assert BPM_TONE_SCHEDULE.skip_seconds == frozenset()
         # Second 15 is a regular tick (10 ms); 25-29 are UT1 ticks (100 ms)
@@ -147,16 +122,10 @@ class TestToneSchedule:
     def test_get_ticks_per_minute(self):
         # WWV/WWVH: skip 2 seconds → 58 ticks
         assert WWV_TONE_SCHEDULE.get_ticks_per_minute() == 58
-        # CHU: skip 2 seconds (0, 29) → 58 ticks
-        assert CHU_TONE_SCHEDULE.get_ticks_per_minute() == 58
         # BPM: skip none → 60 ticks
         assert BPM_TONE_SCHEDULE.get_ticks_per_minute() == 60
 
     def test_is_special_second(self):
-        # CHU FSK and voice seconds are "special"
-        assert CHU_TONE_SCHEDULE.is_special_second(35) is True
-        assert CHU_TONE_SCHEDULE.is_special_second(55) is True
-        assert CHU_TONE_SCHEDULE.is_special_second(15) is False
         # BPM UT1 ticks are "special"
         assert BPM_TONE_SCHEDULE.is_special_second(27) is True
         # WWV/WWVH have no special seconds
@@ -174,38 +143,38 @@ class TestBroadcastSpecProperties:
         return BROADCAST_SPECS['WWV_10000']
 
     @pytest.fixture
-    def chu_7p85mhz(self):
-        return BROADCAST_SPECS['CHU_7850']
+    def wwv_20mhz(self):
+        return BROADCAST_SPECS['WWV_20000']
 
     def test_broadcast_id(self, wwv_10mhz):
         assert wwv_10mhz.broadcast_id == 'WWV_10000'
 
-    def test_frequency_mhz_conversion(self, wwv_10mhz, chu_7p85mhz):
+    def test_frequency_mhz_conversion(self, wwv_10mhz):
         assert wwv_10mhz.frequency_mhz == 10.0
-        assert chu_7p85mhz.frequency_mhz == 7.85
+        assert BROADCAST_SPECS['BPM_2500'].frequency_mhz == 2.5
 
     def test_is_shared_frequency(self, wwv_10mhz):
         assert wwv_10mhz.is_shared_frequency is True
         assert wwv_10mhz.is_unique_frequency is False
 
-    def test_is_unique_frequency_for_chu(self, chu_7p85mhz):
-        assert chu_7p85mhz.is_unique_frequency is True
-        assert chu_7p85mhz.is_shared_frequency is False
+    def test_is_unique_frequency_for_wwv_20mhz(self, wwv_20mhz):
+        assert wwv_20mhz.is_unique_frequency is True
+        assert wwv_20mhz.is_shared_frequency is False
 
-    def test_tone_freq_hz_proxied(self, wwv_10mhz, chu_7p85mhz):
+    def test_tone_freq_hz_proxied(self, wwv_10mhz):
         assert wwv_10mhz.tone_freq_hz == 1000
-        assert chu_7p85mhz.tone_freq_hz == 1000  # CHU uses 1000 Hz
+        assert BROADCAST_SPECS['WWVH_10000'].tone_freq_hz == 1200
 
-    def test_minute_marker_duration_ms_proxied(self, wwv_10mhz, chu_7p85mhz):
+    def test_minute_marker_duration_ms_proxied(self, wwv_10mhz):
         assert wwv_10mhz.minute_marker_duration_ms == 800.0
-        assert chu_7p85mhz.minute_marker_duration_ms == 500.0
+        assert BROADCAST_SPECS['BPM_10000'].minute_marker_duration_ms == 300.0
 
     def test_ticks_per_minute_proxied(self, wwv_10mhz):
         assert wwv_10mhz.ticks_per_minute == 58
 
     def test_has_feature(self, wwv_10mhz):
         assert wwv_10mhz.has_feature(FeatureType.BCD_TIMECODE) is True
-        assert wwv_10mhz.has_feature(FeatureType.FSK_TIMECODE) is False
+        assert wwv_10mhz.has_feature(FeatureType.UT1_TICKS) is False
 
     def test_get_expected_duration_ms(self, wwv_10mhz):
         assert wwv_10mhz.get_expected_duration_ms(0) == 800.0
@@ -239,9 +208,9 @@ class TestLookups:
         assert get_broadcast_spec('XYZ', 9999) is None
 
     def test_get_broadcast_spec_by_id(self):
-        spec = get_broadcast_spec_by_id('CHU_3330')
+        spec = get_broadcast_spec_by_id('WWV_20000')
         assert spec is not None
-        assert spec.station == Station.CHU
+        assert spec.station == Station.WWV
 
     def test_get_broadcast_spec_by_id_unknown(self):
         assert get_broadcast_spec_by_id('FOO_1234') is None
@@ -261,8 +230,8 @@ class TestLookups:
     def test_get_broadcasts_for_station(self):
         wwv = get_broadcasts_for_station('WWV')
         assert len(wwv) == 6
-        chu = get_broadcasts_for_station('CHU')
-        assert len(chu) == 3
+        bpm = get_broadcasts_for_station('BPM')
+        assert len(bpm) == 4
 
     def test_get_channel_broadcasts_shared(self):
         broadcasts = get_channel_broadcasts('SHARED_10000')
@@ -275,10 +244,10 @@ class TestLookups:
         assert len(broadcasts) == 1
         assert broadcasts[0].station == Station.WWV
 
-    def test_get_channel_broadcasts_chu_unique(self):
-        broadcasts = get_channel_broadcasts('CHU_7850')
+    def test_get_channel_broadcasts_wwv_unique(self):
+        broadcasts = get_channel_broadcasts('WWV_20000')
         assert len(broadcasts) == 1
-        assert broadcasts[0].station == Station.CHU
+        assert broadcasts[0].station == Station.WWV
 
     def test_get_channel_broadcasts_with_spaces(self):
         # Spaces in channel name are normalized to underscores
@@ -294,14 +263,14 @@ class TestLookups:
 
     def test_list_all_broadcast_ids_sorted(self):
         ids = list_all_broadcast_ids()
-        assert len(ids) == 17
+        assert len(ids) == 14
         assert ids == sorted(ids)
 
     def test_list_broadcasts_by_station(self):
         layout = list_broadcasts_by_station()
-        assert set(layout) == {'WWV', 'WWVH', 'CHU', 'BPM'}
+        assert set(layout) == {'WWV', 'WWVH', 'BPM'}
         assert len(layout['WWV']) == 6
-        assert len(layout['CHU']) == 3
+        assert len(layout['BPM']) == 4
 
 
 # =============================================================================

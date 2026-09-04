@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Broadcast Specifications - Complete Signal Definitions for All 17 Broadcasts
+Broadcast Specifications - Complete Signal Definitions for All 14 Broadcasts
 
 ================================================================================
 PURPOSE
 ================================================================================
-This module defines the complete signal specifications for each of the 17 HF time
+This module defines the complete signal specifications for each of the 14 HF time
 standard broadcasts. It is the single source of truth for:
 
 - Tone frequencies and durations (per-second schedules)
 - Skip patterns and special seconds
-- Station-specific features (FSK, BCD, test signals, DUT1 encoding)
+- Station-specific features (BCD, test signals, UT1 ticks)
 - Geographic coordinates
 - Propagation bounds
 
@@ -19,28 +19,26 @@ unique scientific entity with its own ionospheric path, rather than grouping
 by receiver channel.
 
 ================================================================================
-THE 17 BROADCASTS
+THE 14 BROADCASTS
 ================================================================================
 WWV (Fort Collins, CO):     2500, 5000, 10000, 15000, 20000, 25000 kHz (6)
 WWVH (Kauai, HI):           2500, 5000, 10000, 15000 kHz (4)
-CHU (Ottawa, Canada):       3330, 7850, 14670 kHz (3)
 BPM (Pucheng, China):       2500, 5000, 10000, 15000 kHz (4)
 
-Total: 17 unique broadcasts
+Total: 14 unique broadcasts
 
 ================================================================================
 FREQUENCY CONVENTION
 ================================================================================
 All frequencies are in kHz (integers) to avoid floating-point comparison issues
-and to match the existing directory naming convention (e.g., CHU_14670).
+and to match the existing directory naming convention (e.g., WWV_20000).
 
-Conversion: MHz = kHz / 1000 (e.g., 14670 kHz = 14.67 MHz)
+Conversion: MHz = kHz / 1000 (e.g., 2500 kHz = 2.5 MHz)
 
 ================================================================================
 REFERENCES
 ================================================================================
 - NIST Special Publication 432, "NIST Time and Frequency Services"
-- NRC CHU Technical Specifications (https://nrc.canada.ca/en/chu-broadcast-codes)
 - ITU-R TF.460-6, "Standard-frequency and time-signal emissions"
 """
 
@@ -60,17 +58,13 @@ class Station(str, Enum):
     """Time standard broadcast stations."""
     WWV = "WWV"      # NIST Fort Collins, Colorado
     WWVH = "WWVH"    # NIST Kekaha, Kauai, Hawaii
-    CHU = "CHU"      # NRC Ottawa, Ontario, Canada
     BPM = "BPM"      # NTSC Pucheng, Shaanxi, China
 
 
 class FeatureType(str, Enum):
     """Station-specific signal features."""
     BCD_TIMECODE = "bcd"           # WWV/WWVH BCD time code
-    FSK_TIMECODE = "fsk"           # CHU Bell 103 FSK
     TEST_SIGNAL = "test_signal"    # WWV min 8, WWVH min 48
-    DUT1_SPLITS = "dut1_splits"    # CHU split tones for DUT1
-    VOICE_ID = "voice_id"          # CHU voice announcement
     UT1_TICKS = "ut1_ticks"        # BPM 100ms UT1 ticks
     TONE_500_600 = "tone_500_600"  # WWV/WWVH 500/600 Hz tones
 
@@ -88,9 +82,7 @@ STATION_COORDINATES: Dict[Station, Tuple[float, float]] = {
     # NIST official: 21° 59' 14" N, 159° 45' 49" W
     Station.WWVH: (21.9872, -159.7636),
     
-    # CHU - Ottawa, Ontario, Canada
     # NRC official: 45° 17' 47" N, 75° 45' 22" W
-    Station.CHU: (45.2953, -75.7544),
     
     # BPM - Pucheng County, Shaanxi, China
     # 34° 56' 55.96" N, 109° 32' 34.93" E
@@ -104,19 +96,17 @@ STATION_COORDINATES: Dict[Station, Tuple[float, float]] = {
 
 WWV_FREQUENCIES_KHZ: List[int] = [2500, 5000, 10000, 15000, 20000, 25000]
 WWVH_FREQUENCIES_KHZ: List[int] = [2500, 5000, 10000, 15000]
-CHU_FREQUENCIES_KHZ: List[int] = [3330, 7850, 14670]
 BPM_FREQUENCIES_KHZ: List[int] = [2500, 5000, 10000, 15000]
 
 # Shared frequencies (multiple stations, require discrimination)
 SHARED_FREQUENCIES_KHZ: List[int] = [2500, 5000, 10000, 15000]
 
 # Unique frequencies (single station, no discrimination needed)
-UNIQUE_FREQUENCIES_KHZ: List[int] = [20000, 25000, 3330, 7850, 14670]
+UNIQUE_FREQUENCIES_KHZ: List[int] = [20000, 25000]
 
 # All broadcast frequencies
 ALL_FREQUENCIES_KHZ: List[int] = sorted(set(
-    WWV_FREQUENCIES_KHZ + WWVH_FREQUENCIES_KHZ + 
-    CHU_FREQUENCIES_KHZ + BPM_FREQUENCIES_KHZ
+    WWV_FREQUENCIES_KHZ + WWVH_FREQUENCIES_KHZ + BPM_FREQUENCIES_KHZ
 ))
 
 
@@ -138,10 +128,6 @@ class ToneSchedule:
         default_tick_duration_ms: Default duration for regular ticks (ms)
         skip_seconds: Seconds with no tone (silent)
         duration_overrides: {second: duration_ms} for non-default durations
-        fsk_seconds: Seconds with FSK data (CHU only)
-        voice_seconds: Seconds with voice announcement (CHU only)
-        dut1_positive_seconds: Seconds for positive DUT1 encoding (CHU only)
-        dut1_negative_seconds: Seconds for negative DUT1 encoding (CHU only)
         ut1_seconds: Seconds with 100ms UT1 ticks (BPM only)
     """
     tone_freq_hz: int
@@ -149,10 +135,6 @@ class ToneSchedule:
     default_tick_duration_ms: float
     skip_seconds: FrozenSet[int]
     duration_overrides: Dict[int, float] = field(default_factory=dict)
-    fsk_seconds: FrozenSet[int] = field(default_factory=frozenset)
-    voice_seconds: FrozenSet[int] = field(default_factory=frozenset)
-    dut1_positive_seconds: FrozenSet[int] = field(default_factory=frozenset)
-    dut1_negative_seconds: FrozenSet[int] = field(default_factory=frozenset)
     ut1_seconds: FrozenSet[int] = field(default_factory=frozenset)
     
     def get_expected_duration_ms(
@@ -176,9 +158,6 @@ class ToneSchedule:
             return None
         
         if second == 0:
-            # CHU: 1000ms at top of hour, 500ms otherwise
-            if minute == 0 and self.minute_marker_duration_ms == 500.0:
-                return 1000.0  # CHU hour marker
             return self.minute_marker_duration_ms
         
         if second in self.duration_overrides:
@@ -191,12 +170,8 @@ class ToneSchedule:
         return 60 - len(self.skip_seconds)
     
     def is_special_second(self, second: int) -> bool:
-        """Check if second has special features (FSK, voice, etc.)."""
-        return (
-            second in self.fsk_seconds or
-            second in self.voice_seconds or
-            second in self.ut1_seconds
-        )
+        """Check if second has special features (UT1 ticks)."""
+        return second in self.ut1_seconds
 
 
 # =============================================================================
@@ -219,28 +194,6 @@ WWVH_TONE_SCHEDULE = ToneSchedule(
     skip_seconds=frozenset({29, 59}),
 )
 
-# CHU: 1000 Hz, variable durations
-# - Second 0: 500ms (1000ms at top of hour) - but second 0 is SILENT, marker at :59.5
-# - Seconds 1-30 (except 29): 300ms regular tones
-# - Seconds 31-39: 10ms ticks + FSK data
-# - Seconds 40-49: 300ms regular tones  
-# - Seconds 50-59: 10ms ticks + voice announcement
-# - Second 29: ALWAYS SILENT
-CHU_TONE_SCHEDULE = ToneSchedule(
-    tone_freq_hz=1000,
-    minute_marker_duration_ms=500.0,  # 1000ms at hour
-    default_tick_duration_ms=300.0,
-    skip_seconds=frozenset({0, 29}),  # Second 0 silent, marker at previous :59.5
-    duration_overrides={
-        **{s: 10.0 for s in range(31, 40)},  # FSK seconds: 10ms tick
-        **{s: 10.0 for s in range(50, 60)},  # Voice seconds: 10ms tick
-    },
-    fsk_seconds=frozenset(range(31, 40)),
-    voice_seconds=frozenset(range(50, 60)),
-    dut1_positive_seconds=frozenset(range(1, 9)),
-    dut1_negative_seconds=frozenset(range(9, 17)),
-)
-
 # BPM: 1000 Hz, 300ms minute marker, 10ms UTC ticks, 100ms UT1 ticks
 BPM_TONE_SCHEDULE = ToneSchedule(
     tone_freq_hz=1000,
@@ -257,7 +210,6 @@ BPM_TONE_SCHEDULE = ToneSchedule(
 STATION_TONE_SCHEDULES: Dict[Station, ToneSchedule] = {
     Station.WWV: WWV_TONE_SCHEDULE,
     Station.WWVH: WWVH_TONE_SCHEDULE,
-    Station.CHU: CHU_TONE_SCHEDULE,
     Station.BPM: BPM_TONE_SCHEDULE,
 }
 
@@ -275,7 +227,7 @@ class BroadcastSpec:
     a specific broadcast and how to analyze them.
     
     Attributes:
-        station: Station identifier (WWV, WWVH, CHU, BPM)
+        station: Station identifier (WWV, WWVH, BPM)
         frequency_khz: Carrier frequency in kHz (integer)
         tone_schedule: Per-second tone timing specification
         features: Set of station-specific features to analyze
@@ -295,7 +247,7 @@ class BroadcastSpec:
     
     @property
     def broadcast_id(self) -> str:
-        """Unique broadcast identifier: 'WWV_10000' or 'CHU_7850'."""
+        """Unique broadcast identifier: 'WWV_10000' or 'BPM_5000'."""
         return f"{self.station.value}_{self.frequency_khz}"
     
     @property
@@ -364,7 +316,6 @@ class BroadcastSpec:
 PROPAGATION_BOUNDS_MS: Dict[Station, Tuple[float, float]] = {
     Station.WWV: (-10.0, 80.0),    # Fort Collins: typically 5-25ms
     Station.WWVH: (0.0, 100.0),    # Hawaii: typically 15-50ms
-    Station.CHU: (-10.0, 80.0),    # Ottawa: typically 5-30ms
     Station.BPM: (10.0, 150.0),    # China: typically 40-100ms (multi-hop)
 }
 
@@ -385,23 +336,17 @@ WWVH_FEATURES: FrozenSet[FeatureType] = frozenset({
     FeatureType.TONE_500_600,
 })
 
-CHU_FEATURES: FrozenSet[FeatureType] = frozenset({
-    FeatureType.FSK_TIMECODE,
-    FeatureType.DUT1_SPLITS,
-    FeatureType.VOICE_ID,
-})
-
 BPM_FEATURES: FrozenSet[FeatureType] = frozenset({
     FeatureType.UT1_TICKS,
 })
 
 
 # =============================================================================
-# BUILD ALL 17 BROADCAST SPECIFICATIONS
+# BUILD ALL 14 BROADCAST SPECIFICATIONS
 # =============================================================================
 
 def _build_broadcast_specs() -> Dict[str, BroadcastSpec]:
-    """Build specifications for all 17 broadcasts."""
+    """Build specifications for all 14 broadcasts."""
     specs = {}
     
     # WWV broadcasts (6)
@@ -434,21 +379,6 @@ def _build_broadcast_specs() -> Dict[str, BroadcastSpec]:
         )
         specs[spec.broadcast_id] = spec
     
-    # CHU broadcasts (3)
-    for freq_khz in CHU_FREQUENCIES_KHZ:
-        lat, lon = STATION_COORDINATES[Station.CHU]
-        spec = BroadcastSpec(
-            station=Station.CHU,
-            frequency_khz=freq_khz,
-            tone_schedule=CHU_TONE_SCHEDULE,
-            features=CHU_FEATURES,
-            lat=lat,
-            lon=lon,
-            propagation_bounds_ms=PROPAGATION_BOUNDS_MS[Station.CHU],
-            test_signal_minute=None,
-        )
-        specs[spec.broadcast_id] = spec
-    
     # BPM broadcasts (4)
     for freq_khz in BPM_FREQUENCIES_KHZ:
         lat, lon = STATION_COORDINATES[Station.BPM]
@@ -467,7 +397,7 @@ def _build_broadcast_specs() -> Dict[str, BroadcastSpec]:
     return specs
 
 
-# The authoritative registry of all 17 broadcasts
+# The authoritative registry of all 14 broadcasts
 BROADCAST_SPECS: Dict[str, BroadcastSpec] = _build_broadcast_specs()
 
 
@@ -480,7 +410,7 @@ def get_broadcast_spec(station: str, frequency_khz: int) -> Optional[BroadcastSp
     Get broadcast specification by station and frequency.
     
     Args:
-        station: Station name ('WWV', 'WWVH', 'CHU', 'BPM')
+        station: Station name ('WWV', 'WWVH', 'BPM')
         frequency_khz: Frequency in kHz
         
     Returns:
@@ -495,7 +425,7 @@ def get_broadcast_spec_by_id(broadcast_id: str) -> Optional[BroadcastSpec]:
     Get broadcast specification by broadcast ID.
     
     Args:
-        broadcast_id: Broadcast ID (e.g., 'WWV_10000', 'CHU_7850')
+        broadcast_id: Broadcast ID (e.g., 'WWV_10000', 'BPM_5000')
         
     Returns:
         BroadcastSpec or None if not found
@@ -524,7 +454,7 @@ def get_broadcasts_for_station(station: str) -> List[BroadcastSpec]:
     Get all broadcasts for a given station.
     
     Args:
-        station: Station name ('WWV', 'WWVH', 'CHU', 'BPM')
+        station: Station name ('WWV', 'WWVH', 'BPM')
         
     Returns:
         List of BroadcastSpec for all frequencies this station broadcasts on
@@ -540,7 +470,7 @@ def get_channel_broadcasts(channel_name: str) -> List[BroadcastSpec]:
     Get broadcasts receivable on a channel.
     
     Args:
-        channel_name: Channel name (e.g., 'SHARED_10000', 'CHU_7850', 'WWV_20000')
+        channel_name: Channel name (e.g., 'SHARED_10000', 'WWV_20000')
         
     Returns:
         List of BroadcastSpec for broadcasts on this channel

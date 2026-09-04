@@ -370,7 +370,7 @@ wait; their outcomes amend this spec before Phase 1 begins.
 WWVB is pooled into fusion as one more D_clock source: the core-recorder
 decode loop → `wwvb_fusion.py` L1 row (same `timing_error_ms` convention as
 the HF workers) → combiner consumes it verbatim
-(`multi_broadcast_fusion.py:2043`) beside WWV/WWVH/CHU/BPM, with a
+(`multi_broadcast_fusion.py:2043`) beside WWV/WWVH/BPM, with a
 groundwave-only delay model (`wwvb_propagation.py`). It is the one pool
 member immune to the shared ionospheric-model error — a potentially valuable
 independent cross-check — but its own docstring grades an uncalibrated WWVB
@@ -412,7 +412,7 @@ configure WWVB at all: absent from the 17 configured broadcasts
 (`/api/stations/broadcasts`), absent from the 24 h broadcasts dashboard, and
 `stations_used` in live fusion is `[WWV, WWVH]` only. The consumer code is
 idle. Additionally the `L3_fusion_timing` schema carries per-station stats
-for WWV/WWVH/CHU/BPM but has **no WWVB columns** — a schema gap to close if
+for WWV/WWVH/BPM but has **no WWVB columns** — a schema gap to close if
 WWVB is kept. Consequence: E1 must first *enable* WWVB on a station (config +
 core-recorder restart — deferred while the T6 hands-off measurement window is
 live) before any utility measurement exists. The retire option currently has

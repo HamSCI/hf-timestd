@@ -40,8 +40,7 @@ ARCHITECTURE
                          │                           │
                          │                           ├── WWV: ToA, SNR, delay
                          │                           ├── WWVH: ToA, SNR, delay
-                         │                           ├── BPM: ToA, SNR, delay
-                         │                           └── CHU: ToA, SNR, delay
+                         │                           └── BPM: ToA, SNR, delay
                          │
                          └── Cross-Frequency Guidance (optional)
                              Use strong detection on one freq to
@@ -71,7 +70,6 @@ from .wwv_constants import (
     WWV_LAT, WWV_LON,
     WWVH_LAT, WWVH_LON,
     BPM_LAT, BPM_LON,
-    CHU_LAT, CHU_LON,
     SPEED_OF_LIGHT_KM_S,
     EARTH_RADIUS_KM,
     MAX_DISPERSION_MS,
@@ -96,7 +94,7 @@ class StationDetection:
     This represents what we measured, what we expected, and the difference.
     """
     # Station identity
-    station: str              # 'WWV', 'WWVH', 'BPM', 'CHU'
+    station: str              # 'WWV', 'WWVH', 'BPM'
     frequency_mhz: float      # Center frequency
     channel: str              # Channel name (e.g., 'WWV 10 MHz')
     
@@ -211,7 +209,6 @@ class MultiStationDetector:
         'WWV': (WWV_LAT, WWV_LON),
         'WWVH': (WWVH_LAT, WWVH_LON),
         'BPM': (BPM_LAT, BPM_LON),
-        'CHU': (CHU_LAT, CHU_LON),
     }
     
     # Stations present on each frequency
@@ -222,9 +219,6 @@ class MultiStationDetector:
         15.0: ['WWV', 'WWVH', 'BPM'],
         20.0: ['WWV'],  # WWV only
         25.0: ['WWV'],  # WWV only
-        3.33: ['CHU'],  # CHU only
-        7.85: ['CHU'],  # CHU only
-        14.67: ['CHU'], # CHU only
     }
     
     def __init__(
@@ -341,7 +335,7 @@ class MultiStationDetector:
             minute_boundary: Unix timestamp of minute start
             rtp_timestamp: RTP timestamp
             system_time: System time
-            tone_detections: Dict with keys 'wwv', 'wwvh', 'chu' containing detection results
+            tone_detections: Dict with keys 'wwv', 'wwvh' containing detection results
             bpm_detection: Optional BPM discrimination result
             
         Returns:

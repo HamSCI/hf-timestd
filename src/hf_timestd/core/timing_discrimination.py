@@ -73,7 +73,6 @@ from .wwv_constants import (
     WWV_COORDINATES,
     WWVH_COORDINATES,
     BPM_COORDINATES,
-    CHU_COORDINATES
 )
 
 logger = logging.getLogger(__name__)
@@ -89,7 +88,7 @@ class DiscriminationPhase(Enum):
 @dataclass
 class StationDelayModel:
     """Propagation delay model for a station."""
-    station: str                      # WWV, WWVH, BPM, CHU
+    station: str                      # WWV, WWVH, BPM
     frequency_mhz: float              # Frequency in MHz
     
     # Delay statistics
@@ -280,7 +279,7 @@ class TimingDiscriminator:
         Validate a station detection using timing constraints.
         
         Args:
-            station: Claimed station (WWV, WWVH, BPM, CHU)
+            station: Claimed station (WWV, WWVH, BPM)
             frequency_mhz: Frequency in MHz
             measured_toa_ms: Measured time of arrival (ms from second boundary)
             minute_number: Minute within hour (0-59)

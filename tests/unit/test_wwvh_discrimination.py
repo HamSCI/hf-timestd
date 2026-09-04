@@ -4,7 +4,7 @@ Unit tests for hf_timestd.core.wwvh_discrimination
 WWVHDiscriminator provides BCD correlation, Doppler estimation, and test-
 signal detection for shared-frequency channels. This file focuses on the
 parts that are testable without a real signal capture:
-- Construction across channel-type variants (CHU vs WWV/WWVH)
+- Construction (every channel gets the BCD encoder and test-signal detector)
 - _generate_bcd_template happy path and failure modes
 - extract_per_tick_phases shape on synthetic IQ
 - estimate_doppler_shift_from_ticks smoke test
@@ -44,20 +44,8 @@ def _synth_iq(sample_rate=24000, n_seconds=60, tone_hz=1000.0,
 class TestConstruction:
     def test_wwv_channel_initializes_bcd_and_test_signal(self):
         d = WWVHDiscriminator('WWV_10000', sample_rate=24000)
-        assert d.is_chu_channel is False
         assert d.bcd_encoder is not None
         assert d.test_signal_detector is not None
-
-    def test_chu_channel_skips_bcd_and_test_signal(self):
-        d = WWVHDiscriminator('CHU_3330', sample_rate=24000)
-        assert d.is_chu_channel is True
-        assert d.bcd_encoder is None
-        assert d.test_signal_detector is None
-
-    def test_lowercase_chu_detected(self):
-        # is_chu_channel uses .upper() — lowercase still counts
-        d = WWVHDiscriminator('chu_7850', sample_rate=24000)
-        assert d.is_chu_channel is True
 
     def test_no_grid_disables_geo_predictor(self):
         d = WWVHDiscriminator('WWV_10000')
@@ -82,12 +70,6 @@ class TestConstruction:
 
 
 class TestGenerateBCDTemplate:
-    def test_chu_channel_returns_none(self):
-        d = WWVHDiscriminator('CHU_3330', sample_rate=24000)
-        ts = datetime(2026, 4, 26, 12, 0, 0,
-                       tzinfo=timezone.utc).timestamp()
-        assert d._generate_bcd_template(ts, sample_rate=24000) is None
-
     def test_wwv_channel_returns_60_second_template(self):
         d = WWVHDiscriminator('WWV_10000', sample_rate=24000)
         ts = datetime(2026, 4, 26, 12, 0, 0,

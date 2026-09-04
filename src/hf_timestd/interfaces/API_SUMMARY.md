@@ -141,7 +141,7 @@ class Discontinuity:
 
 ---
 
-#### `ToneDetectionResult` - WWV/WWVH/CHU Detection
+#### `ToneDetectionResult` - WWV/WWVH Detection
 **Function 3 output with critical purpose separation**
 
 ```python
@@ -277,7 +277,7 @@ class ArchiveReader(ABC):
 
 ### Function 3: `ToneDetector`
 
-**Role:** Discriminate WWV/WWVH/CHU tones
+**Role:** Discriminate WWV/WWVH tones
 
 **Key Methods:**
 

@@ -2,7 +2,7 @@
 
 ## Overview
 
-The `hf_timestd.core` module provides advanced matched filter templates for detecting and correlating time signal modulation patterns from WWV, WWVH, CHU, and BPM stations. These templates enable:
+The `hf_timestd.core` module provides advanced matched filter templates for detecting and correlating time signal modulation patterns from WWV, WWVH, and BPM stations. These templates enable:
 
 1. **Per-second tick detection** with overlapping windows for improved SNR
 2. **BCD time code correlation** for WWV/WWVH 100 Hz subcarrier

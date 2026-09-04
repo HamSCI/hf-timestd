@@ -43,20 +43,6 @@ class TestBroadcastKalmanFilter(unittest.TestCase):
         self.assertTrue(filter.characteristics.has_test_signal)
         self.assertFalse(filter.characteristics.is_anchor)
     
-    def test_initialization_chu_3330(self):
-        """Test filter initialization for CHU 3.33 MHz (anchor, FSK)."""
-        filter = BroadcastKalmanFilter(
-            broadcast_id="CHU_3330",
-            station="CHU",
-            frequency_mhz=3.33
-        )
-        
-        # Check characteristics
-        self.assertEqual(filter.characteristics.typical_layer, 'E')
-        self.assertEqual(filter.characteristics.modulation, 'FSK')
-        self.assertFalse(filter.characteristics.has_bcd)
-        self.assertTrue(filter.characteristics.is_anchor)
-    
     def test_first_update(self):
         """Test first measurement update."""
         filter = BroadcastKalmanFilter(
@@ -200,27 +186,6 @@ class TestBroadcastKalmanFilter(unittest.TestCase):
             filter_wwvh.characteristics.base_measurement_noise_ms,
             filter_wwv.characteristics.base_measurement_noise_ms
         )
-    
-    def test_fsk_modulation_advantage(self):
-        """Test that FSK (CHU) has lower measurement noise than AM."""
-        # CHU (FSK)
-        filter_chu = BroadcastKalmanFilter(
-            broadcast_id="CHU_7850",
-            station="CHU",
-            frequency_mhz=7.85
-        )
-        
-        # WWV (AM)
-        filter_wwv = BroadcastKalmanFilter(
-            broadcast_id="WWV_10000",
-            station="WWV",
-            frequency_mhz=10.0
-        )
-        
-        # CHU should have lower base noise (FSK advantage)
-        # Note: This is approximate due to frequency differences
-        self.assertEqual(filter_chu.characteristics.modulation, 'FSK')
-        self.assertEqual(filter_wwv.characteristics.modulation, 'AM+BCD')
     
     def test_state_persistence(self):
         """Test saving and loading filter state."""

@@ -579,7 +579,7 @@ def install_chrony_config(unit: int = 0) -> str:
 # =============================================================================
 # HF Time Transfer via time-manager
 # =============================================================================
-# This refclock receives UTC from WWV/WWVH/CHU time broadcasts, providing
+# This refclock receives UTC from WWV/WWVH time broadcasts, providing
 # ~1ms accuracy. It can be used as a backup to GPS or as primary reference.
 
 refclock SHM {unit} refid HF poll 4 precision 1e-3

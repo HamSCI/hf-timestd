@@ -59,7 +59,7 @@ def get_broadcast_registry() -> BroadcastRegistry:
     return _broadcast_registry
 
 # Valid stations (derived from registry)
-STATIONS = {"WWV", "WWVH", "CHU", "BPM"}
+STATIONS = {"WWV", "WWVH", "BPM"}
 
 def sanitize_for_json(obj):
     """Recursively convert numpy types to Python native types."""
@@ -82,14 +82,14 @@ async def list_stations():
     """
     List all broadcast stations with summary info.
     
-    Returns the 4 stations (WWV, WWVH, CHU, BPM) with their broadcasts
+    Returns the 3 stations (WWV, WWVH, BPM) with their broadcasts
     and computed geometry from the receiver location.
     """
     try:
         registry = get_broadcast_registry()
         
         stations = []
-        for station_name in ["WWV", "WWVH", "CHU", "BPM"]:
+        for station_name in ["WWV", "WWVH", "BPM"]:
             station = registry.get_station(station_name)
             if not station:
                 continue
@@ -391,7 +391,6 @@ def get_station_info(station_id: str) -> Dict[str, Any]:
     descriptions = {
         "WWV": "NIST standard frequency and time signal station.",
         "WWVH": "NIST Pacific sister station to WWV.",
-        "CHU": "NRC Canadian standard time station.",
         "BPM": "NTSC Chinese standard time station.",
     }
     

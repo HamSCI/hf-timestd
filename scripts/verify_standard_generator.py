@@ -6,7 +6,6 @@ import sys
 import os
 import logging
 import numpy as np
-from datetime import datetime, timedelta
 
 # Add src to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../src')))
@@ -41,50 +40,6 @@ def verify_bpm_pulses():
     logger.info(f"BPM Minute Marker: {dur_min:.3f}s (Expected 0.300)")
     assert np.isclose(dur_min, 0.300, atol=0.001)
 
-def verify_chu_afsk_loopback():
-    logger.info("\n--- Verifying CHU AFSK Loopback ---")
-    sr = 20000
-    gen = StandardTimeSignalGenerator(sample_rate=sr)
-    decoder = CHUFSKDecoder(sample_rate=sr)
-    
-    # Test Time: Day 100, 12:30:00 UTC
-    year = 2024
-    day = 100
-    hour = 12
-    minute = 30
-    
-    logger.info(f"Generating CHU Minute for {year}-{day:03d} {hour}:{minute} UTC")
-    
-    # Manually construct a minute buffer to save time (just seconds 31-39)
-    # But generate_second_combined needs context.
-    # We'll generate just the relevant seconds.
-    
-    seconds_to_test = range(31, 40)
-    full_buffer = np.zeros(60 * sr) # Full minute for simplicity
-    
-    for sec in seconds_to_test:
-        sec_audio = gen.generate_second_combined('CHU', sec, minute, hour, day, year)
-        start = sec * sr
-        full_buffer[start : start + len(sec_audio)] = sec_audio
-        
-    # Decode
-    logger.info("Decoding...")
-    # Timestamp needs to be correct for decoder? Decoder outputs decoded fields.
-    # Calculate the Unix timestamp for the start of the minute
-    minute_start_dt = datetime(year, 1, 1, hour, minute, 0) + timedelta(days=day - 1)
-    minute_start_ts = minute_start_dt.timestamp()
-    result = decoder.decode_minute(full_buffer, minute_start_ts, is_audio=True)
-    # Timestamp doesn't effect decode of content
-    
-    logger.info(f"Detected: {result.detected}")
-    logger.info(f"Frames Decoded: {result.frames_decoded}/9")
-    logger.info(f"Decoded Time: Day {result.decoded_day} {result.decoded_hour}:{result.decoded_minute}")
-    
-    if result.detected:
-        logger.info("✅ SUCCESS: CHU AFSK Loopback Passed")
-    else:
-        logger.error("❌ FAILURE: CHU AFSK Decode Failed")
-
 def verify_test_signals():
     """Verify WWV Scientific Modulation Test Signal generation"""
     logger.info("\n--- Verifying WWV Test Signals ---")
@@ -118,5 +73,4 @@ def verify_test_signals():
 
 if __name__ == "__main__":
     verify_bpm_pulses()
-    verify_chu_afsk_loopback()
     verify_test_signals()

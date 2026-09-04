@@ -61,7 +61,7 @@ class Discontinuity:
         rtp_sequence_after: RTP sequence number after discontinuity
         rtp_timestamp_before: RTP timestamp before discontinuity
         rtp_timestamp_after: RTP timestamp after discontinuity
-        wwv_related: True if discontinuity related to WWV/CHU tone detection
+        wwv_related: True if discontinuity related to WWV tone detection
         explanation: Human-readable description of cause
     """
     timestamp: float
@@ -100,7 +100,7 @@ class Discontinuity:
 @dataclass(frozen=True)
 class TimeSnapReference:
     """
-    Time anchor point established from WWV/CHU tone detection.
+    Time anchor point established from WWV tone detection.
     
     Implements KA9Q-radio timing architecture with PPM correction:
         elapsed_time = (rtp_elapsed / sample_rate) * clock_ratio
@@ -120,7 +120,7 @@ class TimeSnapReference:
         sample_rate: RTP clock rate (typically 20000 Hz)
         source: How this reference was established
         confidence: Confidence in this reference (0.0-1.0)
-        station: Which station provided the reference (WWV, CHU, or initial guess)
+        station: Which station provided the reference (WWV or initial guess)
         established_at: When this reference was created (wall clock time)
         ppm_offset: Measured clock drift in parts-per-million (+ = ADC fast)
         ppm_confidence: Confidence in the PPM measurement (0.0-1.0)
@@ -128,9 +128,9 @@ class TimeSnapReference:
     rtp_timestamp: int
     utc_timestamp: float
     sample_rate: int
-    source: str  # 'wwv_first', 'wwv_verified', 'chu_first', 'chu_verified', 'initial_guess'
+    source: str  # 'wwv_first', 'wwv_verified', 'initial_guess'
     confidence: float
-    station: str  # 'WWV', 'CHU', 'initial'
+    station: str  # 'WWV', 'initial'
     established_at: float  # Wall clock time when reference was created
     ppm_offset: float = 0.0  # Measured ADC clock drift (PPM)
     ppm_confidence: float = 0.0  # Confidence in PPM measurement
@@ -392,13 +392,12 @@ class StationType(Enum):
     Time standard radio stations.
     
     Critical distinction:
-    - WWV (Fort Collins) and CHU (Ottawa): 1000 Hz tone, used for time_snap
+    - WWV (Fort Collins): 1000 Hz tone, used for time_snap
     - WWVH (Hawaii): 1200 Hz tone, used ONLY for propagation analysis
     - BPM (Pucheng, China): 1000 Hz tone, shared frequency with WWV
     """
     WWV = "WWV"      # NIST Fort Collins, CO (1000 Hz) - TIME_SNAP SOURCE
     WWVH = "WWVH"    # NIST Hawaii (1200 Hz) - PROPAGATION STUDY ONLY
-    CHU = "CHU"      # NRC Ottawa, Canada (1000 Hz) - TIME_SNAP SOURCE
     BPM = "BPM"      # NTSC Pucheng, China (1000 Hz) - PROPAGATION STUDY
 
 
@@ -413,7 +412,7 @@ class ToneAcquisitionResult:
     correspondence from the broadcasts themselves.
     
     Attributes:
-        station: Which station template matched (WWV, WWVH, CHU, BPM)
+        station: Which station template matched (WWV, WWVH, BPM)
         frequency_hz: Tone frequency (1000 Hz, 1200 Hz, etc.)
         sample_position: Sample index in buffer where tone onset detected
         rtp_timestamp: RTP timestamp of tone onset (buffer_rtp_start + sample_position)
@@ -437,23 +436,23 @@ class ToneAcquisitionResult:
 @dataclass(frozen=True)
 class ToneDetectionResult:
     """
-    Result of WWV/WWVH/CHU tone detection.
+    Result of WWV/WWVH tone detection.
     
     Produced by Function 3 (tone discrimination) for use by Function 1
     (time_snap updates) and scientific analysis (propagation studies).
     
     The `use_for_time_snap` field is CRITICAL: it separates timing
-    reference (WWV/CHU) from propagation study (WWVH).
+    reference (WWV) from propagation study (WWVH).
     
     Attributes:
-        station: Which station was detected (WWV, WWVH, or CHU)
+        station: Which station was detected (WWV or WWVH)
         frequency_hz: Tone frequency (1000 Hz or 1200 Hz)
         duration_sec: Measured tone duration in seconds
         timestamp_utc: UTC timestamp of tone rising edge
         timing_error_ms: Timing error vs expected :00.000 (milliseconds)
         snr_db: Signal-to-noise ratio of detection (dB)
         confidence: Detection confidence (0.0-1.0)
-        use_for_time_snap: True for WWV/CHU (timing), False for WWVH (propagation)
+        use_for_time_snap: True for WWV (timing), False for WWVH (propagation)
         correlation_peak: Peak correlation value from matched filter
         noise_floor: Estimated noise floor during detection
         tone_power_db: Power of detected tone relative to noise floor (dB) - for discrimination
@@ -490,9 +489,9 @@ class ToneDetectionResult:
     doppler_hz: Optional[float] = None  # Doppler shift estimate
     phase_at_peak_rad: Optional[float] = None  # Phase for sub-sample refinement
     
-    def is_wwv_or_chu(self) -> bool:
+    def is_timing_reference(self) -> bool:
         """Check if this is a timing reference station (not WWVH)"""
-        return self.station in [StationType.WWV, StationType.CHU]
+        return self.station == StationType.WWV
     
     def is_wwvh(self) -> bool:
         """Check if this is WWVH (propagation study only)"""

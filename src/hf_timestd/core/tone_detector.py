@@ -5,7 +5,7 @@ Multi-Station Tone Detector - Precision Timing via Matched Filtering
 ================================================================================
 PURPOSE
 ================================================================================
-Detect WWV/WWVH/CHU time signal tones to establish UTC time reference.
+Detect WWV/WWVH time signal tones to establish UTC time reference.
 This is Step 1 of Phase 2 analytics - the foundation for all timing measurements.
 
 The detected tone arrival time (T_arrival) is the primary observable for
@@ -157,7 +157,7 @@ SIGNAL PROCESSING CHAIN
 
 4. MATCHED FILTER CORRELATION:
    - Quadrature templates at tone frequency (1000 or 1200 Hz)
-   - Template duration matches tone (0.8s WWV/WWVH, 0.5s CHU)
+   - Template duration matches tone (0.8s WWV/WWVH)
    - Unit-energy normalization for proper SNR calculation
 
 5. ENVELOPE DETECTION:
@@ -182,8 +182,6 @@ STATION CHARACTERISTICS
 ├─────────┼────────────┼──────────┼─────────────────────────────────────────┤
 │ WWV     │ 1000       │ 0.8s     │ Fort Collins, CO. 2.5-25 MHz            │
 │ WWVH    │ 1200       │ 0.8s     │ Kauai, HI. 2.5, 5, 10, 15 MHz only      │
-│ CHU     │ 1000       │ 0.5s     │ Ottawa, Canada. 3.33, 7.85, 14.67 MHz   │
-│         │            │ 1.0s     │ (1.0s at top of hour only)              │
 └─────────┴────────────┴──────────┴─────────────────────────────────────────┘
 
 All tones transmitted at exact second boundary (T_emission = 0).
@@ -203,7 +201,6 @@ Timing errors outside physical propagation bounds indicate false detections:
 Typical delays (receiver in central US):
     WWV:  5-30 ms  (1500-9000 km path via ionosphere)
     WWVH: 15-50 ms (4500-15000 km path via ionosphere)
-    CHU:  3-25 ms  (1000-7500 km path via ionosphere)
 
 Detections outside these bounds are rejected as interference.
 
@@ -286,7 +283,6 @@ class MultiStationToneDetector(IMultiStationToneDetector):
     Stations:
     - WWV (Fort Collins): 1000 Hz, 0.8s duration - PRIMARY for time_snap
     - WWVH (Hawaii): 1200 Hz, 0.8s duration - Propagation analysis ONLY
-    - CHU (Canada): 1000 Hz, 0.5s duration - Alternate time_snap
     
     Uses phase-invariant quadrature matched filtering for robust detection
     in poor SNR conditions and with phase-shifted signals.
@@ -302,7 +298,6 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         """
         self.channel_name = channel_name
         self.sample_rate = sample_rate
-        self.is_chu_channel = 'CHU' in channel_name.upper()
         
         # Determine channel frequency from name
         self.channel_frequency_mhz = self._extract_frequency_mhz(channel_name)
@@ -313,31 +308,25 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         # Create matched filter templates (quadrature for phase-invariance)
         self.templates: Dict[StationType, dict] = {}
         
-        if self.is_chu_channel:
-            # CHU frequencies: 3.33, 7.85, 14.67 MHz
-            # Only detect CHU 1000 Hz (0.5s)
-            self.templates[StationType.CHU] = self._create_template(1000, 0.5)
-        else:
-            # WWV frequencies: 2.5, 5, 10, 15, 20, 25 MHz
-            # WWV frequencies: 2.5, 5, 10, 15, 20, 25 MHz
-            # Always detect WWV 1000 Hz tone
-            # Revert to 0.8s template to detect the strong Minute Tone
-            self.templates[StationType.WWV] = self._create_template(1000, 0.8)
-            
-            # WWVH broadcasts on 2.5, 5, 10, 15 MHz (NOT on 20 or 25 MHz)
-            # BPM also broadcasts on these frequencies but is EXCLUDED:
-            # BPM uses the same 1000 Hz tone as WWV, so the matched filter
-            # cannot distinguish them.  The fig12 correlation heatmap shows
-            # r=0.91 between "BPM" and WWV Doppler at 10 MHz — confirming
-            # that "BPM" detections on shared frequencies are misattributed
-            # WWV signals.  BPM discrimination would require tick-duration
-            # measurement (10ms BPM vs 5ms WWV) below our time resolution.
-            if self.channel_frequency_mhz in WWVH_FREQUENCIES:
-                self.templates[StationType.WWVH] = self._create_template(1200, 0.8)
-                logger.info(f"{channel_name}: WWVH detection enabled (shared frequency, BPM excluded — same 1000 Hz tone as WWV)")
-            else:
-                logger.info(f"{channel_name}: WWVH detection disabled (WWV-only frequency)")
+        # WWV frequencies: 2.5, 5, 10, 15, 20, 25 MHz
+        # Always detect WWV 1000 Hz tone
+        # Revert to 0.8s template to detect the strong Minute Tone
+        self.templates[StationType.WWV] = self._create_template(1000, 0.8)
         
+        # WWVH broadcasts on 2.5, 5, 10, 15 MHz (NOT on 20 or 25 MHz)
+        # BPM also broadcasts on these frequencies but is EXCLUDED:
+        # BPM uses the same 1000 Hz tone as WWV, so the matched filter
+        # cannot distinguish them.  The fig12 correlation heatmap shows
+        # r=0.91 between "BPM" and WWV Doppler at 10 MHz — confirming
+        # that "BPM" detections on shared frequencies are misattributed
+        # WWV signals.  BPM discrimination would require tick-duration
+        # measurement (10ms BPM vs 5ms WWV) below our time resolution.
+        if self.channel_frequency_mhz in WWVH_FREQUENCIES:
+            self.templates[StationType.WWVH] = self._create_template(1200, 0.8)
+            logger.info(f"{channel_name}: WWVH detection enabled (shared frequency, BPM excluded — same 1000 Hz tone as WWV)")
+        else:
+            logger.info(f"{channel_name}: WWVH detection disabled (WWV-only frequency)")
+    
         # State tracking
         self.last_detections_by_minute: Dict[int, List[ToneDetectionResult]] = {}
         self.detection_count = 0
@@ -352,7 +341,6 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         self.detection_stats: Dict[StationType, int] = {
             StationType.WWV: 0,
             StationType.WWVH: 0,
-            StationType.CHU: 0,
             StationType.BPM: 0
         }
         self.total_attempts = 0
@@ -373,7 +361,6 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         # Kept for API compatibility but not used for filtering.
         self.station_priorities: Dict[StationType, int] = {
             StationType.WWV: 100,
-            StationType.CHU: 100,
             StationType.BPM: 100,
             StationType.WWVH: 100   # All stations equal - fusion handles weighting
         }
@@ -442,8 +429,8 @@ class MultiStationToneDetector(IMultiStationToneDetector):
             w(t) = Tukey window with α=0.1 (smooth 5% edges)
         
         Args:
-            frequency_hz: Tone frequency in Hz (1000 for WWV/CHU, 1200 for WWVH)
-            duration_sec: Tone duration in seconds (0.8s WWV, 0.5s CHU)
+            frequency_hz: Tone frequency in Hz (1000 for WWV, 1200 for WWVH)
+            duration_sec: Tone duration in seconds (0.8s WWV/WWVH)
             
         Returns:
             dict containing:
@@ -454,7 +441,7 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         """
         # Restore full duration template for maximum detection sensitivity
         # CRITICAL: Use provided duration (optimized by caller for Ticks vs Keys)
-        # WWV Ticks = 5ms, CHU Keys = 300ms+
+        # WWV Ticks = 5ms
         optimal_duration_sec = duration_sec
         
         # Generate time vector
@@ -680,8 +667,8 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         Args:
             audio_signal: AM-demodulated, AC-coupled signal
             correlation_peak_idx: Peak position from Stage 1 matched filter
-            tone_freq_hz: Tone frequency (1000 Hz WWV/CHU, 1200 Hz WWVH)
-            tone_duration_sec: Expected tone duration (0.8s WWV/WWVH, 0.5s CHU)
+            tone_freq_hz: Tone frequency (1000 Hz WWV, 1200 Hz WWVH)
+            tone_duration_sec: Expected tone duration (0.8s WWV/WWVH)
             noise_floor: Noise floor estimate from Stage 1
             
         Returns:
@@ -1334,11 +1321,11 @@ class MultiStationToneDetector(IMultiStationToneDetector):
                 Pass 1+: Use guided narrow window (e.g., ±30ms) from anchor
             expected_offset_ms: Expected offset from minute boundary (default 0)
                 Pass 0: Use 0 (search around minute boundary)
-                Pass 1+: Use expected propagation delay (e.g., +20ms for CHU)
+                Pass 1+: Use expected propagation delay (e.g., +5ms for WWV)
                 This centers the search window at minute_boundary + expected_offset
                 DEPRECATED: Use expected_delays_by_station for per-station delays
             expected_delays_by_station: Dict mapping station name to expected delay in ms
-                e.g., {'WWV': 4.3, 'WWVH': 25.3, 'CHU': 5.8, 'BPM': 44.1}
+                e.g., {'WWV': 4.3, 'WWVH': 25.3, 'BPM': 44.1}
                 If provided, overrides expected_offset_ms for each station
             
         Returns:
@@ -1405,19 +1392,13 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         minute_boundary = int(buffer_start_time / 60) * 60
         
         # Step 1: Demodulation
-        # CHU transmits USB with preserved carrier. Re(IQ) recovers the audio.
         # WWV/WWVH/BPM use conventional AM: |IQ| - DC recovers the envelope.
-        if self.is_chu_channel:
-            audio_signal = np.real(iq_samples).copy()
-            audio_signal -= np.mean(audio_signal)
-            magnitude = np.abs(iq_samples)  # Still needed for leading zeros check
-        else:
-            magnitude = np.abs(iq_samples)
-            audio_signal = magnitude - np.mean(magnitude)  # AC coupling
+        magnitude = np.abs(iq_samples)
+        audio_signal = magnitude - np.mean(magnitude)  # AC coupling
         
         # Diagnostic: Check signal energy
         audio_rms = np.sqrt(np.mean(audio_signal**2))
-        logger.debug(f"Demod ({'USB' if self.is_chu_channel else 'AM'}): "
+        logger.debug(f"Demod (AM): "
                     f"iq_len={len(iq_samples)}, audio_rms={audio_rms:.6f}, "
                     f"mag_mean={np.mean(magnitude):.6f}")
         
@@ -1454,7 +1435,7 @@ class MultiStationToneDetector(IMultiStationToneDetector):
             # Get per-station expected delay if available
             station_expected_offset_ms = expected_offset_ms  # Default fallback
             if expected_delays_by_station is not None:
-                station_name = station_type.value  # e.g., 'WWV', 'WWVH', 'CHU', 'BPM'
+                station_name = station_type.value  # e.g., 'WWV', 'WWVH', 'BPM'
                 if station_name in expected_delays_by_station:
                     station_expected_offset_ms = expected_delays_by_station[station_name]
             
@@ -1556,7 +1537,7 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         
         Args:
             audio_signal: AM-demodulated, AC-coupled signal (magnitude - DC)
-            station_type: Station being detected (WWV, WWVH, or CHU)
+            station_type: Station being detected (WWV or WWVH)
             template: Dict with 'sin', 'cos', 'frequency', 'duration' from _create_template
             current_unix_time: Unix timestamp at buffer MIDPOINT
             minute_boundary: UTC minute boundary (second 0) as Unix timestamp
@@ -1631,9 +1612,6 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         # Expected position: all stations use minute boundary (second 0)
         # - WWV: 1000 Hz, 0.8s tone at :00.0
         # - WWVH: 1200 Hz, 0.8s tone at :00.0  
-        # - CHU: 1000 Hz, 0.5s tone at :00.0 (1.0s at top of hour)
-        #   Note: CHU second 29 is always silent, seconds 31-39 and 50-59 have
-        #   only 10ms ticks (FSK data and voice). But second 00 has full tone.
         buffer_len_sec = len(audio_signal) / self.sample_rate
         buffer_start_time = current_unix_time - (buffer_len_sec / 2)
         
@@ -1878,7 +1856,7 @@ class MultiStationToneDetector(IMultiStationToneDetector):
             snr_db = 0.0
         
         # Calculate actual tone power using FFT on the detected tone segment
-        # Extract the tone segment (0.8s for WWV/WWVH, 0.5s for CHU)
+        # Extract the tone segment (0.8s for WWV/WWVH)
         # Use integer index for slicing (onset_sample_idx may be float from sub-sample interpolation)
         tone_start_idx = max(0, int(onset_sample_idx))
         tone_end_idx = min(len(audio_signal), tone_start_idx + int(duration * self.sample_rate))
@@ -1981,7 +1959,7 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         # 1. BPM is 10,960km away - minimum ToF is ~36ms (speed of light)
         # 2. BPM uses same 1000Hz tone as WWV, so template correlation alone can't distinguish
         # 3. WWV/WWVH signals with ToF < 30ms are physically impossible to be BPM
-        station_name = station_type.value  # 'WWV', 'WWVH', 'CHU', 'BPM'
+        station_name = station_type.value  # 'WWV', 'WWVH', 'BPM'
         min_delay_ms, max_delay_ms = PROPAGATION_BOUNDS_MS.get(
             station_name, DEFAULT_PROPAGATION_BOUNDS_MS
         )
@@ -2014,7 +1992,7 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         # Determine if this station should be used for time_snap
         # 
         # TIMING PHILOSOPHY (Updated):
-        # - WWV and CHU: Primary references (direct UTC(NIST) source)
+        # - WWV: Primary reference (direct UTC(NIST) source)
         # - WWVH: Eligible AFTER back-calculation subtracts propagation delay
         #
         # At this detection level, we mark WWVH as "eligible" but with lower
@@ -2237,7 +2215,6 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         return {
             'wwv_detections': self.detection_stats[StationType.WWV],
             'wwvh_detections': self.detection_stats[StationType.WWVH],
-            'chu_detections': self.detection_stats[StationType.CHU],
             'total_attempts': self.total_attempts,
             'detection_rate_pct': detection_rate
         }
@@ -2281,8 +2258,7 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         """Reset detection statistics"""
         self.detection_stats = {
             StationType.WWV: 0,
-            StationType.WWVH: 0,
-            StationType.CHU: 0
+            StationType.WWVH: 0
         }
         self.total_attempts = 0
         self.timing_errors = []
@@ -2351,9 +2327,6 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         Returns:
             Dict with discrimination results and tone analysis
         """
-        if self.is_chu_channel:
-            return {'status': 'CHU channel - WWV tones not applicable'}
-        
         # Check if buffer is in valid discrimination window
         # 500/600 Hz discrimination only valid when ONE station broadcasts alone
         # (otherwise BCD 100 Hz intermod creates 500/600 Hz products)
@@ -2388,13 +2361,9 @@ class MultiStationToneDetector(IMultiStationToneDetector):
             'discrimination_confidence': 0.0
         }
         
-        # Convert to audio: CHU uses USB with preserved carrier, others use AM
-        if self.is_chu_channel:
-            audio_signal = np.real(iq_samples).copy()
-            audio_signal -= np.mean(audio_signal)
-        else:
-            audio_signal = np.abs(iq_samples)
-            audio_signal = audio_signal - np.mean(audio_signal)  # Remove DC
+        # Convert to audio: AM envelope, DC removed
+        audio_signal = np.abs(iq_samples)
+        audio_signal = audio_signal - np.mean(audio_signal)  # Remove DC
         
         # Extended tone frequencies to analyze
         extended_tones = {
@@ -2538,13 +2507,9 @@ class MultiStationToneDetector(IMultiStationToneDetector):
         """
         from ..interfaces.data_models import ToneAcquisitionResult
         
-        # Demodulation: CHU uses USB with preserved carrier, others use AM
-        if self.is_chu_channel:
-            audio_signal = np.real(samples).copy()
-            audio_signal -= np.mean(audio_signal)
-        else:
-            magnitude = np.abs(samples)
-            audio_signal = magnitude - np.mean(magnitude)
+        # Demodulation: AM envelope, DC removed
+        magnitude = np.abs(samples)
+        audio_signal = magnitude - np.mean(magnitude)
         
         candidates: List[ToneAcquisitionResult] = []
         

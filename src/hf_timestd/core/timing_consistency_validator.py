@@ -14,7 +14,6 @@ INTRA-MINUTE CONSTRAINTS (within a single minute buffer):
 ---------------------------------------------------------
 1. ARRIVAL SEQUENCE: Stations at different distances must arrive in order
    - WWV (~1120 km) arrives before WWVH (~6600 km)
-   - CHU (~1520 km) arrives between WWV and WWVH
    - BPM (~11000 km) arrives last
 
 2. CROSS-STATION CONSISTENCY: All stations transmit at UTC second 0
@@ -241,7 +240,7 @@ class TimingConsistencyValidator:
         Args:
             minute_boundary: Unix timestamp of minute start
             detections: List of dicts with keys:
-                - station: str ('WWV', 'WWVH', 'CHU', 'BPM')
+                - station: str ('WWV', 'WWVH', 'BPM')
                 - frequency_mhz: float
                 - arrival_ms: float (measured arrival time from minute boundary)
                 - snr_db: float (optional)

@@ -75,8 +75,8 @@ T4  chronyc tracking (LAN peers)          — bootstrap only
 when GPS+PPS + the in-shack BPSK injector are healthy; when either
 fails, the authority drops to T3 — the Fusion product that combines
 L2 `broadcast_measurements` rows from the per-station HF metrology
-workers.  WWVB extends T3's source pool from `{WWV, WWVH, CHU, BPM}`
-to `{WWV, WWVH, CHU, BPM, WWVB}` (with CHU dropping out in June).
+workers.  WWVB extends T3's source pool from `{WWV, WWVH, BPM}`
+to `{WWV, WWVH, BPM, WWVB}` (with CHU dropping out in June).
 
 ### Service / process shape
 

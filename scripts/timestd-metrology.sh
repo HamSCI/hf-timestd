@@ -154,34 +154,9 @@ start)
         sleep 0.2
     done
     
-    # CHU Channels
-    declare -A CHU_FREQS=( ["3.33"]="3330000" ["7.85"]="7850000" ["14.67"]="14670000" )
-    
-    for freq_mhz in 3.33 7.85 14.67; do
-        freq_hz=${CHU_FREQS[$freq_mhz]}
-        freq_khz=$(echo "$freq_hz / 1000" | bc)
-        channel_dir="CHU_${freq_khz}"
-        
-        nohup taskset 0x00ff $PYTHON -m hf_timestd.core.metrology_service \
-          --archive-dir "$ARCHIVE_ROOT/$channel_dir" \
-          --output-dir "$DATA_ROOT/phase2/$channel_dir" \
-          --channel-name "$channel_dir" \
-          --frequency-hz "$freq_hz" \
-          --state-file "$DATA_ROOT/state/phase2-chu${freq_mhz}.json" \
-          --poll-interval 10.0 \
-          --log-level INFO \
-          --callsign "$CALLSIGN" --grid-square "$GRID" \
-          --receiver-name "HF-TimeStd" \
-          --station-id "$STATION_ID" --instrument-id "$INSTRUMENT_ID" \
-          $COORD_ARGS $TIERED_ARGS \
-          > "$LOG_DIR/phase2-chu${freq_mhz}.log" 2>&1 &
-        
-        sleep 0.2
-    done
-    
     sleep 2
     COUNT=$(pgrep -f "hf_timestd.core.metrology_service" 2>/dev/null | wc -l)
-    echo "   ✅ Started $COUNT/9 Metrology analytics channels"
+    echo "   ✅ Started $COUNT/6 Metrology analytics channels"
     
     echo "   📄 Logs: $LOG_DIR/phase2-*.log"
     echo "   📊 Output: $DATA_ROOT/phase2/{CHANNEL}/clock_offset/"

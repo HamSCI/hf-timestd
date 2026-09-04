@@ -22,19 +22,19 @@ def channel_name_to_key(channel_name: str) -> str:
     """Convert channel name to consistent key format.
     
     Args:
-        channel_name: Canonical format "STATION_KILOHERTZ" (e.g., "SHARED_10000", "CHU_3330")
+        channel_name: Canonical format "STATION_KILOHERTZ" (e.g., "SHARED_10000", "WWV_20000")
     
     Returns:
-        Key format: "shared10000", "chu3330", etc.
+        Key format: "shared10000", "wwv20000", etc.
     
     Examples:
         >>> channel_name_to_key("SHARED_10000")
         'shared10000'
-        >>> channel_name_to_key("CHU_3330")
-        'chu3330'
+        >>> channel_name_to_key("WWV_20000")
+        'wwv20000'
     """
     # Handle canonical STATION_KILOHERTZ format
-    if '_' in channel_name and channel_name.split('_')[0] in ('SHARED', 'WWV', 'CHU'):
+    if '_' in channel_name and channel_name.split('_')[0] in ('SHARED', 'WWV'):
         parts = channel_name.split('_')
         return f"{parts[0].lower()}{parts[1]}"
     
@@ -45,17 +45,17 @@ def channel_name_to_key(channel_name: str) -> str:
 def channel_name_to_dir(channel_name: str) -> str:
     """Convert channel name to directory format (Station_kHz).
     
-    The canonical format is STATION_KILOHERTZ (e.g., SHARED_10000, CHU_3330).
+    The canonical format is STATION_KILOHERTZ (e.g., SHARED_10000, WWV_20000).
     This function passes through canonical format unchanged.
     
     Examples:
         "SHARED_10000" -> "SHARED_10000" (pass-through)
-        "CHU_3330"     -> "CHU_3330" (pass-through)
+        "WWV_20000"     -> "WWV_20000" (pass-through)
     """
     # Already in canonical STATION_KILOHERTZ format - pass through
     if '_' in channel_name:
         parts = channel_name.split('_')
-        if len(parts) == 2 and parts[0] in ('SHARED', 'WWV', 'CHU') and parts[1].isdigit():
+        if len(parts) == 2 and parts[0] in ('SHARED', 'WWV') and parts[1].isdigit():
             return channel_name
     
     # Fallback: replace spaces with underscores
@@ -66,7 +66,7 @@ def dir_to_channel_name(dir_name: str) -> str:
     """Return directory name unchanged (canonical format is STATION_KILOHERTZ).
     
     Args:
-        dir_name: Directory name (e.g., "SHARED_10000", "CHU_3330")
+        dir_name: Directory name (e.g., "SHARED_10000", "WWV_20000")
     
     Returns:
         Same as input - canonical format is used throughout
@@ -81,10 +81,10 @@ def channel_to_display_name(channel_name: str) -> str:
     the canonical STATION_KILOHERTZ format.
     
     Args:
-        channel_name: Canonical format (e.g., "SHARED_10000", "CHU_3330")
+        channel_name: Canonical format (e.g., "SHARED_10000", "WWV_20000")
     
     Returns:
-        Display format (e.g., "SHARED 10 MHz", "CHU 3.33 MHz")
+        Display format (e.g., "SHARED 10 MHz", "WWV 20 MHz")
     """
     parts = channel_name.split('_')
     if len(parts) == 2 and parts[1].isdigit():

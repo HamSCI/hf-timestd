@@ -21,7 +21,7 @@ Schema v1:
         "uncertainty_ms": 0.94,
         "n_broadcasts": 24,
         "n_stations": 2,
-        "stations_used": ["WWV", "CHU"],
+        "stations_used": ["WWV", "WWVH"],
         "single_station_mode": false,
         "kalman_state": "LOCKED",
         "quality_grade": "A",
@@ -96,8 +96,6 @@ class FusionStatusWriter:
                 stations_used.append("WWV")
             if getattr(result, "wwvh_count", 0) > 0:
                 stations_used.append("WWVH")
-            if getattr(result, "chu_count", 0) > 0:
-                stations_used.append("CHU")
             if getattr(result, "bpm_count", 0) > 0:
                 stations_used.append("BPM")
 

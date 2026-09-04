@@ -25,12 +25,6 @@ class FusionKalmanState(str, Enum):
     LOCKED = "LOCKED"
     REACQUIRING = "REACQUIRING"
 
-class ReferenceStation(str, Enum):
-    WWV = "WWV"
-    WWVH = "WWVH"
-    CHU = "CHU"
-    BPM = "BPM"
-
 class L3FusionTiming(BaseModel):
     """
     Multi-broadcast fusion timing estimate.
@@ -56,17 +50,14 @@ class L3FusionTiming(BaseModel):
     # Station Statistics
     wwv_mean_ms: Optional[float] = None
     wwvh_mean_ms: Optional[float] = None
-    chu_mean_ms: Optional[float] = None
     bpm_mean_ms: Optional[float] = None
     
     wwv_count: int
     wwvh_count: int
-    chu_count: int
     bpm_count: int
     
     wwv_intra_std_ms: Optional[float] = None
     wwvh_intra_std_ms: Optional[float] = None
-    chu_intra_std_ms: Optional[float] = None
     bpm_intra_std_ms: Optional[float] = None
     
     inter_station_spread_ms: Optional[float] = None
@@ -79,7 +70,6 @@ class L3FusionTiming(BaseModel):
     
     # Metadata & Quality
     calibration_applied: bool
-    reference_station: ReferenceStation
     outliers_rejected: int
     quality_grade: FusionQualityGrade
     kalman_state: FusionKalmanState

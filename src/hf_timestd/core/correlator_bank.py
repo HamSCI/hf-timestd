@@ -444,10 +444,6 @@ class CorrelatorBank:
                 assignment.bpm_timing_mode = 'UT1' if minute in BPM_UT1_MINUTES else 'UTC'
                 assignment.bpm_usable_for_timing = minute not in BPM_UT1_MINUTES
                 assignment.bpm_tick_duration_ms = result.tick_duration_ms
-            elif station_name == 'CHU':
-                assignment.chu_component_power_db = result.component_power_db if result.detected else None
-                assignment.chu_toa_ms = result.toa_refined_ms if result.detected else None
-                assignment.chu_confidence = result.confidence
         
         # Cross-validation
         assignment = self._cross_validate(assignment, results)

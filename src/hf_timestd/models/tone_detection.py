@@ -11,7 +11,6 @@ class ToneQualityFlag(str, Enum):
 class AnchorStation(str, Enum):
     WWV = "WWV"
     WWVH = "WWVH"
-    CHU = "CHU"
     BPM = "BPM"
     UNKNOWN = "UNKNOWN"
     NONE = ""
@@ -33,11 +32,6 @@ class L1ToneDetection(BaseModel):
     wwvh_detected: bool
     wwvh_snr_db: Optional[float] = Field(None, ge=-20, le=60)
     wwvh_timing_ms: Optional[float] = Field(None, ge=-1000, le=1000)
-    
-    # CHU
-    chu_detected: bool
-    chu_snr_db: Optional[float] = Field(None, ge=-20, le=60)
-    chu_timing_ms: Optional[float] = Field(None, ge=-1000, le=1000)
     
     # BPM
     bpm_detected: bool

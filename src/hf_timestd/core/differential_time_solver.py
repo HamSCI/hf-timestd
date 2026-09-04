@@ -35,19 +35,13 @@ Different frequencies may use different modes, but:
 - If they don't, we can detect mode misidentification
 - Weighted average with outlier rejection gives robust estimate
 
-CHU Support:
------------
-CHU (Ottawa, 3330/7850/14670 kHz) is included for:
-- Single-station mode identification
-- WWV-CHU or WWVH-CHU differential (cross-frequency)
-
 Global Multi-Channel Solving:
 ----------------------------
 With N detections from any stations/frequencies, we have N*(N-1)/2 differential
 pairs. ALL pairs must be consistent with the SAME clock_error. This over-constrains
 the problem and enables robust mode identification.
 
-Example with 4 WWV frequencies + 3 CHU frequencies = 7 detections → 21 pairs!
+Example with 6 WWV frequencies + 4 WWVH frequencies = 10 detections → 45 pairs!
 
 Usage:
 ------
@@ -529,13 +523,13 @@ class DifferentialTimeSolver:
         doppler_std_hz: float = 0.1
     ) -> Dict:
         """
-        Single-station solve for CHU or when only one station detected.
+        Single-station solve when only one station is detected.
         
         WARNING: This is contaminated by clock error and cannot be verified!
         Use differential methods when possible.
         
         Args:
-            station: 'WWV', 'WWVH', or 'CHU'
+            station: 'WWV' or 'WWVH'
             arrival_rtp: RTP sample index of tone arrival
             minute_boundary_rtp: RTP at expected second boundary
             sample_rate: Audio sample rate
@@ -660,14 +654,14 @@ class DifferentialTimeSolver:
         doppler_std_hz: float = 0.1
     ) -> Dict:
         """
-        Differential solve for ANY two stations (WWV-WWVH, WWV-CHU, or WWVH-CHU).
+        Differential solve for ANY two stations (e.g. WWV-WWVH).
         
         This is the clock-error-immune approach that works for any station pair
         as long as they transmit at the same UTC second boundary.
         
         Args:
-            station_a: First station ('WWV', 'WWVH', or 'CHU')
-            station_b: Second station ('WWV', 'WWVH', or 'CHU')
+            station_a: First station ('WWV' or 'WWVH')
+            station_b: Second station ('WWV' or 'WWVH')
             arrival_a_rtp: RTP sample of station A tone arrival
             arrival_b_rtp: RTP sample of station B tone arrival
             minute_boundary_rtp: RTP at expected second boundary
@@ -1085,7 +1079,7 @@ class GlobalDifferentialSolver:
         
         Args:
             observations: List of dicts with:
-                - station: 'WWV', 'WWVH', or 'CHU'
+                - station: 'WWV' or 'WWVH'
                 - frequency_mhz: float
                 - arrival_rtp: int (RTP sample of tone arrival)
             minute_boundary_rtp: RTP at expected UTC second boundary

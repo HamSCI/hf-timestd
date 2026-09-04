@@ -77,7 +77,7 @@ Set `[metrology] physics_products = false` to disable the four science-only prod
 **Responsibility:** Multi-Broadcast Synthesis (v6.1 Architecture)
 
 - Reads L2 measurements from all active channels via the SQLite store (WAL mode; concurrent read-only connections).
-- **Per-broadcast Kalman filtering** — tracks ionospheric path dynamics for each of 17 broadcasts.
+- **Per-broadcast Kalman filtering** — tracks ionospheric path dynamics for each of 14 broadcasts.
 - **GNSS VTEC correction** — applies real-time ionospheric correction when local GNSS available.
 - **Weighted Least Squares fusion** — optimal linear combination without temporal smoothing.
 - Feeds **Chrony SHM** to discipline the system clock.
@@ -340,7 +340,7 @@ The `HFPropagationModel` is now the sole propagation model throughout the pipeli
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/model/predict` | GET | Single station/frequency delay prediction with all feasible modes |
-| `/model/all-stations` | GET | Predictions for all 17 broadcasts at current UTC |
+| `/model/all-stations` | GET | Predictions for all 14 broadcasts at current UTC |
 | `/model/iono-status` | GET | `IonoDataService` health: data source, cache age, last fetch status |
 
 These endpoints use a lazy-initialized `HFPropagationModel` with receiver coordinates from config.
@@ -361,7 +361,7 @@ The system implements a three-layer metrological architecture that distinguishes
 **Multi-frequency dispersion provides the Vertical Shift** — it calibrates the zero-point per station.  
 **Multi-station fusion provides Integrity** — it ensures the zero-point is consistent globally.
 
-**Key Insight**: The combined regression of 17 broadcasts doesn't just average noise — it **solves the geometry** of the ionosphere to find the true UTC origin point.
+**Key Insight**: The combined regression of 14 broadcasts doesn't just average noise — it **solves the geometry** of the ionosphere to find the true UTC origin point.
 
 For detailed metrological description, see `docs/METROLOGY.md`.
 

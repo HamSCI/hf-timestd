@@ -37,7 +37,7 @@ Ensure the physics pipeline (Phase 3) produces **scientifically valid ionospheri
 
 1. `dtec_rate_tecu_per_s` records accumulate at ~250K/day — check `phase2/science/dtec/` file sizes
 2. Differential dTEC RMS < 0.03 TECU for widest frequency pairs (CHU 3.33–14.67, WWV 2.50–25.00)
-3. `HFPropagationModel.predict()` returns non-zero delay and uncertainty for all 17 broadcasts
+3. `HFPropagationModel.predict()` returns non-zero delay and uncertainty for all 14 broadcasts
 4. `IonoDataService` background thread running (check logs for "IonoDataService" or iono cache files)
 5. Physics service `_processed_minutes` set prevents re-processing (no duplicate records)
 6. Reanalysis logs show MUF corrections at night (real-time MUF > reanalyzed MUF)

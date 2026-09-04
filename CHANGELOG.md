@@ -4,6 +4,39 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Removed — CHU, the station (2026-09-04)
+
+CHU (NRC Ottawa) left the air on 2026-06-27.  Step 1 (`8b33ed5`) removed
+the FSK decoder, the coarse-time producer and the bootstrap coordinator,
+the only path by which hf-timestd ever stepped a host clock.  Step 2
+removes CHU as a station:
+
+* Every station enum drops `CHU`; `broadcast_specs` now registers 14
+  broadcasts (WWV 6, WWVH 4, BPM 4); the tick, tone and Bell 103 AFSK
+  templates, the CHU signal-generator config and the CHU constants in
+  `wwv_constants` are gone.  `tick_edge_detector` and `metrology_engine`
+  no longer carry the 74 ms CHU onset offset or the USB demodulation
+  branch.
+* The L3 fusion record loses `chu_mean_ms`, `chu_count`,
+  `chu_intra_std_ms` and `reference_station`.  The reference-station
+  label drove no arithmetic — `_apply_calibration` uses only the
+  per-broadcast `hardware_offset_ms` — so the record stops naming a
+  reference nobody used.  hamsci-dsp 0.6.0 carries the schema change
+  and a one-time SQLite migration that relaxes the NOT NULL constraint
+  on the retired columns in existing station databases; archived rows
+  keep their values.  hf-timestd now requires hamsci-dsp >= 0.6.0.
+* The leap-second Kalman hold stays, but nothing arms it: the CHU FSK
+  Frame B decode was its only TAI-UTC witness.  A future witness (the
+  WWV BCD leap-second warning bit, for one) can set
+  `_leap_second_hold_until` again.
+* The web API drops the `/metrology/chu-fsk/*` endpoints, the CHU FSK
+  service and the CHU cards on the metrology page.  Read-side viewers
+  over archived CHU data (ionogram, phase, TEC) stay.
+* `hamsci_dsp.stations` keeps CHU with `active=False` so archived data
+  naming CHU still resolves.  Prose in `docs/archive/` describes the
+  CHU-era system and stays as history.
+
+
 ### Changed — the hf-timestd/hamsci-physics split (2026-08-24)
 
 Phase 3 of the split moves the ionospheric science out of this repo into

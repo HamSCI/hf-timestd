@@ -58,7 +58,7 @@ class TestGnssVtecGate(unittest.TestCase):
             # 0.1 ms threshold the retired branch used, so a re-introduced
             # correction would show as a visible D_clock change.
             measurements = [
-                _measurement('CHU', 3.33, 2.0),
+                _measurement('WWVH', 15.0, 2.0),
                 _measurement('WWV', 5.0, 2.0),
                 _measurement('WWV', 10.0, 2.0),
             ]

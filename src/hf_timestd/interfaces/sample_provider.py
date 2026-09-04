@@ -120,7 +120,7 @@ class QualityAnalyzedSampleProvider(ABC):
         """
         Register callback for time_snap updates.
         
-        Called when time_snap reference changes (WWV/CHU detection).
+        Called when time_snap reference changes (WWV detection).
         Allows consumers to be notified of timing corrections.
         
         Args:

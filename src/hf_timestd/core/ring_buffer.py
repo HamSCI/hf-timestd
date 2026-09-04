@@ -2,7 +2,7 @@
 
 Phase 1 of the ring-buffer refactor.  One writer (the core-recorder) writes
 IQ samples into a per-channel SysV shared-memory segment so that multiple
-readers (metrology workers, the archive writer, CHU FSK, future clients)
+readers (metrology workers, the archive writer, future clients)
 can consume the same stream without coupling to file I/O cadence.
 
 Protocol summary

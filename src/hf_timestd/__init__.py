@@ -1,7 +1,7 @@
 """
 HF Time Standard Analysis (hf_timestd)
 
-A system for receiving and analyzing HF time standard broadcasts (WWV/WWVH/CHU)
+A system for receiving and analyzing HF time standard broadcasts (WWV/WWVH/BPM)
 via ka9q-radio RTP streams. Produces precise timing measurements (D_clock) for
 UTC alignment and clock discipline.
 

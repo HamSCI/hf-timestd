@@ -16,7 +16,7 @@ The HF-TimeStd system, while primarily designed for time transfer, is inherently
 2. **Partially implemented** capabilities requiring further development
 3. **Potential future** capabilities enabled by the existing infrastructure
 
-The system monitors **17 broadcasts** across **9 frequencies** from **4 stations** (WWV, WWVH, CHU, BPM), providing continuous ionospheric sounding of multiple paths simultaneously.
+The system monitors **14 broadcasts** across **9 frequencies** from **4 stations** (WWV, WWVH, BPM), providing continuous ionospheric sounding of multiple paths simultaneously.
 
 ---
 
@@ -96,7 +96,7 @@ Carrier-phase dTEC measures the *rate of change* of TEC along each HF path by tr
 
 > **Honesty marker: ❌ — not operational as an absolute TEC product.**
 >
-> The 1/f² fit across WWV/WWVH/CHU/BPM frequencies is **at or below
+> The 1/f² fit across WWV/WWVH/BPM frequencies is **at or below
 > the noise floor** for any single epoch.  Per `PHYSICS_CONTRACT §1/§4`
 > and `METROLOGY_PHYSICS_SPLIT`, *claiming group-delay TEC is
 > operational* is listed as a failure condition.  We compute the fit,
@@ -861,7 +861,7 @@ The WWVH path spans tropical to mid-latitude ionosphere, where the horizontal gr
 **Concept:** Large-scale ionospheric gradients cause systematic TEC differences between paths.
 
 **Method:**
-- Compare TEC from WWV, WWVH, CHU, BPM paths
+- Compare TEC from WWV, WWVH, BPM paths
 - Calculate TEC gradient vector
 - Track gradient evolution
 

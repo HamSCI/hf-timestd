@@ -120,7 +120,7 @@ These systems are solving the same problem with different state machines, creati
 │  │   - Measure each broadcast independently                         │  │
 │  └──────────────────────────────────────────────────────────────────┘  │
 │                                                                         │
-│  Output: Independent metrics for all 17 broadcasts                     │
+│  Output: Independent metrics for all 14 broadcasts                     │
 │          Variations describe ionospheric physics, not errors           │
 │                                                                         │
 │  Degradation Detection:                                                │

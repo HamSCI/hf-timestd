@@ -1,6 +1,6 @@
 # HF Time Standard Analysis
 
-**Precision WWV/CHU time-standard analysis for UTC alignment** - Captures high-precision IQ data from ka9q-radio, performs multi-method WWV/WWVH discrimination, and produces D_clock measurements for system clock discipline.
+**Precision WWV/WWVH time-standard analysis for UTC alignment** - Captures high-precision IQ data from ka9q-radio, performs multi-method WWV/WWVH discrimination, and produces D_clock measurements for system clock discipline.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -11,11 +11,11 @@
 > (metrology vs physics), the two operating modes (RTP vs Fusion), and
 > a terminology cheatsheet that resolves cross-document drift.
 
-HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/CHU/BPM time standard broadcasts via ka9q-radio and produces precise timing measurements (D_clock) for UTC alignment and system clock discipline via Chrony.
+HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/BPM time standard broadcasts via ka9q-radio and produces precise timing measurements (D_clock) for UTC alignment and system clock discipline via Chrony.
 
 **Key Capabilities:**
 
-- 📡 **Multi-channel recording** - Simultaneous WWV, WWVH, CHU, BPM (9 tuned frequencies, 17 logical broadcasts) in **binary IQ archive** format with JSON metadata sidecars.
+- 📡 **Multi-channel recording** - Simultaneous WWV, WWVH, BPM (6 tuned frequencies, 14 logical broadcasts) in **binary IQ archive** format with JSON metadata sidecars.
 - 🎯 **Sub-millisecond timing** - ±0.5 ms via multi-broadcast fusion to UTC(NIST), with theoretical floor of ±0.036 ms (Cramér-Rao bound).
 - 🌐 **Real-time ionospheric model (v6.7)** - WAM-IPE + GIRO data for frequency-dependent, time-varying group delay predictions with multi-hop support (1F, 2F, 3F).
 - 🗃️ **SQLite-backed measurement store** - Single shared database (`/var/lib/timestd/phase2/timestd.db`) for all inter-service L1/L2/L3 data. WAL mode for concurrent readers + a single writer per product, with millisecond commit cadence. (Replaces the pre-7.0 HDF5/SWMR pipeline; the `h5py` runtime dependency was dropped in the 2026-05-21 migration.)
@@ -45,9 +45,8 @@ HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/CHU/BPM time standard
 - **Probabilistic discriminator** — Logistic regression model for station ID confidence scoring
 
 **Time Code Decoding:**
-- **CHU FSK** — Bell 103 demodulation (300 baud), Frame A (UTC) + Frame B (DUT1, TAI-UTC, year), multi-second consensus, cross-validation against RTP
 - **WWV/WWVH BCD** — 100 Hz subcarrier extraction for station identification and time confirmation
-- **Leap second awareness** — TAI-UTC monitoring via CHU FSK, Kalman hold during transitions
+- **Leap second hold** — the fusion Kalman coasts through an observed TAI-UTC change (no live TAI-UTC witness since CHU went off air; the hold awaits a new one)
 
 **Ionospheric Science:**
 - **Carrier-phase dTEC** — Primary product (~6 mTECU/min sensitivity, ~250K records/day), GNSS VTEC-anchored

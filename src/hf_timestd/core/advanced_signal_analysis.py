@@ -53,17 +53,6 @@ This provides:
 - Coherence metric (both present = high coherence)
 - Jitter-cancelled timing
 
-ISSUE 5.4: No Exploitation of CHU FSK Time Code
------------------------------------------------
-PROBLEM: CHU transmits FSK time code with:
-- Verified UTC time (not just relative timing)
-- DUT1 correction (UT1-UTC)
-- Leap second announcements
-
-SOLUTION: CHU FSK decoder:
-- 300 baud FSK demodulation (2025/2225 Hz)
-- BCD time code extraction
-- DUT1 and leap second parsing
 
 ================================================================================
 THEORY: COMPLEX CORRELATION
@@ -120,11 +109,6 @@ USAGE
     print(f"Differential delay: {diff_result.differential_delay_ms:.3f} ms")
     print(f"Coherence: {diff_result.coherence:.3f}")
     
-    # CHU FSK decoding
-    chu_result = analyzer.decode_chu_fsk(iq_samples)
-    if chu_result.valid:
-        print(f"CHU Time: {chu_result.utc_time}")
-        print(f"DUT1: {chu_result.dut1_ms:.1f} ms")
 
 ================================================================================
 REVISION HISTORY
@@ -898,7 +882,7 @@ class AdvancedSignalAnalyzer:
 
         Severity is classified under ``convention`` (default
         :data:`~hamsci_dsp.propagation.HF_OBLIQUE`, the physically correct
-        default for hf-timestd's HF WWV/WWVH/CHU/BPM data). The legacy ITU-R
+        default for hf-timestd's HF WWV/WWVH/BPM data). The legacy ITU-R
         P.531 L-band thresholds are available as
         :data:`~hamsci_dsp.propagation.ITU_R_LBAND` — but those thresholds are
         only meaningful with their own (linear) detrend and window, so they are

@@ -111,7 +111,7 @@ does not label data.  Data labels come from the sample counter
 
 An HF antenna covering 2–30 MHz.  A horizontal dipole or fan dipole at
 ≥10 m height is typical.  The antenna choice directly affects which
-broadcast time stations (WWV, WWVH, CHU, BPM) are receivable.
+broadcast time stations (WWV, WWVH, BPM) are receivable.
 
 ---
 

@@ -142,7 +142,7 @@ else:
 | Field | Description |
 |-------|-------------|
 | `n_broadcasts` | Number of time-standard broadcasts in this cycle |
-| `n_stations` | Unique stations (max 4: WWV, WWVH, CHU, BPM) |
+| `n_stations` | Unique stations (max 4: WWV, WWVH, BPM) |
 | `stations_used` | List of station names |
 | `uncertainty_budget` | `{statistical_ms, systematic_ms, propagation_ms}` |
 | `station_detail` | Per-station `{count, mean_ms, intra_std_ms}` |

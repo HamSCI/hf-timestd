@@ -6,7 +6,7 @@
 
 This document describes a proposed redesign of the `timestd-config.toml` schema to be
 **station-centric** rather than **channel-centric**. This aligns the configuration with
-the physics reality (17 broadcasts from 4 stations) rather than implementation details
+the physics reality (14 broadcasts from 4 stations) rather than implementation details
 (9 frequency channels).
 
 ## Implementation Status
@@ -53,7 +53,7 @@ longitude = -92.127974
 # =============================================================================
 # TIME SIGNAL STATIONS (The Physics Truth)
 # =============================================================================
-# These define the 17 broadcasts we're interested in.
+# These define the 14 broadcasts we're interested in.
 # The system derives channels from these based on source mode.
 
 [[broadcast_station]]
@@ -270,7 +270,7 @@ def build_broadcast_registry(config: Config) -> Dict[str, Broadcast]:
                 azimuth_deg=bearing(config.receiver, station),
                 min_propagation_ms=haversine(config.receiver, station) / C_LIGHT * 1000
             )
-    return registry  # 17 broadcasts
+    return registry  # 14 broadcasts
 ```
 
 ## Bootstrap Problem: Phase-Engine Mode
@@ -355,7 +355,7 @@ class MultiStationToneDetector:
 
 ## Benefits
 
-1. **Physics-First**: Config reflects the 17 broadcasts, not 9 channels
+1. **Physics-First**: Config reflects the 14 broadcasts, not 9 channels
 2. **Self-Documenting**: Station locations, frequencies, and tone patterns in one place
 3. **Dual-Mode Ready**: Same config works for radiod or phase-engine
 4. **Broadcast Registry**: Implicit registry enables station-centric APIs

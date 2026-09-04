@@ -3,7 +3,7 @@
 Unit tests for the M-M9/10/11/12/13 remediation in
 ``multi_broadcast_fusion.py``.
 
-  * M-M9  — one canonical ``broadcast_key`` formatter; CHU's fractional
+  * M-M9  — one canonical ``broadcast_key`` formatter; fractional-MHz
             MHz channels (3.330 / 7.850 / 14.670) no longer alias under
             the old ``.1f`` formatter at one call site.
   * M-M10 — ``BroadcastMeasurement.gpsdo_locked`` is a real field
@@ -41,11 +41,12 @@ from hf_timestd.core.multi_broadcast_fusion import (
 # ---------------------------------------------------------------------
 
 class TestBroadcastKey(unittest.TestCase):
-    def test_two_decimal_places_for_fractional_chu(self):
-        # CHU's three channels are at 3.330, 7.850, 14.670 MHz.
-        self.assertEqual(broadcast_key("CHU", 3.33), "CHU_3.33")
-        self.assertEqual(broadcast_key("CHU", 7.85), "CHU_7.85")
-        self.assertEqual(broadcast_key("CHU", 14.67), "CHU_14.67")
+    def test_two_decimal_places_for_fractional_frequencies(self):
+        # Fractional-MHz channels (CHU's 3.330 / 7.850 / 14.670 MHz exposed
+        # this while it was on air) must keep 0.01 MHz granularity.
+        self.assertEqual(broadcast_key("WWV", 3.33), "WWV_3.33")
+        self.assertEqual(broadcast_key("WWV", 7.85), "WWV_7.85")
+        self.assertEqual(broadcast_key("WWV", 14.67), "WWV_14.67")
 
     def test_integer_wwv_frequencies_round_trip(self):
         self.assertEqual(broadcast_key("WWV", 10.0), "WWV_10.00")
@@ -62,20 +63,19 @@ class TestBroadcastKey(unittest.TestCase):
             fusion = MultiBroadcastFusion(data_root=Path(td))
 
             cal = BroadcastCalibration(
-                station="CHU",
-                frequency_mhz=7.85,
+                station="WWVH",
+                frequency_mhz=2.5,
                 offset_ms=0.0,
                 uncertainty_ms=1.0,
                 n_samples=10,
                 last_updated=time.time(),
-                reference_station="CHU",
             )
             self.assertEqual(
                 cal.broadcast_key,
-                fusion._get_broadcast_key("CHU", 7.85),
+                fusion._get_broadcast_key("WWVH", 2.5),
             )
             # And both equal the module-level formatter.
-            self.assertEqual(cal.broadcast_key, broadcast_key("CHU", 7.85))
+            self.assertEqual(cal.broadcast_key, broadcast_key("WWVH", 2.5))
 
 
 # ---------------------------------------------------------------------
@@ -143,13 +143,13 @@ class TestLeapSecondHoldWindow(unittest.TestCase):
             self.assertFalse(fusion._leap_second_hold_active())
 
     def test_arm_window_holds_for_configured_duration(self):
-        """The hold must persist for `_fsk_leap_second_hold_seconds`
+        """The hold must persist for `_leap_second_hold_seconds`
         — a single per-cycle observation of `tai_utc unchanged` no
         longer clears it.  This is the M-M11 invariant."""
         with tempfile.TemporaryDirectory() as td:
             fusion = MultiBroadcastFusion(data_root=Path(td))
             now = time.time()
-            fusion._fsk_leap_second_hold_until = now + 600.0
+            fusion._leap_second_hold_until = now + 600.0
 
             # Mid-window: held.
             self.assertTrue(fusion._leap_second_hold_active(now + 1.0))
@@ -164,17 +164,17 @@ class TestLeapSecondHoldWindow(unittest.TestCase):
         """The old boolean was set True on a change and False on every
         subsequent observation of an unchanged value.  The new
         timestamp window stays armed independently of cycle count.
-        We simulate the FSK-integration setter logic directly."""
+        The CHU-FSK arming path retired 2026-09-04; we arm the window
+        directly, as a future TAI-UTC witness would."""
         with tempfile.TemporaryDirectory() as td:
             fusion = MultiBroadcastFusion(data_root=Path(td))
             now = time.time()
 
-            # Initial change → arm.
-            fusion._fsk_tai_utc = 37
-            fusion._fsk_leap_second_hold_until = now + 600.0
+            # A TAI-UTC change observed → arm.
+            fusion._leap_second_hold_until = now + 600.0
 
             # Two later cycles observe the same TAI-UTC unchanged.
-            # The new code does NOT touch _fsk_leap_second_hold_until
+            # The new code does NOT touch _leap_second_hold_until
             # when the value is unchanged (verify in source).  Tested
             # here via simulated state: window is still active.
             self.assertTrue(fusion._leap_second_hold_active(now + 60.0))

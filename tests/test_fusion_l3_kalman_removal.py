@@ -45,7 +45,7 @@ _MULTI_STATION = [
     _measurement('WWV', 10.0, 2.0),
     _measurement('WWV', 15.0, 2.2),
     _measurement('WWVH', 10.0, 1.8),
-    _measurement('CHU', 7.85, 2.1),
+    _measurement('WWVH', 15.0, 2.1),
 ]
 
 

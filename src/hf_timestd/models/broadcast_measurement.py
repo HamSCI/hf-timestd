@@ -10,9 +10,9 @@ Each measurement is keyed by broadcast_id (station + frequency_khz), ensuring
 clear attribution and enabling broadcast-specific analysis.
 
 Key changes from channel-centric model:
-1. broadcast_id as primary key (e.g., 'WWV_10000', 'CHU_7850')
+1. broadcast_id as primary key (e.g., 'WWV_10000', 'BPM_5000')
 2. All frequencies in kHz (integers)
-3. Station-specific feature fields (FSK for CHU, BCD for WWV/WWVH, etc.)
+3. Station-specific feature fields (BCD for WWV/WWVH, UT1 ticks for BPM)
 4. Attribution confidence for shared frequencies
 5. Per-second tick analysis integrated
 
@@ -56,7 +56,6 @@ class StationID(str, Enum):
     """Time standard broadcast stations."""
     WWV = "WWV"
     WWVH = "WWVH"
-    CHU = "CHU"
     BPM = "BPM"
     UNKNOWN = "UNKNOWN"
 
@@ -73,11 +72,10 @@ class AttributionMethod(str, Enum):
     """How station attribution was determined."""
     UNIQUE_FREQUENCY = "unique_freq"      # Only one station on this frequency
     TONE_FREQUENCY = "tone_freq"          # 1200 Hz = WWVH (unambiguous)
-    TONE_DURATION = "tone_duration"       # 800ms vs 300ms vs 500ms
+    TONE_DURATION = "tone_duration"       # 800ms vs 300ms
     PROPAGATION_DELAY = "prop_delay"      # Timing matches expected delay
     TEST_SIGNAL = "test_signal"           # Minute 8 (WWV) or 44 (WWVH)
     BCD_DECODE = "bcd_decode"             # BCD time code decoded
-    FSK_DECODE = "fsk_decode"             # CHU FSK decoded
     GROUND_TRUTH_MINUTE = "ground_truth"  # WWV-only or WWVH-only minute
     FUSION = "fusion"                     # Multi-feature fusion
 
@@ -135,8 +133,8 @@ class L1BroadcastMeasurement(BaseModel):
     """
     
     # === BROADCAST IDENTITY (Primary Key) ===
-    broadcast_id: str = Field(..., description="Unique broadcast key: 'WWV_10000' or 'CHU_7850'")
-    station: StationID = Field(..., description="Station: WWV, WWVH, CHU, BPM")
+    broadcast_id: str = Field(..., description="Unique broadcast key: 'WWV_10000' or 'BPM_5000'")
+    station: StationID = Field(..., description="Station: WWV, WWVH, BPM")
     frequency_khz: int = Field(..., description="Carrier frequency in kHz (integer)")
     
     # === TEMPORAL IDENTITY ===
@@ -170,21 +168,6 @@ class L1BroadcastMeasurement(BaseModel):
     test_signal_detected: Optional[bool] = Field(None, description="Test signal present (WWV min 8, WWVH min 48)")
     tone_500_600_hz: Optional[int] = Field(None, description="500/600 Hz tone frequency if present")
     
-    # === CHU SPECIFIC FEATURES ===
-    # Only populated for CHU broadcasts
-    fsk_detected: Optional[bool] = Field(None, description="FSK time code detected")
-    fsk_frames_decoded: Optional[int] = Field(None, ge=0, le=9, description="FSK frames decoded (0-9)")
-    fsk_time_valid: Optional[bool] = Field(None, description="FSK decoded time matches expected")
-    fsk_timing_offset_ms: Optional[float] = Field(None, description="FSK 500ms boundary timing")
-    fsk_decoded_day: Optional[int] = Field(None, description="Day of year from FSK")
-    fsk_decoded_hour: Optional[int] = Field(None, description="Hour from FSK")
-    fsk_decoded_minute: Optional[int] = Field(None, description="Minute from FSK")
-    tick_timing_offset_ms: Optional[float] = Field(None, description="1000 Hz tick onset timing (high precision)")
-    dut1_from_fsk: Optional[float] = Field(None, description="DUT1 from FSK Frame B (seconds)")
-    dut1_from_splits: Optional[float] = Field(None, description="DUT1 from split tones (seconds)")
-    dut1_consistent: Optional[bool] = Field(None, description="FSK and split DUT1 agree")
-    tai_utc_from_fsk: Optional[int] = Field(None, description="TAI-UTC from FSK Frame B")
-    
     # === BPM SPECIFIC FEATURES ===
     # Only populated for BPM broadcasts
     ut1_tick_detected: Optional[bool] = Field(None, description="100ms UT1 tick detected")
@@ -217,13 +200,13 @@ class L1BroadcastMeasurement(BaseModel):
     @property
     def is_unique_frequency(self) -> bool:
         """True if this broadcast is on a unique frequency."""
-        unique_freqs = {20000, 25000, 3330, 7850, 14670}
+        unique_freqs = {20000, 25000}
         return self.frequency_khz in unique_freqs
     
     @property
-    def is_wwv_or_chu(self) -> bool:
+    def is_timing_reference(self) -> bool:
         """True if this is a timing reference station (not WWVH/BPM)."""
-        return self.station in [StationID.WWV, StationID.CHU]
+        return self.station == StationID.WWV
     
     # === VALIDATION ===
     @model_validator(mode='after')
@@ -239,14 +222,9 @@ class L1BroadcastMeasurement(BaseModel):
         
         # Rule 2: Station-specific fields should only be set for relevant stations
         if self.station not in [StationID.WWV, StationID.WWVH]:
-            # CHU/BPM shouldn't have BCD fields set to True
+            # BPM shouldn't have BCD fields set to True
             if self.bcd_detected is True:
                 raise ValueError(f"bcd_detected=True invalid for {self.station}")
-        
-        if self.station != StationID.CHU:
-            # Non-CHU shouldn't have FSK fields set to True
-            if self.fsk_detected is True:
-                raise ValueError(f"fsk_detected=True invalid for {self.station}")
         
         return self
     

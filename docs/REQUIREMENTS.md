@@ -17,7 +17,7 @@ A DASI2 station needs to know *what time it is* to a known, graded accuracy —
 and to keep knowing it when GPS or the network is unavailable — because every
 other RF client labels its data against a UTC↔RTP mapping. hf-timestd is the
 station's **time-standard analyzer and timing authority**. It receives the HF
-time broadcasts (WWV, WWVH, CHU, BPM) through `radiod`, measures tick arrival
+time broadcasts (WWV, WWVH, BPM) through `radiod`, measures tick arrival
 against the GPSDO-disciplined RTP sample counter, and produces (a) a graded
 UTC offset for the host and the suite, and (b) ionospheric science products —
 chiefly carrier-phase differential TEC — as a by-product of the same
@@ -170,7 +170,7 @@ sources (IONEX/Earthdata, IRI-2020, space-weather).
 
 ### 8.1 Inputs
 - radiod RTP IQ via `ka9q-python` (9 channels: 2.5/5/10/15/20/25 MHz; 17
-  broadcasts WWV/WWVH/CHU/BPM).
+  broadcasts WWV/WWVH/BPM).
 - `/etc/hf-timestd/timestd-config.toml` — operator MUST set: `[station]`
   callsign/id/instrument_id/grid (or lat+lon); `[ka9q].status`;
   `[recorder.channel_group.*].channels`; `[uploader.sftp]` host/ssh_key if

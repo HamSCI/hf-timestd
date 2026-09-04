@@ -17,7 +17,6 @@ class QualityFlag(str, Enum):
 class StationID(str, Enum):
     WWV = "WWV"
     WWVH = "WWVH"
-    CHU = "CHU"
     BPM = "BPM"
     WWVB = "WWVB"  # NIST 60 kHz LF (Fort Collins); Fusion source pool, see docs/WWVB-INTEGRATION.md
 

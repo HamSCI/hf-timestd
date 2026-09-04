@@ -99,7 +99,7 @@ class RingBufferReader:
 
     ``metadata`` is in the exact shape
     ``hf_timestd.core.buffer_timing.resolve_buffer_timing()`` already
-    consumes — so downstream code (metrology, CHU FSK, etc.) can treat a
+    consumes — so downstream code (metrology, etc.) can treat a
     ring-buffer extract the same as a decoded ``.bin`` file.
     """
 
@@ -316,7 +316,7 @@ class RingBufferReader:
 
         Returns ``(samples, metadata)``.  ``metadata`` has the shape that
         :func:`hf_timestd.core.buffer_timing.resolve_buffer_timing`
-        already accepts, so metrology / CHU FSK / future consumers do not
+        already accepts, so metrology / future consumers do not
         need a second timing path.
 
         Raises

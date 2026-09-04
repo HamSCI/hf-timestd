@@ -79,28 +79,28 @@ class TestBroadcastRegistry:
         """Test registry initializes with correct counts."""
         registry = BroadcastRegistry(receiver)
         
-        assert registry.n_stations == 4
-        assert registry.n_broadcasts == 17
+        assert registry.n_stations == 3
+        assert registry.n_broadcasts == 14
         assert registry.source_mode == SourceMode.RADIOD
     
-    def test_radiod_mode_9_channels(self, receiver):
-        """Test radiod mode derives 9 channels."""
+    def test_radiod_mode_6_channels(self, receiver):
+        """Test radiod mode derives 6 channels."""
         registry = BroadcastRegistry(receiver, source_mode=SourceMode.RADIOD)
         
-        assert registry.n_channels == 9
+        assert registry.n_channels == 6
         
         # Check shared frequencies require discrimination
         shared_channels = [ch for ch in registry.channels if ch.requires_discrimination]
         unique_channels = [ch for ch in registry.channels if not ch.requires_discrimination]
         
         assert len(shared_channels) == 4  # 2.5, 5, 10, 15 MHz
-        assert len(unique_channels) == 5  # 20, 25, 3.33, 7.85, 14.67 MHz
+        assert len(unique_channels) == 2  # 20, 25 MHz
     
-    def test_phase_engine_mode_17_channels(self, receiver):
-        """Test phase-engine mode derives 17 channels."""
+    def test_phase_engine_mode_14_channels(self, receiver):
+        """Test phase-engine mode derives 14 channels."""
         registry = BroadcastRegistry(receiver, source_mode=SourceMode.PHASE_ENGINE)
         
-        assert registry.n_channels == 17
+        assert registry.n_channels == 14
         
         # All channels should have target_station set
         for ch in registry.channels:
@@ -147,10 +147,10 @@ class TestBroadcastRegistry:
         """Test broadcast lookup."""
         registry = BroadcastRegistry(receiver)
         
-        chu_7850 = registry.get_broadcast('CHU_7850')
-        assert chu_7850 is not None
-        assert chu_7850.station == 'CHU'
-        assert chu_7850.frequency_hz == 7850000
+        wwv_20000 = registry.get_broadcast('WWV_20000')
+        assert wwv_20000 is not None
+        assert wwv_20000.station == 'WWV'
+        assert wwv_20000.frequency_hz == 20000000
         
         # Non-existent broadcast
         assert registry.get_broadcast('FAKE_1234') is None
@@ -161,9 +161,9 @@ class TestBroadcastRegistry:
         
         wwv_broadcasts = registry.get_broadcasts_for_station('WWV')
         assert len(wwv_broadcasts) == 6
-        
-        chu_broadcasts = registry.get_broadcasts_for_station('CHU')
-        assert len(chu_broadcasts) == 3
+
+        bpm_broadcasts = registry.get_broadcasts_for_station('BPM')
+        assert len(bpm_broadcasts) == 4
     
     def test_get_broadcasts_for_frequency(self, receiver):
         """Test getting all broadcasts on a frequency."""
@@ -173,9 +173,9 @@ class TestBroadcastRegistry:
         broadcasts_5mhz = registry.get_broadcasts_for_frequency(5000000)
         assert len(broadcasts_5mhz) == 3  # WWV, WWVH, BPM
         
-        # Unique frequency (7.85 MHz)
-        broadcasts_7850 = registry.get_broadcasts_for_frequency(7850000)
-        assert len(broadcasts_7850) == 1  # CHU only
+        # Unique frequency (20 MHz)
+        broadcasts_20000 = registry.get_broadcasts_for_frequency(20000000)
+        assert len(broadcasts_20000) == 1  # WWV only
     
     def test_shared_frequencies(self, receiver):
         """Test identification of shared frequencies."""
@@ -193,12 +193,9 @@ class TestBroadcastRegistry:
         registry = BroadcastRegistry(receiver)
         
         unique = registry.get_unique_frequencies()
-        assert len(unique) == 5
+        assert len(unique) == 2
         assert unique[20000000] == 'WWV'
         assert unique[25000000] == 'WWV'
-        assert unique[3330000] == 'CHU'
-        assert unique[7850000] == 'CHU'
-        assert unique[14670000] == 'CHU'
     
     def test_channel_naming_radiod(self, receiver):
         """Test channel naming in radiod mode."""
@@ -212,7 +209,7 @@ class TestBroadcastRegistry:
         
         # Unique frequencies should be named STATION_*
         assert 'WWV_20000' in channel_names
-        assert 'CHU_7850' in channel_names
+        assert 'WWV_25000' in channel_names
     
     def test_channel_naming_phase_engine(self, receiver):
         """Test channel naming in phase-engine mode."""
@@ -224,7 +221,7 @@ class TestBroadcastRegistry:
         assert 'WWV_5000' in channel_names
         assert 'WWVH_5000' in channel_names
         assert 'BPM_5000' in channel_names
-        assert 'CHU_7850' in channel_names
+        assert 'WWV_20000' in channel_names
 
 
 class TestConfigIntegration:
@@ -245,7 +242,7 @@ class TestConfigIntegration:
         
         assert registry.receiver.callsign == 'TEST'
         assert registry.receiver.latitude == 40.0
-        assert registry.n_broadcasts == 17
+        assert registry.n_broadcasts == 14
     
     def test_create_registry_missing_station(self):
         """Test creating registry with missing station config."""
@@ -264,7 +261,7 @@ class TestConfigIntegration:
         
         registry = create_registry_from_config(config)
         assert registry.source_mode == SourceMode.PHASE_ENGINE
-        assert registry.n_channels == 17
+        assert registry.n_channels == 14
     
     def test_create_registry_invalid_source_mode(self):
         """Test creating registry with invalid source mode defaults to radiod."""
@@ -275,22 +272,21 @@ class TestConfigIntegration:
         
         registry = create_registry_from_config(config)
         assert registry.source_mode == SourceMode.RADIOD
-        assert registry.n_channels == 9
+        assert registry.n_channels == 6
 
 
 class TestDefaultStations:
     """Test default station definitions."""
     
     def test_default_stations_count(self):
-        """Test we have 4 default stations."""
-        assert len(DEFAULT_STATIONS) == 4
+        """Test we have 3 default stations."""
+        assert len(DEFAULT_STATIONS) == 3
     
     def test_default_stations_names(self):
         """Test default station names."""
         names = [s.name for s in DEFAULT_STATIONS]
         assert 'WWV' in names
         assert 'WWVH' in names
-        assert 'CHU' in names
         assert 'BPM' in names
     
     def test_wwv_frequencies(self):
@@ -301,23 +297,15 @@ class TestDefaultStations:
         assert 10000000 in wwv.frequencies_hz
         assert 20000000 in wwv.frequencies_hz
     
-    def test_chu_unique_frequencies(self):
-        """Test CHU has unique frequencies."""
-        chu = next(s for s in DEFAULT_STATIONS if s.name == 'CHU')
-        assert len(chu.frequencies_hz) == 3
-        assert 3330000 in chu.frequencies_hz
-        assert 7850000 in chu.frequencies_hz
-        assert 14670000 in chu.frequencies_hz
-    
     def test_tone_patterns(self):
         """Test tone patterns are correctly assigned."""
         wwv = next(s for s in DEFAULT_STATIONS if s.name == 'WWV')
         wwvh = next(s for s in DEFAULT_STATIONS if s.name == 'WWVH')
-        chu = next(s for s in DEFAULT_STATIONS if s.name == 'CHU')
+        bpm = next(s for s in DEFAULT_STATIONS if s.name == 'BPM')
         
         assert wwv.tone_pattern == TonePattern.WWV_1000HZ
         assert wwvh.tone_pattern == TonePattern.WWVH_1200HZ
-        assert chu.tone_pattern == TonePattern.CHU_BCD_FSK
+        assert bpm.tone_pattern == TonePattern.BPM_1000HZ
 
 
 if __name__ == '__main__':

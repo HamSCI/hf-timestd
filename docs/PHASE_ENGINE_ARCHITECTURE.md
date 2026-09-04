@@ -61,7 +61,7 @@ resolution requires a non-collinear (2D) array arrangement.
 ### Fundamental Principle
 
 **Both single-antenna (radiod) and multi-antenna (phase-engine) modes are
-broadcast-oriented.** The same 17 broadcasts (WWV×6 + WWVH×4 + CHU×3 + BPM×4)
+broadcast-oriented.** The same 14 broadcasts (WWV×6 + WWVH×4 + CHU×3 + BPM×4)
 are the unit of observation for metrology, physics, and all downstream science.
 The difference is only at the channel/recording layer:
 
@@ -70,7 +70,7 @@ The difference is only at the channel/recording layer:
 | Recording channels | 9 (frequency-based) | 17 (broadcast-based) |
 | Shared frequencies | `SHARED_*` (require discrimination) | `WWV_*/WWVH_*/BPM_*` (beamformed) |
 | Unique frequencies | `CHU_*/WWV_20000/WWV_25000` | Same naming |
-| Downstream pipeline | Same 17 broadcasts | Same 17 broadcasts |
+| Downstream pipeline | Same 14 broadcasts | Same 14 broadcasts |
 | Discrimination | Tone/tick-based (software) | Spatial (hardware) + tone/tick |
 
 ---
@@ -258,7 +258,7 @@ dipole, loop, random wire, or active antenna. The choice affects sensitivity and
 directional pattern but has no impact on array processing (there is none).
 
 **Recommended:** A broadband vertical (e.g., multi-band vertical or active whip)
-provides omnidirectional coverage of all 17 broadcasts. A horizontal dipole gives
+provides omnidirectional coverage of all 14 broadcasts. A horizontal dipole gives
 higher gain toward stations broadside to the wire but has nulls off the ends.
 
 #### N = 2: Two RX888s (1 Baseline)
@@ -989,7 +989,7 @@ The fusion service's dual-feed architecture (TSL1/TSL2) already supports this.
 **5. Downstream clients see broadcast-oriented channels regardless of mode.**
 
 Whether the input is 9 radiod channels or 17 phase-engine channels, the
-downstream pipeline resolves to the same 17 broadcasts. The `BroadcastRegistry`
+downstream pipeline resolves to the same 14 broadcasts. The `BroadcastRegistry`
 class handles this mapping transparently.
 
 ---

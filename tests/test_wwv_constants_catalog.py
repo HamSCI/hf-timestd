@@ -19,7 +19,6 @@ class TestStationDataComesFromTheCatalog:
         for name, (lat_attr, lon_attr) in {
             "WWV": ("WWV_LAT", "WWV_LON"),
             "WWVH": ("WWVH_LAT", "WWVH_LON"),
-            "CHU": ("CHU_LAT", "CHU_LON"),
             "BPM": ("BPM_LAT", "BPM_LON"),
             "WWVB": ("WWVB_LAT", "WWVB_LON"),
         }.items():
@@ -34,10 +33,17 @@ class TestStationDataComesFromTheCatalog:
     def test_frequency_lists_match_the_catalog(self):
         assert tuple(wc.WWV_FREQUENCIES) == BUILTIN_CATALOG.get("WWV").frequencies_mhz
         assert tuple(wc.WWVH_FREQUENCIES) == BUILTIN_CATALOG.get("WWVH").frequencies_mhz
-        assert tuple(wc.CHU_FREQUENCIES) == BUILTIN_CATALOG.get("CHU").frequencies_mhz
         assert tuple(wc.BPM_FREQUENCIES) == BUILTIN_CATALOG.get("BPM").frequencies_mhz
 
     def test_module_exposes_the_catalog_itself(self):
         # New consumers should reach the catalog through wwv_constants
         # during the shim era, then import hamsci_dsp.stations directly.
         assert wc.STATION_CATALOG is BUILTIN_CATALOG
+
+    def test_off_air_station_is_not_re_exported(self):
+        # CHU stays in the catalogue (active=False) so archived data still
+        # resolves, but wwv_constants no longer re-exports it: the code has
+        # no CHU left to use the constants.
+        assert BUILTIN_CATALOG.get("CHU").active is False
+        for name in ("CHU_LAT", "CHU_LON", "CHU_COORDINATES", "CHU_FREQUENCIES"):
+            assert not hasattr(wc, name), name

@@ -84,7 +84,6 @@ from hamsci_dsp.geometry import great_circle_km
 from .wwv_constants import (
     WWV_LAT, WWV_LON,
     WWVH_LAT, WWVH_LON,
-    CHU_LAT, CHU_LON,
     BPM_LAT, BPM_LON,
     SPEED_OF_LIGHT_KM_S,
     EARTH_RADIUS_KM,
@@ -154,7 +153,6 @@ class IonosphericState:
 STATION_COORDS = {
     'WWV': (WWV_LAT, WWV_LON),
     'WWVH': (WWVH_LAT, WWVH_LON),
-    'CHU': (CHU_LAT, CHU_LON),
     'BPM': (BPM_LAT, BPM_LON),
 }
 
@@ -295,7 +293,7 @@ class PhysicsPropagationModel:
         all physically viable modes sorted by probability.
         
         Args:
-            station: Station name (WWV, WWVH, CHU, BPM)
+            station: Station name (WWV, WWVH, BPM)
             frequency_mhz: Broadcast frequency in MHz
             timestamp: UTC timestamp (for ionospheric state)
             
@@ -347,7 +345,7 @@ class PhysicsPropagationModel:
         Compute physics-based propagation delay and residual.
         
         Args:
-            station: Station name (WWV, WWVH, CHU, BPM)
+            station: Station name (WWV, WWVH, BPM)
             frequency_mhz: Broadcast frequency in MHz
             observed_arrival_ms: Measured arrival time relative to second boundary
             timestamp: UTC timestamp of observation

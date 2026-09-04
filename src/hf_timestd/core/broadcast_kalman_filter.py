@@ -7,7 +7,7 @@ PURPOSE
 ================================================================================
 Track ionospheric path dynamics for a single broadcast using a Kalman filter.
 
-Each of the 17 broadcasts (WWV, WWVH, CHU, BPM across multiple frequencies)
+Each of the 14 broadcasts (WWV, WWVH, BPM across multiple frequencies)
 is treated as an independent ionospheric probe with unique characteristics.
 
 STATE VECTOR:
@@ -128,7 +128,7 @@ class BroadcastKalmanFilter:
         
         Args:
             broadcast_id: Unique identifier (e.g., "WWV_10000")
-            station: Station name (WWV, WWVH, CHU, BPM)
+            station: Station name (WWV, WWVH, BPM)
             frequency_mhz: Frequency in MHz
         """
         self.broadcast_id = broadcast_id
@@ -224,12 +224,6 @@ class BroadcastKalmanFilter:
             base_noise = 0.8
             # Increase volatility for long path
             q_tof *= 1.5
-        elif self.station == 'CHU':
-            path_km = 2200.0
-            hops = 1
-            base_noise = 0.4
-            # Increase volatility for auroral effects
-            q_tof *= 1.2
         elif self.station == 'BPM':
             path_km = 10000.0
             hops = 3
@@ -247,12 +241,6 @@ class BroadcastKalmanFilter:
             modulation = 'AM+BCD'
             has_bcd = True
             has_test_signal = True
-        elif self.station == 'CHU':
-            modulation = 'FSK'
-            has_bcd = False
-            has_test_signal = False
-            # FSK is more robust - reduce measurement noise
-            base_noise *= 0.7
         else:  # BPM
             modulation = 'AM'
             has_bcd = False
@@ -267,8 +255,7 @@ class BroadcastKalmanFilter:
         def _is_anchor_freq(f: float, candidates: Tuple[float, ...]) -> bool:
             return any(abs(f - c) < _ANCHOR_TOL_MHZ for c in candidates)
         is_anchor = (
-            (self.station == 'WWV' and _is_anchor_freq(self.frequency_mhz, (20.0, 25.0)))
-            or (self.station == 'CHU' and _is_anchor_freq(self.frequency_mhz, (3.33, 7.85, 14.67)))
+            self.station == 'WWV' and _is_anchor_freq(self.frequency_mhz, (20.0, 25.0))
         )
         
         return BroadcastCharacteristics(

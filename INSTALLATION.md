@@ -3,7 +3,7 @@
 **Author:** Michael James Hauan (AC0G)  
 **Last Updated:** April 8, 2026
 
-This guide covers installing and configuring `hf-timestd` for recording and analyzing HF time standard broadcasts (BPM, CHU, WWV, WWVH).
+This guide covers installing and configuring `hf-timestd` for recording and analyzing HF time standard broadcasts (BPM, WWV, WWVH).
 
 ---
 
