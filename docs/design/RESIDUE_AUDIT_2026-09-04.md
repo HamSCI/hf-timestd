@@ -1,7 +1,8 @@
 # Residue audit: what still serves a superseded model
 
-**Status:** Audit only, 2026-09-04. No code changed, nothing deployed, no
-service touched. The deletion session that follows works from this document.
+**Status:** Audit 2026-09-04; §7 steps 1–2 executed the same day (`9346bc5`,
+and the commit that follows it). Nothing deployed, no service touched. The
+config-dead and labelling sessions still work from this document.
 **Reference:** `MEASUREMENT_MODEL.md` (054dc73). Where this document says
 measurand, registration, or ruler, it means what that document means.
 
@@ -69,7 +70,7 @@ than trusting this page.
 | class | modules | lines | proof strength |
 |---|---|---|---|
 | unreachable from every root, no consumer of any kind | 25 | 10,904 | import graph + string sweep |
-| unreachable from every root, pinned only by tests or tooling | 33 | 10,561 | import graph; deletion costs tests |
+| unreachable from every root, pinned only by tests or tooling | 33 | 10,561 | import graph; deletion costs tests (includes `timing_validation_service`, web-pinned) |
 | reachable, but the output goes nowhere | 2 | 2,612 | data flow read in full |
 | reachable, dead under every shipped and fleet configuration | 6 paths + the `authority` key | ~1,900 | config read on template, B4, ND |
 | live, serves the superseded measurand, gated on measurement | 8 sites | — | not for this programme |
@@ -85,7 +86,7 @@ merely abandoned.
 
 ### 3.1 Dead by reachability, and about timing
 
-Twelve modules carry the `D_clock`-era architecture — the "Set, Monitor,
+Eleven modules carry the `D_clock`-era architecture — the "Set, Monitor,
 Intervention" family, the consensus estimator of system-clock offset, the
 validators that compared fusion against radiod's `GPS_TIME` as ground truth.
 No root reaches them. No test, script or web page imports them. No file of any
@@ -100,21 +101,28 @@ kind names them.
 | `core/sliding_window_monitor.py` | 648 | 10 s window beside the 60 s `D_clock` buffer |
 | `core/primary_time_standard.py` | 611 | "verify UTC(NIST) directly" |
 | `core/quality_metrics.py` | 551 | 2024-era quality tracking |
-| `core/timing_validation_service.py` | 541 | fusion vs `GPS_TIME` |
 | `core/gpsdo_monitor.py` | 522 | anchor watchdog; not the GPSDO probe |
 | `core/consensus_combiner.py` | 437 | weighted consensus of `D_clock` |
 | `core/global_timing_coordinator.py` | 331 | one verified UTC(NIST) back-calculation |
-| `core/timing_validation.py` | 225 | fusion vs `GPS_TIME`, utilities |
+| `core/station_identifier.py` | 475 | phase-keyed station identification; sole importer of the phase manager |
 
-7,248 lines. Six of them (`operational_phase_manager`, `sliding_window_monitor`,
-`timing_validation_service`, `timing_validation`, `consensus_combiner`,
-`global_timing_coordinator`) have a unit test each; those tests die with them.
-`operational_phase_manager` also has one importer, `station_identifier.py`,
-itself unreachable.
+6,957 lines. Four of them (`sliding_window_monitor`, `consensus_combiner`,
+`global_timing_coordinator`, `station_identifier`) have a unit test each,
+126 tests in all; those die with them.
 
-**Proof to re-run:** `scripts/import_reachability.py` with the same roots, then
-`grep -rlw <name>` across `hf-timestd`, `sigmond` and `ops` excluding
-`archive/`. Both returned nothing on 2026-09-04.
+Two corrections from the deletion session. `timing_validation_service` (541)
+and its helper `timing_validation` (225) first stood in this table and do
+not belong here: B4's `timestd-web-api` runs enabled and active, and
+`web-api/routers/timing_validation.py:91` imports the service lazily. They
+move to the pinned class of §2 and to the web API's own future. And
+`station_identifier` joins the set, because it hard-imports
+`operational_phase_manager` and nothing reaches it either.
+
+**Executed 2026-09-04.** Suite 2,680 passed, 0 failed.
+
+**Proof re-run before deletion:** `scripts/import_reachability.py` with the
+same roots, then `grep -rlw <name>` across `hf-timestd`, `sigmond` and `ops`
+excluding `archive/`. Both returned nothing on 2026-09-04.
 
 ### 3.2 Dead by reachability, not about timing
 
@@ -158,9 +166,10 @@ line every tenth call. Measurand: `D_clock`, described as "validates the
 RTP-to-UTC offset using cross-station agreement" — the two measurands in one
 sentence.
 
-**Proof to re-run:** `grep -n "self\.calibrator\b" core_recorder_v2.py` and
-`grep -n _bootstrap_offset_correction multi_broadcast_fusion.py`. Two call
-sites and two references respectively, on 2026-09-04.
+**Executed 2026-09-04, `9346bc5`.** Proof re-run first: two call sites of
+`self.calibrator`, two references to `_bootstrap_offset_correction`. Suite
+2,806 passed, 0 failed; the two tests removed asserted the deleted code's own
+consistency.
 
 ### 3.4 Dead by configuration
 
@@ -363,10 +372,8 @@ needs to stay out of searches, which `.graphifyignore` already does.
 
 Strongest proof first, so an early mistake costs least.
 
-1. §3.3, dead by data flow — 2,612 lines, two call sites, no configuration
-   question. Re-run the two greps, delete, run the suite.
-2. §3.1, the timing twelve — 7,248 lines. Re-run the reachability script and
-   the string sweep, delete with their six tests, run the suite.
+1. ✅ §3.3, dead by data flow — done 2026-09-04, `9346bc5`.
+2. ✅ §3.1, the timing eleven — done 2026-09-04, the commit after it.
 3. §3.4 and §3.5, dead by configuration — retire the keys including
    `[timing] authority` and `rtp_expected_accuracy_ms`, teach `validate` to
    warn, delete the paths. This one touches `core_recorder_v2.py` in several places
