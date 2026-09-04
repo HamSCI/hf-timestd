@@ -209,3 +209,22 @@ and with it the anchor; the minute then runs label-anchored and, under
 the scatter rule, publishes no timing.  That is the honest answer for a
 host clock a tenth of a second wrong — blind, and saying so — and it is
 where the T2 pair witness and the gate take over.
+
+### What withholding the noise ensembles exposed (2026-09-04, 22:25Z)
+
+The promoted noise ensembles had been doing a second job nobody had
+assigned them: writing two `L1_metrology` rows every minute on every
+channel.  `pipeline-watchdog.sh` used that row as its liveness signal for
+the metrology units (`stale > 180 s` → restart).  On AC0G-B4 the marker
+correlator itself detects in one to five minutes per hour, so within
+forty minutes of the deploy the watchdog was restarting all six metrology
+units, fusion and L2-calibration every five minutes; on AC0G-ND, four
+units.  Fusion never reached LOCKED between restarts and B4's FUSE
+refclock went silent at 22:25Z.  chrony stayed on the LAN stratum-1.
+
+The fix is to the watchdog, not to step 0.5(b): liveness now comes from
+what a running service writes every processed minute
+(`L2_detection_attempts`, `L1_all_arrivals`), fusion is judged by its
+per-cycle status file, and L2-calibration by its systemd watchdog.  The
+sparse marker-detection rate on B4 (2–5 % of minutes against 30–50 % on
+ND at the same hours) predates this work and is its own question.

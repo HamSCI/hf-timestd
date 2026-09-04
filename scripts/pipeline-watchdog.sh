@@ -5,17 +5,24 @@
 # Runs every 5 minutes via systemd timer. Checks each service for:
 #   1. Is it supposed to be running? (enabled)
 #   2. Is it actually running? (active)
-#   3. Is it producing fresh output?
+#   3. Is it still doing its work?  LIVENESS, not detections (2026-09-04):
 #        - Recorder: newest binary chunk under raw_buffer (mtime check)
-#        - Metrology / Fusion / Physics: newest row in the corresponding
-#          SQLite table at $SQLITE_DB (post-Phase-3b: SQLite is the sole
-#          writer; HDF5 mtimes are frozen and cannot indicate liveness)
-#        - L2 calibration: state-file mtime
+#        - Metrology: newest row per channel in ANY of L2_detection_attempts,
+#          L1_all_arrivals, L1_metrology_measurements at $SQLITE_DB.  The
+#          first two land every processed minute; an L1 row lands only when
+#          the marker correlator detects, which on a quiet channel is a few
+#          minutes per hour.
+#        - Fusion: mtime of $RUN_DIR/fusion_status.json (written every cycle
+#          with or without input); L3 rows only where that file never existed
+#        - Physics: newest L3_tec row
+#        - L2 calibration: enabled/active only -- systemd WatchdogSec covers
+#          a hung loop, and the state file this once read belongs to fusion
 #        - Web API: HTTP /health
 #
-# If a service is running but its output is stale beyond the threshold,
+# If a service is running but has stopped processing beyond the threshold,
 # the watchdog restarts it. This catches "zombie" services that appear
-# healthy to systemd but have stopped doing useful work.
+# healthy to systemd but have stopped doing work.  A service that processes
+# every minute and detects nothing is healthy; the ionosphere is not a fault.
 #
 # Usage:
 #   ./scripts/pipeline-watchdog.sh           # normal mode (restarts)
@@ -25,7 +32,8 @@
 set -uo pipefail
 
 # ── Paths ──
-DATA_ROOT="/var/lib/timestd"
+DATA_ROOT="${DATA_ROOT:-/var/lib/timestd}"
+RUN_DIR="${RUN_DIR:-/run/hf-timestd}"
 SQLITE_DB="${SQLITE_DB:-$DATA_ROOT/phase2/timestd.db}"
 LOG_TAG="timestd-watchdog"
 DRY_RUN=false
@@ -144,6 +152,16 @@ sqlite_age() {
 }
 
 # Check if a systemd unit is enabled and supposed to be running
+# Smallest of several ages, ignoring UNKNOWN; UNKNOWN only if all are.
+min_known_age() {
+    local best="UNKNOWN" a
+    for a in "$@"; do
+        age_unknown "$a" && continue
+        if age_unknown "$best" || [[ $a -lt $best ]]; then best=$a; fi
+    done
+    echo "$best"
+}
+
 is_enabled() {
     systemctl is-enabled --quiet "$1" 2>/dev/null
 }
@@ -257,13 +275,25 @@ check_metrology() {
             continue
         fi
 
-        local age
-        age=$(sqlite_age "L1_metrology_measurements" "minute_boundary_utc" \
-                        "channel='$channel'")
+        # Liveness, not detections (2026-09-04).  An L1_metrology row exists
+        # only when the 800 ms marker correlator DETECTS, and on AC0G-B4 that
+        # is 1-5 minutes per hour.  Until 41d052a the noise tick ensembles
+        # were promoted into two L1 rows every minute and hid that; the day
+        # they stopped, this rule restarted every sparse channel every 5 min
+        # on both stations.  A running service writes L2_detection_attempts
+        # (every correlator attempt) and L1_all_arrivals (every edge search)
+        # for each minute it processes, detection or not.  The service is
+        # alive if ANY of the three is fresh; it is restarted only when all
+        # three are stale, i.e. no minute has been processed at all.
+        local age_meas age_att age_arr age
+        age_meas=$(sqlite_age "L1_metrology_measurements" "minute_boundary_utc" "channel='$channel'")
+        age_att=$(sqlite_age "L2_detection_attempts" "minute_boundary_utc" "channel='$channel'")
+        age_arr=$(sqlite_age "L1_all_arrivals" "minute_boundary_utc" "channel='$channel'")
+        age=$(min_known_age "$age_meas" "$age_att" "$age_arr")
         if age_unknown "$age"; then
-            log_error "cannot assess L1_metrology freshness for $channel (SQLite query failed) - NOT restarting $unit"
+            log_error "cannot assess metrology liveness for $channel (every SQLite query failed) - NOT restarting $unit"
         elif [[ $age -gt $METROLOGY_STALE ]]; then
-            do_restart "$unit" "running but L1_metrology row for $channel stale for ${age}s (threshold: ${METROLOGY_STALE}s)"
+            do_restart "$unit" "running but no processed minute for $channel in ${age}s (attempts=${age_att}s arrivals=${age_arr}s measurements=${age_meas}s; threshold: ${METROLOGY_STALE}s)"
             RESTARTS=$((RESTARTS + 1))
         fi
     done
@@ -282,7 +312,24 @@ check_fusion() {
         return
     fi
 
+    # Liveness, not output (2026-09-04).  Fusion writes an L3 row only when
+    # it has L1/L2 input; with none it is idle, not dead, and a restart
+    # throws away its convergence state ("Fusion not converged, skipping
+    # calibration save").  It publishes $RUN_DIR/fusion_status.json every
+    # cycle (~8 s) whatever the input, and systemd's WatchdogSec=120 on the
+    # unit already catches a hung main loop.  Judge by the status file; fall
+    # back to the L3 rule only where no status file has ever been written.
+    local status_file="$RUN_DIR/fusion_status.json"
     local age
+    if [[ -e "$status_file" ]]; then
+        age=$(file_age "$status_file")
+        if [[ $age -gt $FUSION_STALE ]]; then
+            do_restart "$unit" "running but fusion_status.json not updated for ${age}s (threshold: ${FUSION_STALE}s)"
+            RESTARTS=$((RESTARTS + 1))
+        fi
+        return
+    fi
+    log_warn "no $status_file; judging fusion by L3_fusion_timing rows (output, not liveness)"
     age=$(sqlite_age "L3_fusion_timing" "minute_boundary")
     if age_unknown "$age"; then
         log_error "cannot assess L3_fusion_timing freshness (SQLite query failed) - NOT restarting $unit"
@@ -330,14 +377,14 @@ check_calibration() {
         return
     fi
 
-    # Calibration state file should be updated frequently
-    local state_file="$DATA_ROOT/state/broadcast_calibration.json"
-    local age
-    age=$(file_age "$state_file")
-    if [[ $age -gt $METROLOGY_STALE ]]; then
-        do_restart "$unit" "running but calibration state stale for ${age}s"
-        RESTARTS=$((RESTARTS + 1))
-    fi
+    # No data-driven rule (2026-09-04).  The file this check used to read,
+    # $DATA_ROOT/state/broadcast_calibration.json, is written by FUSION
+    # (multi_broadcast_fusion.py), and only once fusion has converged -- so
+    # this rule restarted L2-calibration for fusion's silence.  The unit
+    # runs Type=notify with WatchdogSec=180 and pings WATCHDOG=1 every loop;
+    # systemd already restarts it if the loop hangs.  Enabled-but-inactive
+    # (above) is the only thing left for this script to catch.
+    :
 }
 
 # ==========================================================================

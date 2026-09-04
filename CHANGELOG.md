@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — the pipeline watchdog measures liveness, not detections (2026-09-04)
+
+Within forty minutes of 41d052a reaching AC0G-B4, `pipeline-watchdog.sh`
+began restarting every metrology unit, fusion and L2-calibration every
+five minutes, and four units on AC0G-ND.  Its metrology rule read "no
+L1_metrology row in 180 s" as a dead service.  An L1 row exists only when
+the 800 ms marker correlator detects, and on B4 that is one to five
+minutes per hour; the noise tick ensembles that 41d052a stopped promoting
+had been writing two L1 rows every minute on every channel and hid the
+sparse rate.  Fusion, with no L1 input, wrote no L3 row and was restarted
+before it could converge, so B4's FUSE refclock went silent at 22:25Z.
+The calibration rule read a state file that fusion writes, and only once
+converged.  The script now judges metrology alive if any of
+`L2_detection_attempts`, `L1_all_arrivals` or `L1_metrology_measurements`
+has a row for the channel within 180 s (the first two land every processed
+minute), judges fusion by the mtime of `/run/hf-timestd/fusion_status.json`
+(written every cycle, input or not), and leaves L2-calibration to its
+systemd `WatchdogSec`.  `DATA_ROOT` and `RUN_DIR` are overridable so the
+script can be exercised in `--dry-run` against a temporary tree;
+`tests/test_pipeline_watchdog_liveness.py` does that with PATH shims.
+The stations run the script from the checkout, so the fast-forward is the
+deploy.
+
 ### Added — the chrony refclock gate can run chronyc through sudo (2026-09-04)
 
 Enabling the gate on AC0G-B4 and AC0G-ND showed why it had stayed off:
