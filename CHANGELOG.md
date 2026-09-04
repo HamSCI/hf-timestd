@@ -25,7 +25,13 @@ systemd `WatchdogSec`.  `DATA_ROOT` and `RUN_DIR` are overridable so the
 script can be exercised in `--dry-run` against a temporary tree;
 `tests/test_pipeline_watchdog_liveness.py` does that with PATH shims.
 The stations run the script from the checkout, so the fast-forward is the
-deploy.
+deploy.  The first cut read `max(minute_boundary_utc)` per channel, which
+the `(channel, timestamp_utc)` index cannot serve: on B4 it scanned 5 M
+`L1_all_arrivals` rows per channel in 35 s and the watchdog outlived its
+own 5-minute timer.  The lookup now reads `max(timestamp_utc)` (15 ms).
+Still open in the same class: the physics rule restarts
+`hamsci-physics-fusion` when L3 TEC output is an hour old, though the
+service pings its own systemd watchdog.
 
 ### Added — the chrony refclock gate can run chronyc through sudo (2026-09-04)
 

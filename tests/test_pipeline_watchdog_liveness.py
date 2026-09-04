@@ -16,6 +16,7 @@ import os
 import sqlite3
 import subprocess
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -49,10 +50,15 @@ def _make_db(path: Path, now: int, ages: dict, fusion_l3_age):
     """Create the tables the watchdog queries, one row each at now-age."""
     con = sqlite3.connect(path)
     for table in ("L1_metrology_measurements", "L2_detection_attempts", "L1_all_arrivals"):
-        con.execute(f"CREATE TABLE {table} (channel TEXT, minute_boundary_utc INTEGER)")
+        # Same shape hamsci-dsp writes: ISO write time + minute boundary, and
+        # the (channel, timestamp_utc) index the watchdog's lookup relies on.
+        con.execute(f"CREATE TABLE {table} (channel TEXT, timestamp_utc TEXT, "
+                    f"minute_boundary_utc INTEGER)")
+        con.execute(f"CREATE INDEX idx_{table}_chan_ts ON {table} (channel, timestamp_utc)")
         age = ages.get(table)
         if age is not None:
-            con.execute(f"INSERT INTO {table} VALUES (?, ?)", (CHANNEL, now - age))
+            iso = datetime.fromtimestamp(now - age, tz=timezone.utc).isoformat()
+            con.execute(f"INSERT INTO {table} VALUES (?, ?, ?)", (CHANNEL, iso, now - age))
     con.execute("CREATE TABLE L3_fusion_timing (minute_boundary INTEGER)")
     if fusion_l3_age is not None:
         con.execute("INSERT INTO L3_fusion_timing VALUES (?)", (now - fusion_l3_age,))
@@ -143,3 +149,13 @@ def test_calibration_not_judged_by_fusions_state_file(env):
     _touch(env["data_root"] / "state" / "broadcast_calibration.json", 3600)
     out = _run(env, [CAL])
     assert "Would restart" not in out, out
+
+
+def test_future_dated_row_is_not_liveness(env):
+    """The future-grace clause: a row stamped an hour ahead is a clock fault
+    upstream, not proof the service processed a minute just now."""
+    now = int(time.time())
+    _make_db(env["db"], now, {"L1_metrology_measurements": 3600,
+                              "L2_detection_attempts": -3600, "L1_all_arrivals": 900}, None)
+    out = _run(env, [MET])
+    assert f"Would restart {MET}" in out, out

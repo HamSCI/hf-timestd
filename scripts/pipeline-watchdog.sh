@@ -152,6 +152,43 @@ sqlite_age() {
 }
 
 # Check if a systemd unit is enabled and supposed to be running
+# Per-channel age from the ISO write-time column, seconds.  hamsci-dsp
+# indexes every L1/L2 table on (channel, timestamp_utc), so max(timestamp_utc)
+# for one channel is an index-only lookup (~15 ms).  max(minute_boundary_utc)
+# with a channel filter is NOT: on AC0G-B4 (2026-09-04) it scanned the
+# channel's 5 M L1_all_arrivals rows in 35 s, six channels per tick, and the
+# watchdog service outlived its own timer.  Same contract as sqlite_age():
+# UNKNOWN when the query fails, 999999 when there is no row.
+sqlite_channel_age() {
+    local table="$1"
+    local channel="$2"
+    if [[ ! -f "$SQLITE_DB" ]]; then
+        echo 999999
+        return
+    fi
+    local age rc
+    age=$(sqlite3 -readonly "$SQLITE_DB" \
+            "SELECT CAST(strftime('%s','now') - strftime('%s', max(timestamp_utc)) AS INTEGER) \
+             FROM $table WHERE channel='$channel' \
+               AND timestamp_utc <= strftime('%Y-%m-%dT%H:%M:%f','now','+120 seconds');" \
+            2>/dev/null)
+    rc=$?
+    if (( rc != 0 )); then
+        echo UNKNOWN
+        return
+    fi
+    if [[ -z "$age" ]]; then
+        echo 999999
+        return
+    fi
+    if ! [[ "$age" =~ ^-?[0-9]+$ ]]; then
+        echo UNKNOWN
+        return
+    fi
+    (( age < 0 )) && age=0
+    echo "$age"
+}
+
 # Smallest of several ages, ignoring UNKNOWN; UNKNOWN only if all are.
 min_known_age() {
     local best="UNKNOWN" a
@@ -282,13 +319,16 @@ check_metrology() {
         # they stopped, this rule restarted every sparse channel every 5 min
         # on both stations.  A running service writes L2_detection_attempts
         # (every correlator attempt) and L1_all_arrivals (every edge search)
-        # for each minute it processes, detection or not.  The service is
-        # alive if ANY of the three is fresh; it is restarted only when all
-        # three are stale, i.e. no minute has been processed at all.
+        # for each minute it processes, detection or not (all_arrivals every
+        # minute in practice; attempts only when the engine reports them).
+        # The service is alive if ANY of the three is fresh; it is restarted
+        # only when all three are stale, i.e. no minute has been processed.
+        # A per-channel heartbeat from the service itself would be the
+        # principled signal; until it exists, these rows stand in for it.
         local age_meas age_att age_arr age
-        age_meas=$(sqlite_age "L1_metrology_measurements" "minute_boundary_utc" "channel='$channel'")
-        age_att=$(sqlite_age "L2_detection_attempts" "minute_boundary_utc" "channel='$channel'")
-        age_arr=$(sqlite_age "L1_all_arrivals" "minute_boundary_utc" "channel='$channel'")
+        age_meas=$(sqlite_channel_age "L1_metrology_measurements" "$channel")
+        age_att=$(sqlite_channel_age "L2_detection_attempts" "$channel")
+        age_arr=$(sqlite_channel_age "L1_all_arrivals" "$channel")
         age=$(min_known_age "$age_meas" "$age_att" "$age_arr")
         if age_unknown "$age"; then
             log_error "cannot assess metrology liveness for $channel (every SQLite query failed) - NOT restarting $unit"
