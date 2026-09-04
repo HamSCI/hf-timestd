@@ -671,6 +671,32 @@ class StreamRecorderV2:
                     f"(recording continues uncorrected): {exc}"
                 )
 
+    def wire_time_map(self, context_fn, snapshot_fn, a_level_config: str = "A0") -> None:
+        """Give the archive writer a TimeMap provider (TIMING_PROVENANCE_MODEL §3.1).
+        Best-effort: a wiring failure leaves the legacy timing block in place."""
+        if self.archive_writer is None:
+            return
+        try:
+            from dataclasses import replace
+            from hf_timestd.core.time_map_producer import TimeMapInputs, TimeMapProducer
+            producer = TimeMapProducer(snapshot_fn=snapshot_fn, a_level_config=a_level_config)
+            channel = self.config.description
+
+            def provider(inputs: TimeMapInputs):
+                ctx = context_fn(channel) or {}
+                return producer.build(replace(
+                    inputs,
+                    anchor_rtp=ctx.get('anchor_rtp'), anchor_utc_ns=ctx.get('anchor_utc_ns'),
+                    anchor_sigma_ns=ctx.get('anchor_sigma_ns'),
+                    lock_credible=bool(ctx.get('lock_credible', False))))
+
+            ctx0 = context_fn(channel) or {}
+            self.archive_writer.set_time_map_provider(
+                provider, counter_space=ctx0.get('counter_space') or channel)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"{self.config.description}: time map wiring failed "
+                           f"(legacy timing block stays): {exc}")
+
     def _register_with_status_listener(self) -> None:
         """Wire this channel into ka9q-python's continuous STATUS listener.
 

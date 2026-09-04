@@ -38,6 +38,9 @@ def _make_core_recorder(
     """Build a CoreRecorderV2 with the minimum attributes
     ``_initialize_channels`` reads, bypassing the heavy __init__."""
     cr = CoreRecorderV2.__new__(CoreRecorderV2)
+    # The loaded TOML dict; _initialize_channels reads [timing.authority_manager]
+    # for the TimeMap wiring (2026-09-04).  Empty = every default.
+    cr.config = {}
 
     # Channels (all SHARED-style 24 kHz IQ — keeps the spec simple)
     cr.channel_specs = [

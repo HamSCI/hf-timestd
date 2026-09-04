@@ -1426,6 +1426,21 @@ class CoreRecorderV2:
                     status_stream=self.status_address,
                 )
                 self.recorders[description] = recorder
+                # TIMING_PROVENANCE_MODEL §3.1: the archive writer publishes
+                # the registration in force per chunk.  Best-effort; the
+                # legacy timing block stays if wiring fails.
+                try:
+                    from hamsci_dsp.timing import AuthorityReader
+                    _tm_reader = AuthorityReader()   # /run/hf-timestd/authority.json, 60 s freshness
+                    _auth_cfg = ((self.config.get('timing', {}) or {})
+                                 .get('authority_manager', {}) or {})
+                    recorder.wire_time_map(
+                        context_fn=self.time_map_context,
+                        snapshot_fn=_tm_reader.read,
+                        a_level_config=str(_auth_cfg.get('a_level', 'A0')),
+                    )
+                except Exception as _tm_exc:  # noqa: BLE001
+                    logger.warning(f"{description}: time map wiring skipped: {_tm_exc}")
                 # P5: per-stream T5 pairing fallback — this stream can
                 # ground the LB-142x NMEA-vs-RTP pairing when the T6
                 # stream is absent (never raises; wiring failure just
@@ -3713,6 +3728,40 @@ class CoreRecorderV2:
                 )
         return ok
 
+    def time_map_context(self, channel_name: str) -> dict:
+        """What this recorder knows about a channel's registration, for the
+        archive writer's TimeMap (TIMING_PROVENANCE_MODEL §3.1).
+
+        The anchor belongs to the T6 channel only — registration transfer to
+        another counter space is its own measurement (MEASUREMENT_MODEL §3)
+        and Phase 1 does not perform it.  The BPSK PPS channel is provisioned
+        with no archive, so in Phase 1 every archived chunk registers the
+        sysclock chain; the T6 branch waits for the day that stream is
+        archived.  Lock credibility is the anchor authority's verdict:
+        AUTHORITATIVE with no violations (MEASUREMENT_MODEL §6.4).
+        Never raises."""
+        stream = getattr(self, 'status_address', None) or 'radiod'
+        ctx = {
+            'anchor_rtp': None, 'anchor_utc_ns': None, 'anchor_sigma_ns': None,
+            'lock_credible': False,
+            'counter_space': f"{stream}/{channel_name}",
+        }
+        anchor = getattr(self, '_t6_native_anchor', None)
+        t6_name = (getattr(self, '_t6_config', None) or {}).get('description', 'BPSK_PPS')
+        if anchor is None or channel_name != t6_name:
+            return ctx
+        try:
+            auth = self._t6_authority_status() or {}
+        except Exception:  # noqa: BLE001
+            auth = {}
+        ctx['anchor_rtp'] = int(anchor.anchor_rtp)
+        ctx['anchor_utc_ns'] = int(anchor.anchor_utc_ns)
+        sigma = auth.get('sigma_ns')
+        ctx['anchor_sigma_ns'] = int(sigma) if isinstance(sigma, (int, float)) else None
+        ctx['lock_credible'] = (auth.get('state') == 'AUTHORITATIVE'
+                                and not (auth.get('violations') or []))
+        return ctx
+
     def _t6_authority_status(self) -> Optional[dict]:
         """T6 authority block for the status JSON (spec §6 invariant 5:
         cross-tier disagreement is REPORTED here, never corrects the
@@ -3728,10 +3777,15 @@ class CoreRecorderV2:
         except Exception:
             pass
         fine = getattr(self, '_t6_fine_stage', None)
+        sigma = getattr(self, '_t6_holdover_sigma_ns', None)
         return {
             'state': auth.state.value,
             'violations': (list(decision.violations)
                            if decision is not None else []),
+            # The published T6 sigma (live or holdover), for the TimeMap's
+            # u_epoch_ns (TIMING_PROVENANCE_MODEL §3.1).  None until the
+            # publish path has run.
+            'sigma_ns': None if sigma is None else float(sigma),
             'delay_budget_ns': auth.delay_budget_ns,
             'filter_group_delay_ns': auth.filter_group_delay_ns,
             # The configured budget being applied — an assertion, not a
