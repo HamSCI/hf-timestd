@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — the archive publishes its registration: the TimeMap in every chunk sidecar (2026-09-04)
+
+Phase 1 of `docs/design/TIMING_PROVENANCE_MODEL.md` §6. Each chunk's
+`timing` block is now the schema v2 `state` record built by
+`core/time_map_producer.py` from the hamsci-dsp `TimeMap` builders: a
+credible T6 anchor registers the payload-anchored chain, no anchor
+registers radiod's pair as the sysclock chain bounded by the host-clock
+verdict, and a lock that failed its credibility guards registers nothing
+and says why. `BinaryArchiveWriter` names the counter epoch
+(`pair-<gps_time_ns>`, a new one when an adopted pair sits more than
+0.5 s from the mapping in force) and mirrors the Offset Judge keys at top
+level for one release. `StreamRecorderV2.wire_time_map` binds the
+provider from `CoreRecorderV2.time_map_context`, which hands over the
+anchor only for the T6 channel; the BPSK PPS channel is provisioned with
+no archive, so in Phase 1 every archived chunk carries a sysclock
+registration. The fusion service publishes the station's `chain` records
+at `/run/hf-timestd/timing_chain.json` from the defaults plus
+`[timing.provenance]` overrides, which `hf-timestd validate` checks. The
+authority history store gains `host_clock_verdict`, `host_clock_since_utc`,
+`host_clock_t2_ms`, `host_clock_lb1421_s`. Archive labels are unchanged.
+Deploy together with hamsci-dsp ≥ 487df88 (`hamsci_dsp.timing_map`).
+
 ### Fixed — the pipeline watchdog measures liveness, not detections (2026-09-04)
 
 Within forty minutes of 41d052a reaching AC0G-B4, `pipeline-watchdog.sh`
