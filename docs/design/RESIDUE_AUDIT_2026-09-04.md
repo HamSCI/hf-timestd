@@ -257,6 +257,31 @@ the label docstring says `origin: sysclock` in the model's word until the
 TimeMap replaces it. `validate` should warn on a config that still carries the
 key, and say which value the station now runs without it.
 
+**Five things the config-dead session learned (2026-09-04).**
+
+1. `timing_validation.py` (225) was not the web-pinned service's helper. The
+   service never imports it; the reachability script shows no importer in
+   `src/` and one unit test. It was also the last consumer of `TimingConfig`,
+   so it went in the first commit with its 26 tests. The §3.1 correction
+   above stands for `timing_validation_service` alone.
+2. `TimingConfig` carried three more keys — `always_run_fusion`,
+   `validation_threshold_ms`, `timing_snapshot_rate_hz` — that only it read.
+   They retire with it; `validate` warns on all five.
+3. The inventory's `provides_timing_calibration` (CONTRACT §18) read the
+   presence of `[timing] authority`. It now reads whether the service profile
+   activates `fusion`, which hosts the authority manager. True on B4 and ND
+   (profile `full`), false under the default `rtp` profile. Sigmond's own
+   fallback derivation in `clients/hftimestd.py` still reads the key; that is
+   the shared repo's change to make.
+4. The periodic "T6 SHM diag" log line for the HPPS feed sat inside the HFPS
+   block's `if`, so it never emitted on any station. It went with the block.
+   Reviving it is a deliberate change, not a deletion, and waits on that
+   decision.
+5. B4 still carries `timestd-hfps-watchdog.{service,timer}` hand-linked and
+   inactive. Enabled, the script would restart the recorder every cooldown
+   for a feed that does not exist — the June flap `deploy.toml` records. The
+   files should come off B4 in a station session.
+
 ---
 
 ## 4 · Live, serving the superseded measurand, gated on measurement
@@ -291,12 +316,13 @@ deletion session does not talk itself into them, and so the labelling pass of
    measurands. Under the model the comparison itself goes; until then the
    tracker stays. The bench rewiring, named OUT.
 6. **The 250 ms `T6_PHYSICAL_CHAIN_DELAY_MAX_NS` guard.** §6 of the inversion
-   design approved its deletion alongside the store. It still runs at four
+   design approved its deletion alongside the store. It ran at four
    sites — `_t6_on_samples` 4977, `_t6_disambiguate_via_t5_lb1421` 4062,
    `_t6_disambiguate_via_external_reference` 4299, all on the matched-filter
    path, and the diff path at 4201. Removing it widens what the coarse cascade
    will accept. That changes acceptance, so it waits; the design document and
-   the code disagree, and one of them should say so.
+   the code disagree, and one of them should say so. (The diff-path site went
+   with the sidecar in step 3; three matched-filter sites remain, unchanged.)
 7. **The T3 branch of `_build_state`.** `d_clock_fused_ms` published as a
    correction to the sample epoch. The fusion service's chrony feed
    (`multi_broadcast_fusion.py:5096`) uses the same number correctly as §7.1's
@@ -357,7 +383,12 @@ uniform-application rule in their own voice: `docs/ARCHITECTURE.md`,
 `docs/METROLOGY.md` (§2.1 and §4.5, which `MEASUREMENT_MODEL.md` §10 already
 marks superseded but the text does not yet say so in place),
 `docs/TIMING-PIPELINE-WIRING.md`, and `docs/design/METROLOGY_PHYSICS_SPLIT.md`.
-Twenty-one non-archive documents mention `D_clock` at all. The docs pass that
+Twenty-one non-archive documents mention `D_clock` at all. Step 3 added a
+second list for the marking pass: documents that still tell an operator to set
+a retired key or name the HFPS feed as live — `README.md` (SHM unit 3),
+`docs/BPSK-PPS-DETECTION-METHODS.md`, `docs/STATION_SETUP_GUIDE.md`,
+`docs/TIMING-PIPELINE-WIRING.md`, `docs/HF-PPS-CHRONY-TUNING.md` and
+`docs/ARCHITECTURE.md` (`use_matched_filter`). The docs pass that
 follows the deletion should mark the superseded sections in place, the way
 `TIMING_AUTHORITY_ARCHITECTURE.md` was marked on 2026-08-25, rather than
 rewrite them.
@@ -374,10 +405,11 @@ Strongest proof first, so an early mistake costs least.
 
 1. ✅ §3.3, dead by data flow — done 2026-09-04, `9346bc5`.
 2. ✅ §3.1, the timing eleven — done 2026-09-04, the commit after it.
-3. §3.4 and §3.5, dead by configuration — retire the keys including
-   `[timing] authority` and `rtp_expected_accuracy_ms`, teach `validate` to
-   warn, delete the paths. This one touches `core_recorder_v2.py` in several places
-   and deserves its own commit per key.
+3. ✅ §3.4 and §3.5, dead by configuration — done 2026-09-04, one commit
+   per key: `c3415dd` (`[timing] authority`, TimingConfig, the FUSION mode),
+   `9eabd84` (`use_matched_filter`, the legacy calibrator), `986ed28`
+   (`enable_diff_sidecar`, the diff detector, HFPS, the store). `validate`
+   warns on every retired key under both section spellings.
 4. §5, the labels — one commit, docstrings and comments only.
 5. §6, the documents — mark in place.
 
@@ -387,4 +419,7 @@ away.
 
 The suite stood at 2,397 passing on 2026-09-03 (the last full run on record; this audit ran no tests). Each step above should leave
 that count lower only by the tests it deliberately removed, and should say by
-how many.
+how many. Step 3 took it 2,680 → 2,665 → 2,666 → 2,617: 26 tests went with
+`timing_validation`, 41 with the diff detector, the store and the diff-side
+guard; 13 arrived with the retired-key warnings and the inventory basis; the
+parametrised lazy-import test loses one case per deleted module.
