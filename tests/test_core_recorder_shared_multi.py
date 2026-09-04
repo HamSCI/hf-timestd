@@ -7,8 +7,7 @@ must:
 
   * build exactly one ka9q-python MultiStream;
   * call ``register_with(multi)`` on every StreamRecorderV2 it created;
-  * register the resulting SSRC with the timing calibrator (when one
-    is configured);
+  * record the resulting SSRC in the radiod LIFETIME keepalive list;
   * NOT call ``multi.start()`` — that's deferred until the T6 channel
     is also added (step 4 of the plan).
 
@@ -35,7 +34,6 @@ def _make_core_recorder(
     *,
     use_shared: bool,
     n_channels: int = 3,
-    with_calibrator: bool = True,
 ):
     """Build a CoreRecorderV2 with the minimum attributes
     ``_initialize_channels`` reads, bypassing the heavy __init__."""
@@ -74,7 +72,6 @@ def _make_core_recorder(
     cr.data_destination = None
     cr.recorders = {}
     cr.control = MagicMock()
-    cr.calibrator = MagicMock() if with_calibrator else None
     cr._use_shared_multistream = use_shared
     cr._multi = None
     # _initialize_channels appends to this when opting channels into
@@ -98,7 +95,7 @@ def _fake_streamrecorder_factory(call_log: list):
 
     Construction is recorded; ``register_with(multi)`` is forwarded
     to the multi mock (via add_channel) and sets ``config.ssrc`` to
-    a deterministic SSRC so the calibrator path is exercised.
+    a deterministic SSRC so the LIFETIME-registration path is exercised.
     """
     def make(config, control, **kwargs):  # noqa: ARG001 — match signature
         instance = MagicMock()
@@ -159,7 +156,7 @@ class TestSharedMultiStreamInit(unittest.TestCase):
         # added first (step 3) and run() starts the multi (step 4).
         multi_instance.start.assert_not_called()
 
-    def test_shared_mode_registers_ssrc_with_calibrator(self):
+    def test_shared_mode_records_each_ssrc_for_lifetime(self):
         cr = _make_core_recorder(use_shared=True, n_channels=2)
         sr_log: list = []
         with patch(
@@ -169,27 +166,10 @@ class TestSharedMultiStreamInit(unittest.TestCase):
             with patch('ka9q.MultiStream', create=True):
                 cr._initialize_channels()
 
-        # Calibrator gets one register_channel_ssrc call per channel.
-        self.assertEqual(cr.calibrator.register_channel_ssrc.call_count, 2)
-        # Verify the (description, ssrc) pairing makes sense.
-        for call_args in cr.calibrator.register_channel_ssrc.call_args_list:
-            description, ssrc = call_args.args
-            self.assertTrue(description.startswith('TEST_CH_'))
+        # One LIFETIME entry per channel, each carrying a real SSRC.
+        self.assertEqual(len(cr._lifetime_entries), 2)
+        for _control, ssrc in cr._lifetime_entries:
             self.assertGreater(ssrc, 0)
-
-    def test_shared_mode_skipped_when_calibrator_absent(self):
-        # No calibrator is a valid configuration; init must not crash.
-        cr = _make_core_recorder(
-            use_shared=True, n_channels=2, with_calibrator=False,
-        )
-        sr_log: list = []
-        with patch(
-            'hf_timestd.core.core_recorder_v2.StreamRecorderV2',
-            side_effect=_fake_streamrecorder_factory(sr_log),
-        ):
-            with patch('ka9q.MultiStream', create=True):
-                ok = cr._initialize_channels()
-        self.assertTrue(ok)
 
     def test_shared_multi_uses_correct_packet_size(self):
         # Hf-timestd's 24 kHz IQ channels carry 200 samples per RTP packet.

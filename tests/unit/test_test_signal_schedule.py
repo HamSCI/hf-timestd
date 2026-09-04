@@ -68,13 +68,6 @@ class TestEveryConsumerUsesTheOneDefinition:
         assert "TEST_SIGNAL_MINUTES" in src
         assert "[8, 44]" not in src
 
-    def test_the_ground_truth_path_agrees(self):
-        import inspect
-        from hf_timestd.core import timing_calibrator as m
-        src = inspect.getsource(m)
-        assert "TEST_SIGNAL_MINUTES" in src
-        assert "[8, 44]" not in src
-
     def test_the_discriminator_feature_agrees(self):
         import inspect
         from hf_timestd.core import probabilistic_discriminator as m

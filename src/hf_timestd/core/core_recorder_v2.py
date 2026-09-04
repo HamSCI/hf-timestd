@@ -54,7 +54,6 @@ from ka9q import discover_channels, RadiodControl, ChannelInfo, StreamQuality, E
 from ..quota_manager import QuotaManager
 from .stream_recorder_v2 import StreamRecorderV2, StreamRecorderConfig
 from .quality_snapshot import QualitySnapshotWriter
-from .timing_calibrator import TimingCalibrator
 # Module scope: the coast bound is a class attribute, evaluated
 # at import time, and must stay tied to the precision field's
 # saturation point rather than drifting from it.
@@ -1035,20 +1034,6 @@ class CoreRecorderV2:
 
         self.ntp_status_lock = threading.Lock()
 
-        # Timing Calibrator for SSRC registration
-        try:
-            # Shared state file with Analytics Service
-            state_file = self.output_dir / 'state' / 'timing_calibration.json'
-            self.calibrator = TimingCalibrator(
-                data_root=self.output_dir,
-                sample_rate=20000, # Default, will be updated if needed
-                state_file=state_file
-            )
-            logger.info(f"Initialized TimingCalibrator for SSRC tracking: {state_file}")
-        except Exception as e:
-            logger.error(f"Failed to initialize TimingCalibrator: {e}")
-            self.calibrator = None
-        
         # NOTE (2026-02-03): Bootstrap functionality migrated into MetrologyEngine.
         # The recorder now always archives immediately. MetrologyEngine's fusion_state
         # handles timing lock internally using wider search windows until locked.
@@ -1080,16 +1065,8 @@ class CoreRecorderV2:
         channels identically."""
         if recorder.config.ssrc:
             self._lifetime_entries.append((self.control, recorder.config.ssrc))
-        if self.calibrator:
-            try:
-                if recorder.config.ssrc:
-                    self.calibrator.register_channel_ssrc(
-                        recorder.config.description, recorder.config.ssrc)
-                    logger.info(f"Registered SSRC {recorder.config.ssrc:x} for {recorder.config.description}")
-                else:
-                    logger.warning(f"Recorder {recorder.config.description} started but has no SSRC")
-            except Exception as e:
-                logger.warning(f"Failed to register SSRC for {key}: {e}")
+        else:
+            logger.warning(f"Recorder {recorder.config.description} started but has no SSRC")
 
     def _start_deferred_recorder_retry(self, deferred, max_attempts=30, interval_s=20.0):
         """Retry channels that did not start on the first pass (radiod slow to
@@ -1615,23 +1592,6 @@ class CoreRecorderV2:
                             self._lifetime_entries.append(
                                 (self._multi, recorder.config.ssrc)
                             )
-                        # Calibrator SSRC registration happens here in
-                        # shared mode (legacy mode does it in run() after
-                        # recorder.start()).  ssrc is populated by
-                        # register_with -> ensure_channel.
-                        if self.calibrator and recorder.config.ssrc:
-                            try:
-                                self.calibrator.register_channel_ssrc(
-                                    description, recorder.config.ssrc
-                                )
-                                logger.info(
-                                    f"Registered SSRC {recorder.config.ssrc:x} "
-                                    f"with calibrator for {description}"
-                                )
-                            except Exception as e:
-                                logger.warning(
-                                    f"Failed to register SSRC for {description}: {e}"
-                                )
                     except Exception as e:
                         logger.error(
                             f"Failed to register {description} on shared "
