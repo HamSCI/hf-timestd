@@ -279,7 +279,7 @@ appears as a plausible value.
 
 | term | correction | type | method | disposition |
 |---|---|---|---|---|
-| UTC(USNO) via GPS to TS-1 modulator | ~10 µs | B | WB6CXC documentation | declared |
+| UTC(USNO) via GPS to TS-1 modulator | ≤ 200 ns | B | designer statement, P. Elliott WB6CXC, 2026-08-30, standard injector mode | declared (corrected 2026-09-04: an earlier row read "~10 µs, WB6CXC documentation" — that figure came from our own template comment, and the software still applies it as `delay_budget_ns`; §11.8) |
 | antenna terminals to injection point | — | — | — | `not_declared` (§11) |
 | radiod channel filter group delay | folded into 16.618 ms | B | fitted against T4, n = 90 over 15 min, 2026-08-15 | **asserted, not measured** |
 | edge estimation | 0.012 µs offline | A | fold-block scatter, offline harness | not computed at runtime (§6.3) |
@@ -508,3 +508,11 @@ Naming these keeps them from re-emerging as surprises.
    data comparable with ours.
 7. **Whether T6 should feed chrony at all.** §7.1 makes it a question about host
    clock convenience. Deliberately left open.
+8. **The software applies a 10 µs modulator correction that no measurement
+   supports.** `delay_budget_ns` defaults to 10,000 in `core_recorder_v2.py`
+   and every T6 anchor carries it; the designer puts the modulator under
+   200 ns (§6.1, corrected 2026-09-04). The station over-corrects by roughly
+   9.8 µs, which exceeds every evaluated term in the payload-anchored budget
+   combined. Changing a live instrument's published timestamps is an
+   operator decision; `TIMING_PROVENANCE_MODEL.md` §1 records the defect and
+   proposes the change.

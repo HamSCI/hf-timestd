@@ -1,10 +1,15 @@
 # Timing Provenance Metadata Model — Design
 
-**Date:** 2026-08-29
-**Status:** Approved design, pre-implementation
+**Date:** 2026-08-29; amended 2026-09-04
+**Status:** Approved design, pre-implementation. The 2026-09-04 amendment
+brings the record into line with `MEASUREMENT_MODEL.md`, which now supplies
+the model this document records (§10 below maps the two).
 **Approvers:** Michael (mjh)
 **Scope:** GRAPE (hf-timestd) and magnetometer (mag-recorder) products; schema
 lands in `hamsci_dsp.timing` as v2.
+**Derives from:** `docs/design/MEASUREMENT_MODEL.md` (2026-09-04) — one
+measurand, one ruler, one registration. Where this document and that one
+appear to differ, that one governs and this one carries the defect.
 **Builds on:** `docs/METROLOGY.md` §13.2 (the fusion error budget),
 `hamsci_dsp.timing` schema v1 (`AuthoritySnapshot`), and
 `mag-recorder/src/mag_recorder/core/timing_sidecar.py` (the write policy, to be
@@ -95,6 +100,22 @@ filter the signal passes on the way. The second covers the receiver front end.
 Both remain fixed properties of a given installation, so a station can measure
 them. None has.
 
+**The record does not say what happened to it (added 2026-09-04).** On
+2026-09-04 AC0G-B4's host clock ran 11.6 s slow of UTC from about 02:00Z to
+16:03Z behind a correct T6 anchor. chrony followed FUSE under `trust`, and
+FUSE's product follows the host clock, so `chronyc tracking` reported the clock
+within 0.1 ms all day. Every WSPR and FT8 record written in that window carries
+labels seconds off UTC, and no record says so. Three measurements on the host
+saw the fault — the authority manager's own `T6<->T2:11679ms` pair check, the
+LB-1421 probe's host-versus-GPS gap, and gpsdo-monitor's PPS period — and each
+stopped short of a statement. The authority manager now publishes a
+`host_clock` verdict from those witnesses (`docs/design/HOST_CLOCK_INTEGRITY.md`).
+The record has to carry it, and where the label descends from the host clock,
+the witnessed disagreement has to bound the published uncertainty (§3.1.1).
+An inventory flag cannot express "this record's registration disagreed with
+its witness by 11.7 s when it was written." A per-record statement can, and
+that is Phase 1's job.
+
 ⛔ **The software still applies 10 µs.** `delay_budget_ns` defaults to 10,000
 in `core_recorder_v2.py`, and B4 does not override it, so every T6 anchor
 carries that correction. Against WB6CXC's figure the station over-corrects by
@@ -119,6 +140,30 @@ metrological defect. The earlier draft made the instrument look two orders of
 magnitude worse than it is by importing a term its own measurand excludes.
 
 ## 2. The model: a chain, not a tier
+
+**The measurand, from `MEASUREMENT_MODEL.md` §1 (amended 2026-09-04).** For
+every data product this station writes, the measurand reads: the UTC instant at
+which sample `n` was taken at the station's reference plane.
+
+```
+t(n) = t₀ + (n − n₀) / f_s + Σ δᵢ
+```
+
+`f_s` names the ruler (axis A, `MEASUREMENT_MODEL.md` §2). `(t₀, n₀)` names the
+registration (axis T, §3 there). `Σ δᵢ` names the corrections between the
+reference plane and the point the timestamp attaches to, and the station folds
+them into `t₀` when it forms the registration, so a consumer evaluating the
+formula adds nothing. The tiers rank registrations: T6 through T0 name
+competing estimators of one quantity, `t₀`, differing in method and in
+`u(t₀)`. The host system clock plays no part in `t(n)`; `MEASUREMENT_MODEL.md`
+§7.1 recovers `D_clock` as a derived quantity.
+
+A **chain**, in this document's vocabulary, states the plane of that formula
+and the budget of its `δᵢ` — `MEASUREMENT_MODEL.md` §10 maps the two words
+this way. This document keeps two planes where the model names one, because the
+antenna-to-injector run lives between them and the model's §11.1 keeps that run
+in the budget as undeclared. Naming both planes gives the term somewhere to
+stand.
 
 A **chain** is an ordered list of links from a realisation of UTC to the
 timestamp written on a sample. Each link names what it is, what mechanism
@@ -216,23 +261,103 @@ Two block types.
 
 ### 3.1 `state` — every interval
 
+**Amended 2026-09-04.** The `state` block publishes the registration in force,
+not only an uncertainty about an unstated one. Its shape is the runtime carrier
+of `MEASUREMENT_MODEL.md` §8, the `TimeMap`, so that every consumer's arithmetic
+and every recorded block descend from one instance and cannot disagree.
+
 ```json
-{"t":"2026-08-29T10:42:00Z", "type":"state", "chain":"payload-anchored@1",
- "origin":"native_anchor", "u_epoch_ns":1500000, "k":2, "p":0.95,
+{"t":"2026-09-04T16:10:00Z", "type":"state",
+ "chain":"payload-anchored@1", "origin":"native_anchor",
+ "counter_space":"AC0G-B4-status.local/T6_96000", "counter_epoch_id":"r-2026-09-04T16:03:35Z",
+ "n0":2150319213, "t0_utc_ns":1788537251999997458, "f_s_hz":96000,
+ "u_epoch_ns":1500000, "k":2, "p":0.95, "measured_at":"2026-09-04T16:04:52Z",
  "stability_ns":120, "tau_s":60,
- "how":"seeded", "cross_checked":true,
- "cn0_db_hz":55.1, "rf_gain_db":7.5}
+ "a_level":"A1", "a_level_provenance":"observed",
+ "measurand_plane":"antenna_terminals", "calibration_plane":"ts1_injection_point",
+ "engineering":{"judge_tier":"T6", "how":"seeded", "cross_checked":true,
+   "lock_credible":true,
+   "host_clock":{"verdict":"ok","witnesses":{"T2":11.2,"lb1421":0.82}},
+   "radiod_gps_time_ns":1788537251988000000, "radiod_rtp_timesnap":2150318060,
+   "cn0_db_hz":55.1, "rf_gain_db":7.5}}
 ```
 
-- `origin` — `native_anchor` | `sysclock` | `null`. Which chain was actually in
-  force. A switch is a visible event, never a silent change of meaning.
-- `u_epoch_ns` — combined standard uncertainty of the epoch, **computed** where
-  possible (§4), with `k` and `p` always stated. Never a bare sigma.
-- `stability_ns` / `tau_s` — see §3.3.
-- `how` / `cross_checked` — acquisition provenance: which search mode produced
-  the estimate, and whether an independent witness verified it.
-- `cn0_db_hz` / `rf_gain_db` — the receiver operating point, which is what makes
-  `u_epoch_ns` computable rather than asserted.
+- `counter_space` / `counter_epoch_id` — whose numbering `n0` belongs to, and
+  the identifier that changes when radiod re-bases the counter
+  (`MEASUREMENT_MODEL.md` §3). **No consumer extrapolates across a change in
+  `counter_epoch_id`.** A radiod restart renumbers the samples underneath a
+  registration; a consumer that carries the old one errs by seconds.
+- `n0`, `t0_utc_ns`, `f_s_hz` — the registration and the ruler. A consumer
+  evaluates `t(n) = t0_utc_ns + (n − n0) / f_s_hz` with Karn's signed-32
+  technique on the difference. Nothing else is needed to label a sample.
+- `origin` — `native_anchor` | `sysclock` | `null`. Which registration method
+  produced `t0`. A switch is a visible event, never a silent change of meaning.
+- `u_epoch_ns`, `k`, `p`, `measured_at` — `u(t₀)` as of `measured_at`, with
+  coverage always stated. It ages by the composition law of
+  `MEASUREMENT_MODEL.md` §4, `u(t₀, t) = sqrt(u(t₀, t_reg)² + ((t − t_reg) ·
+  u(f_s)/f_s)²)`, and a reader who needs the value at another instant applies
+  that law to these fields. Never a bare sigma.
+- `stability_ns` / `tau_s` — axis A, see §3.3.
+- `a_level` / `a_level_provenance` — the ruler's state and how the station knows
+  it: `observed`, `attested`, or `assumed`, never silently assumed
+  (`MEASUREMENT_MODEL.md` §2).
+- `measurand_plane` / `calibration_plane` — §3.2.
+- `engineering` — the namespace of §3.4. The tier lives here as shorthand. The
+  radiod pair lives here as provenance and appears in no arithmetic.
+
+**A registration may not claim a precision its lock does not support**
+(`MEASUREMENT_MODEL.md` §6.4). The T6 estimator's one real enemy is the
+sidelobe: on 2026-09-04 AC0G-B4 accepted 118.482 ms against a calibrated
+16.618 ms on `ok=22 noise=94`, and later that day accepted 78, 98, 118 and 158 ms
+in turn, each 20.000 ms from the last, each "as-is" because the LB-1421
+disambiguation path had shut. A wrong edge announces itself as a step, not a
+slope change. So `engineering.lock_credible` records whether the lock passed the
+credibility guards (`t6_stale_lock.py`, the learned reference gate, the LB-1421
+pairing), and **a `state` block whose lock is not credible may not publish the
+fine-stage `u_epoch_ns`**: it publishes the uncertainty of the best registration
+that was verified, or `origin: null` with the reason. A microsecond claim on a
+wrongly identified edge harms a consumer more than an honest millisecond one,
+because a consumer can defend against a wide uncertainty and cannot defend
+against a confident error.
+
+**The host clock in the record.** Under `origin: native_anchor` the host clock
+sits outside the measurand, and its verdict rides in `engineering.host_clock`
+so that a reader can see what the station's other timebase was doing. Under
+`origin: sysclock` the label descends from the host clock, and the verdict's
+witnesses bound `u_epoch_ns` — §3.1.1.
+
+### 3.1.1 The `sysclock` registration — every rung fills the shape
+
+`MEASUREMENT_MODEL.md` §8: a station with no TS-1, no GPS and no local peer
+still publishes a map — the one it has, built from radiod's
+`(GPS_TIME, RTP_TIMESNAP)` pair and naming `origin: sysclock` — wearing the
+uncertainty that pair was measured to carry. This section defines that
+registration so that Phase 1 serves every station, not only the one with an
+injector.
+
+- `t0_utc_ns` and `n0` come from the pair at the interval's start; `f_s_hz`
+  from the channel's nominal rate under the declared A-level.
+- `u_epoch_ns` takes the larger of two figures, and states which one governed:
+  1. the pair's measured non-atomicity. AC0G-B4 measured it on 2026-08-16 over
+     900 s: median 2.31 ms, p99 8.03 ms, maximum 47.70 ms on the 96 kHz channel,
+     with two 12 kHz channels reaching 57–63 ms. Until the running-minimum
+     transfer estimator of `MEASUREMENT_MODEL.md` §6.2 exists, the stand-in is
+     the measured p99 for the channel class, Type A, `measured_on` 2026-08-16,
+     disposition `historical`;
+  2. the host-clock verdict's largest witnessed disagreement. When the authority
+     manager's `host_clock` block reads `suspect` or `fault`, the label's clock
+     has been measured that far from an independent reference, and
+     `MEASUREMENT_MODEL.md` §9 invariant 5 forbids publishing anything smaller.
+     A record written on AC0G-B4 at 15:00Z on 2026-09-04 would carry
+     `u_epoch_ns` of 11.64 s, `k` 1, and the reason `host_clock: fault (T2)`.
+- `chain` reads `sysclock@1`, whose budget §3.2 gives.
+- A station that can register nothing publishes `origin: null` with a reason
+  (§7). Absence stays visible as absence.
+
+Nothing about such a station's labels changes. What changes: the station now
+states what it did, so a consumer needing microseconds refuses the data and a
+WSPR decode needing 20 ms proceeds without complaint. **Consumers read
+`u_epoch_ns` and `stability_ns`, never a tier.**
 
 ### 3.2 `chain` — on change, plus heartbeat
 
@@ -244,8 +369,8 @@ Two block types.
  "traceability":{"claim":"UTC(USNO) via GPS", "qualified":true,
    "qualification":"antenna-to-injector path not declared; receiver front end not characterised"},
  "budget":[
-  {"term":"filter_group_delay","correction_ns":16618000,"u_ns":1500000,"type":"B",
-   "method":"asserted from config; disagrees with T4-referenced median 15.153 ms by 1.5 ms"},
+  {"term":"filter_group_delay","disposition":"excluded_by_convention","type":"B",
+   "method":"labeling_convention = content: the label denotes the antenna instant and the channel filter's group delay is pipeline latency outside the measurand (§1, §4.2). Under legacy it re-enters as the asserted 16.618 ms of chain_delay_calib_s, fitted against T4 over 15 min on 2026-08-15 and never measured (MEASUREMENT_MODEL §6.1, §11.2)"},
   {"term":"ts1_modulator_delay","correction_ns":0,"u_ns":200,"type":"B",
    "method":"designer statement, P. Elliott WB6CXC, 2026-08-30; standard injector mode"},
   {"term":"antenna_to_injector","disposition":"not_declared","type":"B",
@@ -261,15 +386,18 @@ Two block types.
    "method":"63 anchors over 4.5 h ACROSS RE-LOCKS; the folded build of 2026-08-29 removed the re-locks"},
   {"term":"edge_estimation","correction_ns":0,"u_ns":5000,"type":"B",
    "method":"conservative bound; becomes Type A computed from cn0_db_hz once the fine-stage sweep of §4.3 has run"}],
- "u_combined_ns":1500008, "k":2}
+ "u_combined_ns":5352, "k":2}
 ```
 
 `u_combined_ns` is the RSS of the `u_ns` terms — the uncertainty **remaining
 after** the `correction_ns` values have been applied. It is NOT the size of any
-correction. In the example the 16.618 ms correction dominates the corrections
-while contributing 1.5 ms of residual uncertainty, and those are different
-numbers in different fields on purpose: an uncorrected 16.6 ms bias reported as
-a 16.6 ms "uncertainty" would be precisely the error this section prevents.
+correction. In the example the three terms that carry a `u_ns` — 200 ns,
+1.9 µs and 5 µs — combine to 5.35 µs, while the excluded group-delay term and
+the two undeclared terms contribute nothing to that figure and say so by
+disposition. Correction and uncertainty stay in different fields on purpose: an
+unapplied 16.6 ms bias reported as a 16.6 ms "uncertainty" would be precisely
+the error this section prevents, and an earlier revision of this very example
+made it.
 
 ⚡ **A chain carries two planes, not one.** `measurand_plane` names where the
 timestamp claims to apply — the antenna terminals. `calibration_plane` names
@@ -306,6 +434,35 @@ unapplied shows the correction it *should* carry and is flagged. That split is
 what distinguishes a GUM budget from a list of numbers — and what would have
 caught the §1 misdiagnosis on its own, since a term whose `correction_ns` is
 excluded by the measurand cannot be silently reported as an uncertainty.
+
+**The `sysclock@1` chain (added 2026-09-04).** The registration of §3.1.1 has
+its own chain and its own budget. Short, and honest about it.
+
+```json
+{"type":"chain", "id":"sysclock@1",
+ "measurand":"UTC instant at which sample n was taken, at radiod's advertised epoch",
+ "measurand_plane":"radiod_rtp_timesnap",
+ "calibration_plane":"host_system_clock",
+ "traceability":{"claim":"UTC via the host clock's chrony reference", "qualified":true,
+   "qualification":"the registration descends from the host system clock; its reference and discipline are stated per interval in engineering.host_clock"},
+ "budget":[
+  {"term":"pair_non_atomicity","correction_ns":0,"u_ns":8030000,"type":"A",
+   "measured_on":{"build":"pre-anchor-inversion","date":"2026-08-16"},"disposition":"historical",
+   "method":"p99 of GPS_TIME minus RTP_TIMESNAP-implied epoch, 900 s, T6 channel; the running-minimum estimator of MEASUREMENT_MODEL §6.2 replaces this"},
+  {"term":"host_clock_discipline","correction_ns":0,"u_ns":null,"type":"A",
+   "disposition":"per_interval",
+   "method":"the largest witnessed disagreement in the authority manager's host_clock block; enters u_epoch_ns directly, per interval, never as a constant"},
+  {"term":"channel_filter_group_delay","disposition":"excluded_by_convention",
+   "method":"under labeling_convention = content the label denotes the antenna instant; the processing interval is pipeline latency, outside the measurand"}],
+ "u_combined_ns":null, "k":1,
+ "note":"u_combined_ns is per interval here because the discipline term is; read state.u_epoch_ns"}
+```
+
+Two dispositions join the three of §3.2: `per_interval` for a term whose value
+lives in every `state` block rather than in the chain, and
+`excluded_by_convention` for a term the measurand's declared plane keeps out
+(`CONTENT_TIME_LABELING_CONVENTION.md`). A reader can tell both from a zero and
+from silence.
 
 ### 3.2.1 Inherited chains — when the payload carries the authority
 
@@ -389,6 +546,15 @@ Doppler science: a 16 ms constant epoch offset barely affects a TID measurement,
 while 100 ns of jitter inside a file does. The metrologist reads the first; the
 physicist usually reads the second; neither is served by an average of them.
 
+`MEASUREMENT_MODEL.md` §5 names what these two are: **the two axes seen from
+the data side.** `u_epoch_ns` is axis T, the registration's uncertainty,
+decayed by axis A under the composition law of §4 there. `stability_ns` over
+`tau_s` is axis A, the ruler's wander integrated over a window. Single-station
+Doppler differentiates phase against the ruler and so reads A; cross-station
+work compares epochs and so reads T. The strongest claim the sidecar makes on
+physics' behalf follows in one line: a chain containing no ionospheric term
+cannot manufacture an ionospheric feature.
+
 ### 3.4 Two namespaces, one declared normative subset
 
 Everything we can profitably act on is captured. But what a metrologist or a
@@ -408,13 +574,23 @@ keeping is lost: "this uncertainty was large *because* the front-end gain was at
 
 | Normative (the formal model) | Engineering (under `engineering:`) |
 |---|---|
-| `measurand`, `measurand_plane`, `calibration_plane` | `fine_search_mode`, `cross_checked` |
-| `inherited_from`, `custody_boundary` | `radiod_gps_time_ns`, `radiod_rtp_timesnap` |
-| `chain`, `origin` | `rf_gain_db`, `cn0_db_hz`, `if_power_dbfs` |
-| per-term `correction_ns` / `u_ns` / `type` / `method` / `disposition` / `measured_on` | `fold_blocks_discarded`, `fold_seconds` |
-| `u_epoch_ns`, `k`, `p` | `judge_age_s`, `segment_id`, `rate_ppm` |
-| `stability_ns`, `tau_s` | `judge_tier` (the demoted shorthand of §2) |
-| `traceability.claim` / `.qualified` / `.qualification` | `judge_age_s` |
+| `measurand`, `measurand_plane`, `calibration_plane` | `fine_search_mode`, `how`, `cross_checked`, `lock_credible` |
+| `counter_space`, `counter_epoch_id`, `n0`, `t0_utc_ns`, `f_s_hz` (added 2026-09-04) | `radiod_gps_time_ns`, `radiod_rtp_timesnap` |
+| `inherited_from`, `custody_boundary` | `rf_gain_db`, `cn0_db_hz`, `if_power_dbfs` |
+| `chain`, `origin` | `fold_blocks_discarded`, `fold_seconds` |
+| per-term `correction_ns` / `u_ns` / `type` / `method` / `disposition` / `measured_on` | `judge_age_s`, `segment_id`, `rate_ppm` |
+| `u_epoch_ns`, `k`, `p`, `measured_at` | `judge_tier` (the demoted shorthand of §2) |
+| `stability_ns`, `tau_s` | `host_clock` (verdict and witnesses; under `origin: sysclock` its largest disagreement is already inside `u_epoch_ns`) |
+| `a_level`, `a_level_provenance` | |
+| `traceability.claim` / `.qualified` / `.qualification` | |
+
+The registration fields sit in the normative subset by the membership rule
+itself: a metrologist labelling a sample needs `n0`, `t0_utc_ns` and `f_s_hz`
+and nothing else, and a physicist correlating two stations needs
+`counter_epoch_id` to know when a numbering ended. The `host_clock` verdict sits
+in engineering because, once its number has bounded `u_epoch_ns`, the
+uncertainty is the decision-changing field and the verdict is the mechanism
+behind it.
 
 ⚡ Note `cn0_db_hz` is **engineering**, even though the normative `u_epoch_ns` is
 computed from it. That is deliberate and worth being explicit about: the
@@ -624,10 +800,33 @@ read the budget, and rightly.
 
 ## 6. Staging, and what licenses the flip
 
-**Phase 1 — publish the correction.** Archive writer untouched. The sidecar
-records the chain in force and, per interval, the offset between the host-clock
-timestamps actually written and the payload anchor's statement, with its
-uncertainty. Zero risk to the data path; applies retroactively to existing data.
+**Phase 1 — publish the map (reworded 2026-09-04; was "publish the
+correction").** Archive writer untouched. Per interval, the record carries the
+`state` block of §3.1 — the registration in force, its ruler, its uncertainty
+with coverage, its origin — and the chain sidecar carries the chain and budget
+of §3.2. The correction the earlier wording named follows by subtraction:
+`t(n)` from the map, minus the label the archive writer wrote. Every station
+publishes a map, the one it has (§3.1.1), so Phase 1 serves the station with
+nothing but radiod's pair as fully as the one with an injector. Zero risk to
+the data path; applies retroactively to existing data wherever the authority
+history store holds the inputs.
+
+Phase 1 delivers, in order of dependency:
+1. `hamsci_dsp.timing` schema v2: the `TimeMap` value object of
+   `MEASUREMENT_MODEL.md` §8, the `state` and `chain` records, the budget
+   arithmetic, and the `sysclock` registration of §3.1.1. Pure, tested,
+   no I/O.
+2. The producer: hf-timestd fills a `TimeMap` per interval from the anchor
+   authority, the authority manager's snapshot (including `host_clock`), and
+   the recorder's channel facts, and extends the per-chunk `timing` block
+   with it. The pair and the tier move under `engineering`.
+3. The chain sidecar: `hamsci_physics.grape.packager` writes
+   `timing-chain-YYYY-MM-DD.jsonl` into the OBS directory under
+   mag-recorder's change-plus-heartbeat policy and bundles it.
+4. The consumer side: `timing_from_sidecar()` reads `u_epoch_ns` and
+   `stability_ns`, never `judge_tier`, and refuses to extrapolate across a
+   `counter_epoch_id` change.
+5. The overclaim gate of §8, run against the authority history store.
 
 **Phase 2 — measure what is currently asserted.**
 - Filter group delay by **two independent routes**: computed from radiod's
@@ -663,10 +862,15 @@ yet been evaluated.
 Best-effort throughout, copying mag-recorder verbatim: a sidecar failure must
 never take down a recorder, so nothing raises.
 
-⛔ **Absence stays visible as absence.** If no chain can be qualified, emit a
-`state` block with `origin: null`, `u_epoch_ns: null` and a reason. Never a
-silently omitted record; never a narrower uncertainty than the evidence
-supports. If a term is unknown, the chain is unqualified.
+⛔ **Absence stays visible as absence** (`MEASUREMENT_MODEL.md` §9, invariant
+3). If no registration can be formed — no anchor, no usable pair — emit a
+`state` block with `origin: null`, `u_epoch_ns: null` and a reason. A station
+that holds only radiod's pair is not this case: it publishes `origin: sysclock`
+with the pair's measured uncertainty (§3.1.1). Never a silently omitted record;
+never a narrower uncertainty than the evidence supports. If a term is unknown,
+the chain is unqualified. If the host-clock verdict reads `fault` under
+`origin: sysclock`, the record says so in its uncertainty, not in a flag a
+reader may skip.
 
 ## 8. Testing and verification
 
@@ -687,3 +891,34 @@ SHM push are real open defects but belong to the T6 tier's own repair, not to
 this model. Whether T6 should feed chrony at all is deliberately left open: once
 Phase 3 lands, the science no longer needs it to, and feeding it re-closes the
 independence loop described in §1.
+
+## 10. Relationship to `MEASUREMENT_MODEL.md` (added 2026-09-04)
+
+That document states the model once; this one records what the data must say
+about it. The mapping runs one to one, and where the two differ the model
+governs.
+
+| here | there | note |
+|---|---|---|
+| §0 fixed invariant | §9 invariants 1–5 | the same rule, stated for the system |
+| §2 chain = plane + budget | §1 measurand, §6 budget | this document keeps two planes so the undeclared antenna-to-injector term of §11.1 has a place |
+| §3.1 `state` | §8 `TimeMap` | one shape, one instance, at runtime and in the record |
+| §3.1 `counter_space`, `counter_epoch_id` | §3 registration transfer, counter re-basing | no extrapolation across a re-base |
+| §3.1 `lock_credible` | §6.4 | a registration may not claim a precision its lock does not support |
+| §3.1.1 `sysclock` registration | §8 "every rung fills this shape" | the pair's measured uncertainty; the host-clock verdict bounds it |
+| §3.3 two uncertainties | §5 two axes, §4 composition law | `u_epoch_ns` is T decayed by A; `stability_ns` is A |
+| §3.4 tier as engineering | §3 "a tier is shorthand for the uncertainty of a registration" | |
+| §4.2 budget | §6.1 budget | see the correction below |
+| §6 Phase 1 "publish the map" | §7.2 the label, §7.3 the record | |
+| §7 absence | §9 invariant 3 | |
+
+**One correction carried the other way.** `MEASUREMENT_MODEL.md` §6.1 listed
+the first budget term as "UTC(USNO) via GPS to TS-1 modulator, ~10 µs, Type B,
+WB6CXC documentation, declared." That row inherited the 10 µs from our own
+template comment, which §1 above traces and which no source outside the project
+ever supported. The designer's statement of 2026-08-30 puts the modulator delay
+under 200 ns in standard injector mode, and §4.2 above carries it so. The row in
+the model now reads that way, and its §11 records the 10 µs `delay_budget_ns`
+default as an open defect rather than a declared term. The TS-1 provides the
+best recovery of UTC this station has; its budget must not carry a number that
+makes it look fifty times worse than its designer measured.
