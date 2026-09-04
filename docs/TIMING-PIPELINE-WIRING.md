@@ -24,6 +24,13 @@ This is the runtime sibling of `METROLOGY.md §4.5` (which defines the
 T-level taxonomy and the `authority.json` schema) and presupposes
 familiarity with that section.
 
+> **Marked in place (2026-09-04).**  Where this document says `D_clock`,
+> read the host clock's derived offset from the station's registration
+> ([`design/MEASUREMENT_MODEL.md`](design/MEASUREMENT_MODEL.md) §7.1),
+> not the measurand.  The consumer tables of §6.3 and §10.2 record the
+> 2026-05 wiring; the RTP/Fusion mode split they assume retired with the
+> `[timing] authority` key (RESIDUE_AUDIT_2026-09-04 §3.5).
+
 ---
 
 ## 1. The principle

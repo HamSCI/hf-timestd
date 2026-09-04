@@ -10,9 +10,8 @@ updated when the regime changes again.
 
 > **Scope of this document**: this is a tuning guide for one specific
 > consumer of the hf-timestd annotation stream — the chrony SHM
-> refclock feed for the T6 BPSK-PPS tier (and the parallel HFPS feed
-> via the diff calibrator).  It is NOT the architectural description
-> of the system.
+> refclock feed for the T6 BPSK-PPS tier.  It is NOT the architectural
+> description of the system.
 >
 > For the architectural framing — RTP sample counter as the substrate,
 > Tn annotations on top, chrony as one downstream consumer of those
@@ -30,10 +29,9 @@ updated when the regime changes again.
 > **HFPS / Method-5 feed:** the parameters documented here are the
 > HPPS / Method-2 (matched-filter) parameters on SHM 2.  The parallel
 > HFPS feed (Method 5, per-sample magnitude derivative, on SHM 3,
-> gated by `diff_to_shm_unit`) is **disabled by default** — it is not in
-> the shipped chrony config, which consumes only FUSE and HPPS.  When
-> enabled it would run alongside HPPS with chrony selecting between the
-> two; its algorithm, evidence, and tuning are
+> gated by `diff_to_shm_unit`) never shipped enabled and left the code
+> on 2026-09-04 (RESIDUE_AUDIT_2026-09-04 §3.4); its algorithm,
+> evidence, and tuning are
 > documented in
 > [BPSK-PPS-DETECTION-METHODS.md](BPSK-PPS-DETECTION-METHODS.md) (§6–§9),
 > not here.

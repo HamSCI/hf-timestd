@@ -4,6 +4,15 @@
 **Status:** DESIGN — supersedes mixed-purpose sections of ARCHITECTURE.md  
 **Author:** Michael James Hauan (AC0G)
 
+> **Marked in place (2026-09-04).**  Two things below have moved on.
+> `D_clock = T_system − T_UTC` names a derived quantity — the host clock's
+> offset from the station's registration — not the measurand
+> ([`MEASUREMENT_MODEL.md`](MEASUREMENT_MODEL.md) §7.1).  And the
+> "RTP mode / Fusion mode" split retired with the `[timing] authority`
+> key (RESIDUE_AUDIT_2026-09-04 §3.4–3.5): the GNSS-TEC term now runs as
+> a cross-check only, on every station.  The two-pipeline argument itself
+> stands.
+
 ---
 
 ## The Core Insight

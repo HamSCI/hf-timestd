@@ -509,8 +509,8 @@ Phase 2: Metrology Service (polls for new files)
 Phase 3: Fusion Service
      ↓ (Dual Kalman Filter + Physics Model)
 ├─→ Chrony SHM (unit 1 = FUSE / T3 fusion; unit 2 = HPPS / T6 BPSK PPS;
-│               unit 3 = HFPS / diff detector — gated on diff_to_shm_unit,
-│               disabled by default; unit 0 = TSL1 legacy, disabled)
+│               unit 3 HFPS / diff detector removed 2026-09-04;
+│               unit 0 = TSL1 legacy, disabled)
 └─→ table: fusion_timing           (L3)
 ```
 
@@ -576,6 +576,12 @@ We don't just "guess" the path; we model it using a tiered hierarchy of physics 
 - Fallback of last resort.
 
 ### The D_clock Equation
+
+> **Superseded (2026-09-04) by [`design/MEASUREMENT_MODEL.md`](design/MEASUREMENT_MODEL.md).**
+> The measurand is the UTC label of each sample against the GPSDO ruler;
+> `D_clock` names the host clock's derived offset from that registration
+> (model §7.1).  The equation below still describes the estimator's
+> arithmetic.
 
 ```
 T_emit = T_arrival - (τ_geo + τ_iono + τ_mode)

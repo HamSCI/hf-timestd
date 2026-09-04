@@ -211,7 +211,7 @@ If you have a WB6CXC BPSK PPS injector — a small GPS-disciplined transmitter t
 
 **Requirements:**
 - WB6CXC PPS injector hardware (GPS+PPS disciplined)
-- GPS+PPS on radiod (L4 or L5 timing authority)
+- GPS+PPS on radiod (the legacy "L4 / L5" shorthand; the `[timing] authority` key that once recorded this retired 2026-09-04 — the station registers radiod's pair and the Offset Judge corrects it)
 
 ### Configuration
 

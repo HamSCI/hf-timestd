@@ -411,8 +411,15 @@ Strongest proof first, so an early mistake costs least.
    `9eabd84` (`use_matched_filter`, the legacy calibrator), `986ed28`
    (`enable_diff_sidecar`, the diff detector, HFPS, the store). `validate`
    warns on every retired key under both section spellings.
-4. §5, the labels — one commit, docstrings and comments only.
-5. §6, the documents — mark in place.
+4. ✅ §5, the labels — done 2026-09-04, `775b5ed`, docstrings and comments
+   only.  t6_naming_continuity and wwvb_fusion hold no branch on the
+   convention key and needed nothing; the TimingCalibrator remnant did not
+   survive step 1.
+5. ✅ §6, the documents — done 2026-09-04, the commit after `775b5ed`: the
+   four `D_clock` documents and the six retired-key / HFPS documents marked
+   in place, the way TIMING_AUTHORITY_ARCHITECTURE.md was marked on
+   2026-08-25.  The audit is complete; what remains is §4, gated on
+   measurement, and the deprecated keys, gated on a bless.
 
 Leave §4 alone. Every entry there waits on a measurement, and the model's own
 §9.4 forbids swapping one asserted number for another to make a symptom go

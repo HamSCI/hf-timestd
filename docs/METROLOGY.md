@@ -44,6 +44,14 @@ This system treats timing as a **measurement problem** with proper uncertainty q
 
 ### 2.1 What We Actually Measure
 
+> **Superseded (2026-09-04) by [`design/MEASUREMENT_MODEL.md`](design/MEASUREMENT_MODEL.md).**
+> The system measures the UTC label of each sample against the GPSDO
+> ruler — one measurand, one ruler, one registration.  `D_clock` below
+> names the host clock's offset from that registration, a derived
+> quantity (model §7.1).  The transmission-time equation stays valid as
+> the estimator's arithmetic; what it solves for is the registration,
+> not the host clock.  The text below stands as written for the record.
+
 The system measures **D_clock**, the offset between the local system clock and UTC(NIST):
 
 ```
@@ -234,7 +242,7 @@ So a pipeline offset correction **is** needed — or better, do not use the pair
 > | T0–T2, T4 levels (chrony/NTP-based) | ✅ | Conventional chrony plumbing; behaviour matches the table. |
 > | T3 (Fusion HF-derived UTC) | ✅ | Produced by `multi_broadcast_fusion`. **Availability is gated on a fresh `fusion_status.json`**; fusion can be (and currently is, in the field) unavailable, in which case T3 is not offered and the manager selects a higher tier (T5/T6) or coasts. The ±0.5 ms (1σ) figure holds only when multi-station fusion is locked and converged. |
 > | T5 (USB-delivered GPS+PPS) | ✅ | LBE-1421 USB-NMEA is consumed by hf-timestd for second-of-day disambiguation (alongside T6) and as the standalone source when T6 is unavailable. Precision is USB-bus-jitter floored at µs-to-ms class. **Upgrade path:** wire the TS-1 PPS OUT jack to a host GPIO / RS232 input with kernel PPS-API support — that adds a *second* ns-class path alongside T6 (for continuous §8 chain-delay cross-validation), but does not promote T5 itself, since the T5 definition is the USB transport. |
-> | **T6 BPSK-PPS injection / detection** | ✅ | TS-1 HF-injected BPSK PPS coupled into the RX path, decoded sample-precise from the IQ stream (HPPS matched-filter; the HFPS diff calibrator is wired but disabled by default). Live on bee1. The chrony-facade calibration has known weaknesses (one-shot disambig is sensitive to host-clock state at calibration moment — see [TIMING-PIPELINE-WIRING.md](TIMING-PIPELINE-WIRING.md) and the chrony-tuning notes); the **annotation product** (per-sample tier + offset + uncertainty) is operational and is the deployed best tier. |
+> | **T6 BPSK-PPS injection / detection** | ✅ | TS-1 HF-injected BPSK PPS coupled into the RX path, decoded sample-precise from the IQ stream (HPPS matched-filter; the HFPS diff calibrator, once wired but never enabled, left the code 2026-09-04). Live on bee1. The chrony-facade calibration has known weaknesses (one-shot disambig is sensitive to host-clock state at calibration moment — see [TIMING-PIPELINE-WIRING.md](TIMING-PIPELINE-WIRING.md) and the chrony-tuning notes); the **annotation product** (per-sample tier + offset + uncertainty) is operational and is the deployed best tier. |
 > | Authority manager + `/run/hf-timestd/authority.json` v1 | ✅ | `AuthoritySnapshotStore` + `AuthorityManager` live; per-cycle records persisted to `/var/lib/timestd/authority_history.db`. |
 > | `chronyc selectopts` runtime gating | ✅ | `ChronyRefclockGate` is wired into the AuthorityRunner and invoked every tick (`AuthorityManager._apply_chrony_gate`); enabled per `[timing.authority_manager.chrony_gate]` (`dry_run` available for staged rollout). |
 > | mDNS TXT-record extension | ✅ | `MdnsFusionAdvertiser` is wired into the AuthorityRunner and applied every tick (`AuthorityManager._apply_mdns_advertiser`); enabled per `[timing.authority_manager.mdns]` (`dry_run` logs the TXT without forking avahi). |
@@ -424,6 +432,15 @@ Each L-level sidecar records the full T-level history covering the data product'
 History is bulkier than the single-value encoding but essential for reprocessing — downstream analysis needs to know at what authority each sample was taken.
 
 #### Relationship to "RTP Mode" and "Fusion Mode"
+
+> **Superseded (2026-09-04).**  The `[timing] authority` key, the
+> `TimingAuthority` enum (rtp | fusion | auto) and the FUSION authority
+> mode left the code with RESIDUE_AUDIT_2026-09-04 §3.4–3.5.  No mode
+> switch remains: T6…T0 are competing estimators of one quantity
+> (MEASUREMENT_MODEL.md §10), the Offset Judge ranks them, and
+> `hf-timestd validate` warns on a config that still carries the key.
+> The "preference" reading of the key in the last paragraph below never
+> shipped.
 
 The §1 and §4.3 shortcuts map onto the T-level space — but with the RTP-reference invariant in force, "mode" is no longer about *whether* RTP or Fusion is trusted. RTP is always the label reference. What changes between modes is **whether the published Fusion offset is a no-op or an active correction**:
 

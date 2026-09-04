@@ -1,14 +1,18 @@
 # BPSK PPS edge detection: methods, evidence, and the path to the diff detector
 
-**Status:** Living engineering record.  **Method 2** (matched filter on
-Costas-derotated real projection) feeds chrony as **HPPS** on SHM 2.
-**Method 5** (per-sample magnitude derivative) is wired to publish as
-**HFPS** on SHM 3 (gated by `diff_to_shm_unit`), but that feed is
-**disabled in the shipped configuration** — `diff_to_shm_unit` is unset
-and the live chrony config consumes only FUSE and HPPS, so HFPS is not
-currently in use.  Method 5 showed ~22 ns short-term σ vs ~150 ns and
-frequent multi-hundred-µs walks on Method 2, which is why the HFPS path
-was built; it remains an opt-in/diagnostic feed pending long-window proof.
+**Status:** Engineering record.  **Method 2** (matched filter on
+Costas-derotated real projection) feeds chrony as **HPPS** on SHM 2 and
+is the only T6 calibrator.
+
+> **Marked in place (2026-09-04).**  The Method 5 code
+> (`bpsk_pps_calibrator_diff.py`), its HFPS feed on SHM 3, the
+> `diff_to_shm_unit` / `enable_diff_sidecar` keys, the persisted
+> chain-delay store and the legacy Method 1 calibrator behind
+> `use_matched_filter = false` all left the tree with
+> RESIDUE_AUDIT_2026-09-04 §3.4.  No station ever enabled them.  The
+> evidence below stays as the record of why Method 5 looked promising
+> (~22 ns short-term σ against ~150 ns and multi-hundred-µs walks on
+> Method 2); bringing it back is a fresh decision, not a re-enable.
 
 **Companion document:** `HF-PPS-CHRONY-TUNING.md` — parameter tuning
 within Method 2, including the four-pass Costas threshold journey
@@ -61,8 +65,9 @@ locate polarity flips.
 - No coherent processing gain — every detection decision was made on
   a single sample.
 
-This is `bpsk_pps_calibrator.py` (still in tree as a legacy
-fallback, default-off via `use_matched_filter = true`).
+This was `bpsk_pps_calibrator.py`.  It left the tree on 2026-09-04
+together with the `use_matched_filter` key that selected it
+(RESIDUE_AUDIT_2026-09-04 §3.4).
 
 ---
 
@@ -245,14 +250,12 @@ failures live.
 
 ## 6. Method 5 — per-sample magnitude derivative (diff feed, opt-in / disabled by default; first prototyped 2026-05-22 ~10:28)
 
-The retreat from boxcar matched filters entirely.  Method 5 is wired to
+The retreat from boxcar matched filters entirely.  Method 5 was wired to
 publish as **HFPS** on SHM 3 (gated by `diff_to_shm_unit`) in
-`core_recorder_v2.py`, but that feed is **disabled by default** —
-`diff_to_shm_unit` is unset in the shipped config and chrony consumes
-only FUSE and HPPS, so HFPS is not currently in use.  When enabled it
-would run alongside HPPS (Method 2, SHM 2),
-with chrony selecting between the two feeds, using T5 / LB-1421 NMEA
-for second-of-arrival disambiguation.
+`core_recorder_v2.py`; no station ever set the gate, and the code left
+the tree on 2026-09-04 (see the note at the top).  When enabled it ran
+alongside HPPS (Method 2, SHM 2), with chrony selecting between the two
+feeds, using T5 / LB-1421 NMEA for second-of-arrival disambiguation.
 
 ```
   d[n] = |s[n] − s[n−1]|
@@ -306,8 +309,8 @@ noise floor.
 This evidence was captured during the original sidecar phase, when
 Method 5 ran alongside Method 2 (production) dumping per-PPS edge
 timestamps to CSV — Method 2 fed chrony and Method 5 was
-observation-only.  (Method 5 has since been wired as an opt-in HFPS
-feed on SHM 3, disabled by default; see §6.)
+observation-only.  (Method 5 was later wired as an opt-in HFPS feed on
+SHM 3, never enabled, and removed 2026-09-04; see §6.)
 
 **First-snapshot data:**
 
@@ -387,12 +390,13 @@ parabolic-interp limit, which for a 2-sample-wide derivative at
     Method 5 in for Method 2, the HFPS path was built as an opt-in
     parallel feed: when `diff_to_shm_unit` is set, Method 5 publishes
     its edge timestamps as HFPS on SHM 3 in parallel with HPPS (Method 2,
-    unit 2).  That gate is **off in the shipped config**, so HFPS is not
-    currently enabled.  Still open: once
-    HFPS is proven to strictly outperform HPPS over multi-hour /
-    multi-day windows, retire Method 2 along with its Costas threshold
-    tuning, chain-delay disambiguation logic, and watchdog backoff
-    (all of which exist to manage Method 2's failure modes).
+    unit 2).  That gate never shipped on, and the code left the tree
+    on 2026-09-04.  The question stays open in principle: a detector
+    that strictly outperforms HPPS over multi-hour / multi-day windows
+    would retire Method 2 along with its Costas threshold tuning,
+    chain-delay disambiguation logic, and watchdog backoff (all of which
+    exist to manage Method 2's failure modes) — but it would start from
+    this record, not from dormant code.
   * **Sample-rate decision** — Method 5's precision is limited by
     sample period (10.4 µs at 96 kHz, sub-sample interp pushes
     this to ns).  Going to 192 kHz IQ would double the precision

@@ -24,7 +24,7 @@ HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/CHU/BPM time standard
 - ⏱️ **NTP-Based Bootstrap (v6.4)** - Fast RTP-to-UTC calibration using GPSDO wallclock (~2 min to LOCKED).
 - 🧠 **AI Discrimination** - Probabilistic Logistic Regression + Heuristic Voting for station ID.
 - 🌐 **Web UI** - Real-time monitoring via **FastAPI** dashboard with Allan Deviation, propagation analysis, and per-path dTEC visualization.
-- ⏰ **Chrony SHM refclocks** - The L2 fusion feed (SHM unit 1 = `FUSE`) plus the T6 BPSK-PPS feeds (SHM unit 2 = `HPPS`, SHM unit 3 = `HFPS`). The legacy dual-feed (L1 raw at SHM unit 0) was retired 2026-05-23 — it produced byte-identical output to the L2 feed in single-station mode. Dual Kalman filtering (L1 raw + L2 calibrated) is still computed inside the fusion service for diagnostic comparison.
+- ⏰ **Chrony SHM refclocks** - The L2 fusion feed (SHM unit 1 = `FUSE`) plus the T6 BPSK-PPS feed (SHM unit 2 = `HPPS`; the diff-detector feed `HFPS` on unit 3 left the code 2026-09-04). The legacy dual-feed (L1 raw at SHM unit 0) was retired 2026-05-23 — it produced byte-identical output to the L2 feed in single-station mode. Dual Kalman filtering (L1 raw + L2 calibrated) is still computed inside the fusion service for diagnostic comparison.
 - 📊 **Metrological Rigor (v6.2)** - Cramér-Rao uncertainty, multipath detection, Doppler correction, adaptive thresholds.
 
 ### Complete Feature Inventory
@@ -257,8 +257,8 @@ The system has an eight-service core pipeline plus a set of housekeeping units (
    • Dual Kalman filtering          • (optional, requires GNSS)
      (L1 + L2 diagnostic compare)
    • Feeds Chrony SHM unit 1 (FUSE) — one consumer of the
-     annotation stream; HPPS (unit 2) and HFPS (unit 3) are
-     fed by the T6 BPSK-PPS path in timestd-core-recorder
+     annotation stream; HPPS (unit 2) is fed by the T6
+     BPSK-PPS path in timestd-core-recorder
      ↓
 6. PHYSICS (timestd-physics)
    • Carrier-phase dTEC + group-delay TEC validation
