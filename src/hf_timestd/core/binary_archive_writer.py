@@ -16,6 +16,11 @@ File structure:
         1765031100.bin      # Raw complex64 samples
         1765031100.json     # Metadata sidecar
         1765031040.bin.zst  # Compressed older minute (optional)
+
+Timing provenance (docs/design/MEASUREMENT_MODEL.md §7.2): the sidecar's
+start time descends from radiod's GPS_TIME/RTP_TIMESNAP pair, so its
+origin is ``sysclock`` in the model's word.  The registration that
+corrects it lives in the anchor ledger and the Offset Judge, not here.
 """
 
 import errno

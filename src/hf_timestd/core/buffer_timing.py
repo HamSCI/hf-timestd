@@ -49,6 +49,11 @@ mapping and keeps the host clock out of it
 (docs/design/T6_ANCHOR_INVERSION_DESIGN.md,
 docs/design/TIMING_AUTHORITY_TWO_AXIS.md §2).
 
+In the measurement model's vocabulary (docs/design/MEASUREMENT_MODEL.md
+§7.2) the label this module computes carries ``origin: sysclock``: it
+descends from radiod's pair, a host-clock reading, until the TimeMap
+replaces it.  The provenance sidecar should record it under that word.
+
 start_system_time is NEVER used for timing.  It is logged for diagnostics
 only.  The writer computes it from its own (possibly stale) GPS/RTP
 mapping, which can be wrong by seconds or more after a radiod restart.

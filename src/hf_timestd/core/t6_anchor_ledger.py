@@ -10,6 +10,11 @@ retroactive correction of every historical anchor with no raw-IQ
 archive.  ``sub_ns``, the fine stage's measured term, is recoverable as
 ``named_second_utc_ns + chain_delay_ns − anchor_utc_ns``.
 
+The ``labeling_convention`` column records which reference plane of
+docs/design/MEASUREMENT_MODEL.md §1 the row's label sits in (§8 names the
+planes ``measurand_plane`` and ``calibration_plane``); it selects nothing
+else.
+
 Until this module the tuples lived only in 300 s-throttled journal
 lines, which rotate: on AC0G-B4 everything before 2026-08-23 was
 already gone the first time anyone wanted the history.

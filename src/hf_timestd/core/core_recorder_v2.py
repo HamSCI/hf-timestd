@@ -203,6 +203,12 @@ def resolve_chain_delay_calib_s(t6_config) -> float:
     return configured if convention == "legacy" else 0.0
 
 
+# ``labeling_convention`` (legacy | content) selects the reference plane of
+# docs/design/MEASUREMENT_MODEL.md §1 — §8 names the two planes
+# ``measurand_plane`` and ``calibration_plane`` — and nothing else.  It is
+# not a mode.  Every branch on it in this file makes that one choice.
+
+
 def t6_chain_delay_uncalibrated(t6_config) -> bool:
     """True when T6 is enabled but asserts a zero RF chain delay.
 
@@ -243,11 +249,15 @@ def _t6_pps_edge_phase_keys(chain_delay_ns) -> dict:
     Both keys go out for one release.  `core-recorder-status.json` serves as a
     published surface, so the old name earns a deprecation window even though
     no consumer outside hf-timestd reads it today.  See
-    docs/design/TIMING_PROVENANCE_MODEL.md §4.5.
+    docs/design/TIMING_PROVENANCE_MODEL.md §4.5.  A release here means an
+    `smd` bless of an image carrying this rename (mjh, 2026-09-04): the old
+    key retires one bless after that, read from the bless ledger, not the
+    calendar.
     """
     return {
         'edge_phase_in_named_second_ns': chain_delay_ns,
-        # DEPRECATED — retire one release after 2026-09-01.
+        # DEPRECATED — retire one smd bless after a blessed image carries
+        # the rename (first shipped 2026-09-01).
         'chain_delay_ns': chain_delay_ns,
     }
 
@@ -280,7 +290,8 @@ def label_plane_measure_for(timing_section: dict) -> bool:
     measured there would be T6's own residual, and correcting by it would
     cancel the disagreement the cross-bench gate exists to detect.
     Derived from the labelling convention rather than configured
-    separately, so the two cannot drift apart.
+    separately, so the two cannot drift apart.  The convention selects the
+    reference plane of MEASUREMENT_MODEL.md §1 and nothing else.
     """
     t6 = (timing_section or {}).get('t6_pps', {}) or {}
     convention = str(t6.get('labeling_convention', 'content')).strip().lower()
@@ -3726,7 +3737,8 @@ class CoreRecorderV2:
             # The configured budget being applied — an assertion, not a
             # measurement, and never the contract's analogue path delay.
             # `asserted_chain_delay_ns` rides along for one release so any
-            # reader outside this repo can move.  See
+            # reader outside this repo can move.  A release = one `smd`
+            # bless of an image carrying the rename (mjh, 2026-09-04).  See
             # docs/design/TIMING_PROVENANCE_MODEL.md §4.5.
             'applied_delay_budget_ns': (
                 auth.delay_budget_ns + auth.filter_group_delay_ns),

@@ -24,6 +24,13 @@ This module is invoked on every authority-manager tick. It is
 stateless by design — each tick is an independent decision — so it
 naturally re-engages if the clock drifts badly again mid-life (e.g.,
 chrony dies and time coasts off).
+
+Measurement-model note (docs/design/MEASUREMENT_MODEL.md §7.1): this
+module handles the HOST CLOCK.  Every offset it reads or writes — chrony's
+``D_clock``, an SHM ``reference_time - system_time``, a coarse UTC estimate
+— describes how far the host clock sits from the station's registration.
+That is a derived quantity.  The measurand stays the UTC label of each
+sample against the GPSDO ruler; chrony never sees it and never sets it.
 """
 from __future__ import annotations
 

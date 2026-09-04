@@ -4897,6 +4897,10 @@ def run_fusion_service(
 
                         _shm_write_t0 = time.monotonic()
                         try:
+                            # Host-clock plane (MEASUREMENT_MODEL.md §7.1):
+                            # d_clock_fused_ms is the host clock's offset from
+                            # the registration — a derived quantity, not the
+                            # measurand.  chrony consumes it; no label does.
                             # Update FUSE feed (SHM 1) - calibrated L2 timing fusion.
                             # The L1 (raw-metrology) feed at SHM 0 was dropped
                             # 2026-05-23 with the TSL→FUSE/HPPS rename; the L1

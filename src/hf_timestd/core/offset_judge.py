@@ -884,7 +884,9 @@ class OffsetJudge:
         # planes coincide, and anything measured here would be T6's own
         # residual — subtracting which would cancel the disagreement the
         # cross-bench gate exists to detect.  The recorder sets this from
-        # [timing.t6_pps].labeling_convention.
+        # [timing.t6_pps].labeling_convention, a key that selects the
+        # reference plane of MEASUREMENT_MODEL.md §1 (§8 names the planes)
+        # and nothing else.
         self.label_plane_measure = bool(cfg.get("label_plane_measure", True))
         # Whether the sustained-violation test removes the plane term.
         # OFF by default -- see _plane_expected_ns for why AC0G-B4 refuted

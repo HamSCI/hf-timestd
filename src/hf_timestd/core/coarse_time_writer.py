@@ -16,6 +16,13 @@ minute-only decoders). Consumers that need tighter precision must
 wait for steady-state Fusion (T3) — this file exists to recover the
 *order of magnitude* of the clock error at bootstrap, not sub-second
 precision.
+
+Measurement-model note (docs/design/MEASUREMENT_MODEL.md §7.1): this
+module handles the HOST CLOCK.  Every offset it reads or writes — chrony's
+``D_clock``, an SHM ``reference_time - system_time``, a coarse UTC estimate
+— describes how far the host clock sits from the station's registration.
+That is a derived quantity.  The measurand stays the UTC label of each
+sample against the GPSDO ruler; chrony never sees it and never sets it.
 """
 from __future__ import annotations
 

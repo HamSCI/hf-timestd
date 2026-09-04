@@ -11,6 +11,13 @@ web API from the in-memory circular buffer. Backend selection is governed by
 ``[storage] write_hdf5 / write_sqlite`` in ``timestd-config.toml`` — the
 factory raises if both are off, so this module no longer carries an
 HDF5-specific gate of its own.
+
+Measurement-model note (docs/design/MEASUREMENT_MODEL.md §7.1): this
+module handles the HOST CLOCK.  Every offset it reads or writes — chrony's
+``D_clock``, an SHM ``reference_time - system_time``, a coarse UTC estimate
+— describes how far the host clock sits from the station's registration.
+That is a derived quantity.  The measurand stays the UTC label of each
+sample against the GPSDO ruler; chrony never sees it and never sets it.
 """
 
 import logging
