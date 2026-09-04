@@ -275,8 +275,9 @@ key, and say which value the station now runs without it.
    the shared repo's change to make.
 4. The periodic "T6 SHM diag" log line for the HPPS feed sat inside the HFPS
    block's `if`, so it never emitted on any station. It went with the block.
-   Reviving it is a deliberate change, not a deletion, and waits on that
-   decision.
+   Michael decided the same day: retired, not revived — the HPPS path has
+   since gained the anchor authority, holdover and its own watchdog, and the
+   incident the line was written for has other instruments now.
 5. B4 still carries `timestd-hfps-watchdog.{service,timer}` hand-linked and
    inactive. Enabled, the script would restart the recorder every cooldown
    for a feed that does not exist — the June flap `deploy.toml` records. The

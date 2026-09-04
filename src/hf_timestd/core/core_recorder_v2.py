@@ -5166,9 +5166,8 @@ class CoreRecorderV2:
             # The HFPS (diff-detector) SHM feed and the periodic "T6 SHM
             # diag" log line stood here until 2026-09-04.  The feed was
             # config-dead (enable_diff_sidecar never set anywhere); the
-            # diag line sat inside its gate, so it never ran either.
-            # Reviving the diag is a deliberate change, not a deletion
-            # (RESIDUE_AUDIT §3.4).
+            # diag line sat inside its gate, so it never ran either, and
+            # Michael retired it the same day (RESIDUE_AUDIT §3.4).
 
             # Log on first lock and periodically
             if result.pps_consecutive == self._t6_calibrator.consecutive_required:
