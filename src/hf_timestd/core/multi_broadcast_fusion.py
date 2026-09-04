@@ -715,12 +715,14 @@ class MultiBroadcastFusion:
         
         # Leap-second Kalman hold.
         # M-M11: hold-window expiry time (unix seconds), not a per-cycle
-        # boolean.  Armed when a TAI-UTC change is observed; cleared by
-        # time elapsing past it.  The only arming path was the CHU FSK
-        # Frame B decode, retired 2026-09-04 with CHU; the coast stays so
-        # a future TAI-UTC witness (e.g. the WWV BCD leap-second warning
-        # bit) can arm it.  Today nothing sets this past 0.0.
+        # boolean.  Armed from the broadcasts' leap-second ADVANCE notice
+        # (L1 metrology ``leap_second_notice``: WWVB dst_ls bits today,
+        # WWV/WWVH BCD second 3 when that decoder is wired) as the month
+        # end approaches -- see _arm_leap_second_hold_from_notices.  The
+        # CHU FSK TAI-UTC change was the previous witness (retired
+        # 2026-09-04); it armed after the step, this arms before it.
         self._leap_second_hold_until: float = 0.0
+        self._leap_second_armed_for: Optional[int] = None  # month-end epoch logged
         # Length of the post-leap-second coast window (seconds).  10 min
         # comfortably covers chrony's reaction time + the broadcast-
         # specific Kalman re-acquisition tail; shorter than the
@@ -841,14 +843,83 @@ class MultiBroadcastFusion:
         logger.info(f"  Channels: {len(self.channels)}")
         logger.info(f"  Auto-calibrate: {auto_calibrate}")
 
+    # Leap-second hold window around the month-end boundary: open this long
+    # before 00:00:00 of the next month, close _leap_second_hold_seconds after.
+    LEAP_HOLD_PRE_SEC = 300.0
+
+    @staticmethod
+    def _month_end_after(minute_boundary_utc: float) -> float:
+        """Unix time of 00:00:00 UTC on the first day of the month following
+        the given instant -- where a leap second announced this month lands."""
+        from datetime import datetime, timezone
+        d = datetime.fromtimestamp(float(minute_boundary_utc), timezone.utc)
+        y, m = (d.year + 1, 1) if d.month == 12 else (d.year, d.month + 1)
+        return datetime(y, m, 1, tzinfo=timezone.utc).timestamp()
+
+    @classmethod
+    def leap_hold_until_from_notices(cls, notices, now: float,
+                                     hold_seconds: float) -> Optional[float]:
+        """Pure: given ``[(minute_boundary_utc, notice), ...]`` decoded from
+        the broadcasts and the current time, return the hold expiry to arm,
+        or None.  A 'positive'/'negative' notice names a leap second at the
+        end of ITS month; the hold opens LEAP_HOLD_PRE_SEC before that
+        boundary and closes hold_seconds after it.  'none' and unknown
+        strings arm nothing."""
+        best = None
+        for minute_boundary_utc, notice in notices:
+            if str(notice).lower() not in ('positive', 'negative'):
+                continue
+            month_end = cls._month_end_after(minute_boundary_utc)
+            if month_end - cls.LEAP_HOLD_PRE_SEC <= now <= month_end + hold_seconds:
+                until = month_end + hold_seconds
+                best = until if best is None else max(best, until)
+        return best
+
+    def _arm_leap_second_hold_from_notices(self, now: Optional[float] = None) -> None:
+        """Arm the Kalman hold when a recent broadcast notice announces a
+        leap second at the coming month end.  Cheap outside the window: the
+        L1 rows are read only within LEAP_HOLD_PRE_SEC + hold of a month end."""
+        if now is None:
+            now = time.time()
+        month_end = self._month_end_after(now)
+        prev_month_end = self._month_end_after(now - 32 * 86400.0) if now < month_end else month_end
+        near = (month_end - self.LEAP_HOLD_PRE_SEC <= now) or \
+               (prev_month_end <= now <= prev_month_end + self._leap_second_hold_seconds)
+        if not near:
+            return
+        try:
+            l1 = self._read_l1_metrology(lookback_minutes=6 * 60)
+        except Exception as exc:
+            logger.debug(f"leap-second notice read failed: {exc}")
+            return
+        notices = []
+        for m in l1.values():
+            n = m.get('leap_second_notice')
+            mb = m.get('minute_boundary_utc')
+            if n and mb is not None:
+                notices.append((float(mb), n))
+        until = self.leap_hold_until_from_notices(notices, now, self._leap_second_hold_seconds)
+        if until is None:
+            return
+        if until > self._leap_second_hold_until:
+            self._leap_second_hold_until = until
+        key = int(until - self._leap_second_hold_seconds)
+        if self._leap_second_armed_for != key:
+            self._leap_second_armed_for = key
+            kinds = sorted({str(n).lower() for _mb, n in notices if str(n).lower() in ('positive', 'negative')})
+            logger.warning(
+                f"Fusion: leap second announced ({','.join(kinds)}) for the month end at "
+                f"{key} -- Kalman hold armed until {until:.0f} "
+                f"({self._leap_second_hold_seconds / 60:.0f} min past the boundary)")
+
     def _leap_second_hold_active(self, now: Optional[float] = None) -> bool:
         """Return True while the post-leap-second Kalman-hold window
         is in effect (M-M11).
 
         ``now`` defaults to wall-clock time.  The hold-window expires
-        on a fixed timestamp set when a TAI-UTC change was last
-        observed (see the M-M11 history note on
-        :attr:`_leap_second_hold_until`), so a single observation
+        on a fixed timestamp set from the broadcasts' leap-second notice
+        (see :meth:`_arm_leap_second_hold_from_notices` and the M-M11
+        history note on :attr:`_leap_second_hold_until`), so a single observation
         coasts the Kalman through the entire transition rather than
         clearing on the next cycle.
         """
@@ -3117,6 +3188,13 @@ class MultiBroadcastFusion:
         except Exception as e:
             logger.debug(f"Tick timing integration failed: {e}")
         
+        # Leap-second hold: arm from the broadcasts' advance notice as the
+        # month end approaches (WWVB dst_ls today; WWV BCD when wired).
+        try:
+            self._arm_leap_second_hold_from_notices()
+        except Exception as exc:
+            logger.debug(f"leap-second arming failed: {exc}")
+
         # Calculate weights
         weights = self._calculate_weights(measurements)
         

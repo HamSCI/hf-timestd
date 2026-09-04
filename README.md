@@ -46,7 +46,7 @@ HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/BPM time standard bro
 
 **Time Code Decoding:**
 - **WWV/WWVH BCD** — 100 Hz subcarrier extraction for station identification and time confirmation
-- **Leap second hold** — the fusion Kalman coasts through an observed TAI-UTC change (no live TAI-UTC witness since CHU went off air; the hold awaits a new one)
+- **Leap second hold** — the fusion Kalman coasts through the month-end boundary when the broadcasts announce a leap second (WWVB's advance notice today, carried on the L1 row as `leap_second_notice`; WWV/WWVH BCD second 3 once that decoder is wired)
 
 **Ionospheric Science:**
 - **Carrier-phase dTEC** — Primary product (~6 mTECU/min sensitivity, ~250K records/day), GNSS VTEC-anchored

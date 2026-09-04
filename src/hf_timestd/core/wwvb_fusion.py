@@ -137,6 +137,17 @@ def compute_timing_error_ms(
     return observed_delay_ms - expected_delay_ms
 
 
+def leap_notice_from_frame(frame) -> Optional[str]:
+    """Map a decoded WWVB frame's leap-second state to the L1 row's
+    ``leap_second_notice`` ('none' | 'positive' | 'negative'), or None when
+    the dst_ls word did not decode."""
+    ls = getattr(frame, "leap_second", None)
+    if ls is None:
+        return None
+    name = getattr(ls, "name", str(ls)).lower()
+    return name if name in ("none", "positive", "negative") else None
+
+
 def build_l1_row(
     *,
     detected_frame,  # wwvb_demod.DetectedFrame
@@ -215,6 +226,7 @@ def build_l1_row(
         light_travel_time_ms=light_travel_time_ms,
         quality_flag=quality_flag,
         processing_version=processing_version,
+        leap_second_notice=leap_notice_from_frame(detected_frame.frame),
     )
     return row.model_dump()
 
@@ -226,4 +238,5 @@ __all__ = [
     "estimate_snr_db",
     "compute_timing_error_ms",
     "build_l1_row",
+    "leap_notice_from_frame",
 ]

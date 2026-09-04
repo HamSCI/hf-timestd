@@ -233,3 +233,25 @@ def test_estimate_snr_db_high_for_clean_symbols():
 
 def test_estimate_snr_db_nan_for_too_few():
     assert math.isnan(estimate_snr_db(np.array([1 + 0j])))
+
+
+# --------------------------------------------------------------------------- #
+# Leap-second advance notice rides on the L1 row (2026-09-04)
+# --------------------------------------------------------------------------- #
+
+def test_l1_row_carries_the_leap_second_notice():
+    from hf_timestd.core.wwvb_fusion import leap_notice_from_frame
+    minute = dt.datetime(2026, 6, 15, 4, 30, tzinfo=dt.timezone.utc)
+    for ls, expect in ((P.LeapSecond.NONE, "none"), (P.LeapSecond.POSITIVE, "positive"),
+                       (P.LeapSecond.NEGATIVE, "negative")):
+        bits = P.encode_time_frame(minute, leap_second=ls)
+        iq = synthesize_wwvb_iq(bits, sample_rate=SR, snr_db=30.0)
+        f = decode_iq(iq, sample_rate=SR).frames[0]
+        assert leap_notice_from_frame(f.frame) == expect
+        anchor_rtp = 1000
+        row = build_l1_row(
+            detected_frame=f, anchor_rtp=anchor_rtp,
+            rtp_to_utc_s=_rtp_to_utc_for_injected_error(minute, f.boundary_sample, anchor_rtp, 0.0),
+            rx_lat=RX_LAT, rx_lon=RX_LON, snr_db=20.0, confidence=1.0, processing_version="t",
+        )
+        assert row is not None and row["leap_second_notice"] == expect

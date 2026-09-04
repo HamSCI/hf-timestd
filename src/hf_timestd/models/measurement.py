@@ -198,6 +198,13 @@ class L1MetrologyMeasurement(BaseModel):
     quality_flag: QualityFlag
     processing_version: str = "1.0.0"
 
+    # Leap-second advance notice decoded from the broadcast's time code
+    # ('none' | 'positive' | 'negative'), for the end of the current UTC
+    # month.  WWVB dst_ls bits today; WWV/WWVH BCD second 3 when wired.
+    # Fusion arms its leap-second Kalman hold from this (2026-09-04).
+    leap_second_notice: Optional[str] = Field(
+        None, description="Leap-second advance notice from the time code: none/positive/negative")
+
     from pydantic import model_validator
     
     @model_validator(mode='after')

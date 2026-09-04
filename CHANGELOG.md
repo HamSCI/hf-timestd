@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — the leap-second hold arms from the broadcasts' advance notice (2026-09-04)
+
+The CHU FSK TAI-UTC change was the hold's only witness and armed it after
+the step.  WWVB's dst_ls bits announce a leap second all month; the
+decoded frame's `leap_second` now rides on the L1 metrology row as
+`leap_second_notice` (none/positive/negative; hamsci-dsp 0.6.1 adds the
+optional column, the writer migrates existing tables), and fusion arms
+`_leap_second_hold_until` from 5 min before the month-end boundary to
+10 min after it when a recent row announces one.  Outside that window
+fusion reads nothing extra.  WWV/WWVH BCD second 3 (`wwv_bcd_decoder`
+already decodes it; nothing calls that decoder yet) is the second witness
+to wire, which would give AC0G-ND, with no WWVB path, a notice of its own.
+
 ### Changed — the per-second tick search is anchored on the minute marker (2026-09-04)
 
 Step 0.5(b) of the host-clock program (`docs/design/HOST_CLOCK_INTEGRITY.md`).
