@@ -60,6 +60,8 @@ def _make_db(path: Path, now: int, ages: dict, fusion_l3_age):
             iso = datetime.fromtimestamp(now - age, tz=timezone.utc).isoformat()
             con.execute(f"INSERT INTO {table} VALUES (?, ?, ?)", (CHANNEL, iso, now - age))
     con.execute("CREATE TABLE L3_fusion_timing (minute_boundary INTEGER)")
+    con.execute("CREATE TABLE L3_tec (minute_boundary INTEGER)")
+    con.execute("INSERT INTO L3_tec VALUES (?)", (now - 5000,))
     if fusion_l3_age is not None:
         con.execute("INSERT INTO L3_fusion_timing VALUES (?)", (now - fusion_l3_age,))
     con.commit()
@@ -108,6 +110,7 @@ def _run(env, enabled_units):
 MET = f"timestd-metrology@{CHANNEL}.service"
 FUS = "timestd-fusion.service"
 CAL = "timestd-l2-calibration.service"
+PHY = "hamsci-physics-fusion.service"
 
 
 def test_sparse_detections_with_fresh_attempts_is_alive(env):
@@ -159,3 +162,11 @@ def test_future_dated_row_is_not_liveness(env):
                               "L2_detection_attempts": -3600, "L1_all_arrivals": 900}, None)
     out = _run(env, [MET])
     assert f"Would restart {MET}" in out, out
+
+
+def test_physics_not_judged_by_tec_output(env):
+    """L3_tec an hour and more old while the chain is quiet: idle, not dead."""
+    now = int(time.time())
+    _make_db(env["db"], now, {}, None)
+    out = _run(env, [PHY])
+    assert "Would restart" not in out, out

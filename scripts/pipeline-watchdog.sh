@@ -14,7 +14,7 @@
 #          minutes per hour.
 #        - Fusion: mtime of $RUN_DIR/fusion_status.json (written every cycle
 #          with or without input); L3 rows only where that file never existed
-#        - Physics: newest L3_tec row
+#        - Physics: enabled/active only -- systemd WatchdogSec covers a hang
 #        - L2 calibration: enabled/active only -- systemd WatchdogSec covers
 #          a hung loop, and the state file this once read belongs to fusion
 #        - Web API: HTTP /health
@@ -235,7 +235,6 @@ RECORDER_STALE=900      # 15 min: > one 10-min chunk duration + flush jitter
 # so genuine stalls trip the watchdog within ~3 minutes.
 METROLOGY_STALE=180
 FUSION_STALE=600        # 10 min: fusion writes every ~60s
-PHYSICS_STALE=3600      # 1 hour: physics may write less often
 
 # ==========================================================================
 # Check 1: Core Recorder
@@ -394,14 +393,12 @@ check_physics() {
 
     # L3_tec covers both AGGREGATED and REANALYZED channels — physics
     # producing either keeps the table fresh, so no channel filter.
-    local age
-    age=$(sqlite_age "L3_tec" "minute_boundary")
-    if age_unknown "$age"; then
-        log_error "cannot assess L3_tec freshness (SQLite query failed) - NOT restarting $unit"
-    elif [[ $age -gt $PHYSICS_STALE ]]; then
-        do_restart "$unit" "running but L3_tec stale for ${age}s (threshold: ${PHYSICS_STALE}s)"
-        RESTARTS=$((RESTARTS + 1))
-    fi
+    # No data-driven rule (2026-09-04).  An L3_tec row needs L2 input; when
+    # the metrology chain is quiet the physics service is idle, not dead, and
+    # this rule restarted it on every 5-minute tick on AC0G-B4 (the age only
+    # grows).  The unit runs WatchdogSec=120 and pets it from its main loop
+    # and its long passes; systemd restarts it if the loop hangs.
+    :
 }
 
 # ==========================================================================

@@ -29,9 +29,10 @@ deploy.  The first cut read `max(minute_boundary_utc)` per channel, which
 the `(channel, timestamp_utc)` index cannot serve: on B4 it scanned 5 M
 `L1_all_arrivals` rows per channel in 35 s and the watchdog outlived its
 own 5-minute timer.  The lookup now reads `max(timestamp_utc)` (15 ms).
-Still open in the same class: the physics rule restarts
-`hamsci-physics-fusion` when L3 TEC output is an hour old, though the
-service pings its own systemd watchdog.
+The physics rule went the same way once the first deploy showed it
+restarting `hamsci-physics-fusion` on every tick (an L3 TEC row needs L2
+input; the age only grows): the unit has `WatchdogSec=120` and pets it,
+so the script now checks enabled/active only.
 
 ### Added — the chrony refclock gate can run chronyc through sudo (2026-09-04)
 
