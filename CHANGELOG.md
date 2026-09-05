@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — the T6 coarse stage folds coherently; the nightly lock cliff moves down by 17.8 dB (2026-09-05)
+
+AC0G-B4 lost T6 every evening: at 48-57 dB-Hz the coarse matched filter,
+which integrates one half-second per edge, drowns in local maxima along
+its own triangular apex (2026-09-05 01:04Z: 104 accepted edges against
+1349 rejected) and never reaches ten consecutive edges. The HPPS watchdog
+then restarted the recorder every 30 minutes for a condition a restart
+cannot cure (nine times in 24 h). `BpskPpsCalibratorMF` now folds its
+matched-filter output modulo the sample rate over `fold_seconds`
+(default 60), sign-alternated per second, normalised per index so the
+filter's half-second warm-up and zero-fill gaps do not bias it, and fits
+the folded second with the triangle the modulation predicts. An apex
+standing `fold_min_snr` (8) above the residual registers the edge with the
+same lock state ten consecutive edges would; pure noise folds to about 4
+to 5 sigma and registers nothing. While a fold reference is in force it
+is the chain delay published and the reference the per-edge detector
+measures against, so a single noisy edge can no longer re-base the lock
+(the reference used to random-walk edge by edge). Offline against the
+synthetic generator: locks at 50 dB-Hz within one 60 s window where the
+per-edge detector never locks in 130 s; the floor is recorded in
+`tests/test_bpsk_pps_coarse_fold.py`. Config:
+`[timing.t6_pps] coarse_fold_seconds`, `coarse_fold_min_snr`; status
+gains `coarse_fold_*`.
+
 ### Added — the archive publishes its registration: the TimeMap in every chunk sidecar (2026-09-04)
 
 Phase 1 of `docs/design/TIMING_PROVENANCE_MODEL.md` §6. Each chunk's

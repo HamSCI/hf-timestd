@@ -774,6 +774,11 @@ class CoreRecorderV2:
                     consecutive_required=self._t6_config.get('consecutive_required', 10),
                     edge_tolerance_samples=self._t6_config.get('edge_tolerance_samples', 30),
                     costas_loop_bw_hz=self._t6_config.get('costas_loop_bw_hz', 1.0),
+                    # Coarse coherent fold (2026-09-05): the per-edge detector
+                    # fell off its lock cliff every night on AC0G-B4
+                    # (48-57 dB-Hz).  K = 60 s buys 17.8 dB.  0 disables.
+                    fold_seconds=int(self._t6_config.get('coarse_fold_seconds', 60)),
+                    fold_min_snr=float(self._t6_config.get('coarse_fold_min_snr', 8.0)),
                     # Diagnostic capture (opt-in).  When
                     # debug_dump_path is set, the MF calibrator
                     # records the matched-filter output ``y``,
@@ -5412,6 +5417,10 @@ class CoreRecorderV2:
                         if _t6_check_metrics else None
                     ),
                     'locked': self._t6_calibrator.locked,
+                    'coarse_fold_locks': getattr(self._t6_calibrator, 'fold_locks', None),
+                    'coarse_fold_evaluations': getattr(self._t6_calibrator, 'fold_evaluations', None),
+                    'coarse_fold_snr': getattr(self._t6_calibrator, 'fold_last_snr', None),
+                    'coarse_fold_ref_samples': getattr(self._t6_calibrator, 'fold_ref_samples', None),
                     # Costas carrier-recovery loop health (Layer A TSL3
                     # fix).  False during a phase excursion — the
                     # calibrator is coasting on the last-good chain delay

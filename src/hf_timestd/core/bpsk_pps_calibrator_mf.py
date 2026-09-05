@@ -172,9 +172,24 @@ class BpskPpsCalibratorMF:
         debug_dump_subthreshold_factor: float = 0.2,
         phase_log_period_batches: int = 0,
         use_magnitude_correlation: bool = False,
+        fold_seconds: int = 60,
+        fold_min_snr: float = 8.0,
     ):
         """
         Args:
+            fold_seconds: coherent fold length for the COARSE stage, in
+                seconds; 0 disables it.  The per-edge detector integrates
+                one half-second per edge and falls off a stochastic lock
+                cliff near 58 dB-Hz (2026-08-28); AC0G-B4's pilot sits at
+                48-57 dB-Hz after dark and the detector floods with noise
+                edges.  Folding the matched-filter output modulo the sample
+                rate over K seconds, sign-alternated per second, gains
+                10*log10(K) dB (17.8 dB at K = 60).  A fold whose triangle
+                stands ``fold_min_snr`` above its residual grants the same
+                lock a run of ``consecutive_required`` edges would.
+            fold_min_snr: apex amplitude over residual sigma a fold must
+                reach to count.  Pure noise folds to ~4-5 sigma; 8 keeps
+                the false-lock rate negligible.
             use_magnitude_correlation: If True, peak-pick on |MF(s_rot)|
                 (complex matched filter, take magnitude) instead of
                 MF(Re(s_rot)) (legacy).  Costas is still used to remove
@@ -260,6 +275,22 @@ class BpskPpsCalibratorMF:
         # happens to make median-based work because the noise dominates
         # the median, but the synthetic case breaks it.
         self._peak_running: Optional[float] = None
+        # Coarse coherent fold (see fold_seconds in the docstring).
+        self.fold_seconds = int(fold_seconds)
+        self.fold_min_snr = float(fold_min_snr)
+        self.fold_locks = 0
+        self.fold_evaluations = 0
+        self.fold_last_snr: Optional[float] = None
+        self._fold_acc = np.zeros(self.sample_rate, dtype=np.float64)
+        self._fold_cnt = np.zeros(self.sample_rate, dtype=np.int32)
+        self._fold_first_rtp: Optional[int] = None
+        self._fold_last_rtp: Optional[int] = None
+        self._fold_step_estimate: Optional[float] = None
+        # The fold's edge estimate in force (samples mod SR).  While set, it
+        # is the reference the per-edge detector measures against and the
+        # chain delay it publishes; a single noisy edge no longer re-bases
+        # either (the reference used to random-walk edge by edge).
+        self._fold_ref: Optional[float] = None
 
         self.pps_ok: int = 0
         self.pps_noise: int = 0
@@ -369,6 +400,10 @@ class BpskPpsCalibratorMF:
         self._last_y_tail = np.zeros(0, dtype=np.float64)
         self._last_rtp_tail = np.zeros(0, dtype=np.int64)
         self._peak_running = None
+        self._fold_reset_window()
+        self._fold_step_estimate = None
+        self._fold_ref = None
+        self.fold_last_snr = None
         self.pps_ok = 0
         self.pps_noise = 0
         self.pps_phantom = 0
@@ -585,6 +620,7 @@ class BpskPpsCalibratorMF:
             if (now - self._debug_started_wall) >= self._debug_dump_seconds:
                 self._flush_debug()
 
+        self._fold_accumulate(y, rtp_at_y)
         if len(y_full) >= 3:
             self._detect_and_record_peaks(y_full, rtp_full)
 
@@ -722,6 +758,147 @@ class BpskPpsCalibratorMF:
         self._step_candidate_rtp = edge_rtp_int
         self._step_candidate_count = 1
         return False
+
+    # ------------------------------------------------------------------
+    # Coarse coherent fold
+    # ------------------------------------------------------------------
+    @property
+    def fold_ref_samples(self) -> Optional[float]:
+        """The fold's edge estimate in force, samples modulo SR, or None."""
+        return self._fold_ref
+
+    def _fold_reset_window(self) -> None:
+        self._fold_acc = np.zeros(self.sample_rate, dtype=np.float64)
+        self._fold_cnt = np.zeros(self.sample_rate, dtype=np.int32)
+        self._fold_first_rtp = None
+        self._fold_last_rtp = None
+
+    def _fold_accumulate(self, y: np.ndarray, rtp_at_y: np.ndarray) -> None:
+        """Add this batch's matched-filter output to the fold, modulo the
+        sample rate.  In the Re-projection mode the PPS polarity flips each
+        second, so the MF output at the edge alternates sign second by
+        second; multiplying by (-1)^second (of the unwrapped counter) makes
+        every second add coherently.  Magnitude mode is sign-free already.
+        The fold pauses while the Costas loop is out of lock: a wandering
+        phase flips the sign of y and would cancel the sum."""
+        if self.fold_seconds <= 0 or len(y) == 0:
+            return
+        if not self._use_magnitude_correlation and not self._costas_locked:
+            return
+        sr = self.sample_rate
+        idx = (rtp_at_y % sr).astype(np.int64)
+        if self._use_magnitude_correlation:
+            contrib = y
+        else:
+            parity = (rtp_at_y // sr) & 1
+            contrib = np.where(parity == 0, y, -y)
+        np.add.at(self._fold_acc, idx, contrib)
+        np.add.at(self._fold_cnt, idx, 1)
+        if self._fold_first_rtp is None:
+            self._fold_first_rtp = int(rtp_at_y[0])
+        self._fold_last_rtp = int(rtp_at_y[-1])
+        if self._fold_last_rtp - self._fold_first_rtp >= self.fold_seconds * sr:
+            self._fold_evaluate()
+
+    def _fold_evaluate(self) -> None:
+        """Judge the fold: apex over the residual of a triangle-wave fit.
+        A passing fold registers (or confirms) the coarse edge."""
+        sr = self.sample_rate
+        seconds = max(1, int(round((self._fold_last_rtp - self._fold_first_rtp) / sr)))
+        self.fold_evaluations += 1
+        # Per-index mean, not sum: the MF emits nothing for its first
+        # half-second, zero-fill gaps and Costas pauses drop batches, so
+        # the indices are not visited equally.  An unequal count put a
+        # one-apex step at index SR/2 and the argmax on it.
+        cnt = self._fold_cnt
+        acc = np.where(cnt > 0, self._fold_acc / np.maximum(cnt, 1), 0.0)
+        k = int(np.argmax(np.abs(acc)))
+        apex = float(acc[k])
+        amp = abs(apex)
+        if not np.isfinite(amp) or amp <= 0.0:
+            self.fold_last_snr = 0.0
+            self._fold_reset_window()
+            return
+        # The MF of a 1 Hz polarity flip with half-second boxcars is a
+        # triangle wave of period TWO seconds: +-A at the edges, zero at
+        # the half-seconds.  Sign-alternated and folded modulo one second
+        # every edge lands at +A and the half-second point at zero, so the
+        # folded shape is a triangle from A at the apex down to 0 half a
+        # second away.  Fit that at the apex and measure what is left.
+        # Distance is linear, not circular: the sign-alternated fold keeps
+        # the raw MF's ramp across the second, so the shape wraps with a
+        # step at the rtp second boundary, not a mirrored slope.
+        d = np.abs(np.arange(sr) - k)
+        template = np.sign(apex) * amp * (1.0 - 2.0 * d / sr)
+        resid = acc - template
+        mad = float(np.median(np.abs(resid - np.median(resid))))
+        sigma = 1.4826 * mad if mad > 0 else float(np.std(resid))
+        snr = amp / sigma if sigma > 0 else float('inf')
+        self.fold_last_snr = float(snr)
+        if snr < self.fold_min_snr:
+            logger.info(
+                f"T6 coarse fold: no edge in {seconds} s (apex/sigma {snr:.1f} < "
+                f"{self.fold_min_snr:.1f}); acquired={int(self._acquired)}")
+            self._fold_reset_window()
+            return
+        # Parabolic sub-sample refinement on |acc| around the apex.
+        a0, a1, a2 = abs(acc[(k - 1) % sr]), amp, abs(acc[(k + 1) % sr])
+        denom = a0 - 2.0 * a1 + a2
+        delta = (a0 - a2) / (2.0 * denom) if denom != 0 else 0.0
+        if not (-1.0 < delta < 1.0):
+            delta = 0.0
+        estimate = float((k + delta) % sr)
+        last_rtp = int(self._fold_last_rtp)
+        edge_rtp = last_rtp - ((last_rtp - k) % sr)
+        if not self._acquired:
+            self._chain_delay_samples = estimate
+            self._fold_ref = estimate
+            self._last_edge_rtp = int(edge_rtp)
+            self._acquired = True
+            self.pps_consecutive = max(self.pps_consecutive, self.consecutive_required)
+            self.fold_locks += 1
+            self._fold_step_estimate = None
+            logger.warning(
+                f"T6 coarse fold LOCK: chain_delay={estimate * 1e9 / sr:.0f} ns "
+                f"({estimate:.1f} samples) from {seconds} s folded, apex/sigma {snr:.1f}; "
+                f"per-edge detector had ok={self.pps_ok} noise={self.pps_noise}")
+        else:
+            cur = float(self._chain_delay_samples) if self._chain_delay_samples is not None else estimate
+            off = (estimate - cur) % sr
+            if off >= sr / 2:
+                off -= sr
+            if abs(off) <= self.edge_tolerance_samples:
+                # The fold agrees with the lock in force: hold it through
+                # a noisy stretch that yields no per-edge acceptances.
+                self.pps_consecutive = max(self.pps_consecutive, self.consecutive_required)
+                self._last_edge_rtp = int(edge_rtp)
+                self._chain_delay_samples = estimate
+                self._fold_ref = estimate
+                self._fold_step_estimate = None
+            else:
+                prev = self._fold_step_estimate
+                agree = (prev is not None
+                         and abs(((estimate - prev) % sr + sr / 2) % sr - sr / 2)
+                         <= self.edge_tolerance_samples)
+                if agree:
+                    logger.warning(
+                        f"T6 coarse fold: two consecutive folds place the edge "
+                        f"{off * 1e6 / sr:+.1f} us from the lock in force; re-homing "
+                        f"(chain_delay {cur * 1e9 / sr:.0f} -> {estimate * 1e9 / sr:.0f} ns, "
+                        f"apex/sigma {snr:.1f})")
+                    self._chain_delay_samples = estimate
+                    self._fold_ref = estimate
+                    self._last_edge_rtp = int(edge_rtp)
+                    self._fold_step_estimate = None
+                    self._step_candidate_rtp = None
+                    self._step_candidate_count = 0
+                else:
+                    logger.warning(
+                        f"T6 coarse fold disagrees with the lock in force by "
+                        f"{off * 1e6 / sr:+.1f} us (apex/sigma {snr:.1f}); holding, one "
+                        f"more agreeing fold re-homes")
+                    self._fold_step_estimate = estimate
+        self._fold_reset_window()
 
     def _detect_and_record_peaks(
         self, y: np.ndarray, rtp_at_y: np.ndarray,
@@ -876,7 +1053,8 @@ class BpskPpsCalibratorMF:
                     continue
 
                 cur_off = edge_rtp_int % self.sample_rate
-                prev_off = self._last_edge_rtp % self.sample_rate
+                prev_off = (self._fold_ref if self._fold_ref is not None
+                            else self._last_edge_rtp % self.sample_rate)
                 d = (cur_off - prev_off) % self.sample_rate
                 if d >= self.sample_rate // 2:
                     d -= self.sample_rate
@@ -957,7 +1135,11 @@ class BpskPpsCalibratorMF:
             # disambiguation logic anchors the absolute reference; the
             # calibrator's job is to report the raw modular position.
             chain_delay_samples = edge_rtp_full % self.sample_rate
-            self._chain_delay_samples = float(chain_delay_samples)
+            if self._fold_ref is None:
+                # Legacy: each accepted edge is the chain delay.  With a
+                # fold reference in force the fold publishes; a single
+                # edge only confirms it.
+                self._chain_delay_samples = float(chain_delay_samples)
             self._last_edge_rtp = edge_rtp_int
             if debug_active:
                 self._debug_peaks.append((

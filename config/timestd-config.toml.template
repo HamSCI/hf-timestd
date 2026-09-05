@@ -452,6 +452,15 @@ high_edge_hz = 25000
 consecutive_required = 10         # valid edges before lock
 edge_tolerance_samples = 30       # scale with sample_rate: 5 @16k, 30 @96k
 use_magnitude_correlation = false # Method 2 Re-projection; Method 4 magnitude
+# Coarse coherent fold (2026-09-05).  The per-edge detector integrates one
+# half-second per edge and falls off a stochastic lock cliff near 58 dB-Hz;
+# AC0G-B4's pilot sits at 48-57 dB-Hz after dark and the detector floods with
+# noise edges.  Folding the matched-filter output over K seconds gains
+# 10*log10(K) dB (17.8 dB at 60 s) and grants the same lock a run of
+# consecutive edges would.  0 disables.  The fold then defines the reference
+# the per-edge detector confirms against; a single edge no longer re-bases it.
+coarse_fold_seconds = 60
+# coarse_fold_min_snr = 8.0        # apex over residual sigma; noise folds to ~4-5
                                   # peak-pick FAILED twice (BPSK-PPS-DETECTION-
                                   # METHODS.md §4-5) — do not enable
 description = "BPSK_PPS"
