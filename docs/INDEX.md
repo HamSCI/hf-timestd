@@ -31,6 +31,8 @@ are marked ★ — when two docs disagree, the canonical one wins.
 | Doc | What it gives you |
 |-----|-------------------|
 | [METROLOGY.md](METROLOGY.md) ★ | **The canonical timing reference.** T-tier hierarchy, the §4.5–§4.6 timing-authority invariant, error budget, chrony feeds (FUSE/HPPS), the clock-health watchdog. |
+| [design/T6_EDGE_METHODS_COMPARED.md](design/T6_EDGE_METHODS_COMPARED.md) | How wd-record (Newell) and hf-timestd each find the TS-1 PPS edge; pros and cons; five measurements to compare them. Start here to understand T6. |
+| [design/T3_FUSION_EXPLAINED.md](design/T3_FUSION_EXPLAINED.md) | How FUSION establishes T3: marker → L1 → L2 → fusion → three sinks; the host-clock loop and its guards. Start here to understand T3. |
 | [TIMING-PIPELINE-WIRING.md](TIMING-PIPELINE-WIRING.md) | Runtime wiring of RTP / chrony / fusion and the SHM producers. |
 | [BPSK-PPS-DETECTION-METHODS.md](BPSK-PPS-DETECTION-METHODS.md) | The five BPSK PPS edge-detection methods (HPPS matched-filter; HFPS diff feed wired but disabled by default). |
 | [HF-PPS-CHRONY-TUNING.md](HF-PPS-CHRONY-TUNING.md) | Costas + chrony refclock tuning for the BPSK PPS feed. |
