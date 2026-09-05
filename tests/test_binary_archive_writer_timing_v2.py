@@ -10,6 +10,11 @@ from hf_timestd.core.binary_archive_writer import BinaryArchiveWriter
 from hf_timestd.core.time_map_producer import TimeMapInputs
 
 T0 = 1_788_537_251_999_997_458
+# radiod's GPS_TIME is ns since the GPS epoch, no leap seconds (2026: 18 s
+# ahead of UTC).  The writer holds it raw; the TimeMap must see UTC.
+from hf_timestd.core.leap_second import get_current_gps_leap_seconds  # noqa: E402
+GPS_MINUS_UNIX_NS = (315964800 - get_current_gps_leap_seconds()) * 10**9
+RAW_PAIR = (T0 - 12_000_000) - GPS_MINUS_UNIX_NS       # what radiod advertises
 
 
 def _bare():
@@ -47,7 +52,7 @@ class _Verdict(SimpleNamespace):
 
 def _writer_with_provider(provider):
     w = _bare()
-    w._gps_time_ns_raw = T0 - 12_000_000
+    w._gps_time_ns_raw = RAW_PAIR
     w._rtp_timesnap = 2_150_318_060
     w._note_counter_epoch(w._gps_time_ns_raw, w._rtp_timesnap, 96_000)
     w._time_map_provider = None
@@ -81,14 +86,14 @@ def test_timing_block_is_the_v2_state_record_with_legacy_keys_mirrored():
     assert block["origin"] == "native_anchor" and block["u_epoch_ns"] == 4093
     assert block["counter_epoch_id"].startswith("pair-")
     assert block["engineering"]["judge_tier"] == "T6"
-    assert block["engineering"]["radiod_gps_time_ns"] == T0 - 12_000_000
+    assert block["engineering"]["radiod_gps_time_ns"] == RAW_PAIR      # raw, legacy name
     # legacy keys mirrored at top level for one release (Plan C retires the mirror)
     assert block["offset_ns"] == 3_536_564.66 and block["offset_sigma_ns"] == 982_495.95
     assert block["judge_tier"] == "T6" and block["radiod_rtp_timesnap"] == 2_150_318_060
     # the provider saw the writer's facts
     inp = seen["inputs"]
     assert inp.counter_space == "AC0G-B4-status.local/T6_96000"
-    assert inp.gps_time_ns == T0 - 12_000_000 and inp.rtp_timesnap == 2_150_318_060
+    assert inp.gps_time_ns == T0 - 12_000_000 and inp.rtp_timesnap == 2_150_318_060   # UTC ns
     assert inp.f_s_hz == 96_000 and inp.judge_tier == "T6"
 
 
@@ -115,3 +120,17 @@ def test_a_provider_that_raises_yields_a_null_map_not_a_crash():
     block = w._chunk_timing_block(_verdict(), chunk_boundary_utc_ns=T0)
     assert block["origin"] is None and "no authority" in block["reason"]
     assert block["offset_ns"] == 3_536_564.66      # legacy mirror still present
+
+
+def test_sysclock_record_t0_is_utc_not_gps_epoch():
+    """The 2026-09-05 10:21Z sidecar on AC0G-B4 carried t0_utc_ns =
+    1472638212992146626 -- radiod's raw GPS_TIME, which reads as 2016."""
+    from hf_timestd.core.time_map_producer import TimeMapProducer
+    producer = TimeMapProducer(snapshot_fn=lambda: None, a_level_config="A1")
+    w = _writer_with_provider(producer.build)
+    block = w._chunk_timing_block(_verdict(), chunk_boundary_utc_ns=T0)
+    assert block["origin"] == "sysclock"
+    assert block["t0_utc_ns"] == T0 - 12_000_000
+    assert block["t0_utc_ns"] > 1_700_000_000 * 10**9          # this decade, not 2016
+    assert block["engineering"]["radiod_gps_time_ns"] == RAW_PAIR
+    assert block["counter_epoch_id"] == f"pair-{RAW_PAIR}"

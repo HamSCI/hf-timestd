@@ -403,6 +403,17 @@ class BinaryArchiveWriter:
         self._counter_epoch_id = f"pair-{int(gps_time_ns)}"
         return self._counter_epoch_id
 
+    @staticmethod
+    def _radiod_gps_ns_to_utc_ns(gps_time_ns: int) -> int:
+        """radiod's GPS_TIME counts nanoseconds from the GPS epoch
+        (1980-01-06) with no leap seconds; the TimeMap's t0 is UTC
+        nanoseconds from the Unix epoch.  Same conversion the labels use
+        (the adoption site above).  On 2026-09-05 the first v2 sidecars on
+        AC0G-B4 carried the raw value as t0_utc_ns and read as 2016."""
+        from .leap_second import get_current_gps_leap_seconds
+        GPS_EPOCH_UNIX = 315964800
+        return int(gps_time_ns) + 1_000_000_000 * (GPS_EPOCH_UNIX - get_current_gps_leap_seconds())
+
     def set_time_map_provider(self, provider, counter_space: str) -> None:
         """Late-bind the TimeMap provider (a callable TimeMapInputs -> TimeMap)
         and this channel's counter-space name."""
@@ -443,12 +454,17 @@ class BinaryArchiveWriter:
         eng = dict(legacy) if legacy is not None else {
             'radiod_gps_time_ns': self._gps_time_ns_raw,
             'radiod_rtp_timesnap': self._rtp_timesnap}
+        # The pair enters the map in UTC nanoseconds; engineering keeps
+        # radiod's raw GPS-epoch value under its legacy name, and the
+        # counter epoch id stays keyed on the raw value (an opaque name).
+        gps_utc_ns = (self._radiod_gps_ns_to_utc_ns(self._gps_time_ns_raw)
+                      if self._gps_time_ns_raw is not None else None)
         inputs = TimeMapInputs(
             counter_space=self._time_map_counter_space or self.config.channel_name,
             counter_epoch_id=self.counter_epoch_id,
             f_s_hz=int(self.config.sample_rate),
             measured_at_utc_ns=int(chunk_boundary_utc_ns),
-            gps_time_ns=self._gps_time_ns_raw, rtp_timesnap=self._rtp_timesnap,
+            gps_time_ns=gps_utc_ns, rtp_timesnap=self._rtp_timesnap,
             judge_tier=(verdict.tier if verdict is not None else None),
             engineering=eng,
         )
