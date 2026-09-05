@@ -69,6 +69,14 @@ class TestGnssVtecGate(unittest.TestCase):
             # A fresh GNSS VTEC reading far from the modelled TEC.
             fusion._read_gnss_vtec = lambda: (2.0, time.time())
 
+            # Pin the measurement instant.  The GNSS_VALIDATED tag needs the
+            # propagation model to predict a propagating mode for each path
+            # at the measurement's UTC time; run at 10Z on 2026-09-05 this
+            # test failed because the model, quite rightly, found none for
+            # WWVH 15 MHz before dawn.  An afternoon instant keeps the
+            # cross-check exercised whatever the clock says.
+            for m in measurements:
+                m.timestamp = 1_788_545_600.0     # 2026-09-04T18:13:20Z
             before = [m.d_clock_ms for m in measurements]
             fusion.fuse(skip_write=True)
             after = [m.d_clock_ms for m in measurements]
