@@ -1,8 +1,7 @@
 # How FUSION establishes T3
 
 **Date:** 2026-09-05
-**Status:** Explainer.  Describes the shipped path as of hf-timestd 2e967e0;
-changes no code.
+**Status:** DRAFT (2026-09-05).  Michael's direction: keep this as a draft through the next period of testing, then rewrite it to describe the best working implementation as it stands.  The record of methods tried and abandoned stays useful as material but does not belong in that description; `BPSK-PPS-DETECTION-METHODS.md` and the design documents keep it.  Passages here that recount interim states or past miscalculations are candidates to leave out in the rewrite.
 **Companion:** `T6_EDGE_METHODS_COMPARED.md` for the injected-PPS tier.  The
 metrology framework: `MEASUREMENT_MODEL.md`, `TIMING_PROVENANCE_MODEL.md`,
 `METROLOGY.md` §4.5.

@@ -1,7 +1,7 @@
 # Finding the PPS edge in a BPSK carrier: two methods, compared
 
 **Date:** 2026-09-05
-**Status:** Explainer and comparison; proposes measurements, changes no code.
+**Status:** DRAFT (2026-09-05).  Michael's direction: keep this as a draft through the next period of testing, then rewrite it to describe the best working implementation as it stands.  The record of methods tried and abandoned stays useful as material but does not belong in that description; `BPSK-PPS-DETECTION-METHODS.md` and the design documents keep it.  Passages here that recount interim states or past miscalculations are candidates to leave out in the rewrite.
 **Scope:** How wd-record in ka9q-radio (Scott Newell) locates the once-per-second
 polarity flip of the TS-1 pilot, how hf-timestd locates the same flip to establish
 and hold T6, what each method gains and gives up, and how to measure the
