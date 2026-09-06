@@ -118,16 +118,16 @@ shared data layer), per `docs/design/HF_TIMESTD_SPLIT_DESIGN.md`.
 - [ ] **Acceptance:** L3_gnss_vtec cadence unchanged; fusion correction
       still applied; disable test — fusion degrades gracefully.
 
-## Phase 5 — extract station-web  (order-independent after Phase 1)
+## Phase 5 — extract station-web  (order-independent after Phase 1)  (done 2026-09-06, see specs/2026-09-06-station-web-extraction-design.md)
 
-- [ ] Move web-api/ wholesale; absorb timing_validation_service +
+- [x] Move web-api/ wholesale; absorb timing_validation_service +
       stability_analysis; chrony parsing via hamsci-dsp or
       DIAG_chrony_stats.
-- [ ] Config-driven docs roots for living-docs; own config file;
+- [x] Config-driven docs roots for living-docs; own config file;
       `station-web.service`.
-- [ ] Drop fastapi stack from core pyproject; audit matplotlib/pandas
+- [x] Drop fastapi stack from core pyproject; audit matplotlib/pandas
       remnants.
-- [ ] **Acceptance:** all routers 200 against a live DB; living-docs render
+- [x] **Acceptance:** all routers 200 against a live DB; living-docs render
       from multi-repo roots; core venv builds without web deps; dashboards
       show live L1–L3 + iono + vtec end-to-end.
 

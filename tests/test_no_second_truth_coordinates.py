@@ -4,8 +4,10 @@
 WWV's position lived in eight places across three repos with five distinct
 latitudes, 1.93 us of predicted delay apart.  The correct value has been in
 this repo the whole time, in `broadcast_specs.py`, with NIST's figure cited in
-the comment above it — while `timing_consistency_validator` and
-`models/broadcast` carried the superseded one.
+the comment above it — while `timing_consistency_validator` and the old
+`models/broadcast` carried the superseded one.  `models/broadcast` left for
+station-web in the 2026-09-06 split (Phase 5), so its DEFAULT_STATIONS guard
+belongs to that repo now; the three checks below cover what stays here.
 
 `hamsci_dsp.stations.BUILTIN_CATALOG` is the single source, and
 `core/wwv_constants.py` is this repo's lookup onto it.  Anything that keeps its
@@ -42,12 +44,3 @@ def test_broadcast_specs_agrees_with_the_catalogue():
     for station, coords in STATION_COORDINATES.items():
         name = station.value if hasattr(station, "value") else str(station)
         assert coords == _cat(name), f"{name} disagrees with the catalogue"
-
-
-def test_default_broadcast_stations_agree_with_the_catalogue():
-    from hf_timestd.models.broadcast import DEFAULT_STATIONS
-
-    for s in DEFAULT_STATIONS:
-        want = _cat(s.name)
-        assert (s.latitude, s.longitude) == want, (
-            f"{s.name} disagrees with the catalogue")

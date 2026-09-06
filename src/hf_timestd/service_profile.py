@@ -8,7 +8,7 @@ overrides allow fine-grained control on top.
 Usage:
     from hf_timestd.service_profile import ServiceProfile
     profile = ServiceProfile.from_config(config)
-    profile.active_services()   # → {'core_recorder', 'web_api', ...}
+    profile.active_services()   # → {'core_recorder', 'radiod_monitor', ...}
     profile.systemd_units()     # → {'timestd-core-recorder.service', ...}
 """
 
@@ -35,7 +35,6 @@ SERVICE_UNIT_MAP: Dict[str, str] = {
     # hamsci-physics in the 2026-08-24 split.  A profile may only name a
     # unit this repo ships — enabling an absent unit fails the whole
     # `profile set` (pinned by TestProfilesOnlyReferenceShippedUnits).
-    'web_api':           'timestd-web-api.service',
     'radiod_monitor':    'timestd-radiod-monitor.service',
     'chrony_monitor':    'timestd-chrony-monitor.timer',
     'pipeline_watchdog': 'timestd-pipeline-watchdog.timer',
@@ -56,7 +55,7 @@ PROFILES: Dict[str, Set[str]] = {
     'archive': _ALWAYS_ON | {'prune'},
 
     'rtp': _ALWAYS_ON | {
-        'web_api', 'radiod_monitor', 'pipeline_watchdog',
+        'radiod_monitor', 'pipeline_watchdog',
         'prune',
     },
 
@@ -67,7 +66,7 @@ PROFILES: Dict[str, Set[str]] = {
                  # Fusion reads gnss_vtec data via
                  # multi_broadcast_fusion._read_gnss_vtec() when present,
                  # so this is a natural augmentation of timing production.
-        'web_api', 'radiod_monitor', 'pipeline_watchdog',
+        'radiod_monitor', 'pipeline_watchdog',
         'chrony_monitor', 'prune',
     },
 
@@ -75,7 +74,7 @@ PROFILES: Dict[str, Set[str]] = {
         'metrology', 'l2_calibration', 'fusion',
         'vtec',  # gated by [gnss_vtec].enabled — suppressed on hosts
                  # without a GNSS receiver (see active_services())
-        'web_api', 'radiod_monitor', 'pipeline_watchdog',
+        'radiod_monitor', 'pipeline_watchdog',
         'chrony_monitor', 'prune',
     },
 }
@@ -87,7 +86,7 @@ PROFILE_NAMES = sorted(PROFILES.keys())
 
 PROFILE_DESCRIPTIONS: Dict[str, str] = {
     'archive': 'Core recorder only — raw IQ preservation, minimal resources',
-    'rtp':     'Archive + web-api + monitoring — standard RTP/GPSDO mode',
+    'rtp':     'Archive + monitoring — standard RTP/GPSDO mode',
     'fusion':  'RTP + metrology + fusion — GPS-denied timing from HF broadcasts',
     # Since the 2026-08-24 split the physics/ionospheric stages belong to
     # hamsci-physics; 'full' is now the complete TIMING stack plus the

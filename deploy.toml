@@ -107,11 +107,6 @@ dst  = "/etc/systemd/system/timestd-radiod-monitor.service"
 
 [[install.steps]]
 kind = "link"
-src  = "systemd/timestd-web-api.service"
-dst  = "/etc/systemd/system/timestd-web-api.service"
-
-[[install.steps]]
-kind = "link"
 src  = "systemd/timestd-vtec.service"
 dst  = "/etc/systemd/system/timestd-vtec.service"
 
@@ -162,7 +157,6 @@ units = [
     # discovery).  l2-calibration stays here and still produces
     # L2_timing_measurements, so no product is orphaned.
     "timestd-radiod-monitor.service",
-    "timestd-web-api.service",
     "timestd-vtec.service",
     # Timers — listed here so `smd start/stop` toggles them too.
     "timestd-chrony-monitor.timer",

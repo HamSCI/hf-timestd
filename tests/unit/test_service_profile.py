@@ -81,12 +81,12 @@ class TestFromConfig:
             'services': {
                 'profile': 'rtp',
                 'vtec': True,            # override-on
-                'web_api': False,        # override-off
+                'radiod_monitor': False,  # override-off
                 'metrology': 'sometimes',  # not bool — ignored
                 'unknown_service': True,   # not in registry — ignored
             }
         })
-        assert profile.overrides == {'vtec': True, 'web_api': False}
+        assert profile.overrides == {'vtec': True, 'radiod_monitor': False}
 
     def test_vtec_flag_picked_up_from_gnss_vtec_section(self):
         profile = ServiceProfile.from_config({
@@ -117,10 +117,10 @@ class TestActiveServices:
     def test_override_can_enable_extra_service(self):
         profile = ServiceProfile(
             profile_name='archive',
-            overrides={'web_api': True},
+            overrides={'radiod_monitor': True},
         )
         active = profile.active_services()
-        assert 'web_api' in active
+        assert 'radiod_monitor' in active
         assert 'core_recorder' in active
 
     def test_override_can_disable_profile_service(self):
@@ -215,8 +215,8 @@ class TestSummary:
         assert summary['services']['chrony_monitor']['enabled'] is True
 
         # A profile-baseline service is sourced from 'profile'
-        assert summary['services']['web_api']['source'] == 'profile'
-        assert summary['services']['web_api']['enabled'] is True
+        assert summary['services']['radiod_monitor']['source'] == 'profile'
+        assert summary['services']['radiod_monitor']['enabled'] is True
 
         # A non-active service is reported as enabled=False
         assert summary['services']['metrology']['enabled'] is False

@@ -59,6 +59,7 @@ hf-timestd raytrace WWV 10.0         # PHaRLAP 2-D ray trace → propagation mod
 - **HDF5 SWMR:** writers keep files open + flush; readers use `swmr=True`
 - **Raw IQ storage:** Configurable chunk duration (`file_duration_sec`, default 600s = 10 min). Compressed `.bin.zst` + JSON sidecar per chunk. GRAPE raw reader handles both legacy 1-min and multi-minute chunks transparently.
 - **GRAPE spectrogram:** Edge tapering at gap boundaries (half-cosine, 5s); full-window validity masking (NFFT=512 → ±25.6s). No zero interpolation.
+- Web UI moved out: station-web (2026-09-06 split Phase 5) serves the pages from the same /var/lib/timestd products; this repo carries no FastAPI.
 - **Config:** TOML-based (`config/timestd-config.toml.template`); production at `/etc/hf-timestd/`
 
 ## Client contract: PROVIDER (not subscriber)

@@ -69,6 +69,7 @@ are marked ★ — when two docs disagree, the canonical one wins.
 | [STATION_SETUP_GUIDE.md](STATION_SETUP_GUIDE.md) · PSWS_SETUP_GUIDE.md and NASA_EARTHDATA_SETUP.md → **[hamsci-physics](https://github.com/HamSCI/hamsci-physics/tree/main/docs)** | First-time site setup here; PSWS upload and NASA Earthdata setup moved with the science products. |
 | [PIPELINE_VERIFICATION.md](PIPELINE_VERIFICATION.md) | Pipeline verification procedure. |
 | [WWVB-INTEGRATION.md](WWVB-INTEGRATION.md) | WWVB 60 kHz fusion source (Layer 4 — currently gated off, awaiting validation). |
+| Web dashboard → **[station-web](https://github.com/mijahauan/station-web)** | The operator web UI left this repo in the 2026-09-06 split (Phase 5). It reads the same `/var/lib/timestd` products; run and document it there. |
 
 ## Subdirectories
 
@@ -76,7 +77,7 @@ are marked ★ — when two docs disagree, the canonical one wins.
 |-----|----------|
 | [design/](design/) | Current architecture/design rationale. |
 | [features/](features/) | Feature designs + operational references (matched filters, monitoring, calibration, paths). |
-| [web-ui/](web-ui/) | FastAPI dashboard reference (config sync, SSRC, timing dashboard). |
+| [web-ui/](web-ui/) | **Historical** — dashboard reference (config sync, SSRC, timing dashboard) written while the FastAPI web UI still lived here. The UI moved to **[station-web](https://github.com/mijahauan/station-web)** in the 2026-09-06 split (Phase 5). |
 | [publications/](publications/) | The QEX paper draft and HamSCI 2026 talk/abstract (the methodology bibliography). |
 | [reference/](reference/) | External specifications (e.g. NIST Enhanced WWVB broadcast format). |
 | [figures/](figures/) · [images/](images/) | Figure assets for the docs and publications. |

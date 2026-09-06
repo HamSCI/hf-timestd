@@ -403,7 +403,7 @@ radiod_restart_request = false
 #
 # Built-in profiles (from least to most services):
 #   archive  — core-recorder only.  Raw IQ preservation, minimal resources.
-#   rtp      — archive + web-api + monitoring timers.  Standard RTP mode
+#   rtp      — archive + monitoring timers.  Standard RTP mode
 #              where radiod's GPSDO provides timing authority.
 #   fusion   — rtp + metrology + l2-calibration + fusion + chrony-monitor.
 #              GPS-denied mode: timing derived from HF broadcasts.
@@ -423,7 +423,6 @@ profile = "rtp"
 # fusion = true               # Multi-broadcast fusion → Chrony SHM
 # physics = true              # L2/L3 ionospheric products
 # vtec = false                # GNSS VTEC (also requires gnss_vtec.enabled)
-# web_api = true              # FastAPI dashboard on port 8000
 # radiod_monitor = true       # Hardware health monitor
 # grape_daily = true          # Daily GRAPE decimation + upload timer
 # chrony_monitor = true       # Chrony timing authority watchdog
