@@ -284,7 +284,7 @@ then `[logging] level`, then `INFO`. SIGHUP re-reads the level and the docs root
 
 ## 8. Configuration
 
-`/etc/station-web/station-web.toml`, override with `STATION_WEB_CONFIG`:
+`/etc/station-web/config.toml` (amended 2026-09-06: sigmond reads any other `*.toml` under `/etc/<client>/` as a per-instance config, so `station-web.toml` produced a phantom `station-web@station-web` instance on B4), override with `STATION_WEB_CONFIG`:
 
 ```toml
 [station]        # seeded from the §14 env bag: STATION_CALL (fallback STATION_CALLSIGN), STATION_GRID, STATION_LAT, STATION_LON
