@@ -32,11 +32,9 @@ Six-service systemd pipeline:
    - Ionospheric modeling, TEC estimation
    - Output: /var/lib/timestd/phase2/{CHANNEL}/L3/
 
-6. WebAPI (timestd-web-api)
-   - REST API and web UI
-   - Reads HDF5 data products
-
 Note: Phase2AnalyticsService and PipelineOrchestrator archived 2026-01-22.
+The REST API and web UI left this repo for station-web on 2026-09-06
+(split Phase 5); they read these same products from outside.
 """
 
 # Lazy facade (PEP 562) — split plan Phase 1: the eager imports

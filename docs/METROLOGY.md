@@ -167,7 +167,6 @@ The system is composed of eight independent systemd services:
 | **timestd-fusion** | Multi-Broadcast Synthesis | `/var/lib/timestd/phase2/fusion/` + Chrony SHM |
 | **timestd-vtec** | Ionospheric Data Acquisition | `/var/lib/timestd/data/gnss_vtec/GNSS_gnss_vtec_YYYYMMDD.h5`, `/var/lib/timestd/ionex/` |
 | **timestd-physics** | Carrier-phase dTEC, group-delay TEC validation, T_iono | `/var/lib/timestd/phase2/science/tec/` |
-| **timestd-web-api** | User Visualization & System API | Port 8000 |
 | **timestd-radiod-monitor** | Hardware Health Monitoring | Alerts on failure |
 
 ### 4.2 Three-Phase Pipeline
@@ -1721,9 +1720,8 @@ The fusion service now records Allan deviation in every HDF5 output:
 **Validation Procedure:**
 
 ```bash
-# Check Allan deviation via web UI (metrology.html)
-# Or query the API:
-curl http://localhost:8000/api/stability/adev
+# Allan deviation is served by station-web (metrology.html and its
+# /api/stability/adev endpoint), not by this repo.
 
 # Expected ADEV values for a healthy system:
 # τ=60s:   ~1e-9 to 1e-8 (dominated by ionosphere)

@@ -447,7 +447,6 @@ sudo systemctl start timestd-core-recorder
 sudo systemctl start timestd-metrology
 sudo systemctl start timestd-l2-calibration
 sudo systemctl start timestd-fusion
-sudo systemctl start timestd-web-api
 
 # Check status
 sudo systemctl status timestd-*
@@ -460,7 +459,6 @@ sudo systemctl status timestd-*
 ls -lt /var/lib/timestd/raw_buffer/*/$(date +%Y%m%d)/ | head
 
 # Web UI
-curl -s http://localhost:8000/api/health/system | python3 -m json.tool
 ```
 
 ---

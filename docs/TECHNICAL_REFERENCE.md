@@ -141,17 +141,12 @@ Guidance:
 - Archives dTEC, TEC, and T_iono to HDF5 for scientific analysis.
 - **Output:** `/var/lib/timestd/phase2/science/tec/` (HDF5 L3)
 
-### 6. Web UI & API (`timestd-web-api`)
+### 6. Web UI & API — moved out
 
-**Responsibility:** User Visualization & System API
-
-- **Service Type:** Python/FastAPI (`uvicorn`).
-- **Endpoint:** Port 8000.
-- **Capabilities:**
-  - Serves static dashboard (`metrology.html`, `logs.html`, `ionosphere.html`).
-  - Provides REST API for system status and HDF5 data access.
-  - Interactive API documentation at `/api/docs`.
-- **Logs Viewer:** Real-time access to systemd journals via `/api/logs` endpoint.
+The dashboard and its REST API left this repo in the 2026-09-06 split
+(Phase 5) and now ship as **[station-web](https://github.com/mijahauan/station-web)**. They read the same
+`/var/lib/timestd` products described above; nothing in this repo serves
+HTTP.
 
 ---
 
@@ -335,7 +330,10 @@ The `HFPropagationModel` is now the sole propagation model throughout the pipeli
 
 **Deprecated:** `PhysicsPropagationModel` in `physics_propagation.py` is retained for backward compatibility but all callers have been migrated.
 
-### 6. Web API Propagation Endpoints (v6.7.1)
+### 6. Propagation Endpoints (v6.7.1) — served by station-web
+
+These endpoints moved to **[station-web](https://github.com/mijahauan/station-web)** with the web UI in the
+2026-09-06 split; the model behind them stays here.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -471,7 +469,7 @@ new code should not follow it.
   process.  Each `write_measurement` / `write_measurements_batch`
   call appends to the extendable datasets and `flush()`-es so readers
   see the new rows immediately.  A `close()` at clean shutdown.
-* **Readers** (`hdf5_reader.py`, `web-api/`, fusion service, any tool)
+* **Readers** (`hdf5_reader.py`, station-web, fusion service, any tool)
   open with `h5py.File(path, 'r', swmr=True)`.  This bypasses the
   POSIX advisory lock the kernel would otherwise hand back EWOULDBLOCK
   for, so a reader can attach to a file the writer holds open.
@@ -642,7 +640,7 @@ data_root / "phase2" / "fusion" / f"fusion_timing_{date}.h5"
 data_root / "products" / channel / "spectrograms" / f"{date}_spectrogram.png"
 ```
 
-The web API (FastAPI/Python) reads the same HDF5 files directly — no path synchronization needed since both the core library and web API are Python.
+station-web reads the same HDF5 files directly — no path synchronization needed, since both the core library and the web client are Python and share `hamsci_dsp.io`.
 
 ---
 
@@ -714,7 +712,6 @@ sudo systemctl enable --now timestd-metrology
 sudo systemctl enable --now timestd-l2-calibration
 sudo systemctl enable --now timestd-fusion
 sudo systemctl enable --now timestd-physics
-sudo systemctl enable --now timestd-web-api
 
 # Optional services
 sudo systemctl enable --now timestd-vtec
@@ -825,14 +822,10 @@ The current package is `hf_timestd` under `src/hf_timestd/`.
 | `uploader.py` | SFTP upload to HamSCI PSWS network |
 | `raw_reader.py` | Reads raw IQ from tiered storage; handles both 1-min and multi-minute chunk files |
 
-### Web API (`web-api/`)
+### Web API — moved out
 
-| Component | Purpose |
-|-----------|--------|
-| `main.py` | FastAPI application with uvicorn, systemd watchdog integration |
-| `routers/` | REST API endpoints: dashboard, metrology, phase, propagation, logs, correlations |
-| `services/` | Data access layer: reads HDF5 products, computes derived views |
-| `static/` | HTML dashboards: metrology, phase/Doppler, ionosphere, Allan deviation, logs |
+The application, its routers, its data-access services and its static
+dashboards all live in **[station-web](https://github.com/mijahauan/station-web)** since the 2026-09-06 split.
 
 ---
 
@@ -847,11 +840,6 @@ The current package is `hf_timestd` under `src/hf_timestd/`.
 - `h5py>=3.8.0` - HDF5 read/write (all inter-service data exchange)
 - `toml` - Configuration parsing
 - `zstandard` - Zstd compression for binary IQ archives
-
-**Web API:**
-- `fastapi` - REST API framework
-- `uvicorn` - ASGI server with systemd watchdog support
-- `jinja2` - HTML template rendering
 
 **Optional (GRAPE/ionospheric):**
 - `digital_rf` - Digital RF HDF5 packaging (GRAPE upload only)
@@ -939,13 +927,6 @@ else:
 ```bash
 # View latest JSON sidecar
 cat $(ls -t /var/lib/timestd/raw_buffer/SHARED_10000/$(date +%Y%m%d)/*.json | head -1) | python3 -m json.tool
-```
-
-### Check Web API
-
-```bash
-curl http://localhost:8000/api/health | python3 -m json.tool
-curl http://localhost:8000/api/dashboard/summary | python3 -m json.tool
 ```
 
 ### Check Service Logs

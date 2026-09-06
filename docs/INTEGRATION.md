@@ -291,7 +291,6 @@ hf-timestd status --data-root /var/lib/timestd
 
 - `timestd-physics` — propagation model, science products (improves grade)
 - `timestd-vtec` — GNSS VTEC for ionospheric correction
-- `timestd-web-api` — real-time dashboard
 
 ---
 

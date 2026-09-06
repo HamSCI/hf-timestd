@@ -23,7 +23,7 @@ HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/BPM time standard bro
 - 🔬 **Hierarchical Estimation** - Per-broadcast Kalman filtering + WLS fusion for deterministic restart behavior.
 - ⏱️ **NTP-Based Bootstrap (v6.4)** - Fast RTP-to-UTC calibration using GPSDO wallclock (~2 min to LOCKED).
 - 🧠 **AI Discrimination** - Probabilistic Logistic Regression + Heuristic Voting for station ID.
-- 🌐 **Web UI** - Real-time monitoring via **FastAPI** dashboard with Allan Deviation, propagation analysis, and per-path dTEC visualization.
+- 🌐 **Web UI** - Served by [station-web](https://github.com/mijahauan/station-web), a separate client since the 2026-09-06 split: Allan deviation, propagation analysis and per-path dTEC over these same products.
 - ⏰ **Chrony SHM refclocks** - The L2 fusion feed (SHM unit 1 = `FUSE`) plus the T6 BPSK-PPS feed (SHM unit 2 = `HPPS`; the diff-detector feed `HFPS` on unit 3 left the code 2026-09-04). The legacy dual-feed (L1 raw at SHM unit 0) was retired 2026-05-23 — it produced byte-identical output to the L2 feed in single-station mode. Dual Kalman filtering (L1 raw + L2 calibrated) is still computed inside the fusion service for diagnostic comparison.
 - 📊 **Metrological Rigor (v6.2)** - Cramér-Rao uncertainty, multipath detection, Doppler correction, adaptive thresholds.
 
@@ -72,8 +72,8 @@ HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/BPM time standard bro
 - **Automated daily upload** — SFTP to HamSCI PSWS network
 - **Spectrograms** — Daily spectrogram generation from decimated data
 
-**Web UI & API:**
-- **FastAPI dashboard** — Metrology, dTEC, ionogram, GRAPE, logs, propagation conditions pages
+**Web UI & API** — in [station-web](https://github.com/mijahauan/station-web), not this repo:
+- **Dashboard** — Metrology, dTEC, ionogram, GRAPE, logs, propagation conditions pages
 - **Custom date range** — Browse any historical day on all time-selector pages
 - **Solar elevation overlay** — Ionogram and dTEC time series
 
@@ -174,7 +174,7 @@ Core-recorder is always on — it is the irreplaceable raw data source.
 | Profile | Services | Use case |
 |---------|----------|----------|
 | `archive` | core-recorder, prune | Raw IQ preservation, minimal resources |
-| `rtp` | archive + web-api, monitoring, GRAPE | Standard GPSDO timing mode |
+| `rtp` | archive + monitoring, GRAPE | Standard GPSDO timing mode |
 | `fusion` | rtp + metrology, fusion, chrony-monitor | GPS-denied timing from HF |
 | `full` | fusion + physics, ionex, iono-reanalysis | Full science + timing |
 
@@ -221,7 +221,7 @@ cookbook and stage-by-stage troubleshooting.
 | **Authority history** | `/var/lib/timestd/authority_history.db` (SQLite — per-cycle T-tier snapshots) |
 | **IONEX** | `/var/lib/timestd/ionex/` |
 
-**Monitor:** Open `http://localhost:8000` for real-time monitoring (FastAPI Web API):
+**Monitor:** install [station-web](https://github.com/mijahauan/station-web) and open it against these products. It serves:
 
 - **Station Overview** - System metadata and recent activity
 - **System Health** - Process status and true uptime
@@ -262,10 +262,7 @@ The system has an eight-service core pipeline plus a set of housekeeping units (
 6. PHYSICS (timestd-physics)
    • Carrier-phase dTEC + group-delay TEC validation
      ↓
-7. WEB API (timestd-web-api)
-   • FastAPI dashboard & REST API (port 8000)
-     ↓
-8. RADIOD MONITOR (timestd-radiod-monitor)
+7. RADIOD MONITOR (timestd-radiod-monitor)
    • Hardware health monitoring
 ```
 

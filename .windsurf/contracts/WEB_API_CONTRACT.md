@@ -1,3 +1,9 @@
+> ⛔ **SUPERSEDED 2026-09-06.** The web API left this repo in the split
+> (Phase 5) and now lives in [station-web](https://github.com/mijahauan/station-web), which carries its own
+> `contract.py` and `tests/test_client_contract.py`. This document is kept
+> only until its requirements are ported there — do not read it as a
+> description of anything in hf-timestd.
+
 # WEB-API CONTRACT — hf-timestd
 
 **Version:** 1.0.0

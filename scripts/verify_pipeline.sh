@@ -98,7 +98,6 @@ if [[ "$MODE" == "production" ]]; then
         "timestd-l2-calibration.service"
         "timestd-fusion.service"
         "hamsci-physics-fusion.service"
-        "timestd-web-api.service"
     )
     
     # Optional monitoring/supplementary services (warnings only)

@@ -48,9 +48,6 @@ TIMESTD_VENV=/opt/hf-timestd/venv
 # Project/source directory
 TIMESTD_PROJECT=/opt/hf-timestd
 
-# Web UI directory
-TIMESTD_WEBUI=/opt/hf-timestd/web-ui
-
 # ===========================================================================
 # LOGGING
 # ===========================================================================

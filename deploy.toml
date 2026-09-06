@@ -97,11 +97,6 @@ dst  = "/etc/systemd/system/timestd-l2-calibration.service"
 
 [[install.steps]]
 kind = "link"
-src  = "systemd/timestd-physics.service"
-dst  = "/etc/systemd/system/timestd-physics.service"
-
-[[install.steps]]
-kind = "link"
 src  = "systemd/timestd-radiod-monitor.service"
 dst  = "/etc/systemd/system/timestd-radiod-monitor.service"
 

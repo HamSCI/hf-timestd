@@ -42,7 +42,6 @@ cp /etc/systemd/system/timestd-*.service /tmp/timestd-service-backup/ 2>/dev/nul
 cp $REPO_DIR/systemd/timestd-core-recorder.service /etc/systemd/system/
 cp $REPO_DIR/systemd/timestd-metrology.service /etc/systemd/system/
 cp $REPO_DIR/systemd/timestd-fusion.service /etc/systemd/system/
-cp $REPO_DIR/systemd/timestd-web-ui-fastapi.service /etc/systemd/system/
 cp $REPO_DIR/systemd/timestd-alert@.service /etc/systemd/system/
 
 echo "✓ Service files installed"
@@ -76,7 +75,6 @@ echo "2. Restart services to enable watchdog support:"
 echo "   sudo systemctl restart timestd-core-recorder"
 echo "   sudo systemctl restart timestd-metrology"
 echo "   sudo systemctl restart timestd-fusion"
-echo "   sudo systemctl restart timestd-web-ui-fastapi"
 echo
 echo "3. Verify watchdog status:"
 echo "   systemctl show timestd-core-recorder | grep Watchdog"

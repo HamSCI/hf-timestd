@@ -85,7 +85,6 @@ STARTUP_ORDER=(
     "timestd-l2-calibration.service"
     "timestd-fusion.service"
     "timestd-vtec.service"
-    "timestd-web-api.service"
     "timestd-radiod-monitor.service"
 )
 
@@ -261,9 +260,8 @@ if systemctl is-active --quiet chronyd; then
     log_info "  ✓ chronyd restarted"
 fi
 
-# Web API and monitoring
-log_step "Starting web API and monitoring..."
-start_service "timestd-web-api" "Web API & Dashboard"
+# Monitoring
+log_step "Starting monitoring..."
 start_service "timestd-radiod-monitor" "Hardware Health Monitor"
 
 # Optional services
@@ -302,13 +300,6 @@ if command -v chronyc &> /dev/null; then
     echo ""
     echo "  Chrony sources:"
     chronyc sources 2>/dev/null | grep -E "TSL|192.168" | head -5 | sed 's/^/    /'
-fi
-
-# Check web API
-if curl -s http://localhost:8000/health > /dev/null 2>&1; then
-    log_info "  Web API: http://localhost:8000 ✓"
-else
-    log_warn "  Web API: not responding yet (may need a moment)"
 fi
 
 # Verify PSWS SFTP connectivity (non-fatal)

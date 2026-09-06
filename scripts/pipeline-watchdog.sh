@@ -17,7 +17,6 @@
 #        - Physics: enabled/active only -- systemd WatchdogSec covers a hang
 #        - L2 calibration: enabled/active only -- systemd WatchdogSec covers
 #          a hung loop, and the state file this once read belongs to fusion
-#        - Web API: HTTP /health
 #
 # If a service is running but has stopped processing beyond the threshold,
 # the watchdog restarts it. This catches "zombie" services that appear
@@ -425,29 +424,6 @@ check_calibration() {
 }
 
 # ==========================================================================
-# Check 6: Web API
-# ==========================================================================
-check_webapi() {
-    local unit="timestd-web-api.service"
-    if ! is_enabled "$unit"; then return; fi
-
-    if ! is_active "$unit"; then
-        do_restart "$unit" "not running but enabled"
-        RESTARTS=$((RESTARTS + 1))
-        return
-    fi
-
-    # Quick HTTP health check
-    if ! curl -sf -o /dev/null --max-time 5 http://localhost:8000/health 2>/dev/null; then
-        # Try root path as fallback
-        if ! curl -sf -o /dev/null --max-time 5 http://localhost:8000/ 2>/dev/null; then
-            do_restart "$unit" "running but HTTP health check failed"
-            RESTARTS=$((RESTARTS + 1))
-        fi
-    fi
-}
-
-# ==========================================================================
 # Run all checks
 # ==========================================================================
 check_recorder
@@ -455,7 +431,6 @@ check_metrology
 check_fusion
 check_physics
 check_calibration
-check_webapi
 
 if [[ $RESTARTS -gt 0 ]]; then
     log_warn "Watchdog: restarted $RESTARTS service(s)"

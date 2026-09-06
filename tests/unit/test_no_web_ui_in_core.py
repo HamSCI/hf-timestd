@@ -22,3 +22,28 @@ def test_manifest_no_longer_ships_the_web_unit():
     assert "timestd-web-api.service" not in d["systemd"]["units"]
     assert not any("web-api" in s.get("src", "") for s in d["install"]["steps"])
     assert not (ROOT / "systemd" / "timestd-web-api.service").exists()
+
+
+def test_every_install_step_src_exists():
+    with open(ROOT / "deploy.toml", "rb") as fh:
+        d = tomllib.load(fh)
+    # Only repo-relative srcs are checkable here.  An absolute src names a
+    # path on the target host (e.g. venv/bin/hf-timestd, a build product of
+    # the venv step) and is legitimately absent from a checkout.
+    missing = [
+        s["src"] for s in d["install"]["steps"]
+        if "src" in s and not s["src"].startswith("/")
+        and not (ROOT / s["src"]).exists()
+    ]
+    assert not missing, missing
+
+
+def test_no_web_ui_residue_in_scripts():
+    import re
+    hits = []
+    for p in (ROOT / "scripts").iterdir():
+        if p.is_file() and p.suffix in {".sh", ".py"}:
+            for i, line in enumerate(p.read_text(errors="replace").splitlines(), 1):
+                if re.search(r"timestd-web-api|timestd-web-ui|web-api/|WEBUI", line):
+                    hits.append(f"{p.name}:{i}")
+    assert not hits, hits

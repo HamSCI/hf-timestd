@@ -133,7 +133,7 @@ sudo ./scripts/install.sh
 4. Creates the `timestd` system user and production directories
 5. Sets up the Python virtual environment (`/opt/hf-timestd/venv`) with an
    **editable** install of this repo (`pip install -e .`)
-6. Copies web-api and systemd service files into place
+6. Copies systemd service files into place
 7. **Runs the setup wizard** (`setup-station.sh`) — an interactive prompt that collects your station identity, location (grid square or lat/lon), ka9q-radio address, timing mode, GNSS VTEC settings, and PSWS upload credentials, then generates `/etc/hf-timestd/timestd-config.toml`
 8. Enables systemd services according to the configured **service profile** (see [Service Profiles](#service-profiles) below)
 
@@ -159,7 +159,6 @@ sudo ./scripts/start-services.sh --status
 - **Logs:** `/var/log/hf-timestd/`
 - **Config:** `/etc/hf-timestd/timestd-config.toml`
 - **Venv:** `/opt/hf-timestd/venv/`
-- **Web API:** `/opt/hf-timestd/web-api/`
 
 ---
 
@@ -262,7 +261,7 @@ file.  The core-recorder is always on — it is the irreplaceable raw data sourc
 | Profile | What runs | Use case |
 |---------|-----------|----------|
 | **archive** | core-recorder, prune | Raw IQ preservation, minimal resources |
-| **rtp** | archive + web-api, radiod-monitor, pipeline-watchdog, GRAPE | Standard GPSDO timing (default) |
+| **rtp** | archive + radiod-monitor, pipeline-watchdog, GRAPE | Standard GPSDO timing (default) |
 | **fusion** | rtp + metrology, l2-calibration, fusion, chrony-monitor | GPS-denied timing from HF broadcasts |
 | **full** | fusion + physics, ionex-download, iono-reanalysis | Full science + timing |
 
@@ -300,7 +299,6 @@ it just refreshes the editable install and restarts the units already enabled.
 | **`timestd-fusion`** | Multi-broadcast Kalman fusion, feeds Chrony SHM (TSL1/TSL2) |
 | **`timestd-physics`** | Carrier-phase dTEC, group-delay TEC, propagation mode ID |
 | **`timestd-vtec`** | GNSS VTEC monitoring (requires `gnss_vtec.enabled = true`) |
-| **`timestd-web-api`** | FastAPI dashboard on port 8000 |
 | **`timestd-radiod-monitor`** | Hardware health monitoring |
 | **`timestd-chrony-monitor.timer`** | Chrony reachability watchdog |
 | **`timestd-pipeline-watchdog.timer`** | Pipeline health watchdog |
@@ -329,8 +327,7 @@ sudo systemctl status timestd-core-recorder
 2. **L1 Metrology:** `ls -lh /var/lib/timestd/phase2/*/metrology/` — HDF5 files (if metrology is enabled)
 3. **L2 Calibration:** `ls -lh /var/lib/timestd/phase2/*/clock_offset/`
 4. **Fusion:** `ls -lh /var/lib/timestd/phase2/fusion/`
-5. **Web API:** Open `http://localhost:8000` in browser
-6. **Chrony:** `chronyc sources` — look for TSL1/TSL2 references (if fusion is enabled)
+5. **Chrony:** `chronyc sources` — look for TSL1/TSL2 references (if fusion is enabled)
 
 ### Pipeline Health Check
 

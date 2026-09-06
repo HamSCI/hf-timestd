@@ -166,9 +166,8 @@ if [ $TOTAL_MOVED -gt 0 ]; then
     echo "✓ Migration successful"
     echo ""
     echo "Next steps:"
-    echo "  1. Verify data is accessible via web-api"
-    echo "  2. Test all API endpoints"
-    echo "  3. Monitor logs for any issues"
+    echo "  1. Verify the products still resolve (scripts/verify_pipeline.sh)"
+    echo "  2. Monitor logs for any issues"
 else
     echo "✓ No migration needed - all files already in correct locations"
 fi

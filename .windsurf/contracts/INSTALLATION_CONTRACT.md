@@ -1,3 +1,9 @@
+> ⚠ **STALE 2026-09-06.** This describes an install flow that has since
+> changed: the web API left the repo (Phase 5 split), the physics stage moved
+> to hamsci-physics (2026-08-24 split), and `timestd-metrology.service` gave
+> way to a target plus template instances. `INSTALLATION.md`, `deploy.toml`
+> and `scripts/install.sh` are the current record.
+
 # INSTALLATION CONTRACT — hf-timestd
 
 **Version:** 1.0.0

@@ -406,7 +406,7 @@ inter-service data exchange (Phase 2 -> Phase 3).
 │  ✅ Real-time ionospheric correction via GNSS VTEC              │
 │  ✅ Cross-channel consistency enforcement                       │
 │  ✅ Real-time Allan Deviation tracking                          │
-│  ✅ Feeds Dashboard via FastAPI                                 │
+│  ✅ Feeds the station-web dashboard                             │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -519,7 +519,7 @@ Phase 3: Fusion Service
 ```
 Web Browser
      ↓
-FastAPI Monitoring Server (Python, port 8000)
+station-web (separate repo since the 2026-09-06 split)
      ↓ (reads SQLite timestd.db + Status JSON)
 ├─→ table: metrology_measurements
 ├─→ table: tick_timing
@@ -655,7 +655,6 @@ select which of these run. The core pipeline:
 | `timestd-physics.service` | Phase 3: Carrier-phase dTEC, group-delay TEC validation, T_iono |
 | `timestd-vtec.service` | GNSS VTEC ingestion (gated by `[gnss_vtec].enabled`) — feeds fusion's ionospheric correction |
 | *(IonoDataService)* | Ionospheric data ingestion (WAM-IPE, GIRO) — runs as a **background thread** within metrology, not a separate service |
-| `timestd-web-api.service` | Web monitoring UI (FastAPI) |
 | `timestd-radiod-monitor.service` | Hardware health monitoring |
 
 **Profile-managed timers (also in `SERVICE_UNIT_MAP`):**

@@ -41,7 +41,6 @@ INSTALL_DIR="$PROJECT_DIR"
 CONFIG_DIR="/etc/hf-timestd"
 DATA_ROOT="/var/lib/timestd"
 VENV_DIR="$INSTALL_DIR/venv"
-WEBUI_DIR="$INSTALL_DIR/web-api"
 LOG_DIR="/var/log/hf-timestd"
 SYSTEMD_DIR="/etc/systemd/system"
 MAIN_CONFIG="$CONFIG_DIR/timestd-config.toml"
@@ -239,7 +238,6 @@ for d in \
     "$CONFIG_DIR" \
     "$INSTALL_DIR" \
     "$INSTALL_DIR/scripts" \
-    "$WEBUI_DIR" \
     "$INSTALL_DIR/config" \
     "$INSTALL_DIR/docs"
 do
@@ -314,7 +312,6 @@ TIMESTD_LOG_DIR=$LOG_DIR
 TIMESTD_CONFIG=$MAIN_CONFIG
 TIMESTD_PROJECT=$INSTALL_DIR
 TIMESTD_INSTALL_DIR=$INSTALL_DIR
-TIMESTD_WEBUI=$WEBUI_DIR
 TIMESTD_VENV=$VENV_DIR
 TIMESTD_LOG_LEVEL=INFO
 TIMESTD_RADIOD_LOCAL=${RADIOD_LOCAL}
@@ -327,7 +324,8 @@ else
     sed -i "s/^TIMESTD_RADIOD_LOCAL=.*/TIMESTD_RADIOD_LOCAL=${RADIOD_LOCAL}/" "$ENV_FILE"
 fi
 
-# Config symlink for web-api
+# Stable config path for clients that read the config from the install
+# tree rather than /etc (station-web among them).
 ln -sf "$MAIN_CONFIG" "$INSTALL_DIR/config/timestd-config.toml"
 
 log_info "Config: OK (RADIOD_LOCAL=$RADIOD_LOCAL)"
@@ -355,12 +353,7 @@ rsync "${RSYNC_OPTS[@]}" --delete "$PROJECT_DIR/scripts/" "$INSTALL_DIR/scripts/
 chmod +x "$INSTALL_DIR/scripts/"*.sh 2>/dev/null || true
 log_info "Scripts synced"
 
-# Web API
-rsync "${RSYNC_OPTS[@]}" --delete --exclude '.pytest_cache' \
-    "$PROJECT_DIR/web-api/" "$WEBUI_DIR/"
-log_info "Web API synced"
-
-# Schemas (web API resolves from src path at runtime, not venv)
+# Schemas (resolved from the src path at runtime, not the venv)
 mkdir -p "$INSTALL_DIR/src/hf_timestd/schemas/"
 rsync -a "$PROJECT_DIR/src/hf_timestd/schemas/" "$INSTALL_DIR/src/hf_timestd/schemas/"
 log_info "Schemas synced"
@@ -401,7 +394,6 @@ chown -R "$INSTALL_USER:$INSTALL_USER" \
     "$INSTALL_DIR/pyproject.toml" \
     "$INSTALL_DIR/src" \
     "$INSTALL_DIR/scripts" \
-    "$WEBUI_DIR" \
     "$INSTALL_DIR/docs" 2>/dev/null || true
 
 log_info "All files synced to $INSTALL_DIR"
@@ -531,7 +523,7 @@ log_info "Installed hf-timestd $INSTALLED_VER"
 # uv.lock, so a sibling added to pyproject but never relocked is simply
 # absent from the venv and uv still exits 0.  That is exactly what happened
 # on 2026-08-28: hamsci-physics was declared in 2f8bf5b but not locked, this
-# script reported success, and timestd-web-api then crash-looped on
+# script reported success, and a unit then crash-looped on
 # ModuleNotFoundError at service start.  Fail here instead — an install that
 # cannot import what the units import is not a successful install.
 "$VENV_DIR/bin/python" - "$PROJECT_DIR" <<'PYEOF' || { log_error "editable sibling verification FAILED"; exit 1; }
@@ -661,7 +653,7 @@ copy_unit() {
 }
 
 # ── Core service files ──
-CORE_UNITS=("timestd-core-recorder" "timestd-l2-calibration" "timestd-fusion" "timestd-web-api" "timestd-radiod-monitor")
+CORE_UNITS=("timestd-core-recorder" "timestd-l2-calibration" "timestd-fusion" "timestd-radiod-monitor")
 
 UPDATED_COUNT=0
 for svc in "${CORE_UNITS[@]}"; do
@@ -1022,7 +1014,6 @@ if [[ "$DO_RESTART" == "true" ]]; then
             for service in \
                 timestd-l2-calibration \
                 timestd-fusion \
-                timestd-web-api \
                 timestd-radiod-monitor \
                 timestd-vtec ; do
                 if systemctl try-restart "$service" 2>/dev/null; then
@@ -1081,7 +1072,7 @@ fi
 if [[ "$DO_RESTART" == "true" ]]; then
     sleep 2
     FAILED_SVCS=()
-    for svc in timestd-core-recorder timestd-metrology.target timestd-l2-calibration timestd-fusion timestd-web-api; do
+    for svc in timestd-core-recorder timestd-metrology.target timestd-l2-calibration timestd-fusion; do
         if systemctl is-enabled --quiet "$svc" 2>/dev/null && ! systemctl is-active --quiet "$svc" 2>/dev/null; then
             FAILED_SVCS+=("$svc")
         fi
@@ -1109,7 +1100,6 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo ""
 echo "  Config:  $MAIN_CONFIG"
 echo "  Data:    $DATA_ROOT"
-echo "  Web API: http://localhost:8000"
 echo "  Verify:  scripts/verify_pipeline.sh"
 echo ""
 echo "  Optional externals (see docs/EXTERNAL_PREREQUISITES.md):"

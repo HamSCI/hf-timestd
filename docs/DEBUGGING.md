@@ -32,8 +32,9 @@ ls -lt /var/lib/timestd/phase2/*/ | head
 chronyc sources -v | grep SHM
 ```
 
-If all six look healthy, the problem is above the data pipeline (web UI,
-GRAPE upload, science products) — skip to the relevant section below.
+If all six look healthy, the problem is above the data pipeline (the
+station-web UI, GRAPE upload, science products) — skip to the relevant
+section below, or to station-web for the pages themselves.
 
 ### Deploy footgun: stale `site-packages` shadowing `src/`
 
@@ -114,18 +115,10 @@ into a `journalctl -u` one-liner.
 
 ### 2.5 Via the web UI
 
-The FastAPI dashboard at `http://<host>:8000/static/logs.html` reads
-the same journald stream. With the v6.12 logging unification this page
-stays in sync with the services — previously the three file-sinked
-services never reached journald, so the web UI went stale.
-
-If the page still looks stale after v6.12:
-
-1. Hard-refresh the browser (Ctrl-Shift-R).
-2. `sudo systemctl restart timestd-web-api` — FastAPI caches some
-   aggregates in memory.
-3. Check `journalctl -u timestd-web-api.service -n 100` for handler
-   errors.
+The web UI left this repo in the 2026-09-06 split (Phase 5). Its log
+viewer reads the same journald stream, so the v6.12 logging unification
+still applies, but the page and its troubleshooting live in
+**[station-web](https://github.com/mijahauan/station-web)**.
 
 ### 2.6 Capacity
 
@@ -305,14 +298,11 @@ journalctl -u grape-daily.service -n 200
 systemctl list-timers 'grape-daily*'
 ```
 
-### 3.9 Web API — `timestd-web-api`
+### 3.9 Web API — moved out
 
-- **Provides**: FastAPI dashboard on port 8000.
-
-```bash
-curl -s http://localhost:8000/api/health || curl -v http://localhost:8000/
-journalctl -u timestd-web-api.service --since -15min
-```
+This repo ships no web service since the 2026-09-06 split (Phase 5).
+The dashboard, its unit and its health endpoints belong to
+**[station-web](https://github.com/mijahauan/station-web)**; debug them there.
 
 ### 3.10 Housekeeping
 
@@ -432,11 +422,9 @@ antenna health.
 
 ### 5.5 Web UI shows stale data
 
-Post-v6.12 the "journalctl-out-of-sync" case is gone. Remaining causes:
-
-1. Browser cache — hard-refresh.
-2. FastAPI in-process cache — `sudo systemctl restart timestd-web-api`.
-3. Handler crash — `journalctl -u timestd-web-api.service --since -1h`.
+A station-web question, not an hf-timestd one — see
+**[station-web](https://github.com/mijahauan/station-web)**. Check here only that the products the pages read
+are fresh (§1 and §3).
 
 ### 5.6 GRAPE upload stuck
 

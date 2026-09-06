@@ -5,7 +5,7 @@ Run from the repo root:
     python3 scripts/import_reachability.py \
       hf_timestd.cli,hf_timestd.core.core_recorder_v2,hf_timestd.core.metrology_service,\
 hf_timestd.core.multi_broadcast_fusion,hf_timestd.core.l2_calibration_service,hf_timestd.quota_manager \
-      scripts/live_vtec.py,scripts/monitor_radiod_health.py,web-api/main.py
+      scripts/live_vtec.py,scripts/monitor_radiod_health.py
 
 Writes importgraph.json beside the invocation and prints the unreachable set.
  Every ast Import/ImportFrom node counts,
@@ -105,14 +105,14 @@ def scan_dir(d):
                 p = os.path.join(dp, f)
                 for e in edges_for(p, None): imp[e].add(p)
     return imp
-timp = scan_dir("tests"); simp = scan_dir("scripts"); wimp = scan_dir("web-api") if os.path.isdir("web-api") else {}
+timp = scan_dir("tests"); simp = scan_dir("scripts")
 
 rows = []
 for m, p in sorted(modules.items()):
     n = sum(1 for _ in open(p, errors="replace"))
     rows.append(dict(module=m, lines=n, reachable=m in reach,
                      src_importers=sorted(importers.get(m, [])),
-                     test_files=len(timp.get(m, [])), script_files=len(simp.get(m, [])), web_files=len(wimp.get(m, []))))
+                     test_files=len(timp.get(m, [])), script_files=len(simp.get(m, []))))
 json.dump(rows, open("importgraph.json", "w"), indent=1)
 print(f"modules={len(modules)} reachable_from_services={sum(r['reachable'] for r in rows)} "
       f"unreachable={sum(not r['reachable'] for r in rows)}")

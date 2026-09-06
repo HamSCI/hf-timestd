@@ -186,7 +186,8 @@ sources (IONEX/Earthdata, IRI-2020, space-weather).
   (WAL) — products: L1 metrology, L2 timing, L3 fusion/dtec/tid/propagation/vtec.
   *(HDF5 retired at v7.0 — see `HFT-F-090`.)*
 - **Clock discipline:** chrony SHM `FUSE` (L3 fusion) and `HPPS` (T6 PPS).
-- **Web API:** `http://localhost:8000/api/*`.
+- **Web API:** none — the dashboard and its REST API moved to station-web
+  in the 2026-09-06 split (Phase 5).
 - **PSWS:** Digital RF + spectrogram via SFTP to `pswsnetwork.eng.ua.edu`.
 - **Raw archive:** zstd IQ chunks under `/var/lib/timestd/raw_buffer/`.
 

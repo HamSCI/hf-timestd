@@ -27,7 +27,6 @@ fi
 SERVICES=(
     "timestd-vtec"
     "timestd-radiod-monitor"
-    "timestd-web-api"
     "timestd-fusion"
     "timestd-l2-calibration"
     "timestd-metrology.target"

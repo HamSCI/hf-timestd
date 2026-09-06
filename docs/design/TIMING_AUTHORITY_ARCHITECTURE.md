@@ -895,8 +895,10 @@ timing_snapshot_rate_hz = 2.0
 
 **Files created:**
 - `src/hf_timestd/core/timing_validation_service.py` - Service to parse JSON sidecars and compare fusion vs GPS
-- `web-api/routers/timing_validation.py` - API endpoints for validation data
-- `web-api/static/timing-validation.html` - Interactive dashboard UI
+- `station_web/routers/timing_validation.py` - API endpoints for validation data
+- `station_web/static/timing-validation.html` - Interactive dashboard UI
+  (both moved to [station-web](https://github.com/mijahauan/station-web) in the 2026-09-06 split, Phase 5;
+  `timing_validation_service.py` stays here)
 
 **Features:**
 - Parses timing snapshots from JSON sidecars

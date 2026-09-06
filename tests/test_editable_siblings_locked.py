@@ -9,7 +9,7 @@ package is simply absent from the venv.
 Regression for 2026-08-28: commit 2f8bf5b added `hamsci-physics` to
 [project].dependencies and [tool.uv.sources] but did not regenerate uv.lock.
 `smd install hf-timestd` on B4 therefore rebuilt the venv WITHOUT
-hamsci_physics, and timestd-web-api crash-looped on ModuleNotFoundError until
+hamsci_physics, and a unit crash-looped on ModuleNotFoundError until
 the sibling was pip-installed by hand.  Fix: `uv lock`.
 """
 import tomllib

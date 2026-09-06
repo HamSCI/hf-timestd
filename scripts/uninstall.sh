@@ -87,7 +87,6 @@ fi
 DATA_ROOT="/var/lib/timestd"
 CONFIG_DIR="/etc/hf-timestd"
 VENV_DIR="/opt/git/sigmond/hf-timestd/venv"
-WEBUI_DIR="/opt/git/sigmond/hf-timestd/web-api"
 LOG_DIR="/var/log/hf-timestd"
 INSTALL_USER="timestd"
 
@@ -106,7 +105,6 @@ SERVICES=(
     # grape-daily.* is deliberately absent: hamsci-physics owns that
     # name now, and uninstalling hf-timestd must not disable it.
     "timestd-physics.service"
-    "timestd-web-api.service"
     "timestd-vtec.service"
     "timestd-radiod-monitor.service"
     "timestd-chrony-monitor.service"
@@ -114,7 +112,6 @@ SERVICES=(
     "timestd-iono-reanalysis.service"
     # Legacy services
     "timestd-analytics.service"
-    "timestd-web-ui.service"
 )
 
 # Stop all metrology template instances first (glob doesn't work with systemctl stop)
@@ -165,7 +162,6 @@ SERVICE_FILES=(
     "/etc/systemd/system/timestd-l2-calibration.service"
     "/etc/systemd/system/timestd-fusion.service"
     "/etc/systemd/system/timestd-physics.service"
-    "/etc/systemd/system/timestd-web-api.service"
     "/etc/systemd/system/timestd-vtec.service"
     "/etc/systemd/system/timestd-radiod-monitor.service"
     "/etc/systemd/system/timestd-chrony-monitor.service"
@@ -179,7 +175,6 @@ SERVICE_FILES=(
     "/etc/systemd/system/timestd-iono-reanalysis.timer"
     # Legacy services (no longer used)
     "/etc/systemd/system/timestd-analytics.service"
-    "/etc/systemd/system/timestd-web-ui.service"
 )
 
 for file in "${SERVICE_FILES[@]}"; do

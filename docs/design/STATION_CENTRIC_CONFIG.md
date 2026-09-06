@@ -13,11 +13,11 @@ the physics reality (14 broadcasts from 4 stations) rather than implementation d
 
 | Component | Status | Location |
 |-----------|--------|----------|
-| `BroadcastRegistry` class | ✅ Done | `src/hf_timestd/models/broadcast.py` |
+| `BroadcastRegistry` class | ✅ Done | `station_web/broadcast.py` (moved 2026-09-06, Phase 5) |
 | Channel derivation (radiod/phase-engine) | ✅ Done | `BroadcastRegistry._derive_channels_*()` |
 | Geometry computation | ✅ Done | `haversine_distance()`, `bearing()` |
 | Config loader integration | ✅ Done | `create_registry_from_config()` |
-| Station-centric API endpoints | ✅ Done | `web-api/routers/stations.py` |
+| Station-centric API endpoints | ✅ Done | `station_web/routers/stations.py` (moved 2026-09-06, Phase 5) |
 | `[ka9q].source` config field | 🔲 Pending | Config schema extension |
 | Discrimination bypass | 🔲 Pending | `tone_detector.py` |
 

@@ -7,7 +7,6 @@ TIMESTD_LOG_DIR=/tmp/timestd-test/logs
 TIMESTD_CONFIG=/home/mjh/git/hf-timestd/config/timestd-config.toml
 TIMESTD_PROJECT=/home/mjh/git/hf-timestd
 TIMESTD_INSTALL_DIR=/home/mjh/git/hf-timestd
-TIMESTD_WEBUI=/home/mjh/git/hf-timestd/web-api
 TIMESTD_VENV=/home/mjh/git/hf-timestd/venv
 TIMESTD_LOG_LEVEL=DEBUG
 

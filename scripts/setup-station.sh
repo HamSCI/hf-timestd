@@ -876,7 +876,6 @@ TIMESTD_LOG_DIR=/var/log/hf-timestd
 TIMESTD_CONFIG=$CONFIG_PATH
 TIMESTD_PROJECT=/opt/git/sigmond/hf-timestd
 TIMESTD_INSTALL_DIR=/opt/git/sigmond/hf-timestd
-TIMESTD_WEBUI=/opt/git/sigmond/hf-timestd/web-api
 TIMESTD_VENV=/opt/git/sigmond/hf-timestd/venv
 TIMESTD_LOG_LEVEL=INFO"
 
