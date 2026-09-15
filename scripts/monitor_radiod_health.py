@@ -307,6 +307,11 @@ def main():
     
     consecutive_failures = 0
     last_known_good = None
+    # Log on CHANGE, not per tick.  The block below is commented "Log status
+    # changes" but logged every pass, so a healthy station wrote 8,640
+    # identical "✓ radiod healthy" lines a day into the journal and onto the
+    # console.  Keeping the last value makes the comment true.
+    last_health = None
     
     while True:
         try:
@@ -378,14 +383,19 @@ def main():
             # Write status
             write_status(status, output_file)
             
-            # Log status changes
-            if status['health'] == 'healthy':
-                sc = status.get('status_channel', {})
-                logger.info(f"✓ radiod healthy (status: {sc.get('status_address', 'unknown')}, mcast: {sc.get('multicast_addr', 'unknown')})")
-            elif status['health'] == 'critical':
-                logger.error(f"✗ radiod CRITICAL (consecutive failures: {consecutive_failures})")
-            else:
-                logger.warning(f"⚠ radiod {status['health']}")
+            # Log status CHANGES only (see last_health above).  A transition
+            # is news; a steady state is not.  Critical stays at ERROR so a
+            # real outage is still loud, and re-entering critical after a
+            # recovery logs again because the value changed.
+            if status['health'] != last_health:
+                if status['health'] == 'healthy':
+                    sc = status.get('status_channel', {})
+                    logger.info(f"✓ radiod healthy (status: {sc.get('status_address', 'unknown')}, mcast: {sc.get('multicast_addr', 'unknown')})")
+                elif status['health'] == 'critical':
+                    logger.error(f"✗ radiod CRITICAL (consecutive failures: {consecutive_failures})")
+                else:
+                    logger.warning(f"⚠ radiod {status['health']}")
+                last_health = status['health']
             
             time.sleep(poll_interval)
             
