@@ -543,6 +543,57 @@ def resolve_a_level(cfg):
     return (level, 'assumed', None)
 
 
+def t5_capability_issues(cfg):
+    """Config asking for a T5 the attached GPSDO cannot provide.
+
+    AC0G-ND carried ``lb1421_enabled = true`` for its entire life against an
+    LBE-Mini, which has no PPS.  The T5 probe reported ``enabled: true,
+    valid_fix: false, "no reading yet"`` for ever, and every surface read that
+    as "T5 is on".  Nothing ever said otherwise, because nothing compared the
+    request against the hardware.
+
+    gpsdo-monitor publishes the discriminator already, so compare.  This is an
+    ERROR rather than a warning: unlike the A-level warning next door, there is
+    no honest reading under which a PPS-less device serves T5, and a station
+    that believes it has T5 quotes a T5 uncertainty.
+    """
+    from .core.gpsdo_capability import (
+        DEFAULT_RUN_DIR, load_device_doc, resolve_t5_capability,
+    )
+    from pathlib import Path as _P
+
+    timing = (cfg.get('timing', {}) or {})
+    asked = timing.get('t5_enabled')
+    if asked is None:
+        asked = timing.get('lb1421_enabled')
+    if asked is not True:
+        return []                      # unset follows the probe; off is a choice
+
+    cap = resolve_t5_capability(load_device_doc(
+        _P(timing.get('lb1421_gpsdo_run_dir', str(DEFAULT_RUN_DIR))),
+        timing.get('lb1421_gpsdo_serial') or None))
+    if not cap.probe_present or cap.available:
+        # No probe is not evidence of no hardware; a capable device is fine.
+        return []
+
+    extra = ''
+    if cap.names_second:
+        extra = (' It reports a GPS fix and can NAME a second for T6 '
+                 'disambiguation, but naming is not placing and that is not T5.')
+    return [{
+        'severity': 'error',
+        'instance': 'default',
+        'message': (
+            f"T5 is enabled in config but the attached GPSDO cannot serve it: "
+            f"{cap.reason}"
+            + (f" (model {cap.model})" if cap.model else '')
+            + ". METROLOGY.md gives T5 the hard prerequisite 'A1 + LBE-1421 USB "
+              "connected to host'; a GPSDO with no PPS disciplines the ADC (the A "
+              "axis) and contributes no T-level." + extra
+            + " Remove the T5 enable, or attach a PPS-capable device."),
+    }]
+
+
 def timing_axis_issues(cfg):
     """Contract issues for the two-axis timing model.
 
@@ -673,6 +724,7 @@ def _handle_validate_contract(args):
             if _gd is not None:
                 issues.append(_gd)
             issues.extend(timing_axis_issues(cfg))
+            issues.extend(t5_capability_issues(cfg))
             issues.extend(retired_key_issues(cfg))
             issues.extend(host_clock_issues(cfg))
             issues.extend(provenance_issues(cfg))
@@ -1948,10 +2000,33 @@ Per-service overrides in [services] take precedence over the profile.
         # enable-signal only; the device path itself is no longer used
         # because the probe reads gpsdo-monitor's JSON rather than the
         # serial endpoint directly (see project_t5_nmea_probe_race).
-        timing_section = config.get('timing', {})
-        lb1421_enabled = bool(timing_section.get('lb1421_enabled', False)) or bool(
-            timing_section.get('lb1421_nmea_device', '').strip()
+        # T5 eligibility is DERIVED from what gpsdo-monitor reports, not typed.
+        # `lb1421_enabled` was a hand-set boolean named after one model, and
+        # AC0G-ND carried it true for its whole life against an LBE-Mini, which
+        # has no PPS: the probe reported `enabled: true, valid_fix: false` for
+        # ever and every surface read that as "T5 is on".  gpsdo-monitor already
+        # publishes the discriminator (pps_study edges), so ask it.  Explicit
+        # config still wins, except that forcing T5 onto a device known to lack
+        # PPS is refused rather than obeyed -- see gpsdo_capability.
+        from .core.gpsdo_capability import (
+            DEFAULT_RUN_DIR as _GPSDO_RUN_DIR, load_device_doc,
+            resolve_t5_capability, t5_enabled_from_config,
         )
+        timing_section = config.get('timing', {})
+        _run_dir = Path(timing_section.get('lb1421_gpsdo_run_dir', str(_GPSDO_RUN_DIR)))
+        _serial = timing_section.get('lb1421_gpsdo_serial') or None
+        _cap = resolve_t5_capability(load_device_doc(_run_dir, _serial))
+        lb1421_enabled, _t5_why = t5_enabled_from_config(timing_section, _cap)
+        logging.getLogger(__name__).info(
+            "T5: %s — %s%s", "enabled" if lb1421_enabled else "not enabled",
+            _t5_why, f" (model {_cap.model})" if _cap.model else "")
+        if (not lb1421_enabled) and _cap.names_second:
+            # A Mini streams UBX time-of-day: it can NAME a second even though
+            # it cannot place one.  Say so, because T6's `naming_unavailable`
+            # refusal on such a station has a source sitting right here.
+            logging.getLogger(__name__).info(
+                "T5: this device reports a GPS fix but no PPS — it can name a "
+                "second (T6 disambiguation) though it is not a T5 source")
         if lb1421_enabled:
             # NB: Path is imported at module level (line 16).  Re-importing
             # here would shadow that into a local-only binding for the
