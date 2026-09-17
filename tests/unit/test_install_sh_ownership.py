@@ -11,12 +11,17 @@ That list omits ``.git``.  sigmond's installer clones the repo, runs
 ``chown -R sigmond:sigmond`` over the whole tree, and *then* runs this
 script — so the worktree ended up ``timestd:timestd`` while ``.git``
 stayed ``sigmond:sigmond``.  Split ownership is exactly what
-``sigmond.gitowner`` REFUSES (sigmond#43/#44) and what ``smd doctor``
-cannot see (sigmond#93), so the component silently stops updating.
+``sigmond.gitowner`` REFUSES (sigmond#43/#44).
 
-Observed on DASI-009.AI6VN twice, across two different images (v3.39 on
-2026-09-16, v3.40 on 2026-09-17).  No other component on that host was
-split, because no other component re-owns its own checkout.
+Observed on DASI-009.AI6VN across three images (v3.39 2026-09-16, v3.40
+and v3.42 2026-09-17).  No other component on that host was ever split,
+because no other component re-owns its own checkout.
+
+⚠ Correction to an earlier claim of mine: ``smd doctor`` is NOT blind to
+ownership.  It reports it per component and offers ``--fix``.  What it
+does is infer the EXPECTED owner from the checkout's top-level directory
+node, which is why the second defect below (``ensure_dir`` on the
+checkout) is worse than it looks rather than merely untidy.
 
 The chown bought nothing: ``timestd`` is in the ``sigmond`` group and the
 installer leaves the tree 2775 (setgid, group-writable).  Verified on
@@ -143,4 +148,40 @@ def test_the_writable_runtime_paths_are_still_chowned(runtime_path):
     assert hits, (
         f"install.sh no longer chowns {runtime_path}; the service account "
         f"must own its writable paths even though it must not own the checkout."
+    )
+
+
+@pytest.mark.parametrize("path", ("", "/scripts", "/config", "/docs"))
+def test_ensure_dir_is_not_called_on_the_checkout(path):
+    """`ensure_dir` chowns what it makes — so never point it at the checkout.
+
+    The loop used to contain `$INSTALL_DIR` plus its `scripts`, `config` and
+    `docs`. All four are TRACKED in git, so `mkdir -p` was a no-op and the
+    chown was the whole effect.
+
+    ⚠ That looks cosmetic and is not. `smd doctor` infers a component's
+    expected owner from its checkout's top-level directory node, so a
+    `timestd`-owned node with `sigmond`-owned contents makes doctor demand
+    the opposite of every working station — measured on v3.42, 2026-09-17:
+
+        AC0G-B4   node sigmond -> "1 path(s) not owned by sigmond"
+        DASI-009  node timestd -> "1643 path(s) not owned by timestd"
+
+    and `--fix` acts on that inference.
+    """
+    target = f'"$INSTALL_DIR{path}"'
+    in_loop = []
+    seen_loop = False
+    for n, line in _live_lines():
+        if line.startswith("for d in") or seen_loop:
+            seen_loop = True
+            in_loop.append((n, line))
+            if line == "done":
+                break
+    body = " ".join(l for _, l in in_loop)
+    assert target not in body, (
+        f'ensure_dir loop includes {target}, which is inside the git '
+        f'checkout (INSTALL_DIR="$PROJECT_DIR"). ensure_dir chowns it to '
+        f'timestd, which flips what `smd doctor` expects for the whole '
+        f'component. Ownership belongs to whoever cloned the repo.'
     )

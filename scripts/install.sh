@@ -235,14 +235,32 @@ for d in \
     "$DATA_ROOT/space_weather_cache" \
     "$DATA_ROOT/ionex" \
     "$LOG_DIR" \
-    "$CONFIG_DIR" \
-    "$INSTALL_DIR" \
-    "$INSTALL_DIR/scripts" \
-    "$INSTALL_DIR/config" \
-    "$INSTALL_DIR/docs"
+    "$CONFIG_DIR"
 do
     ensure_dir "$d"
 done
+# ⛔ `$INSTALL_DIR`, `$INSTALL_DIR/{scripts,config,docs}` were in that list and
+# are removed.  INSTALL_DIR IS the git checkout (line 40), all four are TRACKED
+# in git, so `mkdir -p` is a no-op on every one of them and `ensure_dir`'s chown
+# was the entire effect.
+#
+# That chown is load-bearing in a way it does not look.  `smd doctor` infers a
+# component's expected owner from its checkout's top-level directory node, so
+# leaving that node `timestd` while the installer owns the contents `sigmond`
+# makes doctor demand the opposite of what every working station has:
+#
+#     AC0G-B4    node sigmond  ->  "1 path(s) not owned by sigmond"
+#     AC0G-ND    node sigmond  ->  "1 path(s) not owned by sigmond"
+#     DASI-009   node timestd  ->  "1643 path(s) not owned by timestd"
+#
+# — same component, same doctor, opposite verdicts (measured 2026-09-17 on
+# v3.42).  And `--fix` would act on that inference.  Together with the
+# contents-chown retired in d06cff7, this loop is where the split ownership
+# of sigmond#43/#44 came from.
+#
+# Ownership of the checkout belongs to whoever cloned it.  `timestd` reads the
+# source through group `sigmond` on a 2775 setgid tree; it does not need to own
+# any of it.  See tests/unit/test_install_sh_ownership.py.
 
 # Shared memory hot buffer
 mkdir -p /dev/shm/timestd
