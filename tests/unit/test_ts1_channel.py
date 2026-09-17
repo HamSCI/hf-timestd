@@ -182,3 +182,53 @@ class TestTheCaseThatMotivatedThis:
             FLEET_TS1_TX_HZ, probe=lambda: RATE_64)
         assert source == "radiod"
         assert freq == nyquist_alias_hz(FLEET_TS1_TX_HZ, RATE_64)
+
+
+class TestTheShellSitesAgreeWithThisModule:
+    """The alias is computed in THREE places. Keep them one answer.
+
+    ⚠ Written because fixing two of three is exactly what happened on
+    2026-09-17: `ts1-probe.sh` was corrected, `setup-station.sh` was not,
+    and the commit message claimed both. `setup-station.sh` is the one
+    that writes the config, so the defect survived its own fix. Only
+    reading the files caught it.
+
+    Both shell sites must reduce modulo the sample rate BEFORE reflecting.
+    The defect is the bare `rate - tx` form with no `%` in sight.
+    """
+
+    import pathlib
+    _ROOT = pathlib.Path(__file__).parents[2]
+    SHELL_SITES = ("scripts/ts1-probe.sh", "scripts/setup-station.sh")
+
+    def _alias_region(self, rel):
+        """Lines around the alias computation in one shell file."""
+        text = (self._ROOT / rel).read_text().splitlines()
+        live = [l.strip() for l in text if l.strip() and not l.strip().startswith("#")]
+        return [l for l in live if "INJECTED_HZ" in l or "L6_PPS_FREQUENCY" in l
+                or "%" in l and "ADC" in l.upper()]
+
+    @pytest.mark.parametrize("rel", SHELL_SITES)
+    def test_the_site_reduces_modulo_before_reflecting(self, rel):
+        region = "\n".join(self._alias_region(rel))
+        assert "%" in region, (
+            f"{rel} computes the alias without a modulo reduction. That is "
+            f"the second-Nyquist-zone-only form, which returns a NEGATIVE "
+            f"frequency at 64.8 Msps. See nyquist_alias_hz."
+        )
+
+    @pytest.mark.parametrize("rel", SHELL_SITES)
+    def test_the_site_does_not_assign_a_bare_subtraction(self, rel):
+        """`X=$(( ADC - tx ))` with tx the raw TX, not the reduced remainder."""
+        import re
+        bad = re.compile(
+            r'(INJECTED_HZ|L6_PPS_FREQUENCY)=\$\(\(\s*\w*ADC\w*\s*-\s*'
+            r'(?!_?r\b)[_a-zA-Z]*t[sx]\w*\s*\)\)', re.IGNORECASE)
+        text = (self._ROOT / rel).read_text()
+        live = "\n".join(l for l in text.splitlines()
+                         if not l.strip().startswith("#"))
+        hits = bad.findall(live)
+        assert not hits, (
+            f"{rel} assigns the alias as a bare rate-minus-TX subtraction "
+            f"{hits}; it must subtract the REMAINDER (tx % rate)."
+        )

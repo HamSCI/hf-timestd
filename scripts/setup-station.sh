@@ -450,10 +450,19 @@ if grep -q "^TS1_PRESENT=yes" <<< "$TS1_INFO" && ! grep -q "^TS1_ERROR=" <<< "$T
         "ADC clock the injector aliases under (129600000 or 64800000)" false
     RX888_ADC_HZ="${RX888_ADC_HZ:-129600000}"
     if [[ -n "$_ts1_tx" ]]; then
-        if (( _ts1_tx > RX888_ADC_HZ / 2 )); then
-            L6_PPS_FREQUENCY=$(( RX888_ADC_HZ - _ts1_tx ))
+        # Fold TX into the first Nyquist zone: reduce modulo the sample rate
+        # FIRST, then reflect.  See hf_timestd/core/ts1_channel.py, which
+        # carries the tests and the designer's published values.
+        #
+        # ⛔ This was `RX888_ADC_HZ - _ts1_tx` whenever tx > rate/2 — the
+        # second zone only.  At 64.8 Msps, the other rate the TS-1 is built
+        # for, an 84.225 MHz TX gave -19_425_000: the NEGATION of the value
+        # P. Elliott WB6CXC publishes, written straight into the config.
+        _r=$(( _ts1_tx % RX888_ADC_HZ ))
+        if (( _r * 2 <= RX888_ADC_HZ )); then
+            L6_PPS_FREQUENCY=$_r
         else
-            L6_PPS_FREQUENCY=$_ts1_tx
+            L6_PPS_FREQUENCY=$(( RX888_ADC_HZ - _r ))
         fi
         log_info "Injected (aliased) frequency: ${L6_PPS_FREQUENCY} Hz"
         prompt_yn L6_PPS_ENABLED "Enable T6 sample-precise timing from this TS-1?" "y"
