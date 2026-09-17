@@ -25,8 +25,23 @@ from hf_timestd.core.gpsdo_capability import (
 NOW = 1_000_000.0
 
 
-def _doc(*, model, pps_enabled, edges, fix="3D", written=NOW - 5.0, reason=None):
-    """A gpsdo-monitor per-device document, shaped like the real ones."""
+def _iso(epoch):
+    """gpsdo-monitor's real `written_utc` spelling: ISO-8601 with a Z."""
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(epoch, timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.") + f"{int(epoch % 1 * 1000):03d}Z"
+
+
+def _doc(*, model, pps_enabled, edges, fix="3D", written=None, reason=None):
+    """A gpsdo-monitor per-device document.
+
+    ⚠ CAPTURED from a live station, not invented. `written_utc` is an ISO-8601
+    STRING. The first cut of these tests used a float, the code matched the
+    fixture, and every REAL document then parsed as "age unknown" and was
+    rejected as stale. Deploying is what found it.
+    """
+    if written is None:
+        written = _iso(NOW - 5.0)
     if reason is None:
         reason = ("pll_locked && gps_fix=3D && antenna_ok && pps_present && fresh"
                   if pps_enabled else "pll_locked && gps_fix=3D && fresh")
@@ -76,7 +91,7 @@ class TestDerivedFromTheProbe:
     def test_a_stale_document_is_not_available(self):
         """gpsdo-monitor stalled. An old yes must never read as a current yes."""
         cap = resolve_t5_capability(
-            _doc(model="lbe-1421", pps_enabled=True, edges=60, written=NOW - 3600),
+            _doc(model="lbe-1421", pps_enabled=True, edges=60, written=_iso(NOW - 3600)),
             now=NOW)
         assert cap.available is False
         assert "stale" in cap.reason.lower()
@@ -148,3 +163,28 @@ class TestBothEntryPointsAgree:
         assert enabled is False and why
         assert cap.probe_present is False       # absence is not a refusal
         assert str(run_dir) == "/nonexistent-for-test"
+
+
+class TestTheRealWireFormat:
+    """Regression: gpsdo-monitor writes an ISO-8601 string."""
+
+    def test_iso8601_written_utc_is_understood(self):
+        cap = resolve_t5_capability(
+            _doc(model="lbe-1421", pps_enabled=True, edges=60,
+                 written="2026-09-17T00:07:34.025Z"),
+            now=__import__("datetime").datetime(
+                2026, 9, 17, 0, 7, 40,
+                tzinfo=__import__("datetime").timezone.utc).timestamp())
+        assert cap.available is True, cap.reason
+
+    def test_a_numeric_epoch_still_works(self):
+        cap = resolve_t5_capability(
+            _doc(model="lbe-1421", pps_enabled=True, edges=60, written=NOW - 5.0),
+            now=NOW)
+        assert cap.available is True, cap.reason
+
+    def test_an_unparseable_stamp_is_stale_not_fresh(self):
+        cap = resolve_t5_capability(
+            _doc(model="lbe-1421", pps_enabled=True, edges=60, written="not-a-date"),
+            now=NOW)
+        assert cap.available is False and "stale" in cap.reason.lower()

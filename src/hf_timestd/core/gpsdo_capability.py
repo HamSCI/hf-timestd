@@ -50,6 +50,32 @@ MAX_DOC_AGE_S = 300.0
 DEFAULT_RUN_DIR = Path("/run/gpsdo")
 
 
+def _doc_age_s(written, now: float) -> Optional[float]:
+    """Seconds since the document was written, or None if unreadable.
+
+    ⚠ gpsdo-monitor writes ``written_utc`` as an ISO-8601 STRING
+    (``'2026-09-17T00:07:34.025Z'``), not an epoch number.  The first cut of
+    this module assumed a float, so every real document parsed as "age
+    unknown" and was rejected as stale — a station with a perfectly fresh
+    probe reported no T5 for the wrong reason.  It passed its tests because
+    the fixtures were invented rather than captured.  Numbers are still
+    accepted: cheap, and it costs nothing to read both.
+    """
+    if written is None:
+        return None
+    if isinstance(written, (int, float)):
+        return now - float(written)
+    try:
+        from datetime import datetime, timezone
+        s = str(written).strip().replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return now - dt.timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
 @dataclass(frozen=True)
 class T5Capability:
     """Whether the attached device can serve as a T5 source, and why.
@@ -81,11 +107,7 @@ def resolve_t5_capability(doc: Optional[dict], *, now: Optional[float] = None,
             probe_present=False)
 
     model = ((doc.get("device") or {}).get("model")) or None
-    written = doc.get("written_utc")
-    try:
-        age = now - float(written)
-    except (TypeError, ValueError):
-        age = None
+    age = _doc_age_s(doc.get("written_utc"), now)
     if age is None or age > max_age_s:
         shown = "unknown" if age is None else f"{age:.0f}s"
         return T5Capability(
