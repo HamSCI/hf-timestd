@@ -119,3 +119,32 @@ class TestConfigResolution:
         on, _ = t5_enabled_from_config({"t5_enabled": True},
                                        resolve_t5_capability(None, now=NOW))
         assert on is True
+
+
+class TestBothEntryPointsAgree:
+    """The systemd unit runs `python -m hf_timestd.core.core_recorder_v2`, NOT
+    `hf-timestd daemon`. The T5 enable logic lived in BOTH, and on 2026-09-16 a
+    fix applied only to cli.py was deployed, restarted, and changed nothing —
+    because the unit never calls the CLI. Lock it: neither entry point may
+    re-derive the switch for itself.
+    """
+
+    def _src(self, rel):
+        from pathlib import Path as P
+        return (P(__file__).parents[2] / "src" / "hf_timestd" / rel).read_text()
+
+    def test_neither_entry_point_rederives_the_boolean(self):
+        for rel in ("cli.py", "core/core_recorder_v2.py"):
+            src = self._src(rel)
+            assert "resolve_t5_for_config" in src, f"{rel} must use the resolver"
+            assert "timing_section.get('lb1421_enabled'" not in src, (
+                f"{rel} re-derives the T5 switch instead of asking the resolver")
+
+    def test_the_resolver_returns_everything_a_caller_needs(self):
+        """So no caller has a reason to reach for the config keys itself."""
+        from hf_timestd.core.gpsdo_capability import resolve_t5_for_config
+        enabled, why, cap, run_dir, serial = resolve_t5_for_config(
+            {"lb1421_gpsdo_run_dir": "/nonexistent-for-test"})
+        assert enabled is False and why
+        assert cap.probe_present is False       # absence is not a refusal
+        assert str(run_dir) == "/nonexistent-for-test"

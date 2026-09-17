@@ -6332,13 +6332,26 @@ def main():
             _UNMEAS_A0, _UNMEAS_A1,
         )
 
-    lb1421_enabled = bool(timing_section.get('lb1421_enabled', False)) or bool(
-        str(timing_section.get('lb1421_nmea_device', '')).strip()
-    )
+    # T5 eligibility is DERIVED from what gpsdo-monitor reports, not typed.
+    # THIS is the path the deployed systemd unit runs
+    # (python -m hf_timestd.core.core_recorder_v2); cli.py's `daemon` command
+    # is a second entry point. Both now call the same resolver, because the
+    # enable logic used to be duplicated here and a fix applied only to cli.py
+    # would be dead code in production.
+    from .gpsdo_capability import resolve_t5_for_config
+    lb1421_enabled, _t5_why, _t5_cap, run_dir, serial = \
+        resolve_t5_for_config(timing_section)
+    logger.info("T5: %s - %s%s", "enabled" if lb1421_enabled else "not enabled",
+                _t5_why, f" (model {_t5_cap.model})" if _t5_cap.model else "")
+    if (not lb1421_enabled) and _t5_cap.names_second:
+        # A Mini streams UBX time-of-day: it can NAME a second even though it
+        # cannot place one. Not T5 -- but it is what T6's second-of-day
+        # disambiguation needs, and `naming_unavailable` on such a station has
+        # a source sitting right here.
+        logger.info("T5: this device reports a GPS fix but no PPS - it can name "
+                    "a second (T6 disambiguation) though it is not a T5 source")
     if lb1421_enabled:
-        from .lb1421_t5_probe import Lb1421T5Probe, DEFAULT_RUN_DIR
-        run_dir = Path(timing_section.get('lb1421_gpsdo_run_dir', str(DEFAULT_RUN_DIR)))
-        serial = timing_section.get('lb1421_gpsdo_serial') or None
+        from .lb1421_t5_probe import Lb1421T5Probe
         lb1421_probe = Lb1421T5Probe(run_dir=run_dir, serial=serial)
         lb1421_probe.start()
         recorder.attach_lb1421_probe(lb1421_probe)

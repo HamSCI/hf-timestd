@@ -2001,31 +2001,21 @@ Per-service overrides in [services] take precedence over the profile.
         # because the probe reads gpsdo-monitor's JSON rather than the
         # serial endpoint directly (see project_t5_nmea_probe_race).
         # T5 eligibility is DERIVED from what gpsdo-monitor reports, not typed.
-        # `lb1421_enabled` was a hand-set boolean named after one model, and
-        # AC0G-ND carried it true for its whole life against an LBE-Mini, which
-        # has no PPS: the probe reported `enabled: true, valid_fix: false` for
-        # ever and every surface read that as "T5 is on".  gpsdo-monitor already
-        # publishes the discriminator (pps_study edges), so ask it.  Explicit
-        # config still wins, except that forcing T5 onto a device known to lack
-        # PPS is refused rather than obeyed -- see gpsdo_capability.
-        from .core.gpsdo_capability import (
-            DEFAULT_RUN_DIR as _GPSDO_RUN_DIR, load_device_doc,
-            resolve_t5_capability, t5_enabled_from_config,
-        )
+        # NB: the deployed systemd unit runs
+        # `python -m hf_timestd.core.core_recorder_v2`, NOT this command, so
+        # both entry points call the SAME resolver. The enable logic used to be
+        # duplicated across the two, and a fix applied only here would be dead
+        # code on every station.
+        from .core.gpsdo_capability import resolve_t5_for_config
         timing_section = config.get('timing', {})
-        _run_dir = Path(timing_section.get('lb1421_gpsdo_run_dir', str(_GPSDO_RUN_DIR)))
-        _serial = timing_section.get('lb1421_gpsdo_serial') or None
-        _cap = resolve_t5_capability(load_device_doc(_run_dir, _serial))
-        lb1421_enabled, _t5_why = t5_enabled_from_config(timing_section, _cap)
+        lb1421_enabled, _t5_why, _t5_cap, run_dir, serial = \
+            resolve_t5_for_config(timing_section)
         logging.getLogger(__name__).info(
-            "T5: %s — %s%s", "enabled" if lb1421_enabled else "not enabled",
-            _t5_why, f" (model {_cap.model})" if _cap.model else "")
-        if (not lb1421_enabled) and _cap.names_second:
-            # A Mini streams UBX time-of-day: it can NAME a second even though
-            # it cannot place one.  Say so, because T6's `naming_unavailable`
-            # refusal on such a station has a source sitting right here.
+            "T5: %s - %s%s", "enabled" if lb1421_enabled else "not enabled",
+            _t5_why, f" (model {_t5_cap.model})" if _t5_cap.model else "")
+        if (not lb1421_enabled) and _t5_cap.names_second:
             logging.getLogger(__name__).info(
-                "T5: this device reports a GPS fix but no PPS — it can name a "
+                "T5: this device reports a GPS fix but no PPS - it can name a "
                 "second (T6 disambiguation) though it is not a T5 source")
         if lb1421_enabled:
             # NB: Path is imported at module level (line 16).  Re-importing
@@ -2034,9 +2024,7 @@ Per-service overrides in [services] take precedence over the profile.
             # `daemon_parser.add_argument('--archive-root', type=Path, ...)`
             # raise UnboundLocalError because Python's bytecode compiler
             # sees `Path` as a local variable assigned later.
-            from .core.lb1421_t5_probe import Lb1421T5Probe, DEFAULT_RUN_DIR
-            run_dir = Path(timing_section.get('lb1421_gpsdo_run_dir', str(DEFAULT_RUN_DIR)))
-            serial = timing_section.get('lb1421_gpsdo_serial') or None
+            from .core.lb1421_t5_probe import Lb1421T5Probe
             lb1421_probe = Lb1421T5Probe(run_dir=run_dir, serial=serial)
             lb1421_probe.start()
             recorder.attach_lb1421_probe(lb1421_probe)

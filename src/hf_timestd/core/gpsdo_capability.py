@@ -139,6 +139,28 @@ def load_device_doc(run_dir: Path = DEFAULT_RUN_DIR,
         return None
 
 
+def resolve_t5_for_config(timing_cfg: dict) -> Tuple[bool, str, T5Capability,
+                                                     Path, Optional[str]]:
+    """One answer for every caller: should T5 run, why, and with what.
+
+    ⚠ This exists because the enable logic was DUPLICATED — once in
+    ``cli.py``'s ``daemon`` command and once in ``core_recorder_v2``'s own
+    ``__main__``.  The deployed systemd unit runs the module
+    (``python -m hf_timestd.core.core_recorder_v2``), not the CLI, so a fix
+    applied only to ``cli.py`` is dead code in production.  That is exactly how
+    this was nearly shipped on 2026-09-16: the derivation went into the CLI, the
+    station restarted, and nothing changed because the unit never calls it.
+
+    Returns ``(enabled, why, capability, run_dir, serial)``.
+    """
+    run_dir = Path(str(timing_cfg.get('lb1421_gpsdo_run_dir',
+                                      str(DEFAULT_RUN_DIR))))
+    serial = timing_cfg.get('lb1421_gpsdo_serial') or None
+    cap = resolve_t5_capability(load_device_doc(run_dir, serial))
+    enabled, why = t5_enabled_from_config(timing_cfg, cap)
+    return enabled, why, cap, run_dir, serial
+
+
 def t5_enabled_from_config(timing_cfg: dict,
                            cap: T5Capability) -> Tuple[bool, str]:
     """Resolve the T5 switch: explicit config first, otherwise the probe.
