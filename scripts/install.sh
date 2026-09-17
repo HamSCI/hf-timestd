@@ -389,12 +389,32 @@ $LOG_DIR/*.log {
 EOF
 fi
 
-# Fix ownership
-chown -R "$INSTALL_USER:$INSTALL_USER" \
-    "$INSTALL_DIR/pyproject.toml" \
-    "$INSTALL_DIR/src" \
-    "$INSTALL_DIR/scripts" \
-    "$INSTALL_DIR/docs" 2>/dev/null || true
+# ⛔ Do NOT chown the checkout to $INSTALL_USER.  It used to read:
+#
+#     chown -R "$INSTALL_USER:$INSTALL_USER" \
+#         "$INSTALL_DIR/pyproject.toml" "$INSTALL_DIR/src" \
+#         "$INSTALL_DIR/scripts" "$INSTALL_DIR/docs"
+#
+# $INSTALL_DIR IS the git checkout (line 40: INSTALL_DIR="$PROJECT_DIR"), and
+# that list omits `.git`.  sigmond's installer clones and runs
+# `chown -R sigmond:sigmond` over the whole tree, then invokes this script,
+# which re-owned the worktree to `timestd` and left `.git` as `sigmond` —
+# the SPLIT ownership `sigmond.gitowner` refuses outright (sigmond#43/#44)
+# and that `smd doctor` cannot see (sigmond#93).  The component then silently
+# declines every future update.  Seen on DASI-009.AI6VN twice, on two
+# different images (v3.39 2026-09-16, v3.40 2026-09-17); no other component
+# on that host was split, because no other component does this.
+#
+# It bought nothing.  `timestd` is a member of the `sigmond` group, and the
+# installer leaves the tree 2775 (setgid, group-writable), so the service
+# account already reads the source — verified on AC0G-B4 and AC0G-ND, both
+# `sigmond:sigmond` 2775 with `timestd` in group `sigmond` and reading fine.
+# Nothing in the daemon writes to src/, scripts/, docs/ or pyproject.toml;
+# the writable paths (/var/lib/timestd, /var/log/hf-timestd, /dev/shm/timestd,
+# the venv) are chowned individually elsewhere in this script.
+#
+# Leave ownership to whoever cloned the repo.  See
+# tests/unit/test_install_sh_ownership.py, which fails if this comes back.
 
 log_info "All files synced to $INSTALL_DIR"
 
