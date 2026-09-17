@@ -66,12 +66,27 @@ ref=$(printf '%s' "$out" | grep -m1 -iE 'Reference clock ?\(' | grep -oE '[0-9,]
 [ -n "$ref" ] && echo "TS1_REF_HZ=$ref"
 tx=$(printf '%s' "$out" | grep -m1 -iE '^Output frequency' | grep -oE '[0-9,]+\.[0-9]+' | tr -d ',' | cut -d. -f1)
 [ -n "$tx" ] && echo "TS1_TX_HZ=$tx"
-if [ -n "${tx:-}" ] && [ -n "$ADC_HZ" ]; then
-    half=$((ADC_HZ / 2))
-    if [ "$tx" -gt "$half" ]; then
-        echo "TS1_INJECTED_HZ=$((ADC_HZ - tx))"
+if [ -n "${tx:-}" ] && [ -n "$ADC_HZ" ] && [ "$ADC_HZ" -gt 0 ]; then
+    # Fold TX into the first Nyquist zone. Reduce modulo the sample rate
+    # FIRST, then reflect: the injector sits in whichever zone the ADC
+    # clock puts it in, not necessarily the second.
+    #
+    # ⛔ This was `ADC_HZ - tx` whenever tx > ADC_HZ/2, i.e. the second
+    # zone only. At 64.8 Msps — the other rate this project supports, and
+    # the one config/timestd-config.toml.template documents as 19.425 MHz —
+    # an 84.225 MHz TX gave 64_800_000 - 84_225_000 = -19_425_000. A
+    # negative frequency, silently handed on to channel creation.
+    #
+    #   129_600_000: 84.225 mod 129.6 = 84.225 -> reflect -> 45.375 MHz
+    #    64_800_000: 84.225 mod  64.8 = 19.425 -> keep    -> 19.425 MHz
+    #
+    # Kept in step with hf_timestd.core.ts1_channel.nyquist_alias_hz,
+    # which carries the tests.
+    r=$((tx % ADC_HZ))
+    if [ $((r * 2)) -le "$ADC_HZ" ]; then
+        echo "TS1_INJECTED_HZ=$r"
     else
-        echo "TS1_INJECTED_HZ=$tx"
+        echo "TS1_INJECTED_HZ=$((ADC_HZ - r))"
     fi
 fi
 exit 0
