@@ -65,6 +65,7 @@ are marked ★ — when two docs disagree, the canonical one wins.
 
 | Doc | What it gives you |
 |-----|-------------------|
+| [STATION-TIMING-SETUP.md](STATION-TIMING-SETUP.md) ★ | **Bringing timing up on a new station.** What the site works out for itself (GPSDO capability → T5, TS-1 probe → T6 frequency), the alias arithmetic and the designer's frequency plan, where the ADC sample rate must come from, what still has to be declared (an RF-only TS-1), install hygiene that bites every station, and diagnostic cautions earned the hard way. |
 | [DEBUGGING.md](DEBUGGING.md) ★ | Journald-only logging, triage recipes (incl. clock free-run / makestep), deploy footguns. |
 | [EXTERNAL_PREREQUISITES.md](EXTERNAL_PREREQUISITES.md) | The six external dependencies and how to stage them. |
 | [STATION_SETUP_GUIDE.md](STATION_SETUP_GUIDE.md) · PSWS_SETUP_GUIDE.md and NASA_EARTHDATA_SETUP.md → **[hamsci-physics](https://github.com/HamSCI/hamsci-physics/tree/main/docs)** | First-time site setup here; PSWS upload and NASA Earthdata setup moved with the science products. |
