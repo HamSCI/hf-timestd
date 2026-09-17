@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from hf_timestd.core.ts1_channel import (
+    DESIGNER_ALIASES_HZ,
     DEFAULT_ADC_HZ,
     FLEET_TS1_TX_HZ,
     adc_rate_from_status,
@@ -30,17 +31,35 @@ def _status(*, input_samprate=None, output_samprate=None, frontend=True):
     return SimpleNamespace(frontend=fe, output_samprate=output_samprate)
 
 
-class TestTheAliasArithmetic:
-    """Both values are quoted in config/timestd-config.toml.template."""
+class TestAgainstTheDesignersDocumentation:
+    """P. Elliott WB6CXC, TS-1 TimeSync injector mode, verbatim:
 
+        • Freq: 84.225 MHz
+        • Alias (fSample  64.800 MHz) : 19.425 MHz
+        • Alias (fSample 129.600 MHz) : 45.375 MHz
+
+    This is the source of truth for the arithmetic — not our own template,
+    which quotes it, and not this implementation, which must reproduce it.
+    """
+
+    def test_the_default_tx_frequency_matches_the_designer(self):
+        assert FLEET_TS1_TX_HZ == 84_225_000
+
+    @pytest.mark.parametrize("adc_hz,expected", sorted(DESIGNER_ALIASES_HZ.items()))
+    def test_every_published_alias_is_reproduced(self, adc_hz, expected):
+        assert nyquist_alias_hz(FLEET_TS1_TX_HZ, adc_hz) == expected
+
+    def test_the_64_8_case_is_the_one_that_was_WRONG(self):
+        """⛔ The regression, stated against the designer's own number.
+        `adc - tx` returned -19_425_000 — the negation of the published
+        value — at one of the two sample rates the TS-1 is built for."""
+        assert nyquist_alias_hz(FLEET_TS1_TX_HZ, RATE_64) == 19_425_000
+        assert RATE_64 - FLEET_TS1_TX_HZ == -19_425_000   # what it used to do
+
+
+class TestTheAliasArithmetic:
     def test_129_6_msps_gives_45_375_mhz(self):
         assert nyquist_alias_hz(FLEET_TS1_TX_HZ, RATE_129) == 45_375_000
-
-    def test_64_8_msps_gives_19_425_mhz(self):
-        """⛔ The regression. The shell rule `adc - tx` returned
-        -19_425_000 here — a negative frequency, at the second of the two
-        rates its own help text names."""
-        assert nyquist_alias_hz(FLEET_TS1_TX_HZ, RATE_64) == 19_425_000
 
     def test_the_alias_is_never_negative(self):
         """Whatever else changes, this must hold for every zone."""

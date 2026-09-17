@@ -59,9 +59,40 @@ __all__ = [
 #: 64_800_000 is equally supported and yields a different channel.
 DEFAULT_ADC_HZ = 129_600_000
 
-#: The TS-1's transmit frequency on the fleet standard. Read it from the
-#: injector when you can; this is for documentation and tests.
+#: The TS-1's default transmit frequency, from the designer's own
+#: documentation (P. Elliott WB6CXC, TS-1 TimeSync injector mode).
+#:
+#: ⛔ **Do not treat this as fixed, and do not offer to change it lightly.**
+#: Elliott: "Other output frequencies can be configured to suit other sample
+#: rates" — so read ``TS1_TX_HZ`` from the injector (``scripts/ts1-probe.sh``)
+#: rather than assuming. This constant exists for documentation and tests.
+#:
+#: And 84.225 MHz is not an arbitrary default. Per the same document it was
+#: "chosen to both minimize signal re-transmission through the antenna, and
+#: to place any aliased harmonic frequencies as far as possible from any
+#: 'interesting' bands", achieving "no closer than 0.475 MHz (including first
+#: five aliased harmonics)". Re-planning that is a band-allocation exercise,
+#: not a config tweak.
 FLEET_TS1_TX_HZ = 84_225_000
+
+#: The two aliases the designer publishes, keyed by ADC rate. Kept as data
+#: so :func:`nyquist_alias_hz` can be checked against the source of truth
+#: rather than against itself.
+DESIGNER_ALIASES_HZ = {
+    64_800_000: 19_425_000,
+    129_600_000: 45_375_000,
+}
+
+#: Injected level in TimeSync mode, from the designer: the TS-1 emits a
+#: "low-amplitude signal", bandpass-filtered at 84 MHz and attenuated to
+#: "approximately -33 dBm", then "additionally attenuated by the RX-888
+#: 60 MHz low-pass filter" — 84.225 MHz sits above that corner.
+#:
+#: Recorded because a station once chased a supposed overdrive fault at the
+#: injector (AC0G/DASI-009, 2026-09-16) and added 20 dB of pad to a signal
+#: that was designed weak and is filtered twice before the ADC. The level
+#: hypothesis was wrong; see reference_tick / the T6 notes.
+TS1_INJECT_DBM_NOMINAL = -33.0
 
 
 def nyquist_alias_hz(tx_hz: int, adc_hz: int) -> int:
