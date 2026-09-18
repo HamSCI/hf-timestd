@@ -613,6 +613,21 @@ class CoreRecorderV2:
         # injection, T5 is unavailable and the disambig falls through
         # to T4 chronyc tracking as before.
         self._lb1421_probe = None
+        # A device that NAMES a second but cannot PLACE one.
+        #
+        # An LBE-mini streams GPS time-of-day over USB and has no PPS at all,
+        # so it is not a T5 source — but naming the integer second needs only
+        # ±0.5 s (see `_t6_name_integer_second`), which it clears by orders of
+        # magnitude.  Held in its own slot, deliberately: `_lb1421_probe` also
+        # lights the T5 BENCH (`_t5_lbe1421_product`, whose docstring reads
+        # "lb1421_enabled=true alone ... is sufficient to light the T5 bench"),
+        # and putting a PPS-less device there would recreate exactly the ND
+        # defect the capability work removed — a T5 that reports enabled and
+        # never yields a reading.
+        #
+        # Only the naming path consults this (via `_t6_naming_probe`).  Nothing
+        # else may, and a test enforces that.
+        self._t6_second_namer = None
         # Config-key backward-compat: the canonical key is
         # [timing.t6_pps] (matching the T-tier authority hierarchy).
         # Older deployed configs still use [timing.l6_pps] (the
@@ -2501,6 +2516,32 @@ class CoreRecorderV2:
         """
         self._lb1421_probe = probe
 
+    def attach_second_namer(self, probe) -> None:
+        """Inject a device that can NAME a second but not place one.
+
+        The T-axis question "which integer second is this?" needs ±0.5 s.
+        The T5 question "where exactly is the second boundary?" needs
+        microseconds and a PPS.  An LBE-mini answers the first and cannot
+        answer the second, so collapsing both onto ``lb1421_enabled`` left
+        stations able to name a second refusing to.
+
+        ⛔ Do NOT route this to :meth:`attach_lb1421_probe`.  That slot also
+        feeds the T5 bench and the T5 disambiguation path; a PPS-less device
+        there reports a T5 that never yields a reading — the ND defect.
+
+        Ignored when a real T5 probe is attached: that device both names and
+        places, so it wins on its own merits.
+        """
+        self._t6_second_namer = probe
+
+    def _t6_naming_probe(self):
+        """The probe the NAMING path may use — T5 first, namer second.
+
+        The only sanctioned reader of ``_t6_second_namer``.
+        """
+        return (getattr(self, '_lb1421_probe', None)
+                or getattr(self, '_t6_second_namer', None))
+
     # ── Offset Judge bench providers (P2) ────────────────────────────
     # Both run on the judge's tick thread; every attribute access is
     # getattr-guarded because unit tests bypass __init__ via __new__
@@ -3068,7 +3109,10 @@ class CoreRecorderV2:
         from .t5_rtp_pairing import T5RtpPairing
         from .offset_judge import _rtp_delta_signed
 
-        probe = getattr(self, '_lb1421_probe', None)
+        # NAMING, so a device that only names a second qualifies — see
+        # `_t6_naming_probe`.  `_t5_pairing` is built unconditionally in
+        # __init__, so it is available even where T5 is not.
+        probe = self._t6_naming_probe()
         pairing = getattr(self, '_t5_pairing', None)
         if probe is None or pairing is None:
             return None
@@ -3142,7 +3186,10 @@ class CoreRecorderV2:
             wall = None
 
         if edge_utc is not None:
-            reading = self._lb1421_probe.get_latest()
+            # Same probe `_t6_name_second_via_nmea` just used; re-read
+            # rather than plumb it through, and treat a race as no naming.
+            _probe = self._t6_naming_probe()
+            reading = _probe.get_latest() if _probe is not None else None
             if reading is None:
                 # Raced with a probe expiry between the two reads.
                 edge_utc = None
@@ -6350,6 +6397,8 @@ def main():
         # a source sitting right here.
         logger.info("T5: this device reports a GPS fix but no PPS - it can name "
                     "a second (T6 disambiguation) though it is not a T5 source")
+        from .gpsdo_capability import attach_second_namer
+        attach_second_namer(recorder, run_dir, serial, logger)
     if lb1421_enabled:
         from .lb1421_t5_probe import Lb1421T5Probe
         lb1421_probe = Lb1421T5Probe(run_dir=run_dir, serial=serial)

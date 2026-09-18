@@ -216,3 +216,56 @@ def t5_enabled_from_config(timing_cfg: dict,
                 + (f", model {cap.model}" if cap.model else "") + ")")
         return True, "enabled explicitly in config"
     return cap.available, cap.reason
+
+
+def attach_second_namer(recorder, run_dir, serial, logger=None) -> bool:
+    """Wire a names-but-cannot-place device into T6's second naming.
+
+    Call when :func:`resolve_t5_capability` reports ``available=False`` with
+    ``names_second=True`` — an LBE-mini, typically: GPS time-of-day over USB,
+    no PPS at all.
+
+    ## Why this is separate from the T5 probe
+
+    "Which integer second is this?" needs ±0.5 s.  "Where exactly is the
+    second boundary?" needs microseconds and a PPS.  Both lived behind
+    ``lb1421_enabled``, so a station that could answer the first refused to,
+    and published ``naming_unavailable`` while the answer sat on its USB bus.
+    Measured on DASI-009.AI6VN 2026-09-18: T6 found the edge and could not
+    name its second, with no HF antenna (no T3) and no LAN GPS (no T4) to ask.
+
+    ⛔ It must NOT go to ``attach_lb1421_probe``.  That slot also lights the
+    T5 bench — ``_t5_lbe1421_product``'s docstring says "lb1421_enabled=true
+    alone ... is sufficient to light the T5 bench" — so a PPS-less device
+    there reports a T5 that never yields a reading, which is precisely the ND
+    defect this module exists to have removed.
+
+    ⚠ Inert until gpsdo-monitor publishes ``pps_utc_sec`` for the device.
+    Today an LBE-mini's document carries ``pps_utc_sec: null``, so the probe
+    yields no reading and naming falls through exactly as before.  Shipping
+    the consumer first is safe — it degrades to today's behaviour — but it
+    changes nothing on its own, and must not be reported as a fix.
+
+    Lives here rather than in either entry point because the T5 enable logic
+    was once duplicated across ``cli.py`` and ``core_recorder_v2.__main__``,
+    and a fix applied to only one of them was dead code in production.
+
+    Returns True when a namer was attached.  Never raises: startup path.
+    """
+    try:
+        from .lb1421_t5_probe import Lb1421T5Probe
+        probe = Lb1421T5Probe(run_dir=run_dir, serial=serial)
+        probe.start()
+        recorder.attach_second_namer(probe)
+        if logger is not None:
+            logger.info(
+                "T6 second-namer attached (gpsdo run_dir=%s, serial=%s): this "
+                "device names a second but does not place one, so it feeds "
+                "T6 disambiguation ONLY and does not light T5. Inert until "
+                "gpsdo-monitor publishes pps_utc_sec for it.",
+                run_dir, serial or '*')
+        return True
+    except Exception as exc:                                   # noqa: BLE001
+        if logger is not None:
+            logger.warning("T6 second-namer could not be attached: %s", exc)
+        return False

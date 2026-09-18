@@ -2017,6 +2017,9 @@ Per-service overrides in [services] take precedence over the profile.
             logging.getLogger(__name__).info(
                 "T5: this device reports a GPS fix but no PPS - it can name a "
                 "second (T6 disambiguation) though it is not a T5 source")
+            from .core.gpsdo_capability import attach_second_namer
+            attach_second_namer(recorder, run_dir, serial,
+                                logging.getLogger(__name__))
         if lb1421_enabled:
             # NB: Path is imported at module level (line 16).  Re-importing
             # here would shadow that into a local-only binding for the
