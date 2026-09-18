@@ -273,6 +273,47 @@ findings together.
 
 ---
 
+## 8c. Measured on captured IQ — why the complex fold is the weak link
+
+2026-09-18, 89 s of DASI-009.AI6VN's 45.375 MHz channel captured with
+`pcmrecord --catmode --raw` and analysed off-station
+(`tools/t6_fold_discriminant_bench.py`). Three discriminants, same samples:
+
+```
+newell (per-sample phase jump)   89 candidates (1.00/s), ONE position: 18845
+complex fold, no alternation     0.0184 of signal amplitude
+complex fold, alternate +        0.0061
+complex fold, alternate -        0.0061
+magnitude-difference + fold      18844.7051 samples, peak/median 105x
+                                 per-second sd 0.0091 samples = 95 ns (n=89)
+```
+
+⚡ **The coherent complex fold CANCELS the signal** — down to 0.6-1.8 % of its
+amplitude, whichever sign alternation is used. Residual carrier rotates
+between seconds, so averaging complex samples across them destroys what it
+was meant to accumulate. That is the dependency Costas exists to remove, and
+it is structural: §10 lesson 2 of `BPSK-PPS-DETECTION-METHODS.md` says the
+same thing about the half-second window ("a long integration window is
+sensitive to whatever rotates within it").
+
+⚡ **The magnitude difference is carrier-free and folds cleanly.** It landed
+on Newell's sample exactly, with a 105x spike-to-background and a 2-3 sample
+pulse — the width `1/(2B)` = 20 µs predicts through a ±25 kHz filter.
+
+⚠ Uncertainties stated honestly. The 95 ns is **Type A scatter** over 89
+one-second estimates; it is not accuracy. A fixed offset remains — which
+point of the transition the discriminant marks — and that is exactly what
+calibration against UTC absorbs. Two independent 30 s fold blocks agreed to
+41 ns, consistent with the √30 improvement (17 ns predicted) given n=2.
+
+⚠ And the scope has not widened: one station, one capture, an injected pilot
+at 77 dB-Hz. §8b's phase-noise budget still says a per-sample discriminant
+has 1.8σ of margin at B4's measured 48.4 dB-Hz worst hour, against 52σ here.
+**The fold is what buys that back** — which is the argument for folding
+first and detecting second, rather than the reverse.
+
+---
+
 ## 9. Why not the simpler method
 
 `wd-record` in ka9q-radio (Scott Newell) finds the same flip with a per-sample phase-step state
