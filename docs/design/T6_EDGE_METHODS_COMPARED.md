@@ -228,6 +228,51 @@ converter, one path.
 
 ---
 
+## 8b. The baseline measured — 2026-09-18, DASI-009.AI6VN
+
+§9 said running Newell's detector beside ours "remains worthwhile". It was
+run, on the T6 channel itself (`--sync-ssrc`, SSRC 1818844744, 45.375 MHz,
+96 kHz), for 128 seconds, writing nothing:
+
+```
+edges found           128 in 128 s      every pulse, none missed
+distinct edge phase   ONE value, 41885  bit-identical on all 128 edges
+consecutive run       1 -> 128          unbroken, zero noise events
+inter-edge deltas     127/127 = 96000   exactly one second, to the sample
+```
+
+Our Method 2 chain, on the same stream in the same minutes:
+
+```
+candidates            0.61 /s           FEWER than the 1 Hz pulses present
+accepted              0.037 /s          one good edge every 27 s
+edge_period dev       1.9 ms, 5.7 ms, 330 ms
+bench disagreement    stable +384.6 ms (1.6 ms spread over 8 minutes)
+```
+
+⚡ **A per-sample phase-jump state machine of a few dozen lines, with a ±5
+sample tolerance and no interpolation, placed every edge perfectly where a
+47 dB Costas + matched-filter chain with a ±30 sample tolerance could not.**
+
+That settles §10 lesson 5 of `BPSK-PPS-DETECTION-METHODS.md` empirically
+rather than by argument: *"A strong signal calls for direct detection, not
+matched filtering."*
+
+⚠ Read the scope correctly. This measures **one station, 128 seconds, one
+signal condition** — a locally injected TS-1, which is strong by construction
+and has no ionosphere in front of it. It says nothing about a weak or faded
+pilot, which is the regime the matched filter was chosen for. What it does
+say is that for an injected pilot the MF's processing gain buys a question
+that is already answered (is a flip present?) and costs the one that is not
+(when?).
+
+⛔ It also does not, by itself, explain the +384.6 ms. A stable offset is a
+wrong-peak signature, and `reference_gate_enabled` — which B4 carries and no
+image gives AI6VN — was enabled there the same day. Do not fold the two
+findings together.
+
+---
+
 ## 9. Why not the simpler method
 
 `wd-record` in ka9q-radio (Scott Newell) finds the same flip with a per-sample phase-step state
