@@ -5534,14 +5534,39 @@ class CoreRecorderV2:
             # diag line sat inside its gate, so it never ran either, and
             # Michael retired it the same day (RESIDUE_AUDIT §3.4).
 
-            # Log on first lock and periodically
-            if result.pps_consecutive == self._t6_calibrator.consecutive_required:
+            # Log on the TRANSITION into lock, not on every batch that finds
+            # itself still locked.
+            #
+            # ⛔ This read `== consecutive_required` with no edge detection.
+            # `pps_consecutive` pins AT the requirement rather than counting
+            # past it, so the equality held on every batch: at 96 kHz with
+            # 1920-sample batches that is ~50 identical lines per second.
+            # Measured on DASI-009.AI6VN 2026-09-18 — 3,305 byte-identical
+            # lines in one minute, 99,127 in half an hour, 198 MB of journal.
+            #
+            # It is not merely untidy. It drowns the diagnostics next to it:
+            # the `edge_period` values needed to explain why that very station
+            # will not reach T6 were buried under its own success message.
+            # Same defect class as a71781a ("log radiod health on change, not
+            # 8,640 times a day"), in this same file.
+            _locked_now = (result.pps_consecutive
+                           >= self._t6_calibrator.consecutive_required)
+            _was_locked = getattr(self, '_t6_logged_locked', False)
+            if _locked_now and not _was_locked:
                 logger.info(
                     f"T6 BPSK PPS LOCKED: chain_delay={result.chain_delay_ns} ns "
                     f"({result.chain_delay_samples:.1f} samples), "
                     f"ok={result.pps_ok}, noise={result.pps_noise}"
                 )
-            elif result.pps_ok % 60 == 0:
+            elif _was_locked and not _locked_now:
+                # The losing edge was silent, so a lock that dropped and
+                # re-took looked like one continuous lock in the journal.
+                logger.info(
+                    f"T6 BPSK PPS lock LOST after {result.pps_ok} ok / "
+                    f"{result.pps_noise} noise edges"
+                )
+            self._t6_logged_locked = _locked_now
+            if not _locked_now and result.pps_ok % 60 == 0:
                 logger.debug(
                     f"T6 PPS: delay={result.chain_delay_ns} ns, "
                     f"consecutive={result.pps_consecutive}, "
