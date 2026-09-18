@@ -375,19 +375,40 @@ class T6AnchorAuthority:
             return None
 
         prev = self._state
-        diag = self.stale_diagnosis()
-        logger.warning(
-            "T6 estimate_stale: %s — %d estimate(s) seen, %d refused since "
-            "the last accepted one, reasons=%s, last seen %ss ago, last "
-            "accepted %ss ago",
-            "estimates ARE arriving and every one is being refused"
-            if diag["verdict"] == "rejected"
-            else "no estimates are arriving at all",
-            diag["estimates_seen"], diag["rejected_since_accept"],
-            diag["rejection_reasons"],
-            None if diag["since_seen_sec"] is None else f"{diag['since_seen_sec']:.0f}",
-            None if diag["since_accept_sec"] is None else f"{diag['since_accept_sec']:.0f}",
-        )
+        # ⛔ Throttled, because staleness PERSISTS.  The condition above stays
+        # true for as long as no estimate is accepted, and this method runs
+        # per batch — so an unthrottled warning fired ~50 times a second.
+        # Measured on DASI-009.AI6VN 2026-09-18: 3,105 lines per minute,
+        # 57,823 in twenty minutes, and the journal climbed 185 MB -> 376 MB
+        # in the two hours after a vacuum.
+        #
+        # Same defect class as the T6 lock message (93293c1) and as a71781a
+        # ("log radiod health on change, not 8,640 times a day"). It matters
+        # beyond disk: this station's diagnostics were buried under it while
+        # we were trying to read them.
+        #
+        # Throttled rather than edge-triggered, mirroring
+        # `_note_acquiring_violation`: the diagnosis changes as counters
+        # advance, so a periodic restatement is worth having — every batch
+        # is not.
+        now_warn = self._now()
+        last_warn = getattr(self, '_last_stale_warn_at', None)
+        if last_warn is None or now_warn - last_warn >= ACQUIRING_WARN_PERIOD_SEC:
+            self._last_stale_warn_at = now_warn
+            diag = self.stale_diagnosis()
+            logger.warning(
+                "T6 estimate_stale: %s — %d estimate(s) seen, %d refused since "
+                "the last accepted one, reasons=%s, last seen %ss ago, last "
+                "accepted %ss ago.  (Repeated at most every %.0f s.)",
+                "estimates ARE arriving and every one is being refused"
+                if diag["verdict"] == "rejected"
+                else "no estimates are arriving at all",
+                diag["estimates_seen"], diag["rejected_since_accept"],
+                diag["rejection_reasons"],
+                None if diag["since_seen_sec"] is None else f"{diag['since_seen_sec']:.0f}",
+                None if diag["since_accept_sec"] is None else f"{diag['since_accept_sec']:.0f}",
+                ACQUIRING_WARN_PERIOD_SEC,
+            )
         if self._degraded_since is None:
             self._degraded_since = now
         if now - self._degraded_since > self.degraded_unlock_after_sec:
