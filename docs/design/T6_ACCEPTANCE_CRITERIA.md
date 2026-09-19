@@ -192,7 +192,7 @@ catches a named failure.
 | 2 | Ruler | inter-edge Δ against the sample rate | 127/127 = 96000 exactly | the pulse source walking against the ADC |
 | 3 | Unimodality | per-second estimates about their median | 128/128 and 89/89 at one position | multipath, split peaks, a competing signal |
 | 4 | Shape — triangle fidelity, apex agreement, width | RMS residual of \|T(e)\| against the ideal triangle ÷ peak; apex-to-reported-edge distance; pulse width against 1/(2B) | residual 0.0008–0.0017 real against 0.25–0.42 noise; −1919 samples on a 20 ms displaced lock | lattice phantoms |
-| 5 | Scatter, and σ within the tier's physical budget | per-second sd; σ/√K over the fold | 95 ns, n = 89 | a broken tier masquerading as a wide one |
+| 5 | Scatter, and σ within the tier's physical budget | reported σ against `max(predicted × margin, 1.0 ms)` | 95 ns on real IQ (n = 89); 490 ns anchors the shipped curve | a broken tier masquerading as a wide one |
 | 6 | Split-half agreement | two disjoint folds, against k·σ predicted; **NaN when either sub-fold is empty** | 41 ns against 17 ns predicted, n = 2 | a wandering apex |
 | 7 | Plausibility | implied chain delay within ±250 ms | shipped and in force | gross wrap and sidelobe capture |
 
@@ -273,10 +273,30 @@ A T6 reporting σ = 477 ms has not produced a wide T6; it has produced a broken
 one. Bound the accepted σ by what the tier's own physics permits: the
 per-second edge scatter that the channel's measured C/N0 predicts, improved by
 the fold's processing gain of 10·log10(K), times a stated margin. The
-09-18 numbers anchor that curve at both ends — 95 ns per second at 77 dB-Hz,
-and the §8b budget's 1.8σ per-sample margin at 48.4 dB-Hz. Any σ orders of
-magnitude above the prediction reports a broken measurement, not a wide one,
-and fails the battery before any gate sees it. §2.2's defect then cannot arise from the
+shipped curve anchors at **490 ns** per second at 77 dB-Hz.
+
+⚠ **Not the 95 ns of §8c, and the difference matters.** That figure came from
+real IQ; the sweep that calibrates this code measures 4.0–5.2× wider, uniformly
+across 33 dB. The constant is anchored to what the code actually produces
+rather than to the better number, because a ceiling anchored optimistically
+refuses healthy stations.
+
+⛔ **The ceiling carries an absolute floor of 1.0 ms, and that floor governs
+everywhere real stations live** — from 77 dB-Hz down to about 36. The C/N0
+curve is therefore inert across the whole operating range, by design.
+
+The reason: `reported_sigma_ms` is the tier's *own published uncertainty*,
+computed by the authority; the prediction models the *fold's* block-to-block
+scatter. Those are different quantities, and no choice of anchor makes
+comparing them sound. Pinned to the curve alone, the gate misfires on a real
+station — at a plausible 57 dB-Hz it computed 0.0173 ms against B4's recorded
+0.003–0.07 ms, refusing a healthy B4 by 4×. That is the exact failure this
+whole document exists to end.
+
+⚡ So criterion 5 guards **gross breakage only**. Orders of magnitude, never a
+factor of two. Against the 1.0 ms floor, AI6VN's 477 ms fails by 477× while
+B4's worst recorded hour passes with 14× of room. Tightening it needs a station
+measurement of what healthy tiers actually report — see §8. §2.2's defect then cannot arise from the
 T6 side at all, and §5.4 closes it from the judge's side as well.
 
 ### 4.4 What the battery cannot see
@@ -346,7 +366,7 @@ The mapping, criterion by criterion:
 |---|---|---|
 | 2 | inter-edge Δ = the sample rate | consecutive block edges differ by `fold_seconds × sample_rate` |
 | 3 | per-second estimates at one position | consecutive block estimates agree — the existing `BOOTSTRAP_CONFIRM_BLOCKS` mechanism, surfaced rather than rebuilt |
-| 5 | per-second sd = 95 ns | block-to-block sd, predicted as the per-second sd ÷ √K |
+| 5 | per-second sd (95 ns real IQ, 490 ns swept) | block-to-block sd, predicted as the per-second sd ÷ √K — then floored at 1.0 ms, see §4.3 |
 
 Criteria 1, 4, 6 and 7 already evaluate on the folded block and need no
 mapping.
@@ -454,6 +474,21 @@ reference cable rather than as a detector fault.
 peer above T4 — so an acquisition succeeding there carries no hidden dependence
 on a peer. Success: `t_level_active = T6`, a σ consistent with §4's criterion 5,
 and a residual disagreement that does not sit at a stable hundreds-of-ms value.
+
+**Measure what a healthy tier actually reports.** ⚠ The 1.0 ms sigma floor sits
+pinned to B4's recorded hourly `t6_sigma_ms` of 0.003–0.07 ms — a figure taken
+from the station record, not measured during this work. Read it off the station
+and confirm it. Should a healthy B4 hour ever exceed 1.0 ms, the floor must
+rise and criterion 5 loses what discrimination it retains.
+
+⚠ **Confirm the thresholds against real captures.** Every number in §4 comes
+from band-limited BPSK plus additive Gaussian noise. That model carries no
+multipath, no AGC excursion, and no registration jitter. The separations it
+establishes are real; their margins on a real antenna are not yet known.
+
+⚠ **`min_fold_retention` = 0.50 puts T6's floor near 43.7 dB-Hz, and B4 holds
+4.7 dB above it.** Real room, not generous. Do not raise that threshold without
+re-measuring B4 first.
 
 **B4 second, for the hours that matter.** Compare 00–06Z before and after, with
 `rf_gain`, `if_power`, `t6_baseband_power` and `t6_n0` confirming comparable
