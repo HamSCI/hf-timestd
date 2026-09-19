@@ -33,6 +33,7 @@ import json
 import threading
 import subprocess
 import socket
+import math
 import numpy as np
 from collections import deque
 from pathlib import Path
@@ -589,6 +590,13 @@ class CoreRecorderV2:
         # at the current peak position.  Set to None until the first
         # samples arrive so we don't reset during cold start.
         self._t6_last_locked_wall = None
+        # Has the matched filter ever reported ``locked``?  Gates
+        # stuck-recovery, which must not fire on a station that has not
+        # locked yet.  Separate from ``_t6_last_chain_delay_ns`` because
+        # that variable now latches only once an anchor is CAPTURED --
+        # about 90 s after first lock -- and stuck-recovery needs the
+        # earlier fact.
+        self._t6_mf_ever_locked = False
         # Set at first stable lock from system-clock comparison; constant
         # offset added to every calibrator chain_delay report so all
         # measurements share a common disambiguated reference frame.
@@ -2640,6 +2648,21 @@ class CoreRecorderV2:
         except (TypeError, ValueError, ZeroDivisionError, AttributeError):
             return None
         if abs(disagreement) > self.T6_ORDINAL_DISAGREEMENT_ALARM_SEC:
+            # ⛔ ONE MAGNITUDE MEANS SOMETHING ELSE ENTIRELY.  The signed
+            # 32-bit wrap above holds a +-2**31 sample window, +-6.2 h at
+            # 96 kHz.  Past that the sign flips and the elapsed time
+            # comes out short by exactly 2**32 / sample_rate seconds --
+            # 44,739.24 s at 96 kHz -- or a multiple of it.  The
+            # disagreement is then an ALIASING CONSTANT, not a naming
+            # error, and the real fault is that T6 has not been
+            # authoritative for over six hours.  Sending the operator to
+            # the NMEA reading and the radiod pair for that wastes the
+            # first hour of the investigation.  Say so in the same line;
+            # a separate log would be a second persistent-condition
+            # surface to throttle.
+            wrap_sec = (1 << 32) / sr
+            k = round(abs(disagreement) / wrap_sec) if wrap_sec > 0 else 0
+            stale = (k >= 1 and abs(abs(disagreement) - k * wrap_sec) < 1.0)
             if self._t6_say_once('named_second_disagrees'):
                 logger.warning(
                     "NAMED SECOND DISAGREES with T6 by %+.3f s (T6 "
@@ -2647,9 +2670,17 @@ class CoreRecorderV2:
                     "%d).  T6 holds the better registration by orders of "
                     "magnitude and KEEPS its own count -- this indicts "
                     "the naming cascade, not T6.  Check the T5 NMEA "
-                    "reading and the radiod pair.  (Repeated at most "
+                    "reading and the radiod pair.%s  (Repeated at most "
                     "every %.0f s.)",
                     disagreement, t6_utc_sec, int(named_second),
+                    ("" if not stale else
+                     f"  ⛔ BUT READ THIS ONE AS A STALE T6 ANCHOR FIRST: "
+                     f"the magnitude is {k}x the 32-bit RTP wrap period "
+                     f"({wrap_sec:.0f} s at {sr:.0f} Hz), which is what "
+                     f"an anchor older than {(1 << 31) / sr / 3600.0:.1f} "
+                     f"h aliases to, not anything the namer did.  Check "
+                     f"the T6 authority state and the anchor's age "
+                     f"BEFORE the naming cascade."),
                     self.T6_REPEAT_PERIOD_SEC)
         return disagreement
 
@@ -4577,12 +4608,45 @@ class CoreRecorderV2:
         if getattr(self, '_t6_native_anchor', None) is None:
             return  # not running yet; acquisition owns the refusal
         if verdict.passed:
-            if getattr(self, '_t6_suspect', ()):
+            # Throttled like the warning it answers.  A criterion that
+            # FLAPS trips 'battery_suspect' and this line alternately,
+            # and the warning is throttled while this was not -- so a
+            # flapping station logged a restoration every fold block
+            # (every 30 s at K=30) with the matching fault line
+            # suppressed, which reads as a healthy T6 rather than an
+            # unstable one.  Persistent conditions go through
+            # _t6_say_once; this is one.
+            if getattr(self, '_t6_suspect', ()) and self._t6_say_once(
+                    'battery_restored'):
                 logger.info(
                     "T6 self-consistency restored (%s cleared); the "
-                    "assertion is no longer marked suspect.",
-                    ", ".join(self._t6_suspect))
+                    "assertion is no longer marked suspect.  (Repeated "
+                    "at most every %.0f s.)",
+                    ", ".join(self._t6_suspect), self.T6_REPEAT_PERIOD_SEC)
             self._t6_suspect = ()
+            return
+        # ⛔ "STILL ACCUMULATING" IS NOT "SUSPECT".  Criteria 2 and 3
+        # cannot report until HISTORY_REQUIRED_BLOCKS blocks are in hand,
+        # and criterion 5 cannot state the fold's scatter below two
+        # retained positions -- while the authority captures its anchor
+        # on block 1.  So every cold start used to emit
+        # "T6 SUSPECT: ruler, unimodality" and stamp
+        # t6_suspect_criteria into the authority snapshot for two blocks.
+        # The acquisition log already distinguishes this case (see the
+        # 'battery_refused' line in _t6_disambiguate_via_external_
+        # reference); this path did not.  An alarm that fires on every
+        # healthy start teaches the operator to ignore alarms.
+        #
+        # Any OTHER failing criterion -- retention, shape, split-half,
+        # plausibility, or a finite sigma over its ceiling -- still marks
+        # suspect immediately, accumulating or not.
+        from .t6_battery import is_still_accumulating
+        if is_still_accumulating(verdict):
+            logger.debug(
+                "T6 battery still accumulating its run (%s not yet "
+                "reportable at %d block(s)); not marked suspect.",
+                ", ".join(verdict.failures),
+                verdict.criteria.get('blocks', 0))
             return
         self._t6_suspect = tuple(verdict.failures)
         if self._t6_say_once('battery_suspect'):
@@ -4616,17 +4680,48 @@ class CoreRecorderV2:
         logger.debug("T6 battery: block history dropped (%s)", why)
 
     def _t6_reported_sigma_ms(self) -> Optional[float]:
-        """Std of the recent chain-delay history, in ms, or None.
+        """The scatter criterion 5 judges, in ms, or None.
 
-        The recorder already publishes this quantity as the authority's
-        ``t6_sigma_ms`` (see the ``chain_delay_ns_std_ns`` field in the
-        status payload).  The battery's criterion 5 compares it against
-        a ceiling; reusing the same number keeps one definition of T6's
-        uncertainty rather than inventing a second.
+        ⛔ WHAT THIS QUANTITY IS: the FOLD'S OWN REPEATABILITY, block to
+        block.  It is NOT the tier's published uncertainty.  The status
+        payload's ``t6_sigma_ms`` (``chain_delay_ns_std_ns``) is a
+        different statistic over a different population and stays
+        untouched; nothing here changes what T6 publishes.
 
-        None below two samples: a standard deviation of one reading is
-        not a small uncertainty, it is no uncertainty at all.
+        ⛔ WHY THE FOLD AND NOT THE CHAIN-DELAY HISTORY.  The history is
+        appended to ONLY inside the SHM-push branch below, which requires
+        ``_t6_native_anchor is not None``.  Before acquisition it is
+        empty, so this returned None, ``_t6_evaluate_battery`` turned
+        that into NaN, and ``T6Battery._fails`` failed criterion 5 on it.
+        The battery needed an anchor; the anchor needed the battery.
+        Measured 2026-09-19: three healthy blocks against an empty deque
+        gave ``failures=('sigma',), sigma=nan`` and no anchor, forever --
+        and on a station with no chrony SHM configured the old route
+        never supplied a value at all.
+
+        So prefer the battery's own retained block positions, which exist
+        the moment two fold blocks have landed and require no anchor.
+        Fall back to the chain-delay history only when the battery holds
+        too little of its own.  §4.3 of T6_ACCEPTANCE_CRITERIA.md already
+        records that criterion 5 compares two DIFFERENT quantities and
+        guards gross breakage only; this makes the comparison
+        self-consistent -- a model of block scatter against a measurement
+        of block scatter -- rather than circular.  It does not turn
+        criterion 5 into a precision check.
+
+        None below two readings on both routes: a standard deviation of
+        one reading is not a small uncertainty, it is no uncertainty at
+        all.
         """
+        bat = getattr(self, '_t6_battery', None)
+        if bat is not None:
+            try:
+                fold_sigma = bat.block_position_sigma_ms()
+            except Exception:  # noqa: BLE001
+                fold_sigma = None
+            if isinstance(fold_sigma, (int, float)) and math.isfinite(
+                    fold_sigma):
+                return float(fold_sigma)
         hist = list(getattr(self, '_t6_chain_delay_history', ()) or ())
         if len(hist) < 2:
             return None
@@ -4794,12 +4889,13 @@ class CoreRecorderV2:
             # ⛔ A LOCAL, not self._t6_disambiguation_ns, until every
             # refusal below has had its say.  Writing it here let a
             # REFUSED edge move the clock anyway: the caller folds
-            # self._t6_disambiguation_ns into effective_chain_delay and
-            # latches it into _t6_last_chain_delay_ns whether or not an
-            # anchor was captured, so a missing-reference-cable fold
-            # (retention 0.006 — the exact fault criterion 1 exists to
-            # catch) could fail the battery and still carry its 30 ms
-            # correction into the locked value.
+            # self._t6_disambiguation_ns into effective_chain_delay, so a
+            # missing-reference-cable fold (retention 0.006 — the exact
+            # fault criterion 1 exists to catch) could fail the battery
+            # and still carry its 30 ms correction downstream.  (The
+            # caller no longer LATCHES that value without an anchor —
+            # fixed 2026-09-19 — but it still hands it to the archive
+            # sidecars, so the local is still the right shape.)
             disambiguation_ns = int(round(
                 shift_samples * 1e9 / sr_local
             ))
@@ -5326,10 +5422,21 @@ class CoreRecorderV2:
         wall_now = time.monotonic()
         if result is not None and result.locked:
             self._t6_last_locked_wall = wall_now
+            # "The MF has been locked at least once."  This used to be
+            # read off `_t6_last_chain_delay_ns is not None`, which was
+            # a fair proxy while that latched on the first locked cycle.
+            # It no longer does -- it now latches only once an anchor is
+            # captured, ~90 s later -- so the stuck-recovery condition
+            # gets its own flag rather than inheriting a meaning the
+            # variable stopped carrying.  Without it, a calibrator that
+            # pinned itself unlocked during the battery's accumulation
+            # window would never be reset.
+            self._t6_mf_ever_locked = True
         elif self._t6_last_locked_wall is None:
             # First sample after init — start the timer.
             self._t6_last_locked_wall = wall_now
-        elif (self._t6_last_chain_delay_ns is not None
+        elif ((getattr(self, '_t6_mf_ever_locked', False)
+               or self._t6_last_chain_delay_ns is not None)
                 and (wall_now - self._t6_last_locked_wall)
                     > self.T6_STUCK_TIMEOUT_SEC):
             stuck_for = wall_now - self._t6_last_locked_wall
@@ -5349,6 +5456,11 @@ class CoreRecorderV2:
                 self._t6_fine_stage.clear_own_offset()
             self._t6_battery_forget_run("calibrator stuck unlocked")
             self._t6_last_chain_delay_ns = None
+            # Re-arm.  Leaving this True would re-fire the whole reset
+            # every T6_STUCK_TIMEOUT_SEC for as long as the MF stays
+            # unlocked -- a persistent condition logging on a timer.
+            # One reset per lock, as before.
+            self._t6_mf_ever_locked = False
             self._t6_disambiguation_ns = 0
             self._t6_wrap_rejections = 0
             self._t6_recent_raw.clear()
@@ -5371,9 +5483,30 @@ class CoreRecorderV2:
                 # sample batch (~25 Hz at 96 k / 3720-sample batches) and
                 # each walk shells out to chronyc and emits 3 log lines.
                 # One walk per T6_DISAMBIG_RETRY_INTERVAL_SEC is plenty.
-                # The very first walk (rejections == 0) is never delayed.
-                if (self._t6_initial_accept_rejections > 0
-                        and self._t6_last_disambig_walk_wall is not None
+                # The very first walk is never delayed
+                # (_t6_last_disambig_walk_wall is None).
+                #
+                # ⚠ WIDENED with the acquisition fix below, from "only
+                # while the plausibility guard is refusing" to "whenever
+                # the gate is open".  The gate now stays open until an
+                # anchor is actually captured -- about 90 s -- and this
+                # branch re-runs on every locked batch, ~50/s at 96 kHz
+                # with 1920-sample batches.  Measured 2026-09-19 without
+                # the widening: 3,005 walks in 95 s of stream, each one
+                # asking the T5 probe.  That is the persistent-condition
+                # flood this project keeps rediscovering, and trading an
+                # unacquirable T6 for it would be no trade at all.
+                #
+                # ⚠ THE COST, stated plainly: a throttled cycle returns
+                # before the HPPS/SHM push below, so during the
+                # acquisition window the feed runs at one edge per
+                # T6_DISAMBIG_RETRY_INTERVAL_SEC rather than one per
+                # second.  That window is bounded (it ends at the first
+                # captured anchor, ~90 s after first lock, once per
+                # boot), chrony adjudicates over many samples, and before
+                # this fix the window did not exist only because the gate
+                # was latching shut on a walk that had captured nothing.
+                if (self._t6_last_disambig_walk_wall is not None
                         and (time.monotonic()
                              - self._t6_last_disambig_walk_wall)
                             < self.T6_DISAMBIG_RETRY_INTERVAL_SEC):
@@ -5411,6 +5544,13 @@ class CoreRecorderV2:
                 # (in the tier helpers): reject any reference whose
                 # sigma is larger than the half-second-wrap value we're
                 # trying to disambiguate against (250 ms).
+                # ⛔ Identity, not truthiness.  The question below is
+                # "did THIS attempt capture an anchor", and the authority
+                # can be holding one already (it re-captures on its own
+                # at AUTHORITATIVE while this gate is still open).  A
+                # bare `is not None` would read that standing anchor as
+                # this attempt's success and latch the gate shut on it.
+                _anchor_before = getattr(self, '_t6_native_anchor', None)
                 _dpath = "t5-lb1421"
                 if not self._t6_disambiguate_via_t5_lb1421(result):
                     self._t6_disambiguate_via_external_reference(result)
@@ -5506,12 +5646,49 @@ class CoreRecorderV2:
                     self._t6_disambiguation_ns = 0
                     return
                 self._t6_initial_accept_rejections = 0
-                self._t6_last_chain_delay_ns = effective
                 effective_chain_delay = effective
-                logger.info(
-                    f"T6 chain_delay initial accept: {result.chain_delay_ns} ns "
-                    f"(effective with disambiguation: {effective} ns)"
-                )
+                # ⛔ LATCH ONLY ON A CAPTURED ANCHOR.  This assignment
+                # closes the acquisition gate: the branch above runs only
+                # while _t6_last_chain_delay_ns is None, and nothing but
+                # an abnormal event (stuck-recovery, step-recovery, a
+                # stale-lock abandonment, an authority UNLOCK) reopens
+                # it.  It used to run unconditionally, and the arithmetic
+                # of that is fatal to the whole design: the matched
+                # filter locks after about ten edges (~10 s), the first
+                # fold block lands at K = 30 s, and the battery needs
+                # three blocks (~90 s).  So acquisition was entered ONCE,
+                # at t ~ 10 s, with no fine estimate in hand; it logged
+                # 'no_fine_estimate' and returned; and this line shut the
+                # gate anyway.  T6 could then never acquire on a healthy
+                # station -- the exact outcome the acceptance-criteria
+                # work exists to end.
+                #
+                # So latch only when THIS attempt captured an anchor.
+                # The gate then stays open, one walk per
+                # T6_DISAMBIG_RETRY_INTERVAL_SEC (throttled above), until
+                # the battery has produced a passing verdict and either
+                # disambiguation path has taken an anchor on it -- which
+                # is what T6_ACCEPTANCE_CRITERIA.md §3.2.1 has claimed
+                # all along.
+                if (self._t6_native_anchor is not None
+                        and self._t6_native_anchor is not _anchor_before):
+                    self._t6_last_chain_delay_ns = effective
+                    logger.info(
+                        f"T6 chain_delay initial accept: "
+                        f"{result.chain_delay_ns} ns "
+                        f"(effective with disambiguation: {effective} ns)"
+                    )
+                elif self._t6_say_once('acquisition_holding'):
+                    logger.info(
+                        "T6 acquisition holding: the disambiguation walk "
+                        "captured no anchor this cycle, so the gate "
+                        "stays OPEN and the walk retries every %.0f s. "
+                        "The reason is logged separately by the walk "
+                        "itself (no fine estimate, no battery verdict, a "
+                        "refused battery, or an unnamed second).  "
+                        "(Repeated at most every %.0f s.)",
+                        self.T6_DISAMBIG_RETRY_INTERVAL_SEC,
+                        self.T6_REPEAT_PERIOD_SEC)
             elif abs(wrap_chain_delay_ns(
                     (result.chain_delay_ns + self._t6_disambiguation_ns)
                     - self._t6_last_chain_delay_ns)) > WRAP_THRESHOLD_NS:

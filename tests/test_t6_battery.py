@@ -1,6 +1,7 @@
 """Seven criteria, each with a named failure it catches."""
 from __future__ import annotations
 
+import math
 import sys
 import unittest
 from pathlib import Path
@@ -8,7 +9,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from hf_timestd.core.bpsk_edge_fine_stage import FineEdgeEstimate
-from hf_timestd.core.t6_battery import T6Battery, BatteryThresholds
+from hf_timestd.core.t6_battery import (
+    T6Battery, BatteryThresholds, is_still_accumulating,
+)
 
 SR = 96000
 K = 30
@@ -267,3 +270,150 @@ class TestNaNNeverReadsAsHealthy(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestARulerToleratesADroppedBlock(unittest.TestCase):
+    """⛔ One discarded fold block used to poison the ruler for ~3.5 min.
+
+    ``BpskEdgeFineStage._finish_block`` returns None on a registration
+    spread beyond its limit, so the battery is never called for that
+    block and the next ``evaluate`` sees a gap of TWO folds.  Measured
+    against one fold that reads as an error of a whole fold period, and
+    because the criterion takes the worst gap over the whole retained
+    history (keep=8), ONE stream gap marked a running T6 suspect for
+    about seven further evaluations.
+    """
+
+    def _with_gap(self, gap_samples):
+        """Six blocks, with the gap between blocks 2 and 3 replaced."""
+        base = 1_000_000 + 47916
+        rtps, cur = [base], base
+        for i in range(5):
+            cur += gap_samples if i == 1 else SR * K
+            rtps.append(cur)
+        return [_healthy(edge_rtp=r) for r in rtps]
+
+    def test_a_dropped_block_is_not_a_ruler_fault(self):
+        v = _run(_battery(), self._with_gap(2 * SR * K))
+        self.assertNotIn("ruler", v.failures)
+        self.assertEqual(v.criteria["ruler_folds_skipped"], 1)
+
+    def test_several_dropped_blocks_in_a_row_are_not_a_ruler_fault(self):
+        v = _run(_battery(), self._with_gap(4 * SR * K))
+        self.assertNotIn("ruler", v.failures)
+        self.assertEqual(v.criteria["ruler_folds_skipped"], 3)
+
+    def test_a_gap_that_is_not_a_whole_fold_still_fails(self):
+        """⛔ THE OTHER HALF.  A gap off the fold lattice is the pulse
+        source walking against the ADC, which is the entire reason this
+        criterion exists.  400 samples is 4.2 ms of walk."""
+        v = _run(_battery(), self._with_gap(2 * SR * K + 400))
+        self.assertIn("ruler", v.failures)
+        self.assertEqual(v.criteria["ruler"], 400.0)
+
+    def test_a_walk_inside_a_single_fold_still_fails(self):
+        v = _run(_battery(), self._with_gap(SR * K + 400))
+        self.assertIn("ruler", v.failures)
+
+    def test_a_gap_shorter_than_half_a_fold_still_fails(self):
+        """Rounding to the nearest multiple must not round DOWN to zero
+        and score the gap against nothing."""
+        v = _run(_battery(), self._with_gap(SR * K // 4))
+        self.assertIn("ruler", v.failures)
+
+    def test_the_dropped_block_clears_within_one_evaluation(self):
+        """Not seven.  The next block after the gap is one fold on."""
+        bat = _battery()
+        _run(bat, self._with_gap(2 * SR * K))
+        v = bat.evaluate(_healthy(edge_rtp=1_000_000 + 47916 + 99 * SR * K),
+                         implied_chain_delay_ns=16_618_000,
+                         reported_sigma_ms=0.001, cn0_db_hz=70.0)
+        self.assertNotIn("ruler", v.failures)
+
+
+class TestBlockPositionSigma(unittest.TestCase):
+    """⛔ The circular dependency in criterion 5.
+
+    The recorder's old sigma came from ``_t6_chain_delay_history``, which
+    is appended to only after an anchor exists.  The battery needed an
+    anchor and the anchor needed the battery.  This accessor breaks the
+    circle by reading evidence the fold already holds -- the fold's OWN
+    repeatability, not the tier's published uncertainty.
+    """
+
+    def test_no_positions_reports_none(self):
+        self.assertIsNone(_battery().block_position_sigma_ms())
+
+    def test_one_position_reports_none(self):
+        bat = _battery()
+        _run(bat, _series(1))
+        self.assertIsNone(bat.block_position_sigma_ms(),
+                          "the spread of one reading is not a small "
+                          "uncertainty, it is no uncertainty at all")
+
+    def test_two_positions_report_their_spread(self):
+        bat = _battery()
+        bat.evaluate(_healthy(edge_offset_samples=47916.0),
+                     implied_chain_delay_ns=0, reported_sigma_ms=0.0,
+                     cn0_db_hz=None)
+        bat.evaluate(_healthy(edge_rtp=1_000_000 + 47916 + SR * K,
+                              edge_offset_samples=47956.0),
+                     implied_chain_delay_ns=0, reported_sigma_ms=0.0,
+                     cn0_db_hz=None)
+        # sd of two readings 40 samples apart = 40/sqrt(2) samples.
+        self.assertAlmostEqual(bat.block_position_sigma_ms(),
+                               40.0 / math.sqrt(2) / SR * 1000.0, places=9)
+
+    def test_it_wraps_about_the_fold_origin(self):
+        """Positions are fold-domain offsets in [0, p).  An edge sitting
+        either side of the origin is 2 samples apart, not 95998."""
+        bat = _battery()
+        for i, off in enumerate((1.0, SR - 1.0)):
+            bat.evaluate(_healthy(edge_rtp=1_000_000 + i * SR * K,
+                                  edge_offset_samples=off),
+                         implied_chain_delay_ns=0, reported_sigma_ms=0.0,
+                         cn0_db_hz=None)
+        self.assertLess(bat.block_position_sigma_ms(), 0.05)
+
+    def test_a_non_finite_position_reports_none(self):
+        """Absence of evidence, never a small number."""
+        bat = _battery()
+        for i, off in enumerate((47916.0, float("nan"))):
+            bat.evaluate(_healthy(edge_rtp=1_000_000 + i * SR * K,
+                                  edge_offset_samples=off),
+                         implied_chain_delay_ns=0, reported_sigma_ms=0.0,
+                         cn0_db_hz=None)
+        self.assertIsNone(bat.block_position_sigma_ms())
+
+    def test_reset_forgets_the_positions(self):
+        bat = _battery()
+        _run(bat, _series(4))
+        bat.reset()
+        self.assertIsNone(bat.block_position_sigma_ms())
+
+
+class TestStillAccumulating(unittest.TestCase):
+
+    def test_a_cold_start_reads_as_accumulating(self):
+        v = _run(_battery(), _series(1), sigma_ms=float("nan"))
+        self.assertTrue(is_still_accumulating(v), v.failures)
+
+    def test_a_retention_failure_is_never_accumulating(self):
+        v = _run(_battery(), _series(1, fold_retention=0.006),
+                 sigma_ms=float("nan"))
+        self.assertFalse(is_still_accumulating(v), v.failures)
+
+    def test_a_finite_sigma_over_the_ceiling_is_never_accumulating(self):
+        v = _run(_battery(), _series(1), sigma_ms=477.0)
+        self.assertFalse(is_still_accumulating(v), v.failures)
+
+    def test_a_full_history_is_never_accumulating(self):
+        bat = _battery()
+        v = _run(bat, _series(3, step=SR * K + 400))
+        self.assertIn("ruler", v.failures)
+        self.assertFalse(is_still_accumulating(v))
+
+    def test_a_passing_verdict_is_not_accumulating(self):
+        v = _run(_battery(), _series(4))
+        self.assertTrue(v.passed, v.failures)
+        self.assertFalse(is_still_accumulating(v))

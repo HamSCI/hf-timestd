@@ -87,7 +87,7 @@ class TestSplitHalfAgreement(unittest.TestCase):
         stage._acc_even[:] = 1.0 + 0j
         stage._cnt_even[:] = 1
         # _cnt_odd is left at its post-reset all-zero state.
-        result = stage._split_half_delta(0.0, 0.0)
+        result = stage._split_half_delta(0.0)
         self.assertTrue(math.isnan(result), f"expected NaN, got {result!r}")
 
 

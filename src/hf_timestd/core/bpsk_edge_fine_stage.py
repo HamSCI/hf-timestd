@@ -564,7 +564,7 @@ class BpskEdgeFineStage:
         # edge this estimate names.
         apex_distance = float(((apex_idx - edge_offset + p / 2) % p) - p / 2)
         width = float(hi - lo)
-        split_delta = self._split_half_delta(phi, edge_offset)
+        split_delta = self._split_half_delta(phi)
 
         return FineEdgeEstimate(
             edge_offset_samples=float(edge_offset),
@@ -596,7 +596,7 @@ class BpskEdgeFineStage:
         c = np.cumsum(x)
         return c[-1] - 2.0 * np.concatenate(([0.0], c[:-1]))
 
-    def _split_half_delta(self, phi: float, full_edge: float) -> float:
+    def _split_half_delta(self, phi: float) -> float:
         """Edge position from the even-second sub-fold minus the odd-second
         sub-fold, in samples, wrapped to (-p/2, p/2].
 

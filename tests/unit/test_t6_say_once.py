@@ -100,6 +100,8 @@ class TestTheSpammingSitesAreGated:
         "note_verdict_failed",       # suspect-marking itself raised
         "named_second_disagrees",    # a functional T6 indicts the namer
         "named_second_check_failed", # the crosscheck itself raised
+        "battery_restored",          # a flapping criterion clearing
+        "acquisition_holding",       # the gate stays open, per cycle
     ])
     def test_site_is_throttled(self, key):
         assert key in self._src(), (

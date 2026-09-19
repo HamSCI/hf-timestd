@@ -125,6 +125,37 @@ class TestNamedSecondCrossCheck(unittest.TestCase):
         self.assertAlmostEqual(abs(d), 2.0, places=3)
         self.assertTrue(any("named" in line.lower() for line in cm.output))
 
+    def test_a_stale_anchor_is_named_as_such_not_as_a_naming_fault(self):
+        """⛔ THE MISATTRIBUTION.  The signed 32-bit window is ±2**31
+        samples -- ±6.2 h at 96 kHz.  An anchor older than that aliases
+        to a disagreement of exactly 2**32 / SR = 44,739.24 s, and the
+        warning sent the operator to the NMEA reading and the radiod pair
+        when the real fault is that T6 has not been authoritative for six
+        hours.
+        """
+        r = _recorder()
+        elapsed = 7 * 3600                       # 7 h > the 6.2 h window
+        edge = ANCHOR_RTP + elapsed * SR
+        named = ANCHOR_UTC_NS // 1_000_000_000 + elapsed
+        with self.assertLogs("hf_timestd.core.core_recorder_v2",
+                             level="WARNING") as cm:
+            d = r._t6_check_named_second(edge, named)
+        self.assertAlmostEqual(abs(d), (1 << 32) / SR, places=3)
+        line = "\n".join(cm.output)
+        self.assertIn("STALE T6 ANCHOR", line)
+        self.assertIn("authority", line.lower())
+
+    def test_an_ordinary_disagreement_carries_no_stale_anchor_claim(self):
+        """The hint must not fire on the fault it is distinguishing
+        itself from -- otherwise it just relabels every alarm."""
+        r = _recorder()
+        edge = ANCHOR_RTP + 10 * SR
+        named = ANCHOR_UTC_NS // 1_000_000_000 + 12
+        with self.assertLogs("hf_timestd.core.core_recorder_v2",
+                             level="WARNING") as cm:
+            r._t6_check_named_second(edge, named)
+        self.assertNotIn("STALE T6 ANCHOR", "\n".join(cm.output))
+
     def test_the_check_reads_no_wall_clock(self):
         """CLAUDE.md forbids a new time.time() in the timing path.  The
         anchor and the edge's RTP are sufficient."""

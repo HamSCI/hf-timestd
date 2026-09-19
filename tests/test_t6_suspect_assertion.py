@@ -37,9 +37,10 @@ def _recorder():
     return r
 
 
-def _verdict(passed, failures=(), blocks=5):
+def _verdict(passed, failures=(), blocks=5, sigma_ms=0.001):
     return BatteryVerdict(passed=passed, failures=tuple(failures),
-                          sigma_ms=0.001, criteria={"blocks": blocks})
+                          sigma_ms=sigma_ms,
+                          criteria={"blocks": blocks, "sigma": sigma_ms})
 
 
 class TestRunningT6(unittest.TestCase):
@@ -79,6 +80,82 @@ class TestRunningT6(unittest.TestCase):
             for _ in range(20):
                 r._t6_note_verdict(_verdict(False, ("split_half",)))
         self.assertEqual(len(cm.output), 1, cm.output)
+
+
+class TestStillAccumulatingIsNotSuspect(unittest.TestCase):
+    """⛔ The cold start, which used to alarm on every healthy boot.
+
+    Criteria 2 and 3 refuse to report below HISTORY_REQUIRED_BLOCKS and
+    criterion 5 cannot state the fold's scatter below two positions --
+    while the authority captures its anchor on block 1.  So a healthy
+    station emitted ``T6 SUSPECT: ruler, unimodality`` and stamped
+    ``t6_suspect_criteria`` into the authority snapshot for two blocks.
+    An alarm that fires on every healthy start teaches the operator to
+    ignore alarms.
+    """
+
+    def test_a_cold_start_is_not_marked_suspect(self):
+        r = _recorder()
+        r._t6_note_verdict(
+            _verdict(False, ("ruler", "unimodality"), blocks=1))
+        self.assertEqual(r._t6_suspect, ())
+
+    def test_an_unavailable_sigma_during_accumulation_is_not_suspect(self):
+        """The station with no chrony SHM: before the fold holds two
+        positions, criterion 5 has no evidence either."""
+        r = _recorder()
+        r._t6_note_verdict(_verdict(
+            False, ("ruler", "unimodality", "sigma"), blocks=1,
+            sigma_ms=float("nan")))
+        self.assertEqual(r._t6_suspect, ())
+
+    def test_a_cold_start_does_not_alarm(self):
+        r = _recorder()
+        r._t6_note_verdict(
+            _verdict(False, ("ruler", "unimodality"), blocks=2))
+        self.assertNotIn("battery_suspect", r._t6_say_once_at)
+
+    def test_a_real_fault_during_accumulation_is_still_caught(self):
+        """⛔ The half of this that must NOT be lost.  A missing
+        reference cable (criterion 1) shows on block 1 and is a fault on
+        block 1."""
+        r = _recorder()
+        r._t6_note_verdict(_verdict(
+            False, ("retention", "ruler", "unimodality"), blocks=1))
+        self.assertEqual(r._t6_suspect,
+                         ("retention", "ruler", "unimodality"))
+        self.assertIn("battery_suspect", r._t6_say_once_at)
+
+    def test_a_finite_sigma_over_its_ceiling_is_a_fault_at_once(self):
+        """477 ms is not 'no evidence yet'."""
+        r = _recorder()
+        r._t6_note_verdict(_verdict(
+            False, ("ruler", "unimodality", "sigma"), blocks=1,
+            sigma_ms=477.0))
+        self.assertIn("sigma", r._t6_suspect)
+
+    def test_the_excuse_expires_with_the_history(self):
+        """At HISTORY_REQUIRED_BLOCKS the criteria can report, so a
+        failure there is a fault like any other."""
+        r = _recorder()
+        r._t6_note_verdict(
+            _verdict(False, ("ruler", "unimodality"), blocks=3))
+        self.assertEqual(r._t6_suspect, ("ruler", "unimodality"))
+
+    def test_the_restored_line_is_throttled(self):
+        """A flapping criterion logged 'restored' every fold block while
+        the matching fault line was throttled -- which reads as a healthy
+        T6 rather than an unstable one."""
+        r = _recorder()
+        with self.assertLogs("hf_timestd.core.core_recorder_v2",
+                             level="INFO") as cm:
+            for _ in range(50):
+                r._t6_note_verdict(_verdict(False, ("split_half",)))
+                r._t6_note_verdict(_verdict(True))
+        restored = [m for m in cm.output if "restored" in m]
+        self.assertEqual(
+            len(restored), 1,
+            f"50 flaps produced {len(restored)} 'restored' lines, want 1")
 
 
 class TestHookedIntoTheExistingEvaluation(unittest.TestCase):

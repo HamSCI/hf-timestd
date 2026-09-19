@@ -21,6 +21,7 @@ describes ONE edge and says how it was derived.
 """
 from __future__ import annotations
 
+import math
 import sys
 import unittest
 from pathlib import Path
@@ -110,7 +111,14 @@ def _recorder(named=NAMED_SECOND, battery=None):
     r._t6_calibrator = SimpleNamespace(sample_rate=SR,
                                        _last_edge_rtp=MF_EDGE_RTP)
     r._t6_last_fine_est = None
-    r._t6_chain_delay_history = [16_618_000, 16_618_100, 16_617_900]
+    # ⛔ EMPTY, as production holds it before acquisition.  This list was
+    # primed with three readings, and that fixture hid the circular
+    # dependency in criterion 5 outright: the deque is appended to only
+    # inside a branch requiring `_t6_native_anchor is not None`, so at
+    # this instant the real recorder has NOTHING in it.  Priming it
+    # supplied a sigma production could not have had, and the battery
+    # passed here while failing on every station.
+    r._t6_chain_delay_history = []
     # Fixture bookkeeping: which fold block comes next.  Successive
     # _feed_blocks calls CONTINUE the run, as the fine stage does --
     # restarting the edge sequence would hand the ruler a gap of zero
@@ -459,18 +467,48 @@ class TestSigmaEvidence(unittest.TestCase):
     evidence that it is healthy.  `or 0.0` made criterion 5 inert."""
 
     def test_an_unavailable_sigma_fails_criterion_5(self):
+        """Both routes empty.  Since the 2026-09-19 circularity fix the
+        recorder prefers the BATTERY's own retained block positions, so
+        starving only the chain-delay deque no longer starves criterion
+        5 -- one block starves both, because the battery needs two
+        positions to state a spread."""
         r = _recorder()
         r._t6_chain_delay_history = [16_618_000]      # < 2 samples
-        _feed_blocks(r)
+        _feed_blocks(r, n=1)                          # < 2 positions
         self.assertIn("sigma", r._t6_last_verdict.failures)
         _acquire(r)
         self.assertIsNone(r._t6_native_anchor)
+
+    def test_sigma_comes_from_the_fold_when_no_anchor_exists(self):
+        """⛔ THE CIRCULAR DEPENDENCY, pinned.
+
+        `_t6_chain_delay_history` is appended to only inside a branch
+        requiring `_t6_native_anchor is not None`.  Reading sigma from it
+        alone meant the battery needed an anchor and the anchor needed
+        the battery: three healthy blocks gave
+        `failures=('sigma',), sigma=nan` and no anchor, forever.  A
+        station with no chrony SHM configured never escaped it at all.
+
+        So: EMPTY deque, no anchor, three healthy blocks -- and criterion
+        5 must still be evidenced, from the fold's own block-to-block
+        scatter.
+        """
+        r = _recorder()
+        r._t6_chain_delay_history = []                # as production holds it
+        self.assertIsNone(r._t6_native_anchor)
+        _feed_blocks(r)
+        self.assertNotIn("sigma", r._t6_last_verdict.failures)
+        self.assertTrue(math.isfinite(r._t6_last_verdict.sigma_ms))
+        self.assertTrue(r._t6_last_verdict.passed,
+                        r._t6_last_verdict.failures)
+        _acquire(r)
+        self.assertIsNotNone(r._t6_native_anchor)
 
     def test_a_legitimate_zero_sigma_is_not_swallowed(self):
         """`or 0.0` also could not tell 'no reading' from a real 0.0."""
         r = _recorder()
         r._t6_chain_delay_history = [16_618_000] * 5   # std exactly 0.0
-        _feed_blocks(r)
+        _feed_blocks(r)                 # every block on ONE position: also 0.0
         self.assertEqual(r._t6_last_verdict.sigma_ms, 0.0)
         self.assertNotIn("sigma", r._t6_last_verdict.failures)
 
@@ -536,13 +574,30 @@ class TestTheBatteryForgetsARepudiatedRun(unittest.TestCase):
 
 class TestReportedSigma(unittest.TestCase):
 
-    def test_sigma_comes_from_the_chain_delay_history(self):
+    def test_the_fold_is_preferred_over_the_chain_delay_history(self):
+        """Order of preference, pinned.  The fold's own scatter needs no
+        anchor; the chain-delay history cannot exist without one."""
         r = _recorder()
+        # Two blocks in, so the battery retains two positions 40 samples
+        # apart -- 0.4167 ms at 96 kHz -- while the deque carries a much
+        # wider 0.1 ms-scale spread.  Whichever number comes back names
+        # the route.
+        _feed_blocks(r, n=1)
+        _feed_blocks(r, n=1, edge_offset_samples=EDGE_OFFSET_SAMPLES + 40.0)
+        r._t6_chain_delay_history = [0, 100_000_000]   # would be 50 ms
+        sigma = r._t6_reported_sigma_ms()
+        self.assertIsNotNone(sigma)
+        self.assertAlmostEqual(sigma, 40.0 / SR * 1000.0 / math.sqrt(2),
+                               places=6)
+
+    def test_the_chain_delay_history_still_answers_when_the_fold_cannot(self):
+        r = _recorder()
+        r._t6_chain_delay_history = [16_618_000, 16_618_100, 16_617_900]
         sigma = r._t6_reported_sigma_ms()
         self.assertIsNotNone(sigma)
         self.assertLess(sigma, 1.0)
 
-    def test_too_few_samples_reports_none(self):
+    def test_too_few_samples_on_both_routes_reports_none(self):
         r = _recorder()
         r._t6_chain_delay_history = [16_618_000]
         self.assertIsNone(r._t6_reported_sigma_ms())

@@ -33,7 +33,7 @@ before any threshold is even consulted.  Found 2026-09-19: a NaN
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 # Criterion names.  Logs, telemetry and tests use these strings verbatim.
@@ -272,6 +272,36 @@ class BatteryVerdict:
     criteria: dict
 
 
+def is_still_accumulating(verdict) -> bool:
+    """True when a verdict fails ONLY on criteria that cannot yet report.
+
+    ⛔ "STILL ACCUMULATING" IS NOT "SUSPECT".  Criteria 2 and 3 refuse to
+    report until ``HISTORY_REQUIRED_BLOCKS`` blocks are in hand, and the
+    acquisition path already says so in as many words.  The suspect path
+    did not: because the authority captures its anchor on block 1, every
+    cold start emitted ``T6 SUSPECT: ruler, unimodality`` and stamped
+    ``t6_suspect_criteria`` into the authority snapshot for two blocks --
+    a fault report for a battery doing exactly what it is supposed to do.
+    An alarm that fires on every healthy start teaches the operator to
+    ignore alarms.
+
+    Criterion 5 joins the excused set only while its evidence is
+    UNAVAILABLE (non-finite).  Below two retained positions the fold
+    cannot state its own scatter, which is absence of evidence, not
+    evidence of breakage.  A sigma that is finite and over the ceiling is
+    a real fault and marks suspect at once, accumulating or not -- as
+    does every other criterion.
+    """
+    if not verdict.failures:
+        return False
+    if verdict.criteria.get("blocks", 0) >= HISTORY_REQUIRED_BLOCKS:
+        return False
+    excused = {RULER, UNIMODALITY}
+    if not math.isfinite(verdict.criteria.get(SIGMA, float("nan"))):
+        excused.add(SIGMA)
+    return all(f in excused for f in verdict.failures)
+
+
 class T6Battery:
     """Evaluates §4's seven criteria over a run of fold blocks."""
 
@@ -357,6 +387,50 @@ class T6Battery:
         per_second_ns = REF_SIGMA_NS * 10 ** ((REF_CN0_DB_HZ - cn0_db_hz) / 20.0)
         per_block_ns = per_second_ns / math.sqrt(self.fold_seconds)
         return per_block_ns / 1e6
+
+    def block_position_sigma_ms(self) -> Optional[float]:
+        """Standard deviation of the retained block positions, in ms.
+
+        ⛔ WHAT THIS QUANTITY IS: the FOLD'S OWN REPEATABILITY -- how far
+        the fine stage's edge position moves from one fold block to the
+        next.  It is NOT the tier's published uncertainty.  The authority
+        publishes `t6_sigma_ms` from the chain-delay history, a different
+        statistic over a different population, and this number must never
+        be presented or logged as that one.
+
+        ⛔ WHY IT EXISTS.  Criterion 5 used to read only the recorder's
+        chain-delay history, and that deque is appended to ONLY after an
+        anchor exists.  Before acquisition it is empty, so the sigma was
+        None, became NaN, and failed criterion 5 through `_fails`: the
+        battery needed an anchor and the anchor needed the battery.
+        Measured 2026-09-19 -- three healthy blocks with an empty deque
+        gave `failures=('sigma',), sigma=nan` and no anchor, forever.
+
+        This breaks that circle by taking the sigma from evidence the
+        fold already holds.  §4.3 of T6_ACCEPTANCE_CRITERIA.md already
+        records that criterion 5 compares two different quantities and
+        guards gross breakage only; reading the fold's own scatter makes
+        that comparison SELF-CONSISTENT (a model of block scatter against
+        a measurement of block scatter) rather than circular.  It does
+        not make the criterion a precision check, and it does not make
+        this the number the authority publishes.
+
+        Positions are fold-domain offsets in [0, p), so differences are
+        taken about the median through `_wrapped` -- otherwise an edge
+        sitting near the fold origin would read a full period of scatter
+        from sample-level jitter alone.
+
+        None below two positions: the spread of one reading is not a
+        small uncertainty, it is no uncertainty at all.
+        """
+        pos = [x for x in self._positions if math.isfinite(x)]
+        if len(pos) != len(self._positions) or len(pos) < 2:
+            return None
+        med = sorted(pos)[len(pos) // 2]
+        devs = [self._wrapped(x - med) for x in pos]
+        mean = sum(devs) / len(devs)
+        var = sum((d - mean) ** 2 for d in devs) / (len(devs) - 1)
+        return math.sqrt(var) / self.sample_rate * 1000.0
 
     # -- the battery -----------------------------------------------
 
@@ -472,10 +546,44 @@ class T6Battery:
             # instead of a NaN estimate, so no NaN ever reaches this
             # list.  All arithmetic here is therefore over real ints and
             # a bare `>` cannot silently pass bad evidence.
+            # ⛔ A MISSING BLOCK IS NOT A RULER FAULT.  The fine stage
+            # returns None for a block whose registration spread exceeds
+            # its limit, so the battery is never called for that block
+            # and the next `evaluate` sees a gap of TWO folds.  Measuring
+            # that against one fold reports an error of a whole fold
+            # period -- 2,880,000 samples at K=30, 96 kHz -- and because
+            # `worst` runs over the whole retained history (keep=8), ONE
+            # discarded block marked a running T6 suspect for about seven
+            # further evaluations, roughly 3.5 minutes.
+            #
+            # What this criterion exists to catch is the PULSE SOURCE
+            # WALKING AGAINST THE ADC, and a walk shows up as a gap that
+            # is not a whole number of folds.  So measure each gap
+            # against its OWN nearest integer multiple of the fold
+            # period.  A dropped block leaves the residual at zero; a
+            # walking source leaves it wherever the walk put it.
+            #
+            # This does not blunt the criterion.  The fold period is
+            # 2,880,000 samples and the tolerance is 2, so an arbitrary
+            # gap lands within tolerance of SOME multiple with
+            # probability 5/2,880,000 -- about 1.7e-6.  An outage long
+            # enough to make the multiple large is a liveness problem the
+            # authority already owns (and `_t6_battery_forget_run` drops
+            # the history on repudiation), not something this criterion
+            # should re-report as a walk.
             expected = self.fold_seconds * p
-            worst = max(abs((self._edges[i] - self._edges[i - 1]) - expected)
-                        for i in range(1, len(self._edges)))
+            worst = 0.0
+            skipped = 0
+            for i in range(1, len(self._edges)):
+                gap = self._edges[i] - self._edges[i - 1]
+                # A gap shorter than half a fold cannot be a dropped
+                # block; hold the multiple at 1 so a too-SHORT gap is
+                # still measured against one fold and still fails.
+                folds = max(1, int(round(gap / expected)))
+                worst = max(worst, abs(gap - folds * expected))
+                skipped = max(skipped, folds - 1)
             criteria[RULER] = float(worst)
+            criteria["ruler_folds_skipped"] = int(skipped)
             if self._fails(worst,
                            lambda v: v > self.t.max_ruler_error_samples):
                 failures.append(RULER)

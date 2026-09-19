@@ -203,16 +203,34 @@ stage delivers an estimate. Acquisition *consults* the standing verdict; it
 never evaluates inline.
 
 The reason is arithmetic, and a first implementation got it wrong. Acquisition
-runs once per first lock — the recorder gates it on
-`_t6_last_chain_delay_ns is None`, and that gate closes on the first attempt the
-plausibility guard does not refuse. But criteria 2 and 3 need a *run* of blocks.
-A battery evaluated in acquisition therefore sees one block, fails ruler and
-unimodality forever, and T6 never asserts: the old blocker returns wearing a new
-reason.
+is gated on `_t6_last_chain_delay_ns is None`. But criteria 2 and 3 need a *run*
+of blocks. A battery evaluated in acquisition therefore sees one block, fails
+ruler and unimodality forever, and T6 never asserts: the old blocker returns
+wearing a new reason.
 
-So T6 now waits about three folds — 90 s at K = 30 — after first lock before it
-may assert. That delay is honest. A battery cannot claim self-consistency from a
+So T6 waits about three folds — 90 s at K = 30 — after first lock before it may
+assert. That delay is honest. A battery cannot claim self-consistency from a
 single block.
+
+⛔ **And the gate must stay open for the whole of that wait.** It did not. The
+recorder latched `_t6_last_chain_delay_ns` at the end of the initial-accept
+branch *unconditionally* — whether or not the walk had captured anything. The
+matched filter locks after about ten edges (~10 s), the first fold block lands
+at K = 30 s, and the battery needs three of them. So acquisition ran exactly
+once, at t ≈ 10 s, with `_t6_last_fine_est is None`; it logged
+`no_fine_estimate` and returned; and the latch closed the gate behind it. Only
+an abnormal event — stuck-recovery, step-recovery, a stale-lock abandonment, an
+authority UNLOCK — reopened it. A healthy station could not acquire at all.
+
+Fixed 2026-09-19: the latch fires only when *that attempt* captured an anchor
+(`_t6_native_anchor` compared by identity against its value before the walk, so
+an anchor the authority already held is not mistaken for this attempt's). The
+gate now stays open, one walk per `T6_DISAMBIG_RETRY_INTERVAL_SEC`, until the
+battery produces a passing verdict and an anchor is taken on it — which is what
+this section claimed all along. `_t6_last_chain_delay_ns` thereby stops meaning
+"the MF has locked" and starts meaning "an anchor has been captured";
+stuck-recovery, which needed the earlier fact, reads its own
+`_t6_mf_ever_locked` flag instead.
 
 ⚠ The evaluation sits inside the fine-stage block, **upstream of the authority
 call**. An exception there would skip the authority update and stop T6 asserting
@@ -266,7 +284,7 @@ catches a named failure.
 | 3 | Unimodality | per-second estimates about their median | 128/128 and 89/89 at one position | multipath, split peaks, a competing signal |
 | 4 | Shape — triangle fidelity, apex agreement, width | RMS residual of \|T(e)\| against the ideal triangle ÷ peak; apex-to-reported-edge distance; pulse width against 1/(2B) | residual 0.0008–0.0017 real against 0.25–0.42 noise; −1919 samples on a 20 ms displaced lock | lattice phantoms |
 | 5 | Scatter, and σ within the tier's physical budget | reported σ against `max(predicted × margin, 1.0 ms)` | 95 ns on real IQ (n = 89); 490 ns anchors the shipped curve | a broken tier masquerading as a wide one |
-| 6 | Split-half agreement | two disjoint folds, against k·σ predicted; **NaN when either sub-fold is empty** | 41 ns against 17 ns predicted, n = 2 | a wandering apex |
+| 6 | Split-half agreement | two disjoint folds, against a fixed `max_split_half_delta_samples = 10.0` (104 µs at 96 kHz — *not* a k·σ prediction; see §4.5 for the derivation); **NaN when either sub-fold is empty** | 41 ns against 17 ns predicted, n = 2 | a wandering apex |
 | 7 | Plausibility | implied chain delay within ±250 ms | shipped and in force | gross wrap and sidelobe capture |
 
 ### 4.1 Criterion 1 diagnoses the fault that cost two days
@@ -366,6 +384,23 @@ station — at a plausible 57 dB-Hz it computed 0.0173 ms against B4's recorded
 0.003–0.07 ms, refusing a healthy B4 by 4×. That is the exact failure this
 whole document exists to end.
 
+⛔ **And the σ it reads is the fold's own, not the tier's.** The recorder used
+to hand criterion 5 the standard deviation of `_t6_chain_delay_history`, a deque
+appended to only inside a branch that requires `_t6_native_anchor is not None`.
+Before acquisition it is empty, so σ was None, became NaN, and failed criterion
+5 through `_fails`: **the battery needed an anchor and the anchor needed the
+battery**. Verified 2026-09-19 — three healthy blocks against an empty deque
+gave `failures=('sigma',), sigma=nan` and no anchor, forever; on a station with
+no chrony SHM configured that route never supplied a value at all. The recorder
+now prefers `T6Battery.block_position_sigma_ms()`, the standard deviation of the
+block positions the battery already retains for criterion 3, and falls back to
+the chain-delay history only when the battery holds fewer than two. That is the
+**fold's own repeatability**, not the tier's published uncertainty — the
+authority's `t6_sigma_ms` is unchanged and is still a different number. The
+comparison becomes self-consistent (a model of block scatter against a
+measurement of block scatter) instead of circular; it does not become a
+precision check.
+
 ⚡ So criterion 5 guards **gross breakage only**. Orders of magnitude, never a
 factor of two. Against the 1.0 ms floor, AI6VN's 477 ms fails by 477× while
 B4's worst recorded hour passes with 14× of room. Tightening it needs a station
@@ -437,12 +472,30 @@ The mapping, criterion by criterion:
 
 | | Per-second form (measured) | Fold-block form (implemented) |
 |---|---|---|
-| 2 | inter-edge Δ = the sample rate | consecutive block edges differ by `fold_seconds × sample_rate` |
-| 3 | per-second estimates at one position | consecutive block estimates agree — the existing `BOOTSTRAP_CONFIRM_BLOCKS` mechanism, surfaced rather than rebuilt |
+| 2 | inter-edge Δ = the sample rate | consecutive block edges differ by an **integer multiple** of `fold_seconds × sample_rate` — see below |
+| 3 | per-second estimates at one position | consecutive block estimates agree — `T6Battery.evaluate` computes its **own** max-deviation-about-the-median over the positions it retains, against `max_unimodality_spread_ms = 0.25`. It reuses only the *block count* from `BOOTSTRAP_CONFIRM_BLOCKS` (as `HISTORY_REQUIRED_BLOCKS`); the stage's bootstrap-confirmation statistic itself is neither surfaced nor called, and its tolerance is 4× looser |
 | 5 | per-second sd (95 ns real IQ, 490 ns swept) | block-to-block sd, predicted as the per-second sd ÷ √K — then floored at 1.0 ms, see §4.3 |
 
 Criteria 1, 4, 6 and 7 already evaluate on the folded block and need no
 mapping.
+
+⛔ **Criterion 2 measures each gap against its own nearest multiple of the fold
+period, not against one fold.** `BpskEdgeFineStage._finish_block` returns None
+for a block whose registration spread exceeds its limit, so the battery is never
+called for that block and the next `evaluate` sees a gap of two folds. Measured
+against one fold that reads as an error of a whole fold period — 2,880,000
+samples at K = 30, 96 kHz — and because the criterion takes the worst gap over
+the whole retained history (`keep = 8`), **one** discarded block marked a
+running T6 suspect for about seven further evaluations, roughly 3.5 minutes.
+
+A dropped block is not a ruler fault. What this criterion exists to catch is the
+pulse source walking against the ADC, and a walk shows up as a gap that is *not*
+a whole number of folds. So the residual is taken to the nearest multiple and a
+gap shorter than half a fold is still held to one fold, so a too-short gap still
+fails. This does not blunt the criterion: with a 2,880,000-sample period and a
+2-sample tolerance, an arbitrary gap lands within tolerance of some multiple
+with probability about 1.7 × 10⁻⁶. `criteria["ruler_folds_skipped"]` carries how
+many folds the worst gap spanned.
 
 ⛔ Criterion 6 reports **NaN**, never 0.0, when either sub-fold holds no
 samples. 0.0 is the most favourable value the criterion can return, so
@@ -474,6 +527,20 @@ fault, never silently correct it.
 Demoting instead would reproduce the present problem in new costume — a
 transient trip handing the station back to a tier two orders of magnitude
 worse.
+
+⛔ **"Still accumulating" is not "suspect".** The authority captures its anchor
+on block 1, while criteria 2 and 3 refuse to report before
+`HISTORY_REQUIRED_BLOCKS` and criterion 5 cannot state the fold's scatter below
+two retained positions. So every cold start emitted `T6 SUSPECT: ruler,
+unimodality` and stamped `t6_suspect_criteria` into the authority snapshot for
+two blocks — a fault report for a battery doing exactly what it is supposed to
+do. An alarm that fires on every healthy start teaches the operator to ignore
+alarms. Fixed 2026-09-19 (`t6_battery.is_still_accumulating`): a verdict failing
+*only* on criteria that cannot yet report, while the battery is below
+`HISTORY_REQUIRED_BLOCKS`, is **accumulating** — no suspect mark, no alarm, a
+DEBUG line. Criterion 5 counts as unreportable only while its evidence is
+non-finite; a finite σ over its ceiling, or any other criterion, marks suspect
+at once.
 
 ### 5.2 A missing estimate stays missing
 
