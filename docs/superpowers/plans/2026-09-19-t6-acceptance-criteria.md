@@ -1148,35 +1148,52 @@ Commits: `e012c26` (implemented), `80058e1` (reverted).
 
 ### Task 5: Acquire on the fold, with the battery as the gate
 
-The rewire. `_t6_disambiguate_via_external_reference` stops deriving the
-sub-second term from a reference offset and starts taking it from the
-battery-passed fold, using the ordinal only to name the second.
+The rewire, and the task this whole plan exists for.
+`_t6_disambiguate_via_external_reference` stops deriving the sub-second term
+from a reference offset. The fold supplies the phase; the **existing**
+`_t6_name_integer_second` supplies the second; the battery decides.
 
 **Files:**
 - Modify: `src/hf_timestd/core/core_recorder_v2.py`
-  (`_t6_disambiguate_via_external_reference` at `:4351`; its call site at
-  `:4990`)
+  (`_t6_disambiguate_via_external_reference` at `:4351`)
 - Test: `tests/test_t6_acquire_on_fold.py` (create)
 
 **Interfaces:**
-- Consumes: `_get_ordinal_reference` (Task 4); `T6Battery`, `BatteryVerdict`
-  (Tasks 2–3); `FineEdgeEstimate`'s new fields (Task 1).
+- Consumes: `T6Battery`, `BatteryVerdict` (Tasks 2–3); `FineEdgeEstimate`'s
+  evidence fields (Task 1); `_t6_name_integer_second` (**already in the file**,
+  `:3277`); `self._t6_last_fine_est` (**already set** at `:4916`);
+  `self._t6_chain_delay_history` (**already maintained**).
 - Produces:
-  - `CoreRecorderV2._t6_battery: T6Battery | None` — constructed on first use
+  - `CoreRecorderV2._t6_battery: T6Battery | None` — built on first use
   - `CoreRecorderV2._t6_last_verdict: BatteryVerdict | None` — Task 6 reads it
-  - `_t6_disambiguate_via_external_reference(self, result)` keeps its name and
-    signature; Task 9's integration tests drive it.
+  - `CoreRecorderV2._t6_reported_sigma_ms(self) -> float | None`
 
-**What changes, precisely.** Today:
+⛔ **Three names in an earlier draft of this plan did not exist.** Use these:
 
-```python
-disagreement_sec = offset_sec - (ref_offset_ms / 1000.0)
-shift_samples    = round(disagreement_sec * sr_local)
+| Draft (wrong) | Real |
+|---|---|
+| `_get_ordinal_reference()` | `_t6_name_integer_second(edge_rtp)` → the named second, or `None` |
+| `self._t6_fine_estimate` | `self._t6_last_fine_est` |
+| `self._t6_sigma_ms` | derive from `self._t6_chain_delay_history` — see Step 3 |
+| `self._t6_cn0_db_hz` | does not exist on the recorder; pass `cn0_db_hz=None` |
+
+**Why `cn0_db_hz=None` is correct and not a shortcut.** The C/N0 reading lives
+in `frontend_probe.py`, not the recorder. Task 3 measured that the sigma
+ceiling's absolute floor governs from 77 dB-Hz down to about 36 — the whole
+operating range — so the C/N0 term is inert there by design. Plumbing a new
+dependency across modules would change no verdict. Note it in a comment.
+
+**What changes, precisely.** Today the reference offset carries the sub-second
+term:
+
+```
+ref_time          = round(wall_time_sec)
+disagreement_sec  = offset_sec - (ref_offset_ms / 1000.0)
+shift_samples     = round(disagreement_sec * sr_local)
 ```
 
-The reference offset supplies the sub-second correction. After this task the
-battery-passed fold position supplies it, and `ref_offset_ms` is used only
-inside `pps_firing_utc_ns` to place the named second — which it already does.
+After this task the named second replaces `round(wall_time_sec)`, and the
+battery-passed fold position replaces the reference offset.
 
 ⛔ Keep the ±250 ms plausibility guard exactly where it sits. It is criterion 7
 and the last defence against a gross wrap.
@@ -1186,7 +1203,7 @@ and the last defence against a gross wrap.
 Create `tests/test_t6_acquire_on_fold.py`:
 
 ```python
-"""Acquisition runs on the fold; the ordinal only names the second."""
+"""Acquisition runs on the fold; the namer only says which second."""
 from __future__ import annotations
 
 import sys
@@ -1203,16 +1220,7 @@ from hf_timestd.core.t6_battery import T6Battery
 
 SR = 96000
 K = 30
-
-# rtp_to_utc's return for the fixture edge.  Chosen so the RAW phase the
-# method derives lands on the fold's own phase and the implied shift is
-# ~0 samples:
-#     (EDGE_UTC - chain_delay 0.016618 s) mod 1 s == 47916/96000 == 0.499125
-# A bare 1_700_000_000.0 would put the raw phase at ~94406 samples against
-# a fold phase of 47916, implying a -484 ms shift that the +-250 ms
-# plausibility guard correctly refuses -- failing the test for a reason
-# unrelated to what it tests.
-EDGE_UTC = 1_700_000_000.515743
+NAMED_SECOND = 1_700_000_000
 
 
 def _estimate(edge_rtp, **over):
@@ -1220,21 +1228,22 @@ def _estimate(edge_rtp, **over):
         edge_offset_samples=47916.0, edge_rtp=edge_rtp, edge_subsample=0.0,
         n_seconds_folded=K, plateau_amplitude=1.0, fit_rms=0.02,
         fold_retention=0.98, split_half_delta_samples=0.05,
-        peak_prominence=40.0, transition_width_samples=6.0,
+        peak_prominence=0.001, apex_distance_samples=0.5,
+        transition_width_samples=6.0,
     )
     kw.update(over)
     return FineEdgeEstimate(**kw)
 
 
-def _recorder(ordinal=(-0.284, 0.29, "T4")):
+def _recorder(named=NAMED_SECOND):
     """A bare namespace carrying only what the method touches."""
     r = SimpleNamespace()
     for name in ("_t6_disambiguate_via_external_reference",
-                 "_t6_say_once"):
+                 "_t6_say_once", "_t6_reported_sigma_ms"):
         setattr(r, name, getattr(CoreRecorderV2, name).__get__(r))
     r.T6_REPEAT_PERIOD_SEC = CoreRecorderV2.T6_REPEAT_PERIOD_SEC
     r._t6_say_once_at = {}
-    r._get_ordinal_reference = lambda: ordinal
+    r._t6_name_integer_second = lambda _rtp: named
     r._t6_battery = T6Battery(sample_rate=SR, fold_seconds=K)
     r._t6_last_verdict = None
     r._t6_disambiguation_ns = 0
@@ -1243,84 +1252,78 @@ def _recorder(ordinal=(-0.284, 0.29, "T4")):
     r._t6_channel_info = SimpleNamespace(chain_delay_correction_ns=None)
     r._t6_calibrator = SimpleNamespace(sample_rate=SR,
                                        _last_edge_rtp=1_000_000 + 47916)
-    r._t6_fine_estimate = None
-    r._t6_cn0_db_hz = 70.0
+    r._t6_last_fine_est = None
+    r._t6_chain_delay_history = [16_618_000, 16_618_100, 16_617_900]
     return r
+
+
+def _drive(r, result, n=4, **over):
+    with mock.patch("ka9q.rtp_recorder.rtp_to_utc",
+                    return_value=float(NAMED_SECOND) + 0.499125 + 0.016618):
+        for i in range(n):
+            r._t6_last_fine_est = _estimate(
+                1_000_000 + 47916 + i * SR * K, **over)
+            r._t6_disambiguate_via_external_reference(result)
 
 
 class TestAcquisitionUsesTheFold(unittest.TestCase):
 
     def test_a_passing_battery_captures_an_anchor(self):
         r = _recorder()
-        result = SimpleNamespace(chain_delay_ns=16_618_000)
-        with mock.patch("ka9q.rtp_recorder.rtp_to_utc",
-                        return_value=EDGE_UTC):
-            for i in range(4):
-                r._t6_fine_estimate = _estimate(1_000_000 + 47916 + i * SR * K)
-                r._t6_disambiguate_via_external_reference(result)
+        _drive(r, SimpleNamespace(chain_delay_ns=16_618_000))
         self.assertIsNotNone(r._t6_native_anchor)
-        self.assertTrue(r._t6_last_verdict.passed, r._t6_last_verdict.failures)
+        self.assertTrue(r._t6_last_verdict.passed,
+                        r._t6_last_verdict.failures)
 
     def test_a_failing_battery_captures_nothing(self):
         r = _recorder()
-        result = SimpleNamespace(chain_delay_ns=16_618_000)
-        with mock.patch("ka9q.rtp_recorder.rtp_to_utc",
-                        return_value=EDGE_UTC):
-            for i in range(4):
-                r._t6_fine_estimate = _estimate(
-                    1_000_000 + 47916 + i * SR * K, fold_retention=0.006)
-                r._t6_disambiguate_via_external_reference(result)
+        _drive(r, SimpleNamespace(chain_delay_ns=16_618_000),
+               fold_retention=0.006)
         self.assertIsNone(r._t6_native_anchor)
         self.assertIn("retention", r._t6_last_verdict.failures)
 
-    def test_no_ordinal_source_refuses_without_capturing(self):
-        """A station with no clock within 50 ms has a larger problem."""
-        r = _recorder(ordinal=None)
-        result = SimpleNamespace(chain_delay_ns=16_618_000)
-        with mock.patch("ka9q.rtp_recorder.rtp_to_utc",
-                        return_value=EDGE_UTC):
-            for i in range(4):
-                r._t6_fine_estimate = _estimate(1_000_000 + 47916 + i * SR * K)
-                r._t6_disambiguate_via_external_reference(result)
+    def test_no_named_second_refuses_without_capturing(self):
+        """_t6_name_integer_second returns None when neither NMEA nor the
+        radiod-pair wall lands within 0.4 s of an integer."""
+        r = _recorder(named=None)
+        _drive(r, SimpleNamespace(chain_delay_ns=16_618_000))
         self.assertIsNone(r._t6_native_anchor)
 
     def test_the_plausibility_guard_still_refuses_a_gross_wrap(self):
         r = _recorder()
-        result = SimpleNamespace(chain_delay_ns=400_000_000)
-        with mock.patch("ka9q.rtp_recorder.rtp_to_utc",
-                        return_value=EDGE_UTC):
-            for i in range(4):
-                r._t6_fine_estimate = _estimate(1_000_000 + 47916 + i * SR * K)
-                r._t6_disambiguate_via_external_reference(result)
+        _drive(r, SimpleNamespace(chain_delay_ns=400_000_000))
         self.assertIsNone(r._t6_native_anchor)
 
-    def test_the_anchor_records_which_tier_named_the_second(self):
+    def test_the_anchor_is_built_on_the_named_second(self):
         r = _recorder()
-        result = SimpleNamespace(chain_delay_ns=16_618_000)
-        with mock.patch("ka9q.rtp_recorder.rtp_to_utc",
-                        return_value=EDGE_UTC):
-            for i in range(4):
-                r._t6_fine_estimate = _estimate(1_000_000 + 47916 + i * SR * K)
-                r._t6_disambiguate_via_external_reference(result)
-        self.assertEqual(r._t6_native_anchor.captured_via_tier, "T4")
+        _drive(r, SimpleNamespace(chain_delay_ns=16_618_000))
+        self.assertIsNotNone(r._t6_native_anchor)
+        self.assertAlmostEqual(
+            r._t6_native_anchor.captured_at_utc_ns / 1e9,
+            float(NAMED_SECOND), places=3)
 
-    def test_a_worse_ordinal_sigma_does_not_change_the_phase(self):
-        """The ordinal names a second and nothing more.  T4 at 0.29 ms
-        and T2 at 20 ms must place the same edge."""
-        anchors = []
-        for ordinal in ((-0.284, 0.29, "T4"), (-0.284, 20.0, "T2")):
-            r = _recorder(ordinal=ordinal)
-            result = SimpleNamespace(chain_delay_ns=16_618_000)
-            with mock.patch("ka9q.rtp_recorder.rtp_to_utc",
-                            return_value=EDGE_UTC):
-                for i in range(4):
-                    r._t6_fine_estimate = _estimate(
-                        1_000_000 + 47916 + i * SR * K)
-                    r._t6_disambiguate_via_external_reference(result)
-            anchors.append(r._t6_native_anchor)
-        self.assertIsNotNone(anchors[0])
-        self.assertIsNotNone(anchors[1])
-        self.assertEqual(anchors[0].chain_delay_ns, anchors[1].chain_delay_ns)
+    def test_the_old_sigma_gate_is_no_longer_consulted(self):
+        """_get_disambiguation_reference must not be called: its 10 us bar
+        is the blocker this task removes."""
+        r = _recorder()
+        r._get_disambiguation_reference = mock.Mock(
+            side_effect=AssertionError("old gate consulted"))
+        _drive(r, SimpleNamespace(chain_delay_ns=16_618_000))
+        r._get_disambiguation_reference.assert_not_called()
+
+
+class TestReportedSigma(unittest.TestCase):
+
+    def test_sigma_comes_from_the_chain_delay_history(self):
+        r = _recorder()
+        sigma = r._t6_reported_sigma_ms()
+        self.assertIsNotNone(sigma)
+        self.assertLess(sigma, 1.0)
+
+    def test_too_few_samples_reports_none(self):
+        r = _recorder()
+        r._t6_chain_delay_history = [16_618_000]
+        self.assertIsNone(r._t6_reported_sigma_ms())
 
 
 if __name__ == "__main__":
@@ -1329,39 +1332,70 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Run the test and watch it fail**
 
-Run: `python -m pytest tests/test_t6_acquire_on_fold.py -v`
-Expected: failures naming `_get_ordinal_reference` unused or
-`_t6_last_verdict` never set — the method still runs the old path.
+Run: `.venv/bin/python -m pytest tests/test_t6_acquire_on_fold.py -v --override-ini addopts=`
+Expected: failures — `_t6_reported_sigma_ms` does not exist, and the method
+still calls the old gate.
 
-- [ ] **Step 3: Rewire the method**
+- [ ] **Step 3: Add the sigma helper**
 
-Rewrite `_t6_disambiguate_via_external_reference`. Keep every part not
-mentioned here exactly as it stands — the anchor construction, the ledger
-append, `_t6_rate_reset`, the outer try/except, and the ±250 ms guard.
+`self._t6_chain_delay_history` already holds the last ~60 chain-delay readings
+in ns, and the recorder already documents its standard deviation as "the
+physical uncertainty of the BPSK PPS measurement". Expose it:
+
+```python
+    def _t6_reported_sigma_ms(self):
+        """Std of the recent chain-delay history, in ms, or None.
+
+        The recorder already publishes this quantity as the authority's
+        ``t6_sigma_ms`` (see the ``chain_delay_ns_std_ns`` field in the
+        status payload).  The battery's criterion 5 compares it against
+        a ceiling; reusing the same number keeps one definition of T6's
+        uncertainty rather than inventing a second.
+        """
+        hist = list(getattr(self, '_t6_chain_delay_history', ()) or ())
+        if len(hist) < 2:
+            return None
+        return float(np.std(hist, ddof=1)) / 1e6
+```
+
+- [ ] **Step 4: Rewire the method**
+
+In `_t6_disambiguate_via_external_reference`, keep everything not named here
+exactly as it stands — the anchor construction, the ledger append,
+`_t6_rate_reset`, the outer try/except, and the ±250 ms guard.
 
 Replace the reference lookup:
 
 ```python
             ref = self._get_disambiguation_reference()
-```
-
-with the ordinal lookup and the battery:
-
-```python
-            ref = self._get_ordinal_reference()
             if ref is None:
-                if self._t6_say_once('ordinal_none'):
-                    logger.warning(
-                        "T6 acquisition: no clock within %.0f ms to name the "
-                        "GPS second, so the edge cannot be labelled.  A "
-                        "station holding no clock that close to UTC has a "
-                        "larger problem than a T6 acquisition.  (Repeated at "
-                        "most every %.0f s.)",
-                        self.T6_ORDINAL_MAX_SIGMA_MS, self.T6_REPEAT_PERIOD_SEC)
+                ...
                 return
             ref_offset_ms, ref_sigma_ms, ref_tier = ref
+```
 
-            est = getattr(self, '_t6_fine_estimate', None)
+with the namer, the fold estimate, and the battery:
+
+```python
+            # §3.1 — the ordinal.  The namer already in this file resolves
+            # which UTC second the edge belongs to: T5 NMEA preferred,
+            # radiod-pair wall as fallback, refusing a residual beyond
+            # ±0.4 s.  It needs half a second where the retired gate
+            # demanded 10 µs, and it grants its source nothing further.
+            named_second = self._t6_name_integer_second(last_edge_rtp)
+            if named_second is None:
+                if self._t6_say_once('ordinal_unnamed'):
+                    logger.warning(
+                        "T6 acquisition: could not name the edge's UTC "
+                        "second — neither the T5 NMEA reading nor the "
+                        "radiod-pair wall estimate landed within ±0.4 s "
+                        "of an integer.  T6 does not assert; the station "
+                        "runs its fallback.  (Repeated at most every "
+                        "%.0f s.)", self.T6_REPEAT_PERIOD_SEC)
+                return
+            ref_tier = 'namer'
+
+            est = getattr(self, '_t6_last_fine_est', None)
             if est is None:
                 return
             if getattr(self, '_t6_battery', None) is None:
@@ -1372,17 +1406,12 @@ with the ordinal lookup and the battery:
                 )
 ```
 
-Then, where the method computes `shift_samples`, take the phase from the fold
-instead of from the reference offset:
+Then take the phase from the fold rather than from a reference offset:
 
 ```python
-            # §3.2 — the fold supplies the phase within the second.  The
-            # ordinal supplies only which second that phase belongs to.
-            # Where this method used to read
-            #     disagreement_sec = offset_sec - (ref_offset_ms / 1000.0)
-            # the reference offset carried the sub-second term.  No tier
-            # we run resolves 10.4 us, so that term now comes from the
-            # measurement (§2.1).
+            # §3.2 — the phase.  No tier we run resolves the 10.4 µs a
+            # sample spans at 96 kHz, so the sub-second term comes from
+            # the measurement.
             sr_local = self._t6_calibrator.sample_rate
             fold_phase_samples = float(est.edge_offset_samples)
             raw_phase_samples = (wall_time_sec % 1.0) * sr_local
@@ -1393,77 +1422,78 @@ instead of from the reference offset:
                 shift_samples * 1e9 / sr_local))
 ```
 
-Run the battery immediately before the anchor capture, after
-`effective_chain_delay_ns` exists and after the ±250 ms guard:
+and build the anchor on the named second:
+
+```python
+            pps_firing_utc_ns = int(named_second) * 1_000_000_000
+```
+
+Run the battery after `effective_chain_delay_ns` exists and after the ±250 ms
+guard:
 
 ```python
             verdict = self._t6_battery.evaluate(
                 est,
                 implied_chain_delay_ns=effective_chain_delay_ns,
-                reported_sigma_ms=float(getattr(self, '_t6_sigma_ms', 0.0)),
-                cn0_db_hz=getattr(self, '_t6_cn0_db_hz', None),
+                reported_sigma_ms=(self._t6_reported_sigma_ms() or 0.0),
+                # The C/N0 reading lives in frontend_probe, not here, and
+                # the sigma ceiling's absolute floor governs from 77 dB-Hz
+                # down to ~36 — the whole operating range — so plumbing it
+                # across modules would change no verdict.  See §4.3.
+                cn0_db_hz=None,
+                search_mode=getattr(
+                    self._t6_fine_stage, '_last_search_mode', 'bootstrap'),
             )
             self._t6_last_verdict = verdict
             if not verdict.passed:
                 if self._t6_say_once('battery_refused'):
                     logger.info(
                         "T6 acquisition held: self-consistency battery "
-                        "failed on %s (%s).  T6 does not assert; the "
-                        "station runs its fallback.  (Repeated at most "
-                        "every %.0f s.)",
-                        ", ".join(verdict.failures),
-                        self._t6_battery_detail(verdict),
+                        "failed on %s.  T6 does not assert; the station "
+                        "runs its fallback.  (Repeated at most every "
+                        "%.0f s.)", ", ".join(verdict.failures),
                         self.T6_REPEAT_PERIOD_SEC)
                 return
 ```
 
-and add the small formatter beside it:
-
-```python
-    @staticmethod
-    def _t6_battery_detail(verdict) -> str:
-        """One compact line of the numbers behind a verdict."""
-        return " ".join(
-            f"{k}={v:.4g}" if isinstance(v, float) else f"{k}={v}"
-            for k, v in verdict.criteria.items())
-```
-
 ⚠ The tests patch `ka9q.rtp_recorder.rtp_to_utc`, not a name on
-`core_recorder_v2`, because the method imports it inside its own body
-(`from ka9q.rtp_recorder import rtp_to_utc`). Patching the importing module
-would never take. Leave that import where it sits.
+`core_recorder_v2`, because the method imports it inside its own body. Leave
+that import where it sits.
 
-⚠ `_t6_fine_estimate`, `_t6_sigma_ms` and `_t6_cn0_db_hz` may carry different
-names in this recorder. Before writing, grep for where the fine estimate and
-the C/N0 reach this class — the call site at `:4990` is the place to look —
-and use the real names. Do not invent an attribute that nothing sets.
+⚠ Adapt to the real locals as you read them. The sketch names
+`last_edge_rtp`, `wall_time_sec` and `effective_chain_delay_ns` as the existing
+method does; confirm before pasting.
 
-- [ ] **Step 4: Run the test**
+- [ ] **Step 5: Run the new test**
 
-Run: `python -m pytest tests/test_t6_acquire_on_fold.py -v`
+Run: `.venv/bin/python -m pytest tests/test_t6_acquire_on_fold.py -v --override-ini addopts=`
 Expected: PASS.
 
-- [ ] **Step 5: Run every T6 test in the repo**
+- [ ] **Step 6: Run every T6 test**
 
-Run: `python -m pytest tests/ -k "t6 or bpsk or anchor" -v`
-Expected: PASS. This rewire touches the path several existing suites drive;
-a regression here matters more than the new tests passing.
+Run: `.venv/bin/python -m pytest tests/ -k "t6 or bpsk or anchor" --override-ini addopts= -q`
 
-- [ ] **Step 6: Commit**
+⚠ 13 failures in `tests/test_core_recorder_t6_step_recovery.py` (11) and
+`tests/test_core_recorder_t6_fine_integration.py` (2) are PRE-EXISTING,
+verified at `5cff36e` before any work in this plan. Report the count before and
+after your change; it must not rise, and a new failure must not hide among them.
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add src/hf_timestd/core/core_recorder_v2.py tests/test_t6_acquire_on_fold.py
-git commit -m "t6: acquire on the fold, with the battery as the gate
+git commit -m "t6: acquire on the fold, named by the namer already in this file
 
-The sub-second term used to come from a reference offset, which required
-a tier resolving 10.4 us -- the sample period at 96 kHz.  None exists, so
+The sub-second term used to come from a reference offset, which required a
+tier resolving 10.4 us -- the sample period at 96 kHz.  None exists, so
 DASI-009.AI6VN never completed acquisition and sat at T2 while its edge
 landed on one sample position 128 seconds running.
 
-The fold now supplies the phase and the ordinal supplies only the second.
-The self-consistency battery decides whether the edge may assert.  The
-+-250 ms plausibility guard stays exactly where it was: it is criterion 7
-and the last defence against a gross wrap.
+The fold now supplies the phase.  _t6_name_integer_second -- already in this
+file, already wired into the fine path -- supplies the second, asking 0.4 s
+where the retired gate demanded 10 us.  The self-consistency battery decides
+whether the edge may assert.  The +-250 ms plausibility guard stays exactly
+where it was: it is criterion 7 and the last defence against a gross wrap.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ```
