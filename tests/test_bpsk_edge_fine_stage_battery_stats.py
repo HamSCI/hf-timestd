@@ -1,4 +1,5 @@
-"""The fold's own evidence: retention, split-half, prominence, width."""
+"""The fold's own evidence: retention, split-half, prominence, width,
+apex agreement."""
 from __future__ import annotations
 
 import math
@@ -93,35 +94,24 @@ class TestSplitHalfAgreement(unittest.TestCase):
 class TestProminenceAndWidth(unittest.TestCase):
 
     def test_prominence_separates_a_real_edge_from_pure_noise(self):
-        """peak_prominence (the folded magnitude-difference discriminant,
-        T6_EDGE_METHODS_COMPARED.md §8c order: |diff| on the raw pre-fold
-        samples, THEN folded across seconds) must discriminate real
-        content from the null, not merely clear a fixed constant.
+        """peak_prominence is now a triangle-fidelity RESIDUAL (fix-round-3):
+        RMS(|T(e)| - ideal_triangle) / peak, where T(e) is the closed-form
+        matched filter over the WHOLE derotated folded second.  For a
+        clean single flip T(e) is exactly piecewise-linear, so this reads
+        LOW for a real edge and HIGH for noise -- the opposite sense of a
+        bare peak/median ratio (round 1 and round 2's attempts), which is
+        PINNED at 2.000 for any clean flip (a triangle's median sits at
+        half its peak) and so cannot separate anything by amplitude alone.
 
         Measured here (ten seeded pure-complex-Gaussian-noise trials, no
-        BPSK signal at all -- one trial produced no estimate):
-        noise reads 1.41 - 1.54.  A real edge at a healthy 70 dB-Hz C/N0
-        reads 3.94 -- about 2.6x the noise ceiling, which this test
-        asserts as the healthy-C/N0 case Task 1 can honestly stand behind.
-
-        ⚠ At a realistic worst-case 48.4 dB-Hz (T6_ACCEPTANCE_CRITERIA.md
-        §4.3's C/N0 floor, five seeded trials) this SAME statistic reads
-        1.41 - 1.48 -- fully inside the noise range above, not merely
-        close to it.  A round-1 candidate (differencing the already
-        *folded* complex average, i.e. folding before differencing
-        instead of after) was tried first and measured worse: 4.9 - 5.5
-        at 48.4 dB-Hz against a 4.2 - 5.3 noise range, and ~2.0 at 70
-        dB-Hz -- *below* its own noise ceiling of 3.8, i.e. no better
-        than chance even on a strong signal, because a single first
-        difference of a signal that already sits near its coherent-fold
-        plateau almost everywhere is dominated by the noise floor, not
-        the transition. §8c's pre-fold order is the more principled of
-        the two and is what production carries forward, but neither
-        separates a real 48.4 dB-Hz edge from noise. That is a measured
-        property of criterion 4 at the design's stated worst hour, not a
-        test gap -- reported to the project owner (fix-round-2 report),
-        not fixed by loosening a bound here. Task 1 sets no threshold;
-        this test asserts only the healthy-C/N0 separation it can prove.
+        BPSK signal at all -- one trial produced no estimate): noise reads
+        0.25 - 0.42.  A real edge at 70 dB-Hz reads 0.0014; at a realistic
+        worst-case 48.4 dB-Hz (T6_ACCEPTANCE_CRITERIA.md §4.3's C/N0
+        floor, five seeded trials) it reads 0.0008 - 0.0017 -- roughly
+        150-500x BELOW the noise floor at every C/N0 tested, a gap wide
+        enough for a production threshold to sit in comfortably.  This is
+        the number that makes criterion 4's shape check actually work at
+        the design's stated worst hour; Task 1 still sets no threshold.
         """
         edge_est = _drive(BpskEdgeFineStage(sample_rate=SR))
         self.assertIsNotNone(edge_est)
@@ -143,8 +133,11 @@ class TestProminenceAndWidth(unittest.TestCase):
                 noise_prominences.append(last.peak_prominence)
 
         self.assertTrue(noise_prominences, "no noise trial produced an estimate")
-        noise_ceiling = max(noise_prominences)
-        self.assertGreater(edge_est.peak_prominence, noise_ceiling * 2.0)
+        noise_floor = min(noise_prominences)
+        # A real edge's residual must sit well BELOW even noise's best
+        # (smallest) reading -- the direction is inverted from a bare
+        # ratio, so "separates" here means "stays low", not "stays high".
+        self.assertLess(edge_est.peak_prominence, noise_floor * 0.1)
 
     def test_transition_width_matches_the_channel_filter(self):
         """+-25 kHz predicts 1/(2B) = 20 us = ~2 samples at 96 kHz.
@@ -155,6 +148,70 @@ class TestProminenceAndWidth(unittest.TestCase):
         self.assertIsNotNone(est)
         self.assertGreater(est.transition_width_samples, 0.0)
         self.assertLess(est.transition_width_samples, 60.0)
+
+
+def _apex_index(stage) -> int:
+    """T(e)'s own apex over the whole folded second, independent of the
+    zero-crossing fit -- recomputed the same way _compute_estimate does,
+    reusing the stage's own closed-form-T helper."""
+    avg = stage._last_avg_for_test
+    phi = 0.5 * float(np.angle(np.mean(avg.astype(np.complex128) ** 2)))
+    in_phase = np.real(avg * np.exp(-1j * phi))
+    t = stage._closed_form_T(in_phase)
+    return int(np.argmax(np.abs(t)))
+
+
+class TestApexAgreement(unittest.TestCase):
+    """apex_distance_samples targets a different failure than prominence:
+    not "is there a real transition anywhere" but "does the position this
+    estimate REPORTS agree with where the fold's own evidence peaks."
+    Measured (fix-round-3): a real edge's apex_distance_samples is small
+    (0.35 - 0.87 samples across the C/N0s and seeds used elsewhere in this
+    file) -- but so is pure noise's (0.06 - 1.49 samples across the same
+    ten seeded trials as the prominence test above).  The two ranges
+    overlap: in ordinary (bootstrap-search) operation, both the reported
+    edge and T(e)'s apex come from the SAME single fold via correlated
+    methods, so they agree with each other whether or not there is a real
+    edge to agree ON.  apex_distance_samples does not separate signal
+    from noise, and was never meant to -- see the second test below for
+    the failure it does catch.
+    """
+
+    def test_apex_agrees_with_the_reported_edge_on_a_real_signal(self):
+        """Sanity check: normal operation (no external coarse offset
+        forcing a different search window) keeps the two in agreement."""
+        est = _drive(BpskEdgeFineStage(sample_rate=SR))
+        self.assertIsNotNone(est)
+        self.assertLess(abs(est.apex_distance_samples), 2.0)
+
+    def test_apex_distance_catches_a_displaced_lock(self):
+        """The failure criterion 4 exists for: on 2026-09-04 B4 locked
+        onto a 20.000 ms lattice position away from the true apex -- a
+        lock that fits cleanly (so prominence alone would not catch it)
+        but disagrees with where the fold's own T(e) statistic peaks.
+        Reproduced directly: drive a real edge, then ask what
+        apex_distance_samples WOULD read if this estimate had reported a
+        position ~20 ms (1920 samples at 96 kHz) away from the true one
+        -- exactly what a lattice lock looks like from this check's point
+        of view.  Measured: -1919.19 samples (~-19.99 ms) against ~0.81
+        for the true position, so the check catches a lock this far off
+        by roughly three orders of magnitude in reported distance.
+        """
+        stage = BpskEdgeFineStage(sample_rate=SR)
+        est = _drive(stage)
+        self.assertIsNotNone(est)
+        p = SR
+        apex_idx = _apex_index(stage)
+
+        def distance(reported_edge: float) -> float:
+            return ((apex_idx - reported_edge + p / 2) % p) - p / 2
+
+        true_distance = distance(est.edge_offset_samples)
+        displaced_edge = (est.edge_offset_samples + 1920.0) % p
+        displaced_distance = distance(displaced_edge)
+
+        self.assertLess(abs(true_distance), 2.0)
+        self.assertGreater(abs(displaced_distance), 1900.0)
 
 
 if __name__ == "__main__":

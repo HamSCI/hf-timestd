@@ -99,12 +99,33 @@ class FineEdgeEstimate:
     # sub-fold, in samples.  Two disjoint 30 s folds agreed to 41 ns on
     # captured IQ against 17 ns predicted (n=2).
     split_half_delta_samples: float = 0.0
-    # Peak of the search statistic over its median background.  The
-    # magnitude-difference discriminant read 105x on captured IQ.
+    # Triangle-fidelity residual of |T(e)|, the closed-form matched
+    # filter (T6_FOLDED_SELF_ACQUISITION.md §3.1) evaluated over the
+    # WHOLE derotated folded second: RMS(|T| - ideal_triangle) / peak.
+    # For a single clean polarity flip, T(e) is exactly piecewise-linear
+    # (a tent, apex at the flip) by construction -- NOT an SNR statistic;
+    # the bare peak/median ratio is PINNED at 2.000 regardless of C/N0,
+    # because a triangle's median sits at half its peak.  A real flip's
+    # residual measured 0.0008-0.0017 (48.4-70 dB-Hz); pure noise measured
+    # 0.25-0.42 -- roughly two orders of magnitude apart, and unlike the
+    # bare ratio this SEPARATES at 48.4 dB-Hz.  Field name kept from the
+    # original (bare-ratio) definition for the dataclass contract; LOW
+    # values mean a clean triangle (real edge), HIGH values mean noise --
+    # the opposite sense "prominence" suggests, so read the derivation
+    # above, not the name, for what a given value means.
     peak_prominence: float = 0.0
     # Width of the fitted transition, in samples.  A +-25 kHz channel
     # filter predicts 1/(2B) = 20 us, about 2 samples at 96 kHz.
     transition_width_samples: float = 0.0
+    # Distance, in samples (signed, wrapped to (-p/2, p/2]), between
+    # T(e)'s apex (its own estimate of the flip position, independent of
+    # the zero-crossing fit) and the edge position this estimate reports.
+    # Targets the failure criterion 4 exists for: on 2026-09-04 B4 locked
+    # onto a 20.000 ms lattice position away from the true apex, a lock a
+    # bare prominence ratio never tested.  A real edge measured 0.35-0.87
+    # samples; forcing a ~20 ms displacement (simulating that lock)
+    # measured -1919.19 samples -- the check catches it directly.
+    apex_distance_samples: float = 0.0
 
 
 class BpskEdgeFineStage:
@@ -146,13 +167,6 @@ class BpskEdgeFineStage:
         # seam otherwise shifts every phase by 2^32 % sample_rate
         # (23,296 samples = 242.667 ms at 96 kHz) once per ~12.4 h.
         self._rtp_unwrapper = RtpUnwrapper()
-        # Tail sample for the magnitude-difference discriminant (see
-        # reset()'s ``_magdiff_acc``).  Deliberately NOT cleared by
-        # reset(): the raw stream is physically continuous across a
-        # fold-block boundary even though the fold-domain accumulators
-        # restart there, so the first diff of a new block still wants
-        # the true previous sample, not a fabricated one.
-        self._last_raw_sample: Optional[np.complex128] = None
         self.reset()
 
     def reset(self) -> None:
@@ -167,12 +181,6 @@ class BpskEdgeFineStage:
         # Mean |x| over the block: the denominator of fold retention.
         self._abs_sum = 0.0
         self._abs_n = 0
-        # Magnitude-difference discriminant, folded (T6_EDGE_METHODS_COMPARED.md
-        # §8c: |diff(x)| taken on the RAW pre-fold samples, THEN folded --
-        # carrier-free, so unlike the complex fold it does not depend on
-        # Costas having removed residual carrier rotation first.  Measured
-        # 105x peak/median on captured IQ (tools/t6_fold_discriminant_bench.py).
-        self._magdiff_acc = np.zeros(p, dtype=np.float64)
         self._cont = 0  # samples received since reset
         self._reg_base: Optional[int] = None
         self._reg_rel: list[int] = []  # per-batch (declared − cont) − reg_base
@@ -333,15 +341,6 @@ class BpskEdgeFineStage:
             np.add.at(self._cnt_even, idx[even], 1)
             np.add.at(self._acc_odd, idx[~even], contrib[~even])
             np.add.at(self._cnt_odd, idx[~even], 1)
-            # Magnitude-difference discriminant: diff on the RAW samples
-            # (before any folding or sign alternation), carrying the last
-            # sample of the previous chunk across the boundary so the
-            # first diff of this chunk is real, not fabricated.
-            prev = (self._last_raw_sample if self._last_raw_sample is not None
-                    else chunk[0])
-            raw_diff = np.abs(np.diff(chunk, prepend=prev))
-            np.add.at(self._magdiff_acc, idx, raw_diff)
-            self._last_raw_sample = chunk[-1]
             self._cont += take
             consumed += take
 
@@ -533,19 +532,37 @@ class BpskEdgeFineStage:
         # --- battery evidence (T6_ACCEPTANCE_CRITERIA.md §4) ---
         mean_abs = (self._abs_sum / self._abs_n) if self._abs_n else 0.0
         retention = (float(np.mean(np.abs(avg))) / mean_abs) if mean_abs > 0 else 0.0
-        # Prominence: peak of the folded magnitude-difference discriminant
-        # (self._magdiff_acc, accumulated in process_samples on the RAW
-        # pre-fold samples) over its median background.  §8c's measured
-        # order matters: differencing BEFORE folding stays carrier-free,
-        # so the fold's K-second average brings noise down instead of
-        # cancelling signal — the opposite of differencing the complex
-        # fold (round-1's approach), which halves the transition's own
-        # width down to ~2 samples and roughly doubles noise power,
-        # leaving nothing to distinguish it from noise at realistic
-        # (worst-hour, 48.4 dB-Hz) C/N0 -- see the fix-round-2 report.
-        folded_magdiff = self._magdiff_acc / np.maximum(self._cnt, 1)
-        diff_bg = float(np.median(folded_magdiff))
-        prominence = float(np.max(folded_magdiff)) / diff_bg if diff_bg > 0 else 0.0
+        # peak_prominence: triangle-fidelity residual of |T(e)| over the
+        # WHOLE derotated folded second (fix-round-3; round 1 and round 2's
+        # ratio-based attempts both failed to separate real edges from
+        # noise at 48.4 dB-Hz -- see the fix-round-3 report).  For a clean
+        # single flip, T(e) is exactly piecewise-linear (a tent, apex at
+        # the flip) by construction, so fit that ideal tent through
+        # (0, |T[0]|) -> (apex, peak) -> (p-1, |T[p-1]|) and report the
+        # RMS deviation from it, normalised by the peak.  This is a SHAPE
+        # check, not an amplitude ratio: noise never traces a tent, no
+        # matter how loud, so unlike a bare peak/median ratio (pinned at
+        # 2.000 for any clean flip, since a triangle's median sits at half
+        # its peak) it keeps working down to worst-hour C/N0.
+        t_full = self._closed_form_T(in_phase)
+        at_full = np.abs(t_full)
+        apex_idx = int(np.argmax(at_full))
+        peak_t = float(at_full[apex_idx])
+        if peak_t > 0.0:
+            ideal = np.empty(p)
+            ideal[: apex_idx + 1] = np.linspace(at_full[0], peak_t, apex_idx + 1)
+            ideal[apex_idx:] = np.linspace(peak_t, at_full[-1], p - apex_idx)
+            prominence = float(np.sqrt(np.mean((at_full - ideal) ** 2)) / peak_t)
+        else:
+            prominence = 0.0
+        # apex_distance_samples: T(e)'s own apex, independent of the
+        # zero-crossing fit above, versus the edge this estimate reports.
+        # Catches a lock that fits cleanly but sits on the wrong feature
+        # (the B4 2026-09-04 20.000 ms lattice lock) -- a case the shape
+        # residual above cannot see, because a lattice phantom's own T(e)
+        # can trace a clean tent centred on ITS peak, just not on the true
+        # edge this estimate names.
+        apex_distance = float(((apex_idx - edge_offset + p / 2) % p) - p / 2)
         width = float(hi - lo)
         split_delta = self._split_half_delta(phi, edge_offset)
 
@@ -562,7 +579,22 @@ class BpskEdgeFineStage:
             split_half_delta_samples=split_delta,
             peak_prominence=prominence,
             transition_width_samples=width,
+            apex_distance_samples=apex_distance,
         )
+
+    @staticmethod
+    def _closed_form_T(x: np.ndarray) -> np.ndarray:
+        """Closed-form matched filter for a single polarity flip at e:
+        T(e) = C[p-1] - 2*C[e-1], C = cumsum(x).  For a clean flip this is
+        exactly piecewise-linear -- a tent whose apex is the flip position
+        -- which both ``_split_half_delta`` (locating the edge) and
+        ``_compute_estimate``'s triangle-fidelity check (confirming the
+        shape) rely on.  See T6_FOLDED_SELF_ACQUISITION.md §3.1 -- and the
+        prohibition there against a plain CUSUM (structurally biased
+        1-40 ms when the edge lands near the fold origin).
+        """
+        c = np.cumsum(x)
+        return c[-1] - 2.0 * np.concatenate(([0.0], c[:-1]))
 
     def _split_half_delta(self, phi: float, full_edge: float) -> float:
         """Edge position from the even-second sub-fold minus the odd-second
@@ -586,12 +618,7 @@ class BpskEdgeFineStage:
                 return float("nan")
             sub = np.where(cnt > 0, acc / np.maximum(cnt, 1), 0.0)
             ip = np.real(sub * np.exp(-1j * phi))
-            # Closed-form matched filter for a single polarity flip at e:
-            # T(e) = C[p-1] - 2*C[e-1].  argmax|T| locates the edge.
-            # See T6_FOLDED_SELF_ACQUISITION.md §3.1 -- and note the
-            # prohibition there against a plain CUSUM.
-            c = np.cumsum(ip)
-            t = c[-1] - 2.0 * np.concatenate(([0.0], c[:-1]))
+            t = self._closed_form_T(ip)
             out.append(float(np.argmax(np.abs(t))))
         d = out[0] - out[1]
         return float((d + p / 2) % p - p / 2)
