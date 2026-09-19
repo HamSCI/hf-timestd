@@ -547,15 +547,19 @@ class BpskEdgeFineStage:
         Two disjoint folds of the same stable edge must agree to about
         sqrt(2) times the single-fold scatter.  A wandering apex -- the
         nightly B4 behaviour that produces ~270 tier transitions a day --
-        separates them.  Returns 0.0 when either sub-fold is empty, so a
-        short block reports no evidence rather than false evidence.
+        separates them.  Returns NaN when either sub-fold is empty.  0.0
+        is the most FAVOURABLE value this criterion can report -- "the
+        two folds land on the same sample" -- so using it for "one fold
+        never ran" would read a missing measurement as a perfect one.
+        An empty sub-fold is no evidence, and no evidence must never be
+        spelled as agreement (T6_ACCEPTANCE_CRITERIA.md §4.4, §5.2).
         """
         p = self.sample_rate
         out = []
         for acc, cnt in ((self._acc_even, self._cnt_even),
                          (self._acc_odd, self._cnt_odd)):
             if not np.any(cnt):
-                return 0.0
+                return float("nan")
             sub = np.where(cnt > 0, acc / np.maximum(cnt, 1), 0.0)
             ip = np.real(sub * np.exp(-1j * phi))
             # Closed-form matched filter for a single polarity flip at e:
