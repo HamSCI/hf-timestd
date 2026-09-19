@@ -99,6 +99,28 @@ GPS_EPOCH_UNIX = 315964800
 BILLION = 1_000_000_000
 RTP_WRAP = 0x100000000
 
+# Cap on any bench's sigma contribution to the cross-bench bound
+# k*sqrt(sigma_c^2 + sigma_l^2).
+#
+# The gate arrived after the 2026-08-05 displaced-peak incident, in which
+# "a biased-but-stable T6 was adopted over a healthy T5 because its
+# honest wide sigma kept k*sigma quiet" -- and then reproduced that same
+# polarity one level up: the bound grows with the candidate's own
+# reported uncertainty, so a bench that has gone WRONG (which usually
+# inflates sigma) buys itself a WIDER licence.  On DASI-009.AI6VN,
+# 2026-09-18, a sigma of 477 ms opened the bound to ~2.4 s and a 284 ms
+# disagreement passed unremarked.
+#
+# authority_manager met the mirror image and FLOORED its pair thresholds
+# so a noisy witness could not mask a real disagreement.  This is the
+# opposite bound: a ceiling, so a noisy candidate cannot excuse its own
+# error.
+#
+# 5.0 ms matches the widest legitimate pair in METROLOGY.md §4.5 (T6/T5,
+# where T5 over USB is bus-jitter floored), so no honest bench loses
+# room it was entitled to.
+CROSS_BENCH_SIGMA_CEILING_MS = 5.0
+
 # Per-source key: (status_stream, ssrc) — spec §7.
 SourceKey = Tuple[str, int]
 
@@ -1778,8 +1800,14 @@ class OffsetJudge:
         advance window then restarts cleanly at the caller).
         """
         delta_ns = self._cross_bench_delta_ns(cand, ref, mono_now)
+        # Cap each bench's sigma contribution to the bound (see
+        # CROSS_BENCH_SIGMA_CEILING_MS) -- the published sigmas
+        # themselves are never touched, only their weight here.
+        ceiling_ns = CROSS_BENCH_SIGMA_CEILING_MS * 1e6
+        sigma_c_ns = min(cand.sigma_ns, ceiling_ns)
+        sigma_l_ns = min(ref.sigma_ns, ceiling_ns)
         bound_ns = self.cross_bench_k * math.sqrt(
-            cand.sigma_ns ** 2 + ref.sigma_ns ** 2
+            sigma_c_ns ** 2 + sigma_l_ns ** 2
         )
         if abs(delta_ns) <= bound_ns:
             if (self._cross_conflict is not None
@@ -1813,8 +1841,10 @@ class OffsetJudge:
                 f"OFFSET JUDGE CROSS-BENCH CONFLICT: candidate {cand.tier} "
                 f"disagrees with trusted {ref.tier} by "
                 f"{delta_ns/1e6:+.3f} ms (delta_ns={delta_ns:+.0f}), bound "
-                f"k_x*sqrt(sigma_c^2+sigma_l^2) = {self.cross_bench_k:.1f} x "
-                f"{math.sqrt(cand.sigma_ns**2 + ref.sigma_ns**2)/1e6:.3f} ms "
+                f"k_x*sqrt(sigma_c^2+sigma_l^2) [each sigma capped at "
+                f"{CROSS_BENCH_SIGMA_CEILING_MS:.1f} ms] = "
+                f"{self.cross_bench_k:.1f} x "
+                f"{math.sqrt(sigma_c_ns**2 + sigma_l_ns**2)/1e6:.3f} ms "
                 f"= {bound_ns/1e6:.3f} ms — advancement BLOCKED, judging "
                 f"stays on {ref.tier}; the rejected bench stays under "
                 f"shadow measurement (shadow_residuals in offset_judge.json)."
