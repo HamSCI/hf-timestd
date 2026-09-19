@@ -376,6 +376,20 @@ noise blocks.
 ⚠ The earlier table — noise 0.2547–0.4199, real 0.00079–0.00171 — was taken at
 one fold position, 47916, the one place the defect does not show.
 
+⚠ **The fit is on signed `T(e)`, never on `|T(e)|`.** `T` is a clean tent —
+linear on both arms, apex at the edge, endpoints `±A(p−2e)`. Off-centre those
+endpoints carry opposite signs, so `T` crosses zero on the descending arm and
+`|T|` acquires a V-notch a fitted triangle cannot follow. Fitting `|T|` made the
+residual a function of where the edge happened to land in the fold — an
+arbitrary per-boot offset. Measured at 48.4 dB-Hz: a spread of **410×** across
+fold position under `|T|`, against **1.3–2.2×** under signed `T`.
+
+⚠ **Headroom shrinks with a shorter fold.** Against the 0.008 bound, the worst
+healthy reading at 48.4 dB-Hz sits 13.7× below it at the shipped K = 30, but
+only **6.5× at K = 10**. Still separating, and the null stays 15× above the
+bound — but a station running a shorter fold has materially less room, and
+should not do so without re-measuring.
+
 ⚠ These come from **synthetic signal**, not a station capture — unlike §8c's
 105×, which was measured on 89 s of real IQ. They establish that the statistic
 separates; they do not stand in for an on-station measurement, which §8 owes.
@@ -437,6 +451,15 @@ authority's `t6_sigma_ms` is unchanged and is still a different number. The
 comparison becomes self-consistent (a model of block scatter against a
 measurement of block scatter) instead of circular; it does not become a
 precision check.
+
+⚠ **Criterion 5 is now nearly inert, and the note records that rather than
+implying otherwise.** Its input became the fold's own block-to-block position
+scatter — about 5e-5 ms — because the previous source was circular: it read a
+history appended only once an anchor existed, so the battery needed an anchor
+and the anchor needed the battery. Against the 1.0 ms floor that leaves four
+orders of magnitude of slack, and the tier's *published* sigma is no longer
+checked by any criterion. Better than a criterion that always fails, but it
+wants re-deriving against its new population.
 
 ⚡ So criterion 5 guards **gross breakage only**. Orders of magnitude, never a
 factor of two. Against the 1.0 ms floor, AI6VN's 477 ms fails by 477× while
@@ -677,6 +700,13 @@ establishes are real; their margins on a real antenna are not yet known.
 ⚠ **`min_fold_retention` = 0.50 puts T6's floor near 43.7 dB-Hz, and B4 holds
 4.7 dB above it.** Real room, not generous. Do not raise that threshold without
 re-measuring B4 first.
+
+⚠ **Clear the 13 failing tests in `test_core_recorder_t6_step_recovery.py` and
+`test_core_recorder_t6_fine_integration.py` first.** They predate this work —
+one fixture hands a `MagicMock` calibrator into an `int >= mock` comparison —
+but they now mask the regression signal in exactly the file this design touches
+most. A change that broke step recovery would read as "12 failures instead of
+11", which nobody will notice.
 
 **B4 second, for the hours that matter.** Compare 00–06Z before and after, with
 `rf_gain`, `if_power`, `t6_baseband_power` and `t6_n0` confirming comparable
