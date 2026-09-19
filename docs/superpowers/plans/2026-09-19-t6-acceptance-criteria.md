@@ -1319,6 +1319,16 @@ from hf_timestd.core.t6_battery import T6Battery
 SR = 96000
 K = 30
 
+# rtp_to_utc's return for the fixture edge.  Chosen so the RAW phase the
+# method derives lands on the fold's own phase and the implied shift is
+# ~0 samples:
+#     (EDGE_UTC - chain_delay 0.016618 s) mod 1 s == 47916/96000 == 0.499125
+# A bare 1_700_000_000.0 would put the raw phase at ~94406 samples against
+# a fold phase of 47916, implying a -484 ms shift that the +-250 ms
+# plausibility guard correctly refuses -- failing the test for a reason
+# unrelated to what it tests.
+EDGE_UTC = 1_700_000_000.515743
+
 
 def _estimate(edge_rtp, **over):
     kw = dict(
@@ -1359,7 +1369,7 @@ class TestAcquisitionUsesTheFold(unittest.TestCase):
         r = _recorder()
         result = SimpleNamespace(chain_delay_ns=16_618_000)
         with mock.patch("ka9q.rtp_recorder.rtp_to_utc",
-                        return_value=1_700_000_000.0):
+                        return_value=EDGE_UTC):
             for i in range(4):
                 r._t6_fine_estimate = _estimate(1_000_000 + 47916 + i * SR * K)
                 r._t6_disambiguate_via_external_reference(result)
@@ -1370,7 +1380,7 @@ class TestAcquisitionUsesTheFold(unittest.TestCase):
         r = _recorder()
         result = SimpleNamespace(chain_delay_ns=16_618_000)
         with mock.patch("ka9q.rtp_recorder.rtp_to_utc",
-                        return_value=1_700_000_000.0):
+                        return_value=EDGE_UTC):
             for i in range(4):
                 r._t6_fine_estimate = _estimate(
                     1_000_000 + 47916 + i * SR * K, fold_retention=0.006)
@@ -1383,7 +1393,7 @@ class TestAcquisitionUsesTheFold(unittest.TestCase):
         r = _recorder(ordinal=None)
         result = SimpleNamespace(chain_delay_ns=16_618_000)
         with mock.patch("ka9q.rtp_recorder.rtp_to_utc",
-                        return_value=1_700_000_000.0):
+                        return_value=EDGE_UTC):
             for i in range(4):
                 r._t6_fine_estimate = _estimate(1_000_000 + 47916 + i * SR * K)
                 r._t6_disambiguate_via_external_reference(result)
@@ -1393,7 +1403,7 @@ class TestAcquisitionUsesTheFold(unittest.TestCase):
         r = _recorder()
         result = SimpleNamespace(chain_delay_ns=400_000_000)
         with mock.patch("ka9q.rtp_recorder.rtp_to_utc",
-                        return_value=1_700_000_000.0):
+                        return_value=EDGE_UTC):
             for i in range(4):
                 r._t6_fine_estimate = _estimate(1_000_000 + 47916 + i * SR * K)
                 r._t6_disambiguate_via_external_reference(result)
@@ -1403,7 +1413,7 @@ class TestAcquisitionUsesTheFold(unittest.TestCase):
         r = _recorder()
         result = SimpleNamespace(chain_delay_ns=16_618_000)
         with mock.patch("ka9q.rtp_recorder.rtp_to_utc",
-                        return_value=1_700_000_000.0):
+                        return_value=EDGE_UTC):
             for i in range(4):
                 r._t6_fine_estimate = _estimate(1_000_000 + 47916 + i * SR * K)
                 r._t6_disambiguate_via_external_reference(result)
@@ -1417,7 +1427,7 @@ class TestAcquisitionUsesTheFold(unittest.TestCase):
             r = _recorder(ordinal=ordinal)
             result = SimpleNamespace(chain_delay_ns=16_618_000)
             with mock.patch("ka9q.rtp_recorder.rtp_to_utc",
-                            return_value=1_700_000_000.0):
+                            return_value=EDGE_UTC):
                 for i in range(4):
                     r._t6_fine_estimate = _estimate(
                         1_000_000 + 47916 + i * SR * K)
