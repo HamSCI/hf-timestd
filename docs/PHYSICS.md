@@ -20,6 +20,24 @@ The system monitors **14 broadcasts** across **9 frequencies** from **4 stations
 
 ---
 
+## 1.1 Scope boundary — what T6 does *not* contribute
+
+⛔ **No ionosphere sits in the T6 path, so nothing in this document derives from
+it.** T6 detects a TS-1 BPSK pulse-per-second injected directly into the
+receiver ahead of the antenna. The 16.618 ms it measures is hardware — filter
+group delay and cable — not propagation, and no part of it says anything about
+the sky.
+
+Every measurement described below rests on signals that *did* cross the
+ionosphere: the WWV/WWVH tick train, its carrier phase, and the delay and
+dispersion those acquire in transit. The 2026-09-19 rework of T6's acceptance
+model changed how the station establishes its own timing origin; it changed
+nothing here, because it observes a different signal for a different purpose.
+
+The one place the two meet: a better origin makes every propagation measurement
+below better *registered*, since each is ultimately reported against UTC. The
+physics is unchanged; the ruler it is read against is steadier.
+
 ## 2. The Ionosphere as a Measurement Medium
 
 ### 2.1 Why HF Time Signals Reveal Ionospheric Physics

@@ -269,7 +269,7 @@ Ranked from highest authority (most accurate, most independent of external state
 
 | T-level | Source | Hard prereq | (A1, T) uncertainty | (A0, T) uncertainty |
 |---|---|---|---|---|
-| **T6** | hf-timestd detects TS-1 HF-injected BPSK-PPS in the RX path (sample-precise from the IQ stream) | TS-1 injector present + detection lock; anchor = named second + µs-class `delay_budget_ns` (**content-time convention**, 2026-08-24: the label is the antenna instant, so pipeline latency is *not* folded in — see [CONTENT_TIME_LABELING_CONVENTION.md](design/CONTENT_TIME_LABELING_CONVENTION.md)) | ~ns *precision*; accuracy bounded by the analog term ε and the cross-bench gate | ~tens of μs (per-tick; drifts between ticks at TCXO rate) |
+| **T6** | hf-timestd detects TS-1 HF-injected BPSK-PPS in the RX path (sample-precise from the IQ stream) | TS-1 injector present + detection lock; anchor = named second + µs-class `delay_budget_ns` (**content-time convention**, 2026-08-24: the label is the antenna instant, so pipeline latency is *not* folded in — see [CONTENT_TIME_LABELING_CONVENTION.md](design/CONTENT_TIME_LABELING_CONVENTION.md)) | ~ns *precision*; accuracy bounded by the analog term ε, a self-consistency battery (§4.5.1) and the cross-bench gate | ~tens of μs (per-tick; drifts between ticks at TCXO rate) |
 | **T5** | GPS+PPS delivered over USB to the radiod host (LBE-1421 USB-NMEA, optionally USB-PPS on the same channel); consumed for second-of-day disambig under T6, or as the standalone source when T6 is unavailable | A1 + LBE-1421 USB connected to host | ~µs–few ms (USB-bus-jitter floored) | *not available* |
 | **T4** | system clock chronyed to LAN GPS+PPS timeserver via NTP | reachable GPS-backed peer | ~100 μs – few ms | ~1–5 ms (adds TCXO drift between syncs) |
 | **T3** | hf-timestd recovers UTC from WWV/WWVH tick Fusion | ≥2 stations detected + ionospheric model | ~0.5–2 ms | ~5–10 ms |
@@ -278,6 +278,73 @@ Ranked from highest authority (most accurate, most independent of external state
 | **T0** | free-running system clock, no GPSDO | none | *not available* | unbounded |
 
 "Not available" entries are structural: (A0, T5) and (A0, T1) are by-definition invalid — those T-levels are *defined* by GPSDO presence. (A1, T0) collapses to T1, because A1 alone is a timing authority worth naming.
+
+#### 4.5.1 What entitles T6 to assert — the acceptance model
+
+**The principle has not moved. The means of following it has.**
+
+T6 owns the *origin*: which UTC instant a sample carries. It never votes on the
+*ruler*, because the edge arrives through the sample stream and so inherits the
+converter's rate, and a source that inherits a quantity cannot check it. §7.1.1's
+prohibition stands unchanged, and the 8 mA station that sampled 350 ppm fast
+while every self-check read healthy is why.
+
+What changed is the evidence T6 must produce before it may assert.
+
+**Before (retired 2026-09-19).** Acquisition demanded a non-T6 reference
+reporting σ < 10 µs. At 96 kHz that sits *below one sample period*, and no tier
+in the table above delivers it — T5 is bus-jitter floored at ~1 ms, T4 at
+0.29 ms measured, T3 sub-ms at best, T2 at tens of ms. The requirement was
+therefore unsatisfiable at every station we run. DASI-009.AI6VN, which has no T5
+and no T3, sat at T2 while its edge landed on one sample position for 128
+consecutive seconds.
+
+**After.** T6 acquires on the strength of its own edge. Two questions,
+separated by their tolerances:
+
+| Question | Tolerance | Answered by |
+|---|---|---|
+| Which UTC second? | ≪ 500 ms | `_t6_name_integer_second` — T5 NMEA preferred, radiod-pair wall as fallback, ±0.4 s guard |
+| Which sample within it? | ≪ 10.4 µs | the fold, alone — no tier can reach this |
+
+A seven-criterion **self-consistency battery** decides whether the fold's edge
+may assert: fold retention, ruler, unimodality, shape (triangle fidelity plus
+apex agreement), σ within the tier's budget, split-half agreement, and physical
+plausibility. It evaluates once per fold block, so T6 waits roughly three folds
+after first lock — a battery cannot claim self-consistency from a single block.
+
+⛔ **What the battery proves, and what it does not.** All seven criteria ride one
+antenna, one converter, one path. They establish **self-consistency** and nothing
+about accuracy. Retention and the ruler test **coherence** — both read healthy
+when a single oscillator drives everything and drifts together — so neither may
+be cited as evidence that a GPSDO holds UTC. The residual falls to the second-
+namer and to calibration against UTC, exactly as §7.1.1 requires.
+
+Full specification, with the measurements behind every threshold:
+[T6_ACCEPTANCE_CRITERIA.md](design/T6_ACCEPTANCE_CRITERIA.md).
+
+#### 4.5.2 The cross-bench gate caps each bench at its own tier's budget
+
+The Offset Judge adopts a higher bench only when it agrees with the trusted
+lower tier within `cross_bench_k`·√(σ_c² + σ_l²). That bound *grows with the
+candidate's own reported uncertainty* — so a bench that has gone wrong, which
+usually inflates σ, was handed a wider licence by the gate meant to catch it. On
+AI6VN, 2026-09-18, a σ of 477 ms opened the bound to ~2.4 s and a 284 ms
+disagreement passed unremarked.
+
+Each bench's σ contribution is now capped **at what its own tier can physically
+deliver**, taken from the uncertainty columns of the table above with margin.
+The published σ values themselves are never touched — only their weight inside
+the bound.
+
+⚠ **Per tier, not a flat number.** The gate is tier-agnostic; it caps whatever
+two benches it is handed, so a station with no T6 still meets it. A flat 5 ms
+ceiling measured 3.1× tighter on a T3-fusion station whose reference bench is
+chrony — `ChronyBench` reports `root_dispersion + root_delay/2 + |rms_offset|`,
+routinely well past 5 ms — which would have refused a fusion offset that
+previously passed, on a station whose fusion is quorum-starved by construction.
+A tier reporting inside its budget keeps every bit of the room it is entitled to;
+only a bench claiming an uncertainty its tier cannot produce gets trimmed.
 
 #### The RTP-reference labeling invariant
 

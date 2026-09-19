@@ -116,10 +116,66 @@ RTP_WRAP = 0x100000000
 # opposite bound: a ceiling, so a noisy candidate cannot excuse its own
 # error.
 #
-# 5.0 ms matches the widest legitimate pair in METROLOGY.md §4.5 (T6/T5,
-# where T5 over USB is bus-jitter floored), so no honest bench loses
-# room it was entitled to.
-CROSS_BENCH_SIGMA_CEILING_MS = 5.0
+# ⛔ The ceiling is PER TIER, and it has to be.  A single 5.0 ms number
+# looked right while the only case in view was a broken T6, but the gate
+# is tier-agnostic: it caps whatever two benches it is handed.  A station
+# with no T6 at all still meets it.  Measured consequence of a flat 5 ms
+# on a T3-fusion station whose reference bench is chrony --
+# ChronyBench reports root_dispersion + root_delay/2 + |rms_offset|,
+# routinely well past 5 ms:
+#
+#     candidate σ   ref σ    bound before   bound after   tightening
+#     T3   4.3 ms   20.0 ms      102.3 ms       33.0 ms        3.1x
+#     T3   4.3 ms   10.0 ms       54.4 ms       33.0 ms        1.7x
+#
+# A fusion offset disagreeing with chrony by 50 ms was adopted before and
+# refused after — on a station whose fusion is quorum-starved by
+# construction and whose host clock has run 150 ms out.  The cap would
+# have traded one station's health for another's.
+#
+# So each bench is capped at what ITS OWN tier can physically deliver,
+# taken from the (A1, T) and (A0, T) uncertainty columns of METROLOGY.md
+# §4.5 with margin.  A tier reporting inside its budget keeps every bit
+# of the room it is entitled to; only a bench claiming an uncertainty its
+# tier cannot produce gets trimmed — which is the same principle
+# T6_ACCEPTANCE_CRITERIA.md §4.3 states for the battery's criterion 5.
+#
+# Worked against the two cases that matter:
+#   AI6VN's T6 at 477 ms vs a 2 ms reference -> T6 capped to 5 ms, bound
+#     26.9 ms, the 284 ms disagreement REFUSED (was 2385 ms, admitted).
+#   ND's T3 at 4.3 ms vs chrony at 20 ms -> both inside budget, bound
+#     102.3 ms, UNCHANGED.
+CROSS_BENCH_SIGMA_CEILING_MS_BY_TIER = {
+    # ~ns precision from the fold; accuracy bounded by the analog term.
+    # Anything past a few ms is a broken T6, not a wide one.
+    "T6": 5.0,
+    # µs to a few ms, USB-bus-jitter floored (§4.5).
+    "T5": 10.0,
+    # ~100 µs to a few ms on A1; ~1-5 ms on A0.
+    "T4": 10.0,
+    # ~0.5-2 ms on A1; ~5-10 ms on A0.
+    "T3": 20.0,
+    # ~1-50 ms, NTP-dominated (§4.5).  A WAN bench is LEGITIMATELY wide
+    # and must not be trimmed for it.
+    "T2": 100.0,
+    # GPSDO coast: rate perfect, phase frozen at the last snapshot.
+    "T1": 100.0,
+}
+
+# Applied to a tier the table does not name.  Deliberately generous: an
+# unrecognised tier is a reason to learn, not a reason to trim.
+CROSS_BENCH_SIGMA_CEILING_DEFAULT_MS = 100.0
+
+
+def cross_bench_sigma_ceiling_ms(tier: str) -> float:
+    """The widest uncertainty ``tier`` can honestly claim, in ms.
+
+    See CROSS_BENCH_SIGMA_CEILING_MS_BY_TIER.  Capping a bench at its own
+    tier's budget trims only a bench claiming what its tier cannot
+    produce; a legitimately wide bench keeps its room.
+    """
+    return CROSS_BENCH_SIGMA_CEILING_MS_BY_TIER.get(
+        str(tier), CROSS_BENCH_SIGMA_CEILING_DEFAULT_MS)
 
 # Per-source key: (status_stream, ssrc) — spec §7.
 SourceKey = Tuple[str, int]
@@ -1800,12 +1856,17 @@ class OffsetJudge:
         advance window then restarts cleanly at the caller).
         """
         delta_ns = self._cross_bench_delta_ns(cand, ref, mono_now)
-        # Cap each bench's sigma contribution to the bound (see
-        # CROSS_BENCH_SIGMA_CEILING_MS) -- the published sigmas
-        # themselves are never touched, only their weight here.
-        ceiling_ns = CROSS_BENCH_SIGMA_CEILING_MS * 1e6
-        sigma_c_ns = min(cand.sigma_ns, ceiling_ns)
-        sigma_l_ns = min(ref.sigma_ns, ceiling_ns)
+        # Cap each bench's sigma contribution to the bound at what ITS
+        # OWN tier can physically deliver (see
+        # CROSS_BENCH_SIGMA_CEILING_MS_BY_TIER) -- the published sigmas
+        # themselves are never touched, only their weight here.  A flat
+        # ceiling across all tiers would trim a legitimately wide WAN
+        # bench as hard as a broken T6; the per-tier form trims only a
+        # bench claiming an uncertainty its tier cannot produce.
+        sigma_c_ns = min(
+            cand.sigma_ns, cross_bench_sigma_ceiling_ms(cand.tier) * 1e6)
+        sigma_l_ns = min(
+            ref.sigma_ns, cross_bench_sigma_ceiling_ms(ref.tier) * 1e6)
         bound_ns = self.cross_bench_k * math.sqrt(
             sigma_c_ns ** 2 + sigma_l_ns ** 2
         )
@@ -1841,8 +1902,11 @@ class OffsetJudge:
                 f"OFFSET JUDGE CROSS-BENCH CONFLICT: candidate {cand.tier} "
                 f"disagrees with trusted {ref.tier} by "
                 f"{delta_ns/1e6:+.3f} ms (delta_ns={delta_ns:+.0f}), bound "
-                f"k_x*sqrt(sigma_c^2+sigma_l^2) [each sigma capped at "
-                f"{CROSS_BENCH_SIGMA_CEILING_MS:.1f} ms] = "
+                f"k_x*sqrt(sigma_c^2+sigma_l^2) [sigma capped at each "
+                f"tier's own budget: {cand.tier} "
+                f"{cross_bench_sigma_ceiling_ms(cand.tier):.1f} ms, "
+                f"{ref.tier} "
+                f"{cross_bench_sigma_ceiling_ms(ref.tier):.1f} ms] = "
                 f"{self.cross_bench_k:.1f} x "
                 f"{math.sqrt(sigma_c_ns**2 + sigma_l_ns**2)/1e6:.3f} ms "
                 f"= {bound_ns/1e6:.3f} ms — advancement BLOCKED, judging "
