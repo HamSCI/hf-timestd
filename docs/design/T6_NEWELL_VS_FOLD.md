@@ -13,28 +13,76 @@ the thing a capture cannot supply: **known truth**.
 Scott Newell's `wd-record` finds the TS-1's polarity flip with a per-sample
 phase-step state machine — no carrier recovery, one sample of resolution, a few
 operations per sample in C. On DASI-009.AI6VN it placed **every** edge, 128 of
-128, at a single bit-identical position, while our matched-filter chain accepted
-one good edge every 27 seconds (§8b).
+128, at a single bit-identical position.
 
 That result reads as a rout, and it invites an obvious conclusion: drop the
-expensive chain and take the cheap detector. This note tests that conclusion and
-finds it wrong — for reasons that have nothing to do with which detector finds
-more edges.
+expensive machinery and take the cheap detector. This note tests that
+conclusion and finds it wrong — for reasons that have nothing to do with which
+detector finds more edges.
 
-## 2. The two approaches
+⚠ **Three chains, not two, and §8b compared a different pair than this note
+does.** §8b measured Newell against the **MF calibrator** — the per-second
+Costas-plus-matched-filter path that was then T6's only edge source. This note
+measures Newell against the **fold**, which is a separate stage that does not
+use the MF calibrator to compute anything. Keeping the two comparisons apart
+matters, because the MF calibrator's poor showing in §8b says nothing about the
+fold's.
 
-**Newell alone.** Differentiate the phase sample to sample; accept a jump near
-π. The edge lands on an integer sample index. No interpolation, no averaging,
-no model of the transition's shape.
+## 2. The chains, drawn
 
-**The fold.** Average many seconds of the channel modulo one second, then fit
-the transition inside the averaged result and report a *sub-sample* position.
-Our shipped path (`BpskEdgeFineStage`) folds complex baseband with per-second
-sign alternation, derotates, and fits the zero crossing. The carrier-free
-variant of §8c folds `|diff(x)|` and interpolates the peak parabolically.
+### 2.1 Newell — per-sample phase step
 
-The difference that matters sits in what each can express. Newell answers in
-whole samples. The fold answers in fractions of one.
+```
+  IQ ──► ∠x ──► |Δ∠| between ──► accept jump ──► edge at an
+         phase   adjacent samples    near π       INTEGER sample
+                                                  (10.4 µs at 96 kHz)
+
+  no fold · no matched filter · no carrier recovery · no interpolation
+```
+
+One second of signal yields one answer per edge, quantised to the sample grid.
+
+### 2.2 The MF calibrator — context only, NOT what this note measures
+
+```
+  IQ ──► Costas loop ──► matched filter ──► adaptive-threshold ──► per-second
+         carrier recovery  0.5 s integration   peak pick            edge
+```
+
+Included so the reader can see what §8b actually beat. It still runs, and it
+still seeds §2.3 when it locks, but it computes none of §2.3's answer.
+
+### 2.3 The fold + fit — what ships, and what this note measures
+
+```
+  IQ ──► accumulate K seconds ──► derotate ──► locate the ──► zero-crossing
+         modulo one second        by SQUARING  transition      LINEAR FIT
+         (sign-alternated)        φ=½∠⟨avg²⟩       │                │
+                                                   │                ▼
+                          ┌────────────────────────┤          SUB-SAMPLE
+                          │            │           │           position
+                     "seeded"     "tracking"  "bootstrap"
+                   MF supplies   its own last  boxcar MF ON
+                   the window    position      THE FOLDED SECOND
+                   (optional)    (optional)    (self-sufficient)
+
+  no Costas of its own · MF optional · processing gain 10·log10(K)
+```
+
+⛔ **The fold path needs neither Newell nor the MF calibrator.** In bootstrap
+mode it finds its own edge, with a boxcar matched filter run once over the
+*folded* second — a different object from §2.2's matched filter, which
+integrates 0.5 s of *unfolded* signal per edge.
+
+### 2.4 Newell + the fold — the hybrid that does not exist, and why
+
+```
+  IQ ──► Newell ──► K integer ──► average ──► the SAME integer
+                    detections                (see §5b)
+```
+
+The obvious hybrid: keep Newell's cheap detector, fold its answers for
+precision. §5b measures it. It buys nothing, and the reason is instructive.
 
 ## 3. Method — and why synthetic
 
@@ -101,6 +149,37 @@ offset*, not noise, so averaging cannot reduce it. A thousand more edges buy
 nothing. A perfectly repeatable wrong answer stays wrong, and its repeatability
 is exactly what hides it.
 
+## 5b. Folding Newell's answers buys nothing — measured
+
+The hybrid of §2.4, driven the same way: take every Newell detection in a run
+and average them.
+
+| C/N0 | K | one detection | averaged over the fold | distinct positions per run |
+|---|---|---|---|---|
+| 77.0 | 1 | 5.367 µs | 5.367 µs | **1.00** |
+| 77.0 | 30 | 5.367 µs | 5.560 µs | 1.33 |
+| 60.0 | 30 | 217 ms | 29 ms | 45.67 |
+
+⚡ **At 77 dB-Hz there is nothing to average.** One distinct position per run —
+thirty detections, all the same integer. The mean of thirty identical numbers
+is that number, so the fold has no purchase and the error is unchanged.
+
+**Averaging needs dither.** A fold reduces scatter by averaging *variation*
+around a truth. A clean per-sample detector produces no variation: it rounds
+the same way every time, because the edge sits at the same sub-sample phase
+every time. Its perfect repeatability — the very thing that made §8b's 128/128
+so striking — is exactly what forecloses improvement.
+
+The 60 dB-Hz row shows the other regime and is not a counter-example. Forty-six
+distinct positions appear because noise is producing false detections; averaging
+pulls the mean toward the middle of that spread, from 217 ms to 29 ms, and the
+answer stays useless. Averaging noise does not recover an edge.
+
+⛔ So a quantised detector cannot be folded into sub-sample accuracy. The
+sub-sample answer has to come from a stage that *models the transition* —
+§2.3's linear fit through the zero crossing — rather than from repeating a
+stage that only ever reports which sample the edge fell in.
+
 ## 6. What this does not establish
 
 ⚠ **All synthetic.** Band-limited BPSK plus additive Gaussian noise — no
@@ -115,6 +194,10 @@ from where it was calibrated.
 ⚠ **`magdiff+fold` is not the shipped path** and should not be read as a
 verdict on it. It appears here because §8c measured it on real IQ, which makes
 it the bridge between that capture and this sweep.
+
+⚠ **The MF calibrator was not benchmarked here.** §2.2 draws it for context
+only. §8b measured it against Newell on captured IQ and it lost; this note
+neither repeats nor disputes that.
 
 ⚠ **Newell's detector was not built for this.** `wd-record` aligns recordings
 to the PPS, and for that purpose one sample of resolution is ample and its
@@ -194,6 +277,7 @@ lands directly in the residual the mode selection minimises.
 | Bias | +5.2 µs, half a sample | ~0 |
 | Works at B4's 48.4 dB-Hz worst hour | no | yes, 2.4 µs at K=30 |
 | Cost | a few ops per sample, in C | a Python service, tens of ms per batch |
+| Improves when folded | **no — nothing to average (§5b)** | yes, as √K |
 
 Newell's detector finds the edge better than our chain did. It cannot say
 *where* the edge is to better than a sample, and no amount of repetition
