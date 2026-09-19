@@ -2576,6 +2576,59 @@ class CoreRecorderV2:
         seen[key] = now
         return True
 
+    # §5.3 — a functional T6 becomes the bench.  Half a second is the
+    # whole question the namer answers, so a disagreement past it means
+    # the NAMER picked the wrong second, not that T6 found the wrong
+    # edge.  T6 holds the better registration by orders of magnitude
+    # once the battery passes.
+    T6_ORDINAL_DISAGREEMENT_ALARM_SEC = 0.5
+
+    def _t6_check_named_second(self, edge_rtp, named_second):
+        """Check the namer's answer against T6's own anchor.
+
+        Spec §5.3, the judge inverted.  T6 extrapolates its anchor to
+        this edge; the namer answers independently; they describe the
+        same edge, so they compare directly.  A disagreement past
+        ``T6_ORDINAL_DISAGREEMENT_ALARM_SEC`` indicts the NAMER.
+
+        ⛔ Reads no wall clock.  CLAUDE.md keeps the host clock a
+        derived product and never a source in the timing path, and this
+        check needs only the anchor and an RTP difference.  Do not add a
+        call to the wall-clock module here for convenience.
+
+        Mirrors ``authority_manager._witness_drives_consequences``,
+        which already shields a GPS-disciplined rtp-frame tier from
+        sysclock-frame witnesses: they flag, they never demote.
+
+        Returns the disagreement in seconds, or None when either side is
+        unavailable.
+        """
+        anchor = getattr(self, '_t6_native_anchor', None)
+        if anchor is None or named_second is None:
+            return None
+        try:
+            sr = float(anchor.sample_rate_hz)
+            if sr <= 0:
+                return None
+            elapsed_sec = (int(edge_rtp) - int(anchor.anchor_rtp)) / sr
+            t6_utc_sec = anchor.anchor_utc_ns / 1e9 + elapsed_sec
+            disagreement = t6_utc_sec - float(named_second)
+        except (TypeError, ValueError, ZeroDivisionError, AttributeError):
+            return None
+        if abs(disagreement) > self.T6_ORDINAL_DISAGREEMENT_ALARM_SEC:
+            if self._t6_say_once('named_second_disagrees'):
+                logger.warning(
+                    "NAMED SECOND DISAGREES with T6 by %+.3f s (T6 "
+                    "extrapolates %.3f from its anchor; the namer says "
+                    "%d).  T6 holds the better registration by orders of "
+                    "magnitude and KEEPS its own count -- this indicts "
+                    "the naming cascade, not T6.  Check the T5 NMEA "
+                    "reading and the radiod pair.  (Repeated at most "
+                    "every %.0f s.)",
+                    disagreement, t6_utc_sec, int(named_second),
+                    self.T6_REPEAT_PERIOD_SEC)
+        return disagreement
+
     def _t6_naming_probe(self):
         """The probe the NAMING path may use — T5 first, namer second.
 
@@ -5177,6 +5230,21 @@ class CoreRecorderV2:
                     self._t6_evaluate_battery(fine, result)
                 if fine is not None and self._t6_authority is not None:
                     named = self._t6_name_integer_second(fine.edge_rtp)
+                    # §5.3: a functional T6 is the bench, the namer the
+                    # thing checked.  This is advisory — same shape as
+                    # `_t6_evaluate_battery` above — so it gets its OWN
+                    # inner try/except: the outer guard on this whole
+                    # block would otherwise abort the authority call
+                    # below for this batch too, which is the route by
+                    # which T6 actually asserts.
+                    try:
+                        self._t6_check_named_second(fine.edge_rtp, named)
+                    except Exception as e:
+                        if self._t6_say_once('named_second_check_failed'):
+                            logger.error(
+                                "T6 named-second crosscheck failed (will "
+                                "retry each fold block, logged once): %s",
+                                e, exc_info=True)
                     decision = self._t6_authority.on_fine_estimate(
                         fine, coarse, named)
                     # Spec §3.3: demotion follows N consecutive blocks

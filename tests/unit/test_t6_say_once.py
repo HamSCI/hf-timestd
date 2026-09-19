@@ -98,6 +98,8 @@ class TestTheSpammingSitesAreGated:
         "battery_refused",           # the self-consistency battery failed
         "battery_suspect",           # a RUNNING T6 fails its battery
         "note_verdict_failed",       # suspect-marking itself raised
+        "named_second_disagrees",    # a functional T6 indicts the namer
+        "named_second_check_failed", # the crosscheck itself raised
     ])
     def test_site_is_throttled(self, key):
         assert key in self._src(), (
