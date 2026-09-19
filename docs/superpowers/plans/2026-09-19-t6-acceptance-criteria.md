@@ -383,10 +383,10 @@ reads in one sitting.
     Task 3
   - `class T6Battery` with
     `__init__(self, sample_rate: int, fold_seconds: int, thresholds: BatteryThresholds | None = None)`,
-    `evaluate(self, est, *, implied_chain_delay_ns: int, reported_sigma_ms: float, cn0_db_hz: float | None) -> BatteryVerdict`,
+    `evaluate(self, est, *, implied_chain_delay_ns: int, reported_sigma_ms: float, cn0_db_hz: float | None, search_mode: str = "bootstrap") -> BatteryVerdict`,
     and `reset(self) -> None`
   - Criterion names, used verbatim in logs and tests:
-    `"retention"`, `"ruler"`, `"unimodality"`, `"prominence"`, `"sigma"`,
+    `"retention"`, `"ruler"`, `"unimodality"`, `"shape"`, `"sigma"`,
     `"split_half"`, `"plausibility"`
 
 Tasks 5, 6 and 9 all call `evaluate`. Keep the signature exactly as written.
@@ -422,7 +422,10 @@ def _healthy(edge_rtp: int = 1_000_000 + 47916, **over) -> FineEdgeEstimate:
         fit_rms=0.02,
         fold_retention=0.98,
         split_half_delta_samples=0.05,
-        peak_prominence=40.0,
+        # A triangle-fidelity RESIDUAL: lower is better.  Real edges
+        # measured 0.0008-0.0017 at 48.4 dB-Hz; pure noise 0.25-0.42.
+        peak_prominence=0.001,
+        apex_distance_samples=0.5,
         transition_width_samples=6.0,
     )
     kw.update(over)
@@ -486,17 +489,42 @@ class TestEachCriterionCatchesItsFailure(unittest.TestCase):
         self.assertIn("unimodality", v.failures)
         self.assertNotIn("ruler", v.failures)
 
-    def test_prominence_catches_a_lattice_phantom(self):
-        """B4 locked onto a 20.000 ms lattice on 2026-09-04 and held it.
-        A phantom repeats perfectly, so only shape separates it."""
-        v = _run(_battery(), _series(6, peak_prominence=1.4))
+    def test_shape_catches_a_fold_holding_no_clean_flip(self):
+        """Pure noise measured 0.25-0.42 on the fidelity residual; a
+        real edge at B4's worst hour measured 0.0008-0.0017."""
+        v = _run(_battery(), _series(6, peak_prominence=0.35))
         self.assertFalse(v.passed)
-        self.assertIn("prominence", v.failures)
+        self.assertIn("shape", v.failures)
 
-    def test_prominence_also_catches_an_absent_transition(self):
+    def test_shape_catches_a_nan_fidelity(self):
+        v = _run(_battery(), _series(6, peak_prominence=float("nan")))
+        self.assertFalse(v.passed)
+        self.assertIn("shape", v.failures)
+
+    def test_shape_also_catches_an_absent_transition(self):
         v = _run(_battery(), _series(6, transition_width_samples=900.0))
         self.assertFalse(v.passed)
-        self.assertIn("prominence", v.failures)
+        self.assertIn("shape", v.failures)
+
+    def test_apex_displacement_fails_in_seeded_mode(self):
+        """B4 locked onto a 20.000 ms lattice on 2026-09-04 and held it.
+        A phantom repeats perfectly, so every repeatability criterion
+        passes it; the apex distance is what catches it, measured at
+        -1919 samples against 0.35-0.87 for an undisplaced edge."""
+        bat = _battery()
+        v = None
+        for e in _series(6, apex_distance_samples=-1919.0):
+            v = bat.evaluate(e, implied_chain_delay_ns=16_618_000,
+                             reported_sigma_ms=0.001, cn0_db_hz=70.0,
+                             search_mode="seeded")
+        self.assertFalse(v.passed)
+        self.assertIn("shape", v.failures)
+
+    def test_apex_displacement_is_not_judged_in_bootstrap_mode(self):
+        """In bootstrap the search centre and the apex derive from the
+        same fold, so agreement proves nothing and must not be scored."""
+        v = _run(_battery(), _series(6, apex_distance_samples=-1919.0))
+        self.assertNotIn("shape", v.failures)
 
     def test_sigma_catches_a_broken_tier_claiming_to_be_a_wide_one(self):
         """AI6VN reported 477 ms on 2026-09-18, which widened the judge's
@@ -507,6 +535,14 @@ class TestEachCriterionCatchesItsFailure(unittest.TestCase):
 
     def test_split_half_catches_a_wandering_apex(self):
         v = _run(_battery(), _series(6, split_half_delta_samples=120.0))
+        self.assertFalse(v.passed)
+        self.assertIn("split_half", v.failures)
+
+    def test_split_half_fails_on_nan_rather_than_reading_it_as_agreement(self):
+        """NaN means a sub-fold held no samples.  No evidence must never
+        read as perfect agreement -- spec §4.6 and §5.2."""
+        v = _run(_battery(), _series(6,
+                                     split_half_delta_samples=float("nan")))
         self.assertFalse(v.passed)
         self.assertIn("split_half", v.failures)
 
@@ -533,7 +569,7 @@ class TestEvidenceDiscipline(unittest.TestCase):
 
     def test_the_verdict_reports_every_criterion_measured(self):
         v = _run(_battery(), _series(6))
-        for name in ("retention", "ruler", "unimodality", "prominence",
+        for name in ("retention", "ruler", "unimodality", "shape",
                      "sigma", "split_half", "plausibility"):
             self.assertIn(name, v.criteria)
 
@@ -584,12 +620,12 @@ from typing import Optional
 RETENTION = "retention"
 RULER = "ruler"
 UNIMODALITY = "unimodality"
-PROMINENCE = "prominence"
+SHAPE = "shape"
 SIGMA = "sigma"
 SPLIT_HALF = "split_half"
 PLAUSIBILITY = "plausibility"
 
-ALL_CRITERIA = (RETENTION, RULER, UNIMODALITY, PROMINENCE, SIGMA,
+ALL_CRITERIA = (RETENTION, RULER, UNIMODALITY, SHAPE, SIGMA,
                 SPLIT_HALF, PLAUSIBILITY)
 
 # How many consecutive blocks the multi-block criteria need before they
@@ -621,11 +657,31 @@ class BatteryThresholds:
     # Consecutive block positions about their median.  The fine stage's
     # own BOOTSTRAP_CONFIRM_TOLERANCE_MS is 1.0 ms; match it.
     max_unimodality_spread_ms: float = 1.0
-    # Peak over median background.  The magnitude-difference
-    # discriminant read 105x on captured IQ.  A lattice phantom repeats
-    # perfectly and so passes every repeatability check -- only shape
-    # separates it, which makes this criterion load-bearing.
-    min_peak_prominence: float = 5.0
+    # Triangle-fidelity residual, carried on FineEdgeEstimate under the
+    # legacy field name `peak_prominence`.  LOWER IS BETTER: it is an RMS
+    # residual over the peak, not a ratio.  T(e) traces a triangle when
+    # the folded second holds one clean polarity flip, so the residual
+    # measures whether a flip is PRESENT, independent of its strength --
+    # which is why it survives at 48.4 dB-Hz where a peak-over-background
+    # ratio does not.  Measured 2026-09-19 on synthetic signal:
+    #     pure noise          0.2547 - 0.4199
+    #     real, 70 dB-Hz      0.00137
+    #     real, 48.4 dB-Hz    0.00079 - 0.00171
+    # 0.05 sits ~30x above the worst real case and ~5x below the best
+    # noise case.  Task 3's sweep replaces it with a swept value.
+    max_fidelity_residual: float = 0.05
+    # Distance from T(e)'s apex to the reported edge, in samples.  This
+    # is the statistic that addresses the 2026-09-04 B4 failure: a lock
+    # at a 20.000 ms lattice position AWAY from the true apex, measured
+    # at -1919 samples against 0.35-0.87 for an undisplaced edge.
+    #
+    # ⚠ It runs WEAK in the fine stage's 'bootstrap' mode, where the
+    # search centre and the apex derive from the same fold and agreement
+    # is near-tautological.  It is informative in 'seeded' and
+    # 'tracking' mode, where an external coarse offset can place the
+    # search away from the apex.  The battery applies it only in those
+    # two modes -- see `evaluate`.
+    max_apex_distance_samples: float = 100.0
     # A +-25 kHz channel filter predicts a transition 1/(2B) = 20 us
     # wide, about 2 samples at 96 kHz.  The fit band spans several
     # samples either side; the discriminating case is a phantom, which
@@ -712,7 +768,8 @@ class T6Battery:
 
     def evaluate(self, est, *, implied_chain_delay_ns: int,
                  reported_sigma_ms: float,
-                 cn0_db_hz: Optional[float]) -> BatteryVerdict:
+                 cn0_db_hz: Optional[float],
+                 search_mode: str = "bootstrap") -> BatteryVerdict:
         p = self.sample_rate
         failures: list[str] = []
         criteria: dict = {}
@@ -729,18 +786,42 @@ class T6Battery:
         if est.fold_retention < self.t.min_fold_retention:
             failures.append(RETENTION)
 
-        # 4 — prominence and width.  Shape, which a phantom lacks.
-        criteria[PROMINENCE] = float(est.peak_prominence)
+        # 4 — shape.  A phantom repeats perfectly, so only shape separates
+        # it.  Three parts: triangle fidelity, apex agreement, width.
+        #
+        # ⚠ `peak_prominence` carries a RESIDUAL: lower is better.  The
+        # field kept its name for contract stability when the statistic
+        # changed; see T6_ACCEPTANCE_CRITERIA.md §4.2.
+        fidelity = float(est.peak_prominence)
+        criteria[SHAPE] = fidelity
+        criteria["apex_distance_samples"] = float(est.apex_distance_samples)
         criteria["transition_width_samples"] = float(est.transition_width_samples)
-        if (est.peak_prominence < self.t.min_peak_prominence
-                or est.transition_width_samples <= 0.0
-                or est.transition_width_samples
-                > self.t.max_transition_width_samples):
-            failures.append(PROMINENCE)
+        bad_shape = (
+            not (fidelity == fidelity)            # NaN
+            or fidelity > self.t.max_fidelity_residual
+            or est.transition_width_samples <= 0.0
+            or est.transition_width_samples
+            > self.t.max_transition_width_samples
+        )
+        # Apex agreement only where it carries information.  In bootstrap
+        # mode the search centre and the apex come from the same fold, so
+        # agreement proves nothing; in seeded/tracking mode an external
+        # coarse offset can place the search away from the apex, which is
+        # exactly the 2026-09-04 failure.
+        if search_mode in ("seeded", "tracking"):
+            if (abs(float(est.apex_distance_samples))
+                    > self.t.max_apex_distance_samples):
+                bad_shape = True
+        if bad_shape:
+            failures.append(SHAPE)
 
         # 6 — split-half agreement.  A wandering apex separates the halves.
-        criteria[SPLIT_HALF] = float(est.split_half_delta_samples)
-        if abs(est.split_half_delta_samples) > self.t.max_split_half_delta_samples:
+        #
+        # ⛔ NaN means a sub-fold held no samples -- NO EVIDENCE, which
+        # must never read as agreement (spec §4.6, §5.2).  Fail on it.
+        sh = float(est.split_half_delta_samples)
+        criteria[SPLIT_HALF] = sh
+        if not (sh == sh) or abs(sh) > self.t.max_split_half_delta_samples:
             failures.append(SPLIT_HALF)
 
         # 7 — physical plausibility of the implied chain delay.
@@ -867,6 +948,8 @@ import sys
 import unittest
 from pathlib import Path
 
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -934,6 +1017,30 @@ class TestThresholdsAtB4WorstHour(unittest.TestCase):
                         f"{[v.failures for v in verdicts[2:]]}")
 
 
+class TestTheNullIsRefused(unittest.TestCase):
+
+    def test_pure_noise_does_not_pass_the_battery(self):
+        """A gate validated only on healthy signal is not known to refuse
+        anything.  Task 1's first two prominence candidates both passed
+        this kind of check and still could not tell noise from a real
+        edge at 48.4 dB-Hz."""
+        stage = BpskEdgeFineStage(sample_rate=SR, fold_seconds=K)
+        bat = T6Battery(sample_rate=SR, fold_seconds=K)
+        rng = np.random.default_rng(11)
+        n = SR * (K * 5 + 1)
+        sig = (rng.normal(0, 1, n) + 1j * rng.normal(0, 1, n)).astype(np.complex64)
+        verdicts = []
+        for i in range(0, len(sig), BATCH):
+            est = stage.process_samples(sig[i:i + BATCH], i)
+            if est is None:
+                continue
+            verdicts.append(bat.evaluate(
+                est, implied_chain_delay_ns=16_618_000,
+                reported_sigma_ms=0.001, cn0_db_hz=48.4))
+        self.assertFalse(any(v.passed for v in verdicts),
+                         f"noise passed: {[v.criteria for v in verdicts]}")
+
+
 class TestSigmaCeilingTracksCn0(unittest.TestCase):
 
     def test_the_ceiling_widens_as_the_channel_degrades(self):
@@ -965,13 +1072,21 @@ Expected: the 77 dB-Hz case and both sigma-ceiling cases pass on Task 2's
 defaults. The 48.4 dB-Hz case is the one under investigation — it may fail,
 and if it does, the failure names which threshold to move.
 
-- [ ] **Step 3: Measure, then set each default**
+- [ ] **Step 3: Measure the null as well as the signal**
+
+⛔ **Measure the null.** Task 1 shipped a statistic only after pure-noise runs
+showed the first two candidates could not be separated from a real edge at
+48.4 dB-Hz. Every threshold here gets the same treatment: drive **pure complex
+Gaussian noise, no signal at all**, at least 10 seeded trials, and record what
+each criterion reads. A threshold set from healthy runs alone cannot be known
+to refuse anything.
 
 Instrument rather than guess. For each of C/N0 ∈ {77, 66, 58, 52, 48.4, 44}
-and seeds {11, 23, 37}, drive `_run_blocks` and print
+and seeds {11, 23, 37}, plus the pure-noise case, drive `_run_blocks` and print
 `v.criteria` for every settled block. Then set each default so that:
 
 - every healthy run at 48.4 dB-Hz passes, across all three seeds
+- **pure noise FAILS**, and you can name which criterion refuses it
 - the failure fixtures in `tests/test_t6_battery.py` still fail
 
 Write the measured spread into the comment above each field — replacing the
@@ -1660,8 +1775,8 @@ class TestRunningT6(unittest.TestCase):
 
     def test_every_failing_criterion_is_named(self):
         r = _recorder()
-        r._t6_note_verdict(_verdict(False, ("retention", "prominence")))
-        self.assertEqual(r._t6_suspect, ("retention", "prominence"))
+        r._t6_note_verdict(_verdict(False, ("retention", "shape")))
+        self.assertEqual(r._t6_suspect, ("retention", "shape"))
 
     def test_the_alarm_is_throttled(self):
         """A persistent condition reported every cycle blinds the log it
@@ -2254,13 +2369,15 @@ class TestTheFailuresWeRefuse(unittest.TestCase):
                 edge_subsample=0.0, n_seconds_folded=K,
                 plateau_amplitude=1.0, fit_rms=0.02,
                 fold_retention=0.98, split_half_delta_samples=0.02,
-                peak_prominence=1.3,             # no spike
-                transition_width_samples=800.0,  # no transition
+                peak_prominence=0.001,             # a clean flip IS present
+                apex_distance_samples=-1919.0,     # but the lock is 20 ms off it
+                transition_width_samples=6.0,
             )
             v = bat.evaluate(est, implied_chain_delay_ns=16_618_000,
-                             reported_sigma_ms=0.001, cn0_db_hz=70.0)
+                             reported_sigma_ms=0.001, cn0_db_hz=70.0,
+                             search_mode="seeded")
         self.assertFalse(v.passed)
-        self.assertIn("prominence", v.failures)
+        self.assertIn("shape", v.failures)
 
     def test_a_477_ms_sigma_is_refused(self):
         """The AI6VN reading of 2026-09-18, which widened the judge's

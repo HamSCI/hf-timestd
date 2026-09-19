@@ -191,9 +191,9 @@ catches a named failure.
 | 1 | Fold retention | folded amplitude ÷ mean per-second amplitude | 0.9998 AI6VN, 0.98 B4, **0.006 when broken** | a missing reference cable; any incoherent chain |
 | 2 | Ruler | inter-edge Δ against the sample rate | 127/127 = 96000 exactly | the pulse source walking against the ADC |
 | 3 | Unimodality | per-second estimates about their median | 128/128 and 89/89 at one position | multipath, split peaks, a competing signal |
-| 4 | Prominence and width | peak ÷ median, and pulse width against 1/(2B) | 105×, 2–3 samples against 20 µs predicted | lattice phantoms |
+| 4 | Shape — triangle fidelity, apex agreement, width | RMS residual of \|T(e)\| against the ideal triangle ÷ peak; apex-to-reported-edge distance; pulse width against 1/(2B) | residual 0.0008–0.0017 real against 0.25–0.42 noise; −1919 samples on a 20 ms displaced lock | lattice phantoms |
 | 5 | Scatter, and σ within the tier's physical budget | per-second sd; σ/√K over the fold | 95 ns, n = 89 | a broken tier masquerading as a wide one |
-| 6 | Split-half agreement | two disjoint folds, against k·σ predicted | 41 ns against 17 ns predicted, n = 2 | a wandering apex |
+| 6 | Split-half agreement | two disjoint folds, against k·σ predicted; **NaN when either sub-fold is empty** | 41 ns against 17 ns predicted, n = 2 | a wandering apex |
 | 7 | Plausibility | implied chain delay within ±250 ms | shipped and in force | gross wrap and sidelobe capture |
 
 ### 4.1 Criterion 1 diagnoses the fault that cost two days
@@ -215,10 +215,54 @@ Every criterion that measures *repeatability* passes a phantom, because a
 phantom repeats perfectly. B4 locked onto a 20.000 ms lattice on 2026-09-04 and
 held it.
 
-Prominence and width discriminate on *shape* instead. A ±25 kHz filter predicts
-a transition 1/(2B) = 20 µs wide, which the magnitude-difference discriminant
-resolved as a 2–3 sample pulse at 105× the background. A lattice phantom
-carries no such pulse.
+Criterion 4 discriminates on *shape* instead, and on two statistics rather than
+one.
+
+**Triangle fidelity.** The closed-form matched filter of
+`T6_FOLDED_SELF_ACQUISITION.md` §3.1,
+
+    T(e) = sum_{j>=e} x[j] - sum_{j<e} x[j] = C[p-1] - 2*C[e-1]
+
+traces a **triangle** over the folded second when that second holds one clean
+polarity flip: |T| climbs linearly to the apex at the edge and falls linearly
+away. Fitting the ideal triangle and reporting the RMS residual over the peak
+therefore measures whether a flip is present at all, independently of how
+strong it is.
+
+**Apex agreement.** The distance between T(e)'s apex and the edge position the
+stage reports. The 2026-09-04 failure was a lock at a lattice position *away
+from* the true apex, so this is the statistic that addresses it directly.
+
+⚠ **An earlier draft of this document specified peak ÷ median and cited 105×
+from §8c. Measurement refuted it.** Driven against synthetic signal on
+2026-09-19, a peak-over-background ratio read 4.9–5.5 at B4's governing
+48.4 dB-Hz against 4.2–5.3 on pure noise — no threshold separates those. The
+fault was operator choice: that statistic *differentiates*, which doubles noise
+power and confines the signal to the ~2 samples of the transition, where T(e)
+*integrates* the whole second and survives. Two orders of magnitude separate
+the two approaches at the condition that governs.
+
+    fidelity residual   pure noise            0.2547 – 0.4199
+                        real, 70 dB-Hz        0.00137
+                        real, 48.4 dB-Hz      0.00079 – 0.00171
+    apex distance       real                  0.35 – 0.87 samples
+                        20 ms displaced lock  −1919.19 samples
+
+⚠ These come from **synthetic signal**, not a station capture — unlike §8c's
+105×, which was measured on 89 s of real IQ. They establish that the statistic
+separates; they do not stand in for an on-station measurement, which §8 owes.
+
+⚠ Apex distance does **not** separate a real edge from noise, and is not meant
+to. It is a displacement check. It also runs weak in the fine stage's
+*bootstrap* mode, where the search centre and the apex derive from the same
+fold; it earns its keep in *seeded* and *tracking* mode, where an external
+coarse offset can place the search away from the apex — which is the 09-04
+shape exactly. The battery weights it by search mode rather than applying one
+threshold to all three.
+
+⚠ The `FineEdgeEstimate` field keeps the name `peak_prominence` for contract
+stability while the criterion is named `shape`. **Lower now means better** —
+the field carries a residual, not a ratio.
 
 ⚡ Without criterion 4 this design would trade a gate that blocks good edges for
 one that admits bad ones. It is the load-bearing member.
@@ -284,7 +328,14 @@ The mapping, criterion by criterion:
 | 5 | per-second sd = 95 ns | block-to-block sd, predicted as the per-second sd ÷ √K |
 
 Criteria 1, 4, 6 and 7 already evaluate on the folded block and need no
-mapping. §4.5's thresholds therefore get derived in per-second terms from the
+mapping.
+
+⛔ Criterion 6 reports **NaN**, never 0.0, when either sub-fold holds no
+samples. 0.0 is the most favourable value the criterion can return, so
+returning it for "no evidence" would report a parity fault — every sample
+routed into one sub-fold — as perfect agreement. §5.2's rule that absence stays
+visible as absence binds inside a criterion, not only at the tier boundary.
+The battery fails the criterion on NaN. §4.5's thresholds therefore get derived in per-second terms from the
 C/N0 sweep, then converted by the fold's √K improvement before they become
 module constants.
 
