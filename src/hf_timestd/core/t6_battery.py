@@ -53,76 +53,180 @@ HISTORY_REQUIRED_BLOCKS = 3
 class BatteryThresholds:
     """Every acceptance threshold, with its derivation.
 
-    Task 3 replaces these defaults with values derived from the C/N0
-    sweep.  Until then they carry the 2026-09-18 measurements directly
-    and are deliberately loose.
+    Derived 2026-09-19 from a C/N0 sweep, not from two stations on one
+    evening.  The sweep drives the REAL fine stage and the REAL battery
+    over synthetic band-limited BPSK at C/N0 in {77, 66, 58, 52, 48.4,
+    44} dB-Hz, six seeds each, six 30 s fold blocks each, plus 32 seeds
+    of PURE complex Gaussian noise with no signal at all (120 settled
+    noise blocks).  Every figure quoted below is a settled-block range
+    from that sweep; ``tests/test_t6_battery_thresholds.py`` re-derives
+    it under T6_SWEEP=1.
+
+    ⛔ The governing case is 48.4 dB-Hz -- B4's measured worst hour of
+    2026-08-28 -- NOT AI6VN's 77 dB-Hz injected pilot.  A threshold set
+    at 77 and never checked at 48.4 ships a gate that fails every night
+    at exactly the hours the folded-acquisition design is judged on.
+    Every threshold here passes 48.4 across all six seeds.
+
+    ⛔ And every threshold was checked against the NULL.  Task 1 shipped
+    two prominence statistics that passed healthy-signal checks while
+    being unable to tell a real edge from pure noise at 48.4 dB-Hz; the
+    failure stayed invisible until someone drove noise through the
+    stage.  So each field below carries its pure-noise reading, and
+    where a criterion does NOT separate the two populations, it says so
+    rather than implying a discrimination it cannot perform.
     """
-    # Measured 0.9998 at AI6VN and 0.98 at B4 with a coherent chain;
-    # 0.006 with the TS-1's REF IN on its internal 10 MHz.  The two
-    # populations sit two orders apart, so the threshold's exact value
-    # matters little -- only that it lands between them.
+    # Coherence of the reference chain.  Folded amplitude over mean
+    # instantaneous amplitude: noise does not fold coherently, so this
+    # falls with C/N0 as well as with incoherence.  The two populations
+    # sit far apart, so the threshold's exact value matters little --
+    # only that it lands between them.
+    #     pure noise        0.18180 - 0.18323  (120 blocks, 32 seeds)
+    #     real, 77 dB-Hz    0.99954
+    #     real, 48.4 dB-Hz  0.72729 - 0.72840
+    #     real, 44 dB-Hz    0.52797 - 0.52968
+    # 0.50 sits 1.45x below the worst healthy reading at the governing
+    # 48.4 dB-Hz and 2.73x above the best pure-noise reading.  It may
+    # not go HIGHER: the 44 dB-Hz column shows this criterion sets T6's
+    # effective C/N0 floor near 43.7 dB-Hz in this model, so raising the
+    # threshold raises that floor into the band B4 actually works in.
+    # (AI6VN measured 0.006 on captured IQ with the TS-1's REF IN on its
+    # internal 10 MHz, and 0.9998 once fed from the governing GPSDO.)
     min_fold_retention: float = 0.50
     # Consecutive block edges must differ by fold_seconds * sample_rate.
-    # 127/127 per-second deltas came out exact on captured IQ; a block
-    # tolerance of 2 samples (21 us) allows sub-sample fit noise without
-    # admitting a pulse source walking against the ADC.
+    #     pure noise        196 - 2,961,880 samples  (nearest 196)
+    #     real, 77 dB-Hz    0
+    #     real, 48.4 dB-Hz  0 - 1
+    # A pulse source locked to the ADC lands EXACTLY one fold apart; the
+    # 0-1 sample spread at 48.4 dB-Hz is rounding of the sub-sample fit,
+    # not walk.  2 samples (21 us) leaves one sample of headroom over
+    # the worst healthy reading and still refuses the nearest noise
+    # block by 98x.  This is the widest-separating criterion in the
+    # battery after split-half.
     max_ruler_error_samples: float = 2.0
-    # Consecutive block positions about their median.  The fine stage's
-    # own BOOTSTRAP_CONFIRM_TOLERANCE_MS is 1.0 ms; match it.
-    max_unimodality_spread_ms: float = 1.0
+    # Consecutive block positions about their median, in ms.
+    #     pure noise        2.049 - 492.98 ms  (nearest 2.049)
+    #     real, 77 dB-Hz    0.00007 - 0.00026 ms
+    #     real, 48.4 dB-Hz  0.00047 - 0.00565 ms
+    #     real, 44 dB-Hz    up to 0.00817 ms
+    # The placement is deliberately ASYMMETRIC.  Refusing a healthy
+    # station is the failure this whole task exists to prevent, while
+    # admitting noise here costs nothing -- noise is refused by four
+    # other criteria besides this one.  So 0.25 ms takes 44x of headroom
+    # over the worst healthy reading at 48.4 dB-Hz and leaves 8.2x to
+    # the nearest noise block, rather than splitting the gap evenly.
+    # Still a 4x tightening on the fine stage's own
+    # BOOTSTRAP_CONFIRM_TOLERANCE_MS of 1.0 ms: the battery should be a
+    # stricter gate than the stage's bootstrap confirmation, not an
+    # echo of it.
+    max_unimodality_spread_ms: float = 0.25
     # Triangle-fidelity residual, carried on FineEdgeEstimate under the
     # legacy field name `peak_prominence`.  LOWER IS BETTER: it is an RMS
     # residual over the peak, not a ratio.  T(e) traces a triangle when
     # the folded second holds one clean polarity flip, so the residual
     # measures whether a flip is PRESENT, independent of its strength --
     # which is why it survives at 48.4 dB-Hz where a peak-over-background
-    # ratio does not.  Measured 2026-09-19 on synthetic signal:
-    #     pure noise          0.2547 - 0.4199
-    #     real, 70 dB-Hz      0.00137
-    #     real, 48.4 dB-Hz    0.00079 - 0.00171
-    # 0.05 sits ~30x above the worst real case and ~5x below the best
-    # noise case.  Task 3's sweep replaces it with a swept value.
-    max_fidelity_residual: float = 0.05
+    # ratio does not.
+    #     pure noise        0.1016 - 0.6695  (nearest 0.1016)
+    #     real, 77 dB-Hz    0.00136 - 0.00141
+    #     real, 48.4 dB-Hz  0.00039 - 0.00194
+    #     real, 44 dB-Hz    up to 0.00232
+    # ⚠ The 2026-09-18 note put the noise floor at 0.2547 from a handful
+    # of seeds; 32 seeds pull the tail down to 0.1016, and the previous
+    # default of 0.05 sat only 2.0x below it.  0.015 restores the
+    # balance: 7.7x above the worst healthy reading at 48.4 dB-Hz, 6.5x
+    # above the worst at 44, and 6.8x below the lowest of 120 pure-noise
+    # blocks.  A tail that moved once with more seeds can move again --
+    # do not raise this without re-running the null.
+    max_fidelity_residual: float = 0.015
     # Distance from T(e)'s apex to the reported edge, in samples.  This
     # is the statistic that addresses the 2026-09-04 B4 failure: a lock
     # at a 20.000 ms lattice position AWAY from the true apex, measured
     # at -1919 samples against 0.35-0.87 for an undisplaced edge.
     #
-    # ⚠ It runs WEAK in the fine stage's 'bootstrap' mode, where the
-    # search centre and the apex derive from the same fold and agreement
-    # is near-tautological.  It is informative in 'seeded' and
-    # 'tracking' mode, where an external coarse offset can place the
-    # search away from the apex.  The battery applies it only in those
-    # two modes -- see `evaluate`.
-    max_apex_distance_samples: float = 100.0
+    # ⛔ It does NOT separate signal from noise and is not meant to.  It
+    # is a DISPLACEMENT check:
+    #     pure noise        |apex| 0.021 - 4.587   <- overlaps healthy
+    #     real, 48.4 dB-Hz  |apex| 0.005 - 1.311   (same in seeded mode)
+    #     20 ms lattice lock       -1919
+    # Which is why the battery scores it only in 'seeded' and 'tracking'
+    # mode, where an external coarse offset can place the search away
+    # from the apex -- see `evaluate`.  50 samples (0.52 ms) is the
+    # geometric middle of the healthy range and the lattice lock: 38x
+    # above the worst healthy reading at 48.4 dB-Hz, 38x below the
+    # displacement it exists to catch, and well inside the stage's
+    # +-6 ms (576 sample) search window, so any lattice capture the
+    # window can reach is caught.
+    max_apex_distance_samples: float = 50.0
     # A +-25 kHz channel filter predicts a transition 1/(2B) = 20 us
-    # wide, about 2 samples at 96 kHz.  The fit band spans several
-    # samples either side; the discriminating case is a phantom, which
-    # carries no transition at all and reads far wider.
-    max_transition_width_samples: float = 60.0
-    # Two disjoint sub-folds of a stable edge agree to about sqrt(2)
-    # times the single-fold scatter -- 41 ns measured against 17 ns
-    # predicted (n=2).  10 samples = 104 us leaves generous room while
-    # still separating a wandering apex.
+    # wide, about 2 samples at 96 kHz.
+    #
+    # ⛔ This one does NOT separate either, and the sweep says so
+    # plainly:
+    #     pure noise        1 - 5 samples
+    #     real, 77 dB-Hz    1
+    #     real, 48.4 dB-Hz  1 - 2
+    #     real, 44 dB-Hz    1 - 3
+    # It stays in the battery as a PHYSICS BOUND, not a discriminator:
+    # the discriminating case is a phantom, which carries no transition
+    # at all and reads far wider than any real channel filter can
+    # produce.  30 samples (312 us) bounds a transition wider than a
+    # 1.6 kHz channel could make -- 10x the widest healthy reading and
+    # 6x the widest noise reading, so it fires on nothing the sweep
+    # produced and only on a fit with no transition in it.
+    max_transition_width_samples: float = 30.0
+    # Even-second sub-fold position minus odd-second, in samples.  A
+    # wandering apex separates the halves; a stable one does not.
+    #     pure noise        |delta| 1308 - 47937  (nearest 1308)
+    #     real, 77 dB-Hz    0
+    #     real, 48.4 dB-Hz  0 - 2
+    #     real, 44 dB-Hz    0 - 1
+    # (Captured IQ agreed to 41 ns against 17 ns predicted, n=2 -- far
+    # tighter than the synthetic, whose 0-2 samples is fit rounding.)
+    # 10 samples = 104 us sits 5x above the worst healthy reading at
+    # 48.4 dB-Hz and 131x below the nearest of 120 noise blocks.  The
+    # gap is wide enough that this stays the battery's strongest single
+    # refusal of the null.
     max_split_half_delta_samples: float = 10.0
-    # Implied chain delay.  Already enforced in the recorder as
-    # T6_PHYSICAL_CHAIN_DELAY_MAX_NS; restated here so the battery owns
-    # a complete verdict.
+    # Implied chain delay.  Not a swept quantity -- it arrives as an
+    # argument to `evaluate`, so the sweep can say nothing about it and
+    # this criterion separates nothing on its own.  Already enforced in
+    # the recorder as T6_PHYSICAL_CHAIN_DELAY_MAX_NS; restated here so
+    # the battery owns a complete verdict.
     max_chain_delay_ns: int = 250_000_000
     # Sigma ceiling (§4.3): the reported sigma may exceed the physical
     # prediction by at most this factor.  A T6 reporting 477 ms has not
     # produced a wide T6, it has produced a broken one.
     #
-    # Deliberately generous, because the prediction curve is anchored on
-    # ONE measured point (95 ns per second at 77 dB-Hz) and extrapolated
-    # by 1/sqrt(SNR).  The criterion exists to catch a tier reporting
-    # orders of magnitude outside its physics, not to police a factor of
-    # two.  At 48.4 dB-Hz this still puts the ceiling near 0.047 ms,
-    # four orders below the 477 ms it must refuse.
+    # ⛔ Like plausibility, this one cannot be swept: `reported_sigma_ms`
+    # is an input to `evaluate`, so pure noise and a healthy pilot read
+    # whatever the caller hands over.  What the sweep CAN check is the
+    # prediction curve the ceiling rides on, and it does:
+    #     measured block-to-block position scatter vs _predicted_sigma_ms
+    #       77 dB-Hz  0.090 us / 0.017 us  ->  5.19x
+    #       66 dB-Hz  0.321 us / 0.062 us  ->  5.22x
+    #       58 dB-Hz  0.751 us / 0.155 us  ->  4.86x
+    #       52 dB-Hz  1.376 us / 0.308 us  ->  4.46x
+    #     48.4 dB-Hz  2.095 us / 0.467 us  ->  4.49x
+    #       44 dB-Hz  3.118 us / 0.775 us  ->  4.02x
+    # The 1/sqrt(SNR) SHAPE holds across 33 dB -- the ratio is flat --
+    # but the anchor constant (95 ns per second at 77 dB-Hz, one
+    # measured point) under-predicts this stage's actual scatter by
+    # about 5x throughout.  That is exactly the error a generous margin
+    # exists to absorb: ~5 of the 100x is consumed by the anchor, ~20x
+    # remains as real headroom.  The criterion catches a tier reporting
+    # orders of magnitude outside its physics, not a factor of two.  At
+    # 48.4 dB-Hz the ceiling lands at 0.047 ms, four orders below the
+    # 477 ms it must refuse.
+    #
+    # ⚠ Lower bound on this number: a station at 77 dB-Hz reporting
+    # 1 us of sigma needs margin > 57.7 to pass at all, so 100 carries
+    # only 1.73x of headroom on the healthy-at-77 case.  Do not lower it.
     sigma_margin: float = 100.0
     # Fallback ceiling when no C/N0 reading accompanies the estimate.
-    # 1 ms is already ~10,000x the 95 ns per-second scatter measured at
-    # 77 dB-Hz, so it refuses only the grossly broken.
+    # 1 ms is 320x the 3.1 us of per-block scatter measured at 44 dB-Hz,
+    # the worst channel in the sweep, so it refuses only the grossly
+    # broken.
     max_sigma_ms_without_cn0: float = 1.0
 
 
