@@ -96,6 +96,8 @@ class TestTheSpammingSitesAreGated:
         "battery_no_verdict",        # the battery has seen no fold block
         "battery_evaluate_failed",   # the battery itself could not run
         "battery_refused",           # the self-consistency battery failed
+        "battery_suspect",           # a RUNNING T6 fails its battery
+        "note_verdict_failed",       # suspect-marking itself raised
     ])
     def test_site_is_throttled(self, key):
         assert key in self._src(), (

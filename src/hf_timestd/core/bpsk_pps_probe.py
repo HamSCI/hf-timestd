@@ -308,6 +308,13 @@ class BpskPpsProbe:
             # the archive.  None on producers older than this change.
             "fine_search_mode": t6.get("fine_search_mode"),
             "fine_coarse_unverified": t6.get("fine_coarse_unverified"),
+            # Spec §5.1: a failed self-consistency guardrail on a
+            # RUNNING T6 marks the assertion suspect rather than
+            # demoting it.  Comma-joined failing criteria (empty when
+            # healthy) and the block count the standing verdict was
+            # judged over.  None on producers older than this change.
+            "suspect_criteria": t6.get("suspect_criteria"),
+            "battery_blocks": t6.get("battery_blocks"),
         }
         # hf-timestd-native (RTP, UTC) anchor — forward into the
         # ProbeResult detail so downstream consumers (authority

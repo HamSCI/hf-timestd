@@ -1078,6 +1078,13 @@ def _flatten_t6(snapshot: Dict[str, Any], r: Optional[ProbeResult]) -> None:
     snapshot["t6_fine_coarse_unverified"] = (
         None if _unverified is None else (1 if _unverified else 0)
     )
+    # Spec §5.1: a failed self-consistency guardrail on a RUNNING T6
+    # marks the assertion suspect rather than demoting it.  Comma-joined
+    # failing criteria, empty (never None) when healthy or when the
+    # producer predates this field, so a missing column reads the same
+    # as a clean bill of health rather than as unknown.
+    snapshot["t6_suspect_criteria"] = d.get("suspect_criteria") or ""
+    snapshot["t6_battery_blocks"] = int(d.get("battery_blocks") or 0)
     dm = d.get("drift_monitor")
     if isinstance(dm, dict):
         snapshot["t6_anchor_discontinuity"] = (

@@ -336,6 +336,10 @@ class CoreRecorderV2:
         # estimate the fine stage actually produced, not from config.
         self._t6_battery = None
         self._t6_last_verdict = None
+        # Failing criteria on a RUNNING T6 (spec §5.1).  Empty when
+        # healthy.  Set by ``_t6_note_verdict``; never demotes -- see
+        # that method's docstring.
+        self._t6_suspect = ()
         # Pre-trigger IQ ring; off unless configured (#43).
         self._t6_anomaly = None
         # T6-channel block-drop counter: this channel is not
@@ -4458,6 +4462,60 @@ class CoreRecorderV2:
                     "(%s); no verdict stands, so T6 holds acquisition. "
                     "(Repeated at most every %.0f s.)",
                     e, self.T6_REPEAT_PERIOD_SEC)
+            return
+        # ⛔ Isolated from the ``try`` above on purpose.  That block's
+        # ``except`` means "the battery could not be evaluated", and
+        # nulls the verdict accordingly.  A raise from
+        # ``_t6_note_verdict`` means something different -- the battery
+        # DID produce a verdict, only the suspect-marking of it failed --
+        # so it must not be reported as, or have the side effects of,
+        # "no verdict stands".  A verdict that was successfully computed
+        # keeps standing either way; only the suspect mark is skipped.
+        try:
+            self._t6_note_verdict(self._t6_last_verdict)
+        except Exception as e:  # noqa: BLE001
+            if self._t6_say_once('note_verdict_failed'):
+                logger.warning(
+                    "T6 suspect-marking raised (%s) while noting the "
+                    "self-consistency verdict; the verdict itself still "
+                    "stands and T6 continues to assert unaffected. "
+                    "(Repeated at most every %.0f s.)",
+                    e, self.T6_REPEAT_PERIOD_SEC)
+
+    def _t6_note_verdict(self, verdict) -> None:
+        """Record a battery verdict for a T6 that has already acquired.
+
+        Spec §5.1: a failed guardrail does NOT demote.  Demoting would
+        reproduce the problem this design removes -- a transient trip
+        handing the station back to a tier two orders of magnitude
+        worse.  T6 keeps asserting, marked suspect, and alarms; the
+        operator decides.
+
+        ⛔ Spec §5.2: this path is for a T6 that is PRODUCING estimates
+        and failing them.  An ABSENT estimate never comes here.  The
+        authority's liveness invariant degrades loudly on absence, and
+        blurring the two would hide a dead detector behind a warning
+        about a live one.
+        """
+        if getattr(self, '_t6_native_anchor', None) is None:
+            return  # not running yet; acquisition owns the refusal
+        if verdict.passed:
+            if getattr(self, '_t6_suspect', ()):
+                logger.info(
+                    "T6 self-consistency restored (%s cleared); the "
+                    "assertion is no longer marked suspect.",
+                    ", ".join(self._t6_suspect))
+            self._t6_suspect = ()
+            return
+        self._t6_suspect = tuple(verdict.failures)
+        if self._t6_say_once('battery_suspect'):
+            logger.warning(
+                "T6 SUSPECT: self-consistency battery failed on %s while "
+                "T6 is asserting.  The anchor is KEPT and T6 continues to "
+                "publish, marked suspect -- a timing fault gets exposed, "
+                "never silently corrected.  Operator judgement required.  "
+                "(Repeated at most every %.0f s.)",
+                ", ".join(verdict.failures), self.T6_REPEAT_PERIOD_SEC)
 
     def _t6_battery_forget_run(self, why: str) -> None:
         """Drop the battery's block history when the stage position dies.
@@ -6174,6 +6232,20 @@ class CoreRecorderV2:
                         self._compute_rtp_to_utc_offset_ns()
                         if self._t6_native_anchor is not None else None
                     ),
+                    # Spec §5.1: a failed guardrail on a RUNNING T6 does
+                    # not demote -- it marks the assertion suspect and
+                    # names the failing criterion.  Comma-joined, empty
+                    # when healthy, so "not suspect" and "not yet judged"
+                    # both read as the empty string here (the latter is
+                    # already visible via ``fine_search_mode``/blocks).
+                    'suspect_criteria': ",".join(
+                        getattr(self, '_t6_suspect', ()) or ()),
+                    # How many fold blocks the standing verdict was
+                    # judged over -- 0 before the battery has a run.
+                    'battery_blocks': int((
+                        (getattr(self, '_t6_last_verdict', None)
+                         and self._t6_last_verdict.criteria.get('blocks', 0))
+                        or 0)),
                 }
                 # Spec §4: authority transitions must reach
                 # authority.json, not just this status file.  The only
