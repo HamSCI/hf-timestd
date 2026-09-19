@@ -1717,33 +1717,47 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 ---
 
-### Task 7: The judge inverts — T6 checks the ordinal
+### Task 7: The judge inverts — T6 checks the namer
 
-Once T6 passes the battery, T6 becomes the bench. It extrapolates its own
-anchor forward and checks the ordinal source against itself.
+Once T6 passes the battery and holds an anchor, T6 becomes the bench. It
+extrapolates its own anchor to the edge in hand and checks the namer's answer
+against itself.
 
 **Files:**
 - Modify: `src/hf_timestd/core/core_recorder_v2.py`
 - Test: `tests/test_t6_ordinal_crosscheck.py` (create)
 
 **Interfaces:**
-- Consumes: `_get_ordinal_reference` (Task 4), `_t6_native_anchor` (existing).
+- Consumes: `_t6_name_integer_second` (already in the file), `_t6_native_anchor`
+  (already), `_t6_say_once` (already).
 - Produces:
   - `CoreRecorderV2.T6_ORDINAL_DISAGREEMENT_ALARM_SEC = 0.5`
-  - `CoreRecorderV2._t6_check_ordinal(self) -> float | None` — the
-    disagreement in seconds, or `None` when it cannot be computed.
+  - `CoreRecorderV2._t6_check_named_second(self, edge_rtp, named_second) -> float | None`
+    returning the disagreement in seconds, or `None` when it cannot be computed.
 
-**The point.** This mirrors what `authority_manager._witness_drives_consequences`
-(`:665`) already does for a GPS-disciplined rtp-frame tier against
-sysclock-frame witnesses: the witness flags, it never demotes. The acquisition
-path gains the shielding the arbitration path has had all along.
+⛔ **No wall-clock read.** `CLAUDE.md` forbids introducing a new `time.time()`
+into the timing path — the host clock is a derived product, never a source, and
+the one sanctioned exception is the Offset Judge's bench role. This check needs
+no clock at all. T6's anchor and the edge's RTP give T6's own answer; the namer
+gives the other. Both describe the same edge, so they compare directly:
+
+```
+t6_utc_sec   = anchor_utc_ns/1e9 + (edge_rtp - anchor_rtp) / sample_rate
+disagreement = t6_utc_sec - named_second
+```
+
+⚡ **The alarm names the NAMER, not T6.** Once T6 passes the battery it holds
+the better registration by orders of magnitude, so a disagreement past half a
+second says the namer picked the wrong second. T6 keeps its own count. This
+mirrors `authority_manager._witness_drives_consequences`, which has shielded a
+GPS-disciplined rtp-frame tier from sysclock-frame witnesses all along.
 
 - [ ] **Step 1: Write the failing test**
 
 Create `tests/test_t6_ordinal_crosscheck.py`:
 
 ```python
-"""A functional T6 is the bench.  Disagreement indicts the ordinal."""
+"""A functional T6 is the bench.  Disagreement indicts the namer."""
 from __future__ import annotations
 
 import sys
@@ -1757,67 +1771,94 @@ from hf_timestd.core.core_recorder_v2 import CoreRecorderV2
 from hf_timestd.core.native_anchor import NativeAnchor
 
 SR = 96000
+ANCHOR_RTP = 47916
+ANCHOR_UTC_NS = 1_700_000_000_000_000_000
 
 
-def _recorder(ordinal_offset_ms, anchor_utc_ns=1_700_000_000_000_000_000):
+def _recorder(anchor=True):
     r = SimpleNamespace()
-    r._t6_check_ordinal = CoreRecorderV2._t6_check_ordinal.__get__(r)
+    r._t6_check_named_second = \
+        CoreRecorderV2._t6_check_named_second.__get__(r)
     r._t6_say_once = CoreRecorderV2._t6_say_once.__get__(r)
     r.T6_REPEAT_PERIOD_SEC = CoreRecorderV2.T6_REPEAT_PERIOD_SEC
     r.T6_ORDINAL_DISAGREEMENT_ALARM_SEC = \
         CoreRecorderV2.T6_ORDINAL_DISAGREEMENT_ALARM_SEC
     r._t6_say_once_at = {}
-    r._get_ordinal_reference = lambda: (ordinal_offset_ms, 20.0, "T2")
     r._t6_native_anchor = NativeAnchor(
-        anchor_rtp=47916, anchor_utc_ns=anchor_utc_ns, sample_rate_hz=SR,
-        chain_delay_ns=16_618_000, captured_at_utc_ns=anchor_utc_ns,
-        captured_via_tier="T2",
-    )
-    r._t6_now_utc_ns = lambda: anchor_utc_ns
+        anchor_rtp=ANCHOR_RTP, anchor_utc_ns=ANCHOR_UTC_NS,
+        sample_rate_hz=SR, chain_delay_ns=16_618_000,
+        captured_at_utc_ns=ANCHOR_UTC_NS, captured_via_tier="namer",
+    ) if anchor else None
     return r
 
 
-class TestOrdinalCrossCheck(unittest.TestCase):
+class TestNamedSecondCrossCheck(unittest.TestCase):
 
-    def test_a_sane_ordinal_raises_nothing(self):
-        r = _recorder(ordinal_offset_ms=20.0)
+    def test_an_agreeing_namer_raises_nothing(self):
+        r = _recorder()
+        # Ten seconds of RTP past the anchor: T6 says anchor_utc + 10.
+        edge = ANCHOR_RTP + 10 * SR
+        named = ANCHOR_UTC_NS // 1_000_000_000 + 10
         with self.assertNoLogs("hf_timestd.core.core_recorder_v2",
                                level="WARNING"):
-            d = r._t6_check_ordinal()
+            d = r._t6_check_named_second(edge, named)
         self.assertIsNotNone(d)
         self.assertLess(abs(d), 0.5)
 
     def test_a_two_second_error_alarms(self):
-        r = _recorder(ordinal_offset_ms=2000.0)
+        r = _recorder()
+        edge = ANCHOR_RTP + 10 * SR
+        named = ANCHOR_UTC_NS // 1_000_000_000 + 12   # two seconds wrong
         with self.assertLogs("hf_timestd.core.core_recorder_v2",
                              level="WARNING") as cm:
-            r._t6_check_ordinal()
-        self.assertTrue(any("ordinal" in line.lower() for line in cm.output))
+            d = r._t6_check_named_second(edge, named)
+        self.assertAlmostEqual(abs(d), 2.0, places=3)
+        self.assertTrue(any("named" in line.lower() for line in cm.output))
 
-    def test_the_alarm_names_the_ordinal_not_t6(self):
-        """Under primacy the functional T6 is the bench."""
-        r = _recorder(ordinal_offset_ms=2000.0)
+    def test_the_alarm_indicts_the_namer_not_t6(self):
+        r = _recorder()
+        edge = ANCHOR_RTP + 10 * SR
+        named = ANCHOR_UTC_NS // 1_000_000_000 + 12
         with self.assertLogs("hf_timestd.core.core_recorder_v2",
                              level="WARNING") as cm:
-            r._t6_check_ordinal()
-        joined = " ".join(cm.output)
-        self.assertIn("T2", joined)
+            r._t6_check_named_second(edge, named)
+        joined = " ".join(cm.output).lower()
+        self.assertIn("named", joined)
+        self.assertNotIn("t6 suspect", joined)
 
     def test_t6_keeps_its_anchor_through_the_disagreement(self):
-        r = _recorder(ordinal_offset_ms=2000.0)
+        r = _recorder()
         anchor = r._t6_native_anchor
-        r._t6_check_ordinal()
+        r._t6_check_named_second(ANCHOR_RTP + 10 * SR,
+                                 ANCHOR_UTC_NS // 1_000_000_000 + 12)
         self.assertIs(r._t6_native_anchor, anchor)
 
     def test_no_anchor_means_no_check(self):
-        r = _recorder(ordinal_offset_ms=2000.0)
-        r._t6_native_anchor = None
-        self.assertIsNone(r._t6_check_ordinal())
+        r = _recorder(anchor=False)
+        self.assertIsNone(r._t6_check_named_second(
+            ANCHOR_RTP, ANCHOR_UTC_NS // 1_000_000_000))
 
-    def test_no_ordinal_means_no_check(self):
-        r = _recorder(ordinal_offset_ms=0.0)
-        r._get_ordinal_reference = lambda: None
-        self.assertIsNone(r._t6_check_ordinal())
+    def test_no_named_second_means_no_check(self):
+        r = _recorder()
+        self.assertIsNone(r._t6_check_named_second(ANCHOR_RTP, None))
+
+    def test_the_alarm_is_throttled(self):
+        r = _recorder()
+        edge = ANCHOR_RTP + 10 * SR
+        named = ANCHOR_UTC_NS // 1_000_000_000 + 12
+        with self.assertLogs("hf_timestd.core.core_recorder_v2",
+                             level="WARNING") as cm:
+            for _ in range(20):
+                r._t6_check_named_second(edge, named)
+        self.assertEqual(len(cm.output), 1, cm.output)
+
+    def test_the_check_reads_no_wall_clock(self):
+        """CLAUDE.md forbids a new time.time() in the timing path.  The
+        anchor and the edge's RTP are sufficient."""
+        import inspect
+        src = inspect.getsource(CoreRecorderV2._t6_check_named_second)
+        self.assertNotIn("time.time", src)
+        self.assertNotIn("datetime.now", src)
 
 
 if __name__ == "__main__":
@@ -1826,32 +1867,37 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Run the test and watch it fail**
 
-Run: `python -m pytest tests/test_t6_ordinal_crosscheck.py -v`
-Expected: `AttributeError: ... '_t6_check_ordinal'`.
+Run: `.venv/bin/python -m pytest tests/test_t6_ordinal_crosscheck.py -v --override-ini addopts=`
+Expected: `AttributeError: ... '_t6_check_named_second'`.
 
-- [ ] **Step 3: Write the check**
+- [ ] **Step 3: Add the constant and the check**
 
-Add the constant beside `T6_ORDINAL_MAX_SIGMA_MS`:
+Beside the other T6 class constants:
 
 ```python
     # §5.3 — a functional T6 becomes the bench.  Half a second is the
-    # whole question the ordinal answers, so anything past it means the
-    # ORDINAL named the wrong second, not that T6 found the wrong edge.
+    # whole question the namer answers, so a disagreement past it means
+    # the NAMER picked the wrong second, not that T6 found the wrong
+    # edge.  T6 holds the better registration by orders of magnitude
+    # once the battery passes.
     T6_ORDINAL_DISAGREEMENT_ALARM_SEC = 0.5
 ```
 
-and the method:
-
 ```python
-    def _t6_check_ordinal(self):
-        """Check the ordinal source against T6's own extrapolated anchor.
+    def _t6_check_named_second(self, edge_rtp, named_second):
+        """Check the namer's answer against T6's own anchor.
 
-        Spec §5.3, the judge inverted.  Once T6 passes the battery it
-        holds the better registration by two orders of magnitude, so a
-        disagreement past half a second indicts the ORDINAL SOURCE.  T6
-        keeps its own count and alarms naming that source.
+        Spec §5.3, the judge inverted.  T6 extrapolates its anchor to
+        this edge; the namer answers independently; they describe the
+        same edge, so they compare directly.  A disagreement past
+        ``T6_ORDINAL_DISAGREEMENT_ALARM_SEC`` indicts the NAMER.
 
-        This mirrors authority_manager._witness_drives_consequences,
+        ⛔ Reads no wall clock.  CLAUDE.md keeps the host clock a
+        derived product and never a source in the timing path, and this
+        check needs only the anchor and an RTP difference.  Do not add a
+        ``time.time()`` here for convenience.
+
+        Mirrors ``authority_manager._witness_drives_consequences``,
         which already shields a GPS-disciplined rtp-frame tier from
         sysclock-frame witnesses: they flag, they never demote.
 
@@ -1859,58 +1905,74 @@ and the method:
         unavailable.
         """
         anchor = getattr(self, '_t6_native_anchor', None)
-        if anchor is None:
+        if anchor is None or named_second is None:
             return None
-        ref = self._get_ordinal_reference()
-        if ref is None:
+        try:
+            sr = float(anchor.sample_rate_hz)
+            if sr <= 0:
+                return None
+            elapsed_sec = (int(edge_rtp) - int(anchor.anchor_rtp)) / sr
+            t6_utc_sec = anchor.anchor_utc_ns / 1e9 + elapsed_sec
+            disagreement = t6_utc_sec - float(named_second)
+        except (TypeError, ValueError, ZeroDivisionError, AttributeError):
             return None
-        ref_offset_ms, ref_sigma_ms, ref_tier = ref
-        now_ns = self._t6_now_utc_ns()
-        # T6's own view of (system_clock − UTC), from the anchor.
-        t6_offset_sec = (now_ns - anchor.anchor_utc_ns) / 1e9
-        disagreement = t6_offset_sec - (ref_offset_ms / 1000.0)
         if abs(disagreement) > self.T6_ORDINAL_DISAGREEMENT_ALARM_SEC:
-            if self._t6_say_once('ordinal_disagrees'):
+            if self._t6_say_once('named_second_disagrees'):
                 logger.warning(
-                    "ORDINAL SOURCE %s DISAGREES with T6 by %+.3f s "
-                    "(its offset %+.3f ms, sigma %.3f ms).  T6 holds the "
-                    "better registration by two orders of magnitude and "
-                    "KEEPS its own count; this indicts %s, not T6.  "
-                    "Check that source's discipline.  (Repeated at most "
+                    "NAMED SECOND DISAGREES with T6 by %+.3f s (T6 "
+                    "extrapolates %.3f from its anchor; the namer says "
+                    "%d).  T6 holds the better registration by orders of "
+                    "magnitude and KEEPS its own count -- this indicts "
+                    "the naming cascade, not T6.  Check the T5 NMEA "
+                    "reading and the radiod pair.  (Repeated at most "
                     "every %.0f s.)",
-                    ref_tier, disagreement, ref_offset_ms, ref_sigma_ms,
-                    ref_tier, self.T6_REPEAT_PERIOD_SEC)
+                    disagreement, t6_utc_sec, int(named_second),
+                    self.T6_REPEAT_PERIOD_SEC)
         return disagreement
 ```
 
-⚠ `_t6_now_utc_ns` may not exist. If the recorder reads the clock another way,
-use that and adapt the test's stub name to match. Do not add a second clock
-accessor to the class.
+Add `named_second_disagrees` to the throttle guard list in
+`tests/unit/test_t6_say_once.py`.
 
-- [ ] **Step 4: Call it on the T6 poll**
+- [ ] **Step 4: Call it where the namer is consulted**
 
-Call `self._t6_check_ordinal()` once per T6 poll cycle, beside the other
-periodic T6 work. Its return value goes nowhere — the alarm is the product.
+Find where `_t6_name_integer_second` is called with a live anchor available —
+the fine-stage path is the natural site. Call
+`self._t6_check_named_second(fine.edge_rtp, named)` there. Its return value goes
+nowhere; the alarm is the product.
+
+⚠ That region is upstream of the authority call and already fails closed. Keep
+your addition inside that protection: a raise here must not stop T6 asserting.
 
 - [ ] **Step 5: Run the tests**
 
-Run: `python -m pytest tests/test_t6_ordinal_crosscheck.py -v`
-Expected: PASS.
+Run:
+```
+.venv/bin/python -m pytest tests/test_t6_ordinal_crosscheck.py \
+    tests/unit/test_t6_say_once.py tests/test_t6_acquire_on_fold.py \
+    -v --override-ini addopts=
+```
+Then `.venv/bin/python -m pytest tests/ -k "t6 or bpsk or anchor" --override-ini addopts= -q`
+
+⚠ 13 pre-existing failures (11 + 2) verified at `5cff36e`. Report before/after.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add src/hf_timestd/core/core_recorder_v2.py tests/test_t6_ordinal_crosscheck.py
-git commit -m "t6: the judge inverts -- a functional T6 checks the ordinal
+git commit -m "t6: the judge inverts -- a functional T6 checks the namer
 
-Once T6 passes the battery it holds the better registration by two orders
-of magnitude.  A disagreement past half a second therefore says the
-ordinal source named the wrong second, not that T6 found the wrong edge,
-and the alarm names that source.  T6 keeps its own count.
+Once T6 passes the battery it holds the better registration by orders of
+magnitude.  A disagreement past half a second therefore says the naming
+cascade picked the wrong second, not that T6 found the wrong edge, and the
+alarm says so.  T6 keeps its own count.
+
+The check reads no wall clock: T6's anchor and the edge's RTP give T6's
+answer, the namer gives the other, and both describe the same edge.  The host
+clock stays a derived product rather than becoming a source.
 
 This mirrors authority_manager._witness_drives_consequences, which has
-shielded a GPS-disciplined rtp-frame tier from sysclock witnesses all
-along.  The acquisition path finally gets the same treatment.
+shielded a GPS-disciplined rtp-frame tier from sysclock witnesses all along.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ```
