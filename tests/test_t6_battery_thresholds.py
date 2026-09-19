@@ -28,7 +28,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_bpsk_pps_calibrator_mf import _make_bpsk_signal
 from hf_timestd.core.bpsk_edge_fine_stage import BpskEdgeFineStage
-from hf_timestd.core.t6_battery import T6Battery, BatteryThresholds
+from hf_timestd.core.t6_battery import (
+    T6Battery, BatteryThresholds, SIGMA_CEILING_FLOOR_MS)
 
 SR = 96000
 BATCH = 1920
@@ -37,6 +38,14 @@ EDGE = 47916.1672
 
 # B4's measured worst hour, 2026-08-28.  AI6VN's injected pilot reads 77.
 B4_WORST_CN0 = 48.4
+
+# Every C/N0 the sweep drives.  The sigma ceiling must behave at all of
+# them, not merely at the governing case.
+SWEPT_CN0 = (77.0, 66.0, 58.0, 52.0, B4_WORST_CN0, 44.0)
+
+# B4's recorded hourly `t6_sigma_ms` runs 0.003 - 0.07 ms.  The high end
+# is what an unfloored ceiling would have refused.
+B4_WORST_REPORTED_SIGMA_MS = 0.07
 
 SWEEP = unittest.skipUnless(os.environ.get("T6_SWEEP"), "slow: set T6_SWEEP=1")
 
@@ -289,21 +298,129 @@ class TestTheThresholdsSitBetweenTheMeasuredPopulations(unittest.TestCase):
         self.assertGreater(self.t.max_transition_width_samples, 5.0)
 
     def test_the_sigma_ceiling_is_not_a_swept_quantity(self):
-        """`reported_sigma_ms` arrives as an argument, so no C/N0 arm
-        can measure it.  What the sweep constrains is the curve beneath
-        it: the measured per-block scatter tracked 1/sqrt(SNR) across
-        33 dB while sitting 4.0-5.2x above the prediction, so roughly 5
-        of the 100x margin is consumed by the anchor constant."""
+        """`reported_sigma_ms` arrives as an argument, so no C/N0 arm can
+        measure it -- pure noise and a healthy pilot read whatever the
+        caller hands over.  All this test establishes is the fact that
+        makes the other two sigma classes necessary: the battery reads
+        sigma straight back out of its input, so the criterion can only
+        ever judge it against a MODEL.  The model's anchoring lives in
+        TestThePredictionCurveIsAnchoredToWhatTheStageProduces and the
+        resulting ceiling in
+        TestTheSigmaCeilingDoesNotRefuseTheStationItServes."""
         bat = T6Battery(sample_rate=SR, fold_seconds=K)
-        measured_us = {77.0: 0.0900, 66.0: 0.3210, 58.0: 0.7512,
-                       52.0: 1.3760, 48.4: 2.0950, 44.0: 3.1175}
-        for cn0, us in measured_us.items():
+        for handed_in in (0.001, 0.05, 12.5):
+            with self.subTest(reported=handed_in):
+                v = _sigma_verdict(handed_in, B4_WORST_CN0, bat=bat)
+                self.assertEqual(v.criteria["sigma"], handed_in)
+                self.assertEqual(v.sigma_ms, handed_in)
+
+
+def _sigma_verdict(sigma_ms: float, cn0: float, *, bat=None):
+    """One healthy six-block run through the real battery, so only the
+    sigma criterion can be what decides."""
+    import test_t6_battery as fixtures  # the healthy FineEdgeEstimate
+    bat = bat or T6Battery(sample_rate=SR, fold_seconds=K)
+    bat.reset()
+    v = None
+    for e in fixtures._series(6):
+        v = bat.evaluate(e, implied_chain_delay_ns=16_618_000,
+                         reported_sigma_ms=sigma_ms, cn0_db_hz=cn0)
+    return v
+
+
+class TestTheSigmaCeilingDoesNotRefuseTheStationItServes(unittest.TestCase):
+    """The regression that would have caught the misfire.
+
+    ⛔ The ceiling compares two DIFFERENT quantities: `reported_sigma_ms`
+    is the tier's OWN published uncertainty, computed by the authority
+    from its own statistics, while `_predicted_sigma_ms` models the
+    FOLD's block-to-block scatter.  Those are not the same measurement
+    and no choice of anchor constant makes comparing them sound -- so an
+    absolute floor sits under the ceiling.
+
+    Before the floor, a plausible daytime 57 dB-Hz gave a ceiling near
+    0.017 ms, and B4's recorded hourly sigma runs 0.003-0.07 ms.  A
+    healthy B4 would have been REFUSED: precisely the failure this whole
+    design exists to end.  Shipping that would have been worse than
+    shipping no sigma criterion at all."""
+
+    def test_b4s_worst_recorded_sigma_passes_at_every_swept_cn0(self):
+        for cn0 in SWEPT_CN0:
             with self.subTest(cn0=cn0):
-                ratio = (us / 1000.0) / bat._predicted_sigma_ms(cn0)
+                v = _sigma_verdict(B4_WORST_REPORTED_SIGMA_MS, cn0)
+                self.assertNotIn(
+                    "sigma", v.failures,
+                    f"a healthy B4 hour was refused at {cn0} dB-Hz; "
+                    f"ceiling {v.criteria['sigma_ceiling_ms']} ms")
+                self.assertTrue(v.passed, v.failures)
+
+    def test_477_ms_still_fails_at_every_swept_cn0(self):
+        """DASI-009.AI6VN, 2026-09-18.  No band condition excuses it,
+        and the floor must not have excused it either."""
+        for cn0 in SWEPT_CN0:
+            with self.subTest(cn0=cn0):
+                v = _sigma_verdict(477.0, cn0)
+                self.assertIn("sigma", v.failures)
+                self.assertFalse(v.passed)
+
+    def test_the_floor_governs_the_whole_working_band(self):
+        """From 77 dB-Hz down to about 36 the floor IS the ceiling; only
+        below that does the 1/sqrt(SNR) term widen it, which is the
+        intended behaviour for a channel genuinely that bad."""
+        bat = T6Battery(sample_rate=SR, fold_seconds=K)
+        for cn0 in SWEPT_CN0:
+            with self.subTest(cn0=cn0):
+                curve = bat._predicted_sigma_ms(cn0) * bat.t.sigma_margin
+                self.assertLess(curve, SIGMA_CEILING_FLOOR_MS)
+                v = _sigma_verdict(0.001, cn0)
+                self.assertEqual(v.criteria["sigma_ceiling_ms"],
+                                 SIGMA_CEILING_FLOOR_MS)
+        self.assertGreater(
+            bat._predicted_sigma_ms(30.0) * bat.t.sigma_margin,
+            SIGMA_CEILING_FLOOR_MS)
+
+    def test_the_floor_clears_b4_by_14x_and_refuses_ai6vn_by_477x(self):
+        """The two station measurements that fix where the floor sits."""
+        self.assertAlmostEqual(
+            SIGMA_CEILING_FLOOR_MS / B4_WORST_REPORTED_SIGMA_MS,
+            14.3, places=1)
+        self.assertAlmostEqual(477.0 / SIGMA_CEILING_FLOOR_MS, 477.0, places=1)
+
+
+class TestThePredictionCurveIsAnchoredToWhatTheStageProduces(unittest.TestCase):
+    """⚠ Re-anchored 2026-09-19: REF_SIGMA_NS 95 -> 490.
+
+    95 ns came from §8c's real-IQ per-second measurement at 77 dB-Hz.
+    The sweep measured this stage's own block-to-block scatter and found
+    it 4.0-5.2x wider, uniformly across 33 dB -- the 1/sqrt(SNR) SHAPE
+    held, so the law was right and only the constant was wrong.  Code
+    must be anchored to what it actually produces."""
+
+    MEASURED_US_PER_BLOCK = {77.0: 0.0900, 66.0: 0.3210, 58.0: 0.7512,
+                             52.0: 1.3760, 48.4: 2.0950, 44.0: 3.1175}
+
+    def test_the_curve_now_tracks_the_measurement_within_1_3x(self):
+        bat = T6Battery(sample_rate=SR, fold_seconds=K)
+        for cn0, us in self.MEASURED_US_PER_BLOCK.items():
+            with self.subTest(cn0=cn0):
+                ratio = bat._predicted_sigma_ms(cn0) / (us / 1000.0)
+                # Over-predicting is the safe direction for a ceiling;
+                # under-predicting by more than a few percent is not.
+                self.assertGreater(ratio, 0.95)
+                self.assertLess(ratio, 1.30)
+
+    def test_the_old_anchor_would_have_under_predicted_by_about_five(self):
+        """Kept as the record of WHY it moved: at 95 ns the curve sat
+        4.0-5.2x below the stage's measured scatter, so 5x of the 100x
+        margin was silently covering a modelling error rather than real
+        variation."""
+        bat = T6Battery(sample_rate=SR, fold_seconds=K)
+        for cn0, us in self.MEASURED_US_PER_BLOCK.items():
+            with self.subTest(cn0=cn0):
+                old = bat._predicted_sigma_ms(cn0) * (95.0 / 490.0)
+                ratio = (us / 1000.0) / old
                 self.assertGreater(ratio, 3.5)
                 self.assertLess(ratio, 6.0)
-                # The margin must still cover the under-prediction.
-                self.assertGreater(bat.t.sigma_margin, ratio * 10)
 
 
 class TestSigmaCeilingTracksCn0(unittest.TestCase):

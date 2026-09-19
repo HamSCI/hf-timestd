@@ -14,6 +14,13 @@ COHERENCE: both read healthy when a single oscillator drives everything
 and drifts together.  Never cite either as evidence that a GPSDO holds
 UTC.  See T6_ACCEPTANCE_CRITERIA.md §4.4.
 
+⛔ Criterion 5 (sigma) guards GROSS BREAKAGE only -- orders of
+magnitude, never a factor of two.  It compares the tier's own published
+uncertainty against a model of the FOLD's scatter, and those are not the
+same measurement, so an absolute floor sits under the ceiling to stop it
+refusing the healthy stations it exists to serve.  See
+SIGMA_CEILING_FLOOR_MS and the note beside `sigma_margin`.
+
 ⛔ Evidence the fold could not compute must never be evidence that the
 fold is healthy.  In plain Python, ``nan < x`` and ``nan > x`` are both
 False, so a bare threshold comparison silently PASSES a NaN — the
@@ -47,6 +54,30 @@ ALL_CRITERIA = (RETENTION, RULER, UNIMODALITY, SHAPE, SIGMA,
 # full searches agree: the battery should be no quicker to trust a
 # position than the stage that found it.
 HISTORY_REQUIRED_BLOCKS = 3
+
+# Absolute floor under criterion 5's sigma ceiling, in ms.
+#
+# ⛔ WHY A FLOOR AT ALL.  The ceiling compares two DIFFERENT quantities.
+# `reported_sigma_ms` is the tier's OWN published uncertainty, computed
+# by the authority from its own statistics; `_predicted_sigma_ms` models
+# the FOLD's block-to-block scatter.  They are not the same measurement,
+# and no choice of anchor constant makes comparing them sound -- so the
+# criterion must not be allowed to police the difference between them.
+#
+# The numbers say an unfloored ceiling misfires on a real station.  B4's
+# recorded hourly `t6_sigma_ms` runs 0.003-0.07 ms.  At a plausible
+# daytime 57 dB-Hz the pre-floor ceiling computes to about 0.017 ms, so
+# a healthy B4 would be REFUSED -- precisely the failure this whole
+# design exists to end.  Shipping that would be worse than shipping no
+# sigma criterion at all.
+#
+# 1.0 ms clears B4's worst recorded hour (0.07 ms) by about 14x, while
+# the case the criterion was written for -- 477 ms at DASI-009.AI6VN on
+# 2026-09-18 -- still fails by 477x.  The floor dominates the curve from
+# 77 dB-Hz down to about 36 dB-Hz; below that the 1/sqrt(SNR) term takes
+# over and widens the ceiling further, which is the intended behaviour
+# for a channel genuinely that bad.
+SIGMA_CEILING_FLOOR_MS = 1.0
 
 
 @dataclass(frozen=True)
@@ -90,6 +121,12 @@ class BatteryThresholds:
     # not go HIGHER: the 44 dB-Hz column shows this criterion sets T6's
     # effective C/N0 floor near 43.7 dB-Hz in this model, so raising the
     # threshold raises that floor into the band B4 actually works in.
+    #
+    # ⛔ B4's worst recorded hour of 48.4 dB-Hz holds only 4.7 dB above
+    # that floor, and retention falls steeply through the band (0.9995
+    # at 77, 0.727 at 48.4, 0.528 at 44).  Do not raise this threshold
+    # without re-measuring B4 first.  Whoever raises it is deciding, in
+    # effect, which of B4's hours T6 is allowed to serve.
     # (AI6VN measured 0.006 on captured IQ with the TS-1's REF IN on its
     # internal 10 MHz, and 0.9998 once fed from the governing GPSDO.)
     min_fold_retention: float = 0.50
@@ -195,33 +232,30 @@ class BatteryThresholds:
     # the battery owns a complete verdict.
     max_chain_delay_ns: int = 250_000_000
     # Sigma ceiling (§4.3): the reported sigma may exceed the physical
-    # prediction by at most this factor.  A T6 reporting 477 ms has not
+    # prediction by at most this factor, subject to the absolute
+    # SIGMA_CEILING_FLOOR_MS beneath it.  A T6 reporting 477 ms has not
     # produced a wide T6, it has produced a broken one.
     #
-    # ⛔ Like plausibility, this one cannot be swept: `reported_sigma_ms`
-    # is an input to `evaluate`, so pure noise and a healthy pilot read
-    # whatever the caller hands over.  What the sweep CAN check is the
-    # prediction curve the ceiling rides on, and it does:
-    #     measured block-to-block position scatter vs _predicted_sigma_ms
-    #       77 dB-Hz  0.090 us / 0.017 us  ->  5.19x
-    #       66 dB-Hz  0.321 us / 0.062 us  ->  5.22x
-    #       58 dB-Hz  0.751 us / 0.155 us  ->  4.86x
-    #       52 dB-Hz  1.376 us / 0.308 us  ->  4.46x
-    #     48.4 dB-Hz  2.095 us / 0.467 us  ->  4.49x
-    #       44 dB-Hz  3.118 us / 0.775 us  ->  4.02x
-    # The 1/sqrt(SNR) SHAPE holds across 33 dB -- the ratio is flat --
-    # but the anchor constant (95 ns per second at 77 dB-Hz, one
-    # measured point) under-predicts this stage's actual scatter by
-    # about 5x throughout.  That is exactly the error a generous margin
-    # exists to absorb: ~5 of the 100x is consumed by the anchor, ~20x
-    # remains as real headroom.  The criterion catches a tier reporting
-    # orders of magnitude outside its physics, not a factor of two.  At
-    # 48.4 dB-Hz the ceiling lands at 0.047 ms, four orders below the
-    # 477 ms it must refuse.
+    # ⛔ WHAT THIS CRITERION CAN AND CANNOT CLAIM.  It guards GROSS
+    # BREAKAGE only -- orders of magnitude, never a factor of two.  It
+    # cannot police precision, because the two sides of the comparison
+    # are not the same measurement: `reported_sigma_ms` is the tier's own
+    # published uncertainty and `_predicted_sigma_ms` is a model of the
+    # fold's block-to-block scatter.  Tightening it would need a station
+    # measurement of what healthy tiers actually REPORT -- not what the
+    # fold scatters -- which is out of scope here and belongs to
+    # on-station verification.  Until that measurement exists, read a
+    # pass on criterion 5 as "not obviously broken", never as "precise".
     #
-    # ⚠ Lower bound on this number: a station at 77 dB-Hz reporting
-    # 1 us of sigma needs margin > 57.7 to pass at all, so 100 carries
-    # only 1.73x of headroom on the healthy-at-77 case.  Do not lower it.
+    # ⛔ Like plausibility, the margin itself cannot be swept:
+    # `reported_sigma_ms` is an input to `evaluate`, so pure noise and a
+    # healthy pilot read whatever the caller hands over.  What the sweep
+    # CAN check is the prediction curve the ceiling rides on, and it did
+    # -- see the re-anchoring note in `_predicted_sigma_ms`.  With the
+    # curve anchored to what this stage actually produces, the 100x
+    # margin is no longer absorbing a 5x modelling error; it is real
+    # headroom over a curve that tracks the measurement to within 1.3x
+    # across 33 dB.
     sigma_margin: float = 100.0
     # Fallback ceiling when no C/N0 reading accompanies the estimate.
     # 1 ms is 320x the 3.1 us of per-block scatter measured at 44 dB-Hz,
@@ -282,16 +316,44 @@ class T6Battery:
     def _predicted_sigma_ms(self, cn0_db_hz: Optional[float]) -> Optional[float]:
         """Per-block scatter the channel's C/N0 predicts, in ms.
 
-        Anchored on the 2026-09-18 capture: 95 ns of per-second scatter
-        at 77 dB-Hz on an injected pilot.  Scatter follows 1/sqrt(SNR),
-        so it doubles for every 6 dB lost, and the fold improves it by
-        sqrt(K).  At B4's measured 48.4 dB-Hz worst hour this predicts
-        roughly 2.6 us per second and 0.5 us per 30 s block.
+        Scatter follows 1/sqrt(SNR), so it doubles for every 6 dB lost,
+        and the fold improves it by sqrt(K).
+
+        ⚠ RE-ANCHORED 2026-09-19.  The constant was 95 ns, taken from
+        §8c's real-IQ per-second measurement at 77 dB-Hz on an injected
+        pilot.  The C/N0 sweep then measured this stage's own
+        block-to-block position scatter and found it 4.0-5.2x WIDER than
+        that anchor predicted, uniformly across 33 dB:
+
+            C/N0   measured/block   old prediction   ratio
+            77      0.090 us         0.017 us        5.19x
+            66      0.321 us         0.062 us        5.22x
+            58      0.751 us         0.155 us        4.86x
+            52      1.376 us         0.308 us        4.46x
+            48.4    2.095 us         0.467 us        4.49x
+            44      3.118 us         0.775 us        4.02x
+
+        The 1/sqrt(SNR) SHAPE held -- the ratio is flat -- so the law is
+        right and only the constant was wrong.  Solving each row for the
+        anchor gives 493, 496, 462, 424, 426 and 382 ns; 490 ns takes the
+        77 and 66 dB-Hz points essentially exactly (0.99x) and
+        over-predicts by at most 1.28x at 44 dB-Hz, which is the safe
+        direction for a ceiling.
+
+        ⛔ Code must be anchored to what it actually produces.  The old
+        constant described a different measurement -- real IQ through a
+        different path -- and leaving it in place meant a 100x margin was
+        silently spending 5x of itself covering a modelling error rather
+        than covering real variation.  Re-measure this curve, on this
+        stage, before changing the constant again.
+
+        At B4's measured 48.4 dB-Hz worst hour this now predicts roughly
+        13.2 us per second and 2.4 us per 30 s block.
         """
         if cn0_db_hz is None:
             return None
         REF_CN0_DB_HZ = 77.0
-        REF_SIGMA_NS = 95.0
+        REF_SIGMA_NS = 490.0
         per_second_ns = REF_SIGMA_NS * 10 ** ((REF_CN0_DB_HZ - cn0_db_hz) / 20.0)
         per_block_ns = per_second_ns / math.sqrt(self.fold_seconds)
         return per_block_ns / 1e6
@@ -378,7 +440,14 @@ class T6Battery:
         # 5 — sigma inside the tier's physical budget.
         criteria[SIGMA] = float(reported_sigma_ms)
         predicted = self._predicted_sigma_ms(cn0_db_hz)
-        ceiling = (predicted * self.t.sigma_margin if predicted is not None
+        # ⛔ The floor, not the curve, governs the whole working band.
+        # An unfloored ceiling computes to ~0.017 ms at 57 dB-Hz, which
+        # would REFUSE a healthy B4 whose recorded hourly sigma runs
+        # 0.003-0.07 ms.  See SIGMA_CEILING_FLOOR_MS: this criterion
+        # guards gross breakage, and a bound that refuses the station it
+        # was written to serve guards nothing.
+        ceiling = (max(predicted * self.t.sigma_margin,
+                       SIGMA_CEILING_FLOOR_MS) if predicted is not None
                    else self.t.max_sigma_ms_without_cn0)
         criteria["sigma_ceiling_ms"] = float(ceiling)
         if self._fails(reported_sigma_ms, lambda v: v > ceiling):
