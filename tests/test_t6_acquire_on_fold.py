@@ -1,11 +1,23 @@
 """Acquisition runs on the fold's edge; the namer only says which second.
 
-⛔ Read the fixture arithmetic before changing a number.  An earlier draft
-of this file described two different edges at once -- `edge_rtp` implied an
-RTP phase of 87916 samples while `edge_offset_samples` said 47916 -- so no
-correct implementation could have satisfied it, and a wrong one did.  Every
-constant below describes ONE edge, and the comment beside each says how it
-was derived so the next reader can check it rather than trust it.
+⛔ TWO fixture defects have hidden real bugs in this file.  Read before
+changing a number.
+
+1. An early draft described two edges at once -- `edge_rtp` implied an RTP
+   phase of 87916 samples while `edge_offset_samples` said 47916 -- so no
+   correct implementation could satisfy it, and a wrong one did.
+2. The next draft drove `_t6_disambiguate_via_external_reference` once per
+   fold block, advancing the estimate each time.  The recorder never does
+   that: the acquisition path runs only while `_t6_last_chain_delay_ns is
+   None`, i.e. ONCE per first-lock, or repeatedly against the SAME
+   estimate.  The manufactured cadence let a battery evaluated inside
+   acquisition appear to accumulate a run of blocks it could never see in
+   production, hiding a defect that made an anchor impossible.
+
+So: `_feed_blocks` drives `_t6_evaluate_battery` at the fold cadence, which
+is where blocks really arrive, and `_acquire` calls the acquisition path
+ONCE, which is how often the recorder calls it.  Every constant below
+describes ONE edge and says how it was derived.
 """
 from __future__ import annotations
 
@@ -46,11 +58,13 @@ EDGE_OFFSET_SAMPLES = 1595.0
 # must come from the fold's edge, never this one.
 MF_EDGE_RTP = EDGE_RTP + 500
 
-N_BLOCKS = 4
-# _drive advances the edge by one fold block per call, so the last block's
-# edge belongs to this second.
-LAST_NAMED = NAMED_SECOND + (N_BLOCKS - 1) * K
-LAST_EDGE_RTP = EDGE_RTP + (N_BLOCKS - 1) * SR * K
+# Three blocks is HISTORY_REQUIRED_BLOCKS: what the ruler and unimodality
+# criteria need before they will report at all.
+BLOCKS = 3
+# _feed_blocks advances one fold block per call, so the last block's edge
+# belongs to this second.
+LAST_NAMED = NAMED_SECOND + (BLOCKS - 1) * K
+LAST_EDGE_RTP = EDGE_RTP + (BLOCKS - 1) * SR * K
 
 
 def _estimate(edge_rtp, **over):
@@ -71,11 +85,11 @@ def _result(chain_delay_ns=CHAIN_DELAY_NS):
 
 
 def _recorder(named=NAMED_SECOND, battery=None):
-    """A bare namespace carrying only what the method touches."""
+    """A bare namespace carrying only what the two methods touch."""
     r = SimpleNamespace()
     for name in ("_t6_disambiguate_via_external_reference",
-                 "_t6_say_once", "_t6_reported_sigma_ms",
-                 "_t6_battery_forget_run"):
+                 "_t6_evaluate_battery", "_t6_say_once",
+                 "_t6_reported_sigma_ms", "_t6_battery_forget_run"):
         setattr(r, name, getattr(CoreRecorderV2, name).__get__(r))
     r.T6_REPEAT_PERIOD_SEC = CoreRecorderV2.T6_REPEAT_PERIOD_SEC
     r._t6_say_once_at = {}
@@ -89,6 +103,7 @@ def _recorder(named=NAMED_SECOND, battery=None):
     r._t6_battery = battery or T6Battery(sample_rate=SR, fold_seconds=K)
     r._t6_last_verdict = None
     r._t6_disambiguation_ns = 0
+    r._t6_last_chain_delay_ns = None
     r._t6_native_anchor = None
     r._t6_rate_reset = lambda _why: None
     r._t6_channel_info = SimpleNamespace(chain_delay_correction_ns=None)
@@ -96,6 +111,11 @@ def _recorder(named=NAMED_SECOND, battery=None):
                                        _last_edge_rtp=MF_EDGE_RTP)
     r._t6_last_fine_est = None
     r._t6_chain_delay_history = [16_618_000, 16_618_100, 16_617_900]
+    # Fixture bookkeeping: which fold block comes next.  Successive
+    # _feed_blocks calls CONTINUE the run, as the fine stage does --
+    # restarting the edge sequence would hand the ruler a gap of zero
+    # and fail a battery that production would have passed.
+    r._fixture_next_block = 0
     return r
 
 
@@ -112,7 +132,33 @@ def _wall_of(rtp, wall_error_sec=0.0):
             + CHAIN_DELAY_SEC + wall_error_sec)
 
 
-def _drive(r, result=None, n=N_BLOCKS, wall_error_sec=0.0, **over):
+_KEEP = object()   # "caller said nothing", as distinct from "caller said None"
+
+
+def _feed_blocks(r, n=BLOCKS, result=_KEEP, **over):
+    """Fold blocks arriving at the fine stage's cadence.
+
+    This is what the recorder does at `_t6_on_samples`: one estimate per
+    completed fold block, one battery evaluation each, edges exactly one
+    fold apart.  Leaves `_t6_last_fine_est` on the last block, as the
+    recorder does.  `result=None` models the matched filter unlocked --
+    `_maybe_result` returns None unless it is locked WITH an estimate.
+    """
+    result = _result() if result is _KEEP else result
+    for _ in range(n):
+        i = r._fixture_next_block
+        r._fixture_next_block = i + 1
+        est = _estimate(EDGE_RTP + i * SR * K, **over)
+        r._t6_last_fine_est = est
+        r._t6_evaluate_battery(est, result)
+
+
+def _acquire(r, result=None, wall_error_sec=0.0, times=1):
+    """The acquisition path, called as often as the recorder calls it.
+
+    Once per first-lock.  `times` exists only for the tests that prove
+    repetition changes nothing.
+    """
     result = _result() if result is None else result
 
     def _fake_rtp_to_utc(rtp, _channel_info):
@@ -120,8 +166,7 @@ def _drive(r, result=None, n=N_BLOCKS, wall_error_sec=0.0, **over):
 
     with mock.patch("ka9q.rtp_recorder.rtp_to_utc",
                     side_effect=_fake_rtp_to_utc):
-        for i in range(n):
-            r._t6_last_fine_est = _estimate(EDGE_RTP + i * SR * K, **over)
+        for _ in range(times):
             r._t6_disambiguate_via_external_reference(result)
 
 
@@ -129,14 +174,16 @@ class TestAcquisitionUsesTheFold(unittest.TestCase):
 
     def test_a_passing_battery_captures_an_anchor(self):
         r = _recorder()
-        _drive(r)
+        _feed_blocks(r)
+        _acquire(r)
         self.assertIsNotNone(r._t6_native_anchor)
         self.assertTrue(r._t6_last_verdict.passed,
                         r._t6_last_verdict.failures)
 
     def test_a_failing_battery_captures_nothing(self):
         r = _recorder()
-        _drive(r, fold_retention=0.006)
+        _feed_blocks(r, fold_retention=0.006)
+        _acquire(r)
         self.assertIsNone(r._t6_native_anchor)
         self.assertIn("retention", r._t6_last_verdict.failures)
 
@@ -144,7 +191,8 @@ class TestAcquisitionUsesTheFold(unittest.TestCase):
         """_t6_name_integer_second returns None when neither NMEA nor the
         radiod-pair wall lands within 0.4 s of an integer."""
         r = _recorder(named=None)
-        _drive(r)
+        _feed_blocks(r)
+        _acquire(r)
         self.assertIsNone(r._t6_native_anchor)
 
     def test_the_plausibility_guard_still_refuses_a_gross_wrap(self):
@@ -156,13 +204,14 @@ class TestAcquisitionUsesTheFold(unittest.TestCase):
         and a channel filter.
         """
         r = _recorder()
-        _drive(r, wall_error_sec=0.45)
+        _feed_blocks(r)
+        _acquire(r, wall_error_sec=0.45)
         self.assertIsNone(r._t6_native_anchor)
 
     def test_the_anchor_is_built_on_the_named_second(self):
         r = _recorder()
-        _drive(r)
-        self.assertIsNotNone(r._t6_native_anchor)
+        _feed_blocks(r)
+        _acquire(r)
         self.assertEqual(r._t6_native_anchor.captured_at_utc_ns,
                          LAST_NAMED * 1_000_000_000)
 
@@ -172,13 +221,15 @@ class TestAcquisitionUsesTheFold(unittest.TestCase):
         r = _recorder()
         r._get_disambiguation_reference = mock.Mock(
             side_effect=AssertionError("old gate consulted"))
-        _drive(r)
+        _feed_blocks(r)
+        _acquire(r)
         r._get_disambiguation_reference.assert_not_called()
 
     def test_the_anchor_registers_the_folds_edge_not_the_matched_filters(self):
         """The fold locates the edge; the MF is only the trigger."""
         r = _recorder()
-        _drive(r)
+        _feed_blocks(r)
+        _acquire(r)
         self.assertEqual(r._t6_native_anchor.anchor_rtp,
                          LAST_EDGE_RTP & 0xFFFFFFFF)
         self.assertNotEqual(r._t6_native_anchor.anchor_rtp,
@@ -192,10 +243,143 @@ class TestAcquisitionUsesTheFold(unittest.TestCase):
         the anchor must not move by one nanosecond.
         """
         good = _recorder()
-        _drive(good)
+        _feed_blocks(good)
+        _acquire(good)
         wrong = _recorder()
-        _drive(wrong, edge_offset_samples=77_777.0)
+        _feed_blocks(wrong, edge_offset_samples=77_777.0)
+        _acquire(wrong)
         self.assertEqual(wrong._t6_native_anchor, good._t6_native_anchor)
+
+
+class TestTheBatteryIsJudgedWhereBlocksArrive(unittest.TestCase):
+    """The defect this class exists for.
+
+    `T6Battery.evaluate` appends one history entry per CALL, and criteria
+    2 and 3 need three entries one fold apart.  Acquisition runs once per
+    first-lock, so a battery evaluated there sees one block -- or N copies
+    of one block -- and can never pass.  The evaluation belongs where fold
+    blocks land.
+    """
+
+    def test_acquisition_never_evaluates_the_battery(self):
+        """⚠ COUNT the calls, do not raise from a stub.
+
+        `_t6_disambiguate_via_external_reference` wraps its whole body in
+        `except Exception` and logs, so an AssertionError raised from a
+        mock inside it is swallowed and the test passes regardless.
+        """
+        r = _recorder()
+        _feed_blocks(r)
+        before = list(r._t6_battery._edges)
+        calls = []
+        real = r._t6_battery.evaluate
+
+        def _counting(*a, **kw):
+            calls.append(1)
+            return real(*a, **kw)
+
+        r._t6_battery.evaluate = _counting
+        _acquire(r, times=6)
+        self.assertEqual(calls, [], "acquisition evaluated the battery")
+        self.assertEqual(list(r._t6_battery._edges), before)
+
+    def test_the_evaluation_is_wired_to_the_fold_block_site(self):
+        """Structural guard on the split, since the fixture drives the
+        two methods directly and would not notice them being re-joined."""
+        src = (Path(__file__).resolve().parent.parent / "src" / "hf_timestd"
+               / "core" / "core_recorder_v2.py").read_text()
+        self.assertIn("self._t6_evaluate_battery(fine, result)", src,
+                      "the fold-block site no longer evaluates the battery")
+        acquisition = src[
+            src.index("def _t6_disambiguate_via_external_reference"):
+            src.index("def _wait_for_chrony_settled")]
+        self.assertNotIn("self._t6_evaluate_battery(", acquisition, (
+            "the acquisition path evaluates the battery again; it runs "
+            "once per first-lock and cannot assemble a run of blocks"))
+
+    def test_acquisition_with_no_blocks_yet_holds_without_capturing(self):
+        r = _recorder()
+        r._t6_last_fine_est = _estimate(EDGE_RTP)
+        _acquire(r)
+        self.assertIsNone(r._t6_native_anchor)
+        self.assertIsNone(r._t6_last_verdict)
+
+    def test_repeating_the_call_does_not_manufacture_a_run(self):
+        """Six calls against one estimate -- the other cadence the
+        recorder can produce -- must not add up to a passing battery."""
+        r = _recorder()
+        r._t6_last_fine_est = _estimate(EDGE_RTP)
+        _acquire(r, times=6)
+        self.assertIsNone(r._t6_native_anchor)
+        self.assertEqual(len(r._t6_battery._edges), 0)
+
+    def test_the_hold_resolves_itself_as_blocks_accumulate(self):
+        r = _recorder()
+        r._t6_last_fine_est = _estimate(EDGE_RTP)
+        _acquire(r)
+        self.assertIsNone(r._t6_native_anchor)
+
+        _feed_blocks(r, n=1)
+        _acquire(r)
+        self.assertIsNone(r._t6_native_anchor)
+        self.assertIn("ruler", r._t6_last_verdict.failures)
+
+        _feed_blocks(r, n=BLOCKS)
+        _acquire(r)
+        self.assertIsNotNone(r._t6_native_anchor)
+
+    def test_the_holding_message_is_throttled(self):
+        """A station that never acquires must not log per cycle."""
+        r = _recorder()
+        r._t6_last_fine_est = _estimate(EDGE_RTP)
+        _acquire(r, times=200)
+        self.assertIn("battery_no_verdict", r._t6_say_once_at)
+        self.assertFalse(r._t6_say_once("battery_no_verdict"),
+                         "the holding message is not throttled")
+
+
+class TestARefusedEdgeDoesNotMoveTheClock(unittest.TestCase):
+    """`_t6_disambiguation_ns` is recorder state the CALLER folds into
+    `effective_chain_delay` and latches into `_t6_last_chain_delay_ns`,
+    whether or not an anchor was captured.  So a refusal that writes it
+    lets the battery reject an edge and the edge move the clock anyway."""
+
+    PRIOR = 12_345
+
+    def test_a_battery_refusal_leaves_the_shift_untouched(self):
+        r = _recorder()
+        r._t6_disambiguation_ns = self.PRIOR
+        # Retention 0.006: the missing-reference-cable fault measured at
+        # AI6VN, and the exact failure criterion 1 exists to catch.
+        _feed_blocks(r, fold_retention=0.006)
+        _acquire(r, wall_error_sec=0.030)
+        self.assertIsNone(r._t6_native_anchor)
+        self.assertEqual(r._t6_disambiguation_ns, self.PRIOR)
+
+    def test_a_plausibility_refusal_leaves_the_shift_untouched(self):
+        r = _recorder()
+        r._t6_disambiguation_ns = self.PRIOR
+        _feed_blocks(r)
+        _acquire(r, wall_error_sec=0.45)
+        self.assertIsNone(r._t6_native_anchor)
+        self.assertEqual(r._t6_disambiguation_ns, self.PRIOR)
+
+    def test_an_unnamed_second_leaves_the_shift_untouched(self):
+        r = _recorder(named=None)
+        r._t6_disambiguation_ns = self.PRIOR
+        _feed_blocks(r)
+        _acquire(r, wall_error_sec=0.030)
+        self.assertEqual(r._t6_disambiguation_ns, self.PRIOR)
+
+    def test_a_captured_anchor_does_commit_the_shift(self):
+        """The positive control: refusal must be the only thing that
+        withholds the write."""
+        r = _recorder()
+        r._t6_disambiguation_ns = self.PRIOR
+        _feed_blocks(r)
+        _acquire(r, wall_error_sec=3.0 / SR)
+        self.assertIsNotNone(r._t6_native_anchor)
+        self.assertEqual(r._t6_disambiguation_ns, round(3 * 1e9 / SR))
 
 
 class TestTheDeviationArithmetic(unittest.TestCase):
@@ -203,13 +387,15 @@ class TestTheDeviationArithmetic(unittest.TestCase):
 
     def test_a_firing_instant_already_on_the_named_second_shifts_nothing(self):
         r = _recorder()
-        _drive(r)
+        _feed_blocks(r)
+        _acquire(r)
         self.assertEqual(r._t6_disambiguation_ns, 0)
         self.assertEqual(r._t6_native_anchor.chain_delay_ns, CHAIN_DELAY_NS)
 
     def test_a_firing_instant_three_samples_late_shifts_three_samples(self):
         r = _recorder()
-        _drive(r, wall_error_sec=3.0 / SR)
+        _feed_blocks(r)
+        _acquire(r, wall_error_sec=3.0 / SR)
         # +3 samples of deviation -> +3 samples of correction, ADDED to
         # the raw chain delay (the caller re-forms raw + disambiguation).
         self.assertEqual(r._t6_disambiguation_ns, round(3 * 1e9 / SR))
@@ -224,14 +410,32 @@ class TestTheDeviationArithmetic(unittest.TestCase):
     def test_the_correction_is_signed_not_absolute(self):
         """Three samples EARLY must move the other way."""
         r = _recorder()
-        _drive(r, wall_error_sec=-3.0 / SR)
+        _feed_blocks(r)
+        _acquire(r, wall_error_sec=-3.0 / SR)
         self.assertEqual(r._t6_disambiguation_ns, -round(3 * 1e9 / SR))
         firing = (_wall_of(LAST_EDGE_RTP, -3.0 / SR)
                   - r._t6_native_anchor.chain_delay_ns / 1e9)
         self.assertAlmostEqual(firing, float(LAST_NAMED), places=7)
 
+    def test_the_subsample_fraction_is_carried_not_discarded(self):
+        """edge_rtp is the rounded integer; edge_subsample is what the
+        rounding threw away.  2.4 samples of mapping error plus 0.4 of
+        sub-sample is 2.8 -- three samples.  Discard the fraction and it
+        rounds to two."""
+        r = _recorder()
+        _feed_blocks(r, edge_subsample=0.4)
+        _acquire(r, wall_error_sec=2.4 / SR)
+        self.assertEqual(r._t6_disambiguation_ns, round(3 * 1e9 / SR))
+
 
 class TestThePlausibilityGuardStandsAlone(unittest.TestCase):
+
+    def _loose(self):
+        """A battery whose criterion 7 cannot fire, so only the ±250 ms
+        guard can refuse a gross wrap."""
+        return T6Battery(sample_rate=SR, fold_seconds=K,
+                         thresholds=BatteryThresholds(
+                             max_chain_delay_ns=1_000_000_000_000))
 
     def test_the_guard_refuses_where_the_battery_would_not(self):
         """Isolate criterion 7's twin.
@@ -239,58 +443,77 @@ class TestThePlausibilityGuardStandsAlone(unittest.TestCase):
         The guard and BatteryThresholds.max_chain_delay_ns carry the same
         250 ms bound, so a gross wrap trips both and deleting the guard
         breaks no test.  Loosen the battery's copy to 1000 s and only the
-        guard can refuse -- and because the guard returns BEFORE
-        `evaluate` runs, a verdict of None proves it was the guard that
-        did it.
+        guard can refuse -- and the standing verdict, asserted PASSED
+        below, shows the battery would have let it through.
         """
-        loose = T6Battery(sample_rate=SR, fold_seconds=K,
-                          thresholds=BatteryThresholds(
-                              max_chain_delay_ns=1_000_000_000_000))
-        r = _recorder(battery=loose)
-        _drive(r, wall_error_sec=0.45)
+        r = _recorder(battery=self._loose())
+        _feed_blocks(r)
+        _acquire(r, wall_error_sec=0.45)
+        self.assertTrue(r._t6_last_verdict.passed,
+                        r._t6_last_verdict.failures)
         self.assertIsNone(r._t6_native_anchor)
-        self.assertIsNone(r._t6_last_verdict,
-                          "the battery ran; the guard should have returned "
-                          "before it")
 
-    def test_the_loosened_battery_really_would_have_passed(self):
-        """Guards the test above against passing for the wrong reason."""
-        loose = T6Battery(sample_rate=SR, fold_seconds=K,
-                          thresholds=BatteryThresholds(
-                              max_chain_delay_ns=1_000_000_000_000))
-        est = _estimate(EDGE_RTP)
-        for i in range(3):
-            v = loose.evaluate(_estimate(EDGE_RTP + i * SR * K),
-                               implied_chain_delay_ns=466_618_000,
-                               reported_sigma_ms=0.0, cn0_db_hz=None)
-        self.assertTrue(v.passed, v.failures)
-        self.assertIsNotNone(est)
+
+class TestSigmaEvidence(unittest.TestCase):
+    """⛔ Evidence the station could not compute must never read as
+    evidence that it is healthy.  `or 0.0` made criterion 5 inert."""
+
+    def test_an_unavailable_sigma_fails_criterion_5(self):
+        r = _recorder()
+        r._t6_chain_delay_history = [16_618_000]      # < 2 samples
+        _feed_blocks(r)
+        self.assertIn("sigma", r._t6_last_verdict.failures)
+        _acquire(r)
+        self.assertIsNone(r._t6_native_anchor)
+
+    def test_a_legitimate_zero_sigma_is_not_swallowed(self):
+        """`or 0.0` also could not tell 'no reading' from a real 0.0."""
+        r = _recorder()
+        r._t6_chain_delay_history = [16_618_000] * 5   # std exactly 0.0
+        _feed_blocks(r)
+        self.assertEqual(r._t6_last_verdict.sigma_ms, 0.0)
+        self.assertNotIn("sigma", r._t6_last_verdict.failures)
+
+    def test_a_broken_battery_holds_acquisition_without_raising(self):
+        """The battery is advisory and sits inside the fine-stage block,
+        whose failures must not reach the authority call after it.  So a
+        broken battery drops its verdict (acquisition holds) and raises
+        nothing."""
+        r = _recorder()
+        _feed_blocks(r)
+        self.assertTrue(r._t6_last_verdict.passed)
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("battery exploded")
+
+        r._t6_battery = SimpleNamespace(evaluate=_boom)
+        _feed_blocks(r, n=1)                      # must not raise
+        self.assertIsNone(r._t6_last_verdict)
+        _acquire(r)
+        self.assertIsNone(r._t6_native_anchor)
+
+    def test_no_chain_delay_measurement_fails_plausibility(self):
+        """result is None unless the MF is locked WITH an estimate."""
+        r = _recorder()
+        _feed_blocks(r, result=None)
+        self.assertIn("plausibility", r._t6_last_verdict.failures)
 
 
 class TestTheBatteryForgetsARepudiatedRun(unittest.TestCase):
 
     def test_reset_makes_the_history_criteria_report_not_yet(self):
         r = _recorder()
-        _drive(r)
+        _feed_blocks(r)
         self.assertTrue(r._t6_last_verdict.passed)
 
         r._t6_battery_forget_run("test")
         self.assertIsNone(r._t6_last_verdict)
 
-        _drive(r, n=1)
+        _feed_blocks(r, n=1)
         v = r._t6_last_verdict
         self.assertEqual(v.criteria["blocks"], 1)
         self.assertIn("ruler", v.failures)
         self.assertIn("unimodality", v.failures)
-
-    def test_without_reset_the_stale_run_would_judge_the_new_one(self):
-        """The failure the reset prevents, stated as the counterfactual."""
-        r = _recorder()
-        _drive(r)
-        # A new acquisition whose edge is NOT one fold block after the
-        # old run's last block: the ruler sees an impossible gap.
-        _drive(r, n=1)
-        self.assertIn("ruler", r._t6_last_verdict.failures)
 
     def test_a_missing_battery_is_not_an_error(self):
         r = _recorder()

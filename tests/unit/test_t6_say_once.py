@@ -92,6 +92,9 @@ class TestTheSpammingSitesAreGated:
         # successors on the same per-cycle path are guarded here instead
         # -- the surface moved, the flood risk did not.
         "ordinal_unnamed",           # the cascade named no integer second
+        "no_fine_estimate",          # the fold has produced no estimate yet
+        "battery_no_verdict",        # the battery has seen no fold block
+        "battery_evaluate_failed",   # the battery itself could not run
         "battery_refused",           # the self-consistency battery failed
     ])
     def test_site_is_throttled(self, key):

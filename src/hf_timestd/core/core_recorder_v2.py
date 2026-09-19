@@ -4355,6 +4355,110 @@ class CoreRecorderV2:
             )
             return False
 
+    def _t6_evaluate_battery(self, est, result) -> None:
+        """Judge the fold's self-consistency — once per FOLD BLOCK.
+
+        ⛔ This must not live in the acquisition path, and the reason is
+        arithmetic rather than taste.  Criteria 2 (ruler) and 3
+        (unimodality) need ``HISTORY_REQUIRED_BLOCKS`` consecutive block
+        edges exactly one fold apart.  But
+        ``_t6_disambiguate_via_external_reference`` runs only while
+        ``_t6_last_chain_delay_ns is None`` — that gate closes on the
+        first call the plausibility guard does not refuse — so in
+        production it is called ONCE per first-lock, or repeatedly
+        against the SAME ``_t6_last_fine_est``.  A battery evaluated
+        there sees one block, or N copies of one block, and can never
+        satisfy those two criteria: measured, one call gives
+        ``blocks=1`` and failures ``('ruler', 'unimodality')``, six
+        calls against one estimate give ``blocks=6`` and ``('ruler',)``.
+        Never an anchor.
+
+        Fold blocks arrive HERE, at the fine stage's own cadence, so the
+        run the battery judges is assembled here and acquisition merely
+        consults the standing verdict.  Acquisition therefore waits
+        about three folds (90 s at K=30) for the battery to earn an
+        opinion.  That wait is the honest answer: one block cannot
+        evidence self-consistency.
+        """
+        # ⛔ The battery is an ADVISORY gate and must never take the
+        # fine stage down with it.  This runs inside the fine-stage
+        # block, whose own comment says failures there must not affect
+        # the calibrator/disambiguation path -- and a raise here would
+        # skip the authority call that follows, which is the route by
+        # which T6 actually asserts (see _t6_apply_authority_decision).
+        # Fail CLOSED: drop the verdict so acquisition holds, say so
+        # once, and let the authority carry on.
+        try:
+            if getattr(self, '_t6_battery', None) is None:
+                from .t6_battery import T6Battery
+                self._t6_battery = T6Battery(
+                    sample_rate=int(self._t6_calibrator.sample_rate),
+                    fold_seconds=int(est.n_seconds_folded),
+                )
+            # Criterion 7 wants the chain delay this edge implies, and
+            # before acquisition no disambiguated value exists — the anchor
+            # that would carry one is the thing the battery is being asked
+            # to authorise.  So hand over the best measurement that DOES
+            # exist, in order of preference:
+            #
+            #   1. the calibrator's current raw delay plus whatever
+            #      disambiguation is already committed (``result`` is None
+            #      unless the MF is locked WITH an estimate — see
+            #      ``BpskPpsCalibratorMF._maybe_result``);
+            #   2. the last accepted effective delay, if one was ever
+            #      accepted;
+            #   3. NaN.
+            #
+            # ⚠ In case 1 before first acquisition the disambiguation term
+            # is still zero, so criterion 7 is judging the matched filter's
+            # RAW estimate, not the effective delay the acquisition path
+            # guards.  That is a different number and a weaker claim.  It is
+            # still the right question — a raw delay past ±250 ms is a
+            # phantom either way — and both bounds must clear before an
+            # anchor is captured, because the ±250 ms guard in the
+            # acquisition path tests the effective value independently.
+            #
+            # ⛔ Case 3 is NaN, not a plausible-looking stand-in.  Evidence
+            # the station could not compute must never read as evidence that
+            # it is healthy; ``T6Battery._fails`` treats any non-finite
+            # input as an automatic failure, so a block with no chain-delay
+            # measurement at all refuses rather than passes.
+            raw_ns = getattr(result, 'chain_delay_ns', None)
+            if raw_ns is not None:
+                implied_ns = float(wrap_chain_delay_ns(
+                    int(raw_ns) + int(self._t6_disambiguation_ns)))
+            elif getattr(self, '_t6_last_chain_delay_ns', None) is not None:
+                implied_ns = float(self._t6_last_chain_delay_ns)
+            else:
+                implied_ns = float('nan')
+            # ⛔ NaN, never 0.0, when the sigma is unavailable.  ``or 0.0``
+            # made criterion 5 inert below two history samples (0.0 clears
+            # every ceiling) and swallowed a legitimate 0.0 besides.  §4.7
+            # already rules that non-finite evidence fails its criterion, so
+            # this reuses that convention instead of inventing a second one.
+            sigma = self._t6_reported_sigma_ms()
+            self._t6_last_verdict = self._t6_battery.evaluate(
+                est,
+                implied_chain_delay_ns=implied_ns,
+                reported_sigma_ms=(float('nan') if sigma is None else sigma),
+                # The C/N0 reading lives in frontend_probe, not here, and the
+                # sigma ceiling's absolute floor governs from 77 dB-Hz down
+                # to ~36 — the whole operating range — so plumbing it across
+                # modules would change no verdict.  See §4.3.
+                cn0_db_hz=None,
+                search_mode=(getattr(
+                    getattr(self, '_t6_fine_stage', None),
+                    '_last_search_mode', None) or 'bootstrap'),
+            )
+        except Exception as e:  # noqa: BLE001
+            self._t6_last_verdict = None
+            if self._t6_say_once('battery_evaluate_failed'):
+                logger.warning(
+                    "T6 self-consistency battery could not be evaluated "
+                    "(%s); no verdict stands, so T6 holds acquisition. "
+                    "(Repeated at most every %.0f s.)",
+                    e, self.T6_REPEAT_PERIOD_SEC)
+
     def _t6_battery_forget_run(self, why: str) -> None:
         """Drop the battery's block history when the stage position dies.
 
@@ -4427,12 +4531,37 @@ class CoreRecorderV2:
                         "(Repeated at most every %.0f s.)",
                         self.T6_REPEAT_PERIOD_SEC)
                 return
-            if getattr(self, '_t6_battery', None) is None:
-                from .t6_battery import T6Battery
-                self._t6_battery = T6Battery(
-                    sample_rate=int(self._t6_calibrator.sample_rate),
-                    fold_seconds=int(est.n_seconds_folded),
-                )
+
+            # §4 — the functional test that replaced the reference test.
+            # CONSULTED here, never evaluated here: this path runs once
+            # per first-lock and a single block cannot evidence
+            # self-consistency, so a battery evaluated here could never
+            # satisfy criteria 2 and 3.  See _t6_evaluate_battery, which
+            # runs at the fold-block cadence where the run is assembled.
+            verdict = getattr(self, '_t6_last_verdict', None)
+            if verdict is None:
+                if self._t6_say_once('battery_no_verdict'):
+                    logger.info(
+                        "T6 acquisition holding: the self-consistency "
+                        "battery has not yet seen a fold block, so it "
+                        "has no opinion to offer.  It needs about three "
+                        "folds; this resolves itself as blocks arrive.  "
+                        "(Repeated at most every %.0f s.)",
+                        self.T6_REPEAT_PERIOD_SEC)
+                return
+            if not verdict.passed:
+                if self._t6_say_once('battery_refused'):
+                    logger.info(
+                        "T6 acquisition holding: self-consistency "
+                        "battery failed on %s (%d blocks seen).  T6 does "
+                        "not assert; the station runs its fallback.  "
+                        "'ruler' and 'unimodality' alone mean the "
+                        "battery is still accumulating its run and will "
+                        "clear on its own.  (Repeated at most every "
+                        "%.0f s.)", ", ".join(verdict.failures),
+                        verdict.criteria.get('blocks', 0),
+                        self.T6_REPEAT_PERIOD_SEC)
+                return
 
             # ⛔ ONE edge answers every question below, and it is the
             # FOLD's.  The whole point of this task is that the fold
@@ -4500,8 +4629,18 @@ class CoreRecorderV2:
             # evaluate the mapping, not a phase to compare against
             # anything.
             sr_local = self._t6_calibrator.sample_rate
+            # ``edge_rtp`` is already an integer (the fine stage stores
+            # ``int(round(edge_rtp_float))``), and ``edge_subsample`` is
+            # the fraction it rounded away, in (-0.5, +0.5] samples.
+            # rtp_to_utc can only be evaluated at the integer, so add the
+            # fraction back rather than discard it: half a sample is
+            # 5.2 µs at 96 kHz, below the 10.4 µs the shift quantises to,
+            # but it is what centres the rounding on the true edge
+            # instead of on the integer beside it.
             firing_instant_sec = (
-                raw_wall_time_sec - (result.chain_delay_ns / 1e9)
+                raw_wall_time_sec
+                + (float(est.edge_subsample) / sr_local)
+                - (result.chain_delay_ns / 1e9)
             )
             deviation_sec = firing_instant_sec - float(named_second)
             # Sign, because it is easy to get backwards and expensive to
@@ -4517,7 +4656,16 @@ class CoreRecorderV2:
             # A minus sign here puts the firing instant at
             # ``named − deviation``: twice the error, on the wrong side.
             shift_samples = int(round(deviation_sec * sr_local))
-            self._t6_disambiguation_ns = int(round(
+            # ⛔ A LOCAL, not self._t6_disambiguation_ns, until every
+            # refusal below has had its say.  Writing it here let a
+            # REFUSED edge move the clock anyway: the caller folds
+            # self._t6_disambiguation_ns into effective_chain_delay and
+            # latches it into _t6_last_chain_delay_ns whether or not an
+            # anchor was captured, so a missing-reference-cable fold
+            # (retention 0.006 — the exact fault criterion 1 exists to
+            # catch) could fail the battery and still carry its 30 ms
+            # correction into the locked value.
+            disambiguation_ns = int(round(
                 shift_samples * 1e9 / sr_local
             ))
             # Capture the hf-timestd-native anchor against the
@@ -4526,7 +4674,7 @@ class CoreRecorderV2:
             # second the edge fell.
             from .native_anchor import NativeAnchor
             effective_chain_delay_ns = wrap_chain_delay_ns(
-                result.chain_delay_ns + self._t6_disambiguation_ns
+                result.chain_delay_ns + disambiguation_ns
             )
             # Layer B physical-plausibility guard — same rationale as
             # the T5 path; see ``_t6_disambiguate_via_t5_lb1421``.  This
@@ -4545,30 +4693,9 @@ class CoreRecorderV2:
                 )
                 return
 
-            # §4 — the functional test that replaces the reference test.
-            verdict = self._t6_battery.evaluate(
-                est,
-                implied_chain_delay_ns=effective_chain_delay_ns,
-                reported_sigma_ms=(self._t6_reported_sigma_ms() or 0.0),
-                # The C/N0 reading lives in frontend_probe, not here, and
-                # the sigma ceiling's absolute floor governs from 77 dB-Hz
-                # down to ~36 — the whole operating range — so plumbing it
-                # across modules would change no verdict.  See §4.3.
-                cn0_db_hz=None,
-                search_mode=(getattr(
-                    getattr(self, '_t6_fine_stage', None),
-                    '_last_search_mode', None) or 'bootstrap'),
-            )
-            self._t6_last_verdict = verdict
-            if not verdict.passed:
-                if self._t6_say_once('battery_refused'):
-                    logger.info(
-                        "T6 acquisition held: self-consistency battery "
-                        "failed on %s.  T6 does not assert; the station "
-                        "runs its fallback.  (Repeated at most every "
-                        "%.0f s.)", ", ".join(verdict.failures),
-                        self.T6_REPEAT_PERIOD_SEC)
-                return
+            # Every refusal has now had its say, so the shift may be
+            # committed.  Nothing above this line writes recorder state.
+            self._t6_disambiguation_ns = disambiguation_ns
 
             pps_firing_utc_ns = int(named_second) * 1_000_000_000
             self._t6_native_anchor = NativeAnchor(
@@ -4986,6 +5113,10 @@ class CoreRecorderV2:
                     samples, resolve_batch_rtp(quality))
                 if fine is not None:
                     self._t6_last_fine_est = fine
+                    # A fold block just landed: this is the ONLY cadence
+                    # at which the battery's run-of-blocks criteria can
+                    # be assembled.  See _t6_evaluate_battery.
+                    self._t6_evaluate_battery(fine, result)
                 if fine is not None and self._t6_authority is not None:
                     named = self._t6_name_integer_second(fine.edge_rtp)
                     decision = self._t6_authority.on_fine_estimate(
