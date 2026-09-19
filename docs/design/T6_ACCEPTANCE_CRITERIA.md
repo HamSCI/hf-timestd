@@ -268,6 +268,33 @@ A threshold set on an injected pilot and never checked against 48.4 dB-Hz would
 ship a gate that fails every night at exactly the hours §2 of the folded
 acquisition design says we are judged on.
 
+### 4.6 The battery reads the fold, not individual seconds
+
+⚠ The numbers in §4's table come from per-second estimates on captured IQ. The
+battery evaluates at **fold-block** granularity, because that is what the
+production path produces: `BpskEdgeFineStage` emits one `FineEdgeEstimate` per
+`fold_seconds` block, not one per second.
+
+The mapping, criterion by criterion:
+
+| | Per-second form (measured) | Fold-block form (implemented) |
+|---|---|---|
+| 2 | inter-edge Δ = the sample rate | consecutive block edges differ by `fold_seconds × sample_rate` |
+| 3 | per-second estimates at one position | consecutive block estimates agree — the existing `BOOTSTRAP_CONFIRM_BLOCKS` mechanism, surfaced rather than rebuilt |
+| 5 | per-second sd = 95 ns | block-to-block sd, predicted as the per-second sd ÷ √K |
+
+Criteria 1, 4, 6 and 7 already evaluate on the folded block and need no
+mapping. §4.5's thresholds therefore get derived in per-second terms from the
+C/N0 sweep, then converted by the fold's √K improvement before they become
+module constants.
+
+⚡ This keeps a per-second detector out of the production path. §8b's
+measurement argues one belongs there eventually — Newell's detector placed
+every edge where our chain could not — but adopting it would change the
+detector and the acceptance rule in one step, and a regression in either would
+then hide the other. That sequencing lesson belongs to
+`T6_FOLDED_SELF_ACQUISITION.md` §4, and it applies here unchanged.
+
 ---
 
 ## 5. Failure, alarm, and the judge
