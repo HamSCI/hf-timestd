@@ -1510,17 +1510,29 @@ assertion suspect, names the criterion, and alarms.
 - Test: `tests/test_t6_suspect_assertion.py` (create)
 
 **Interfaces:**
-- Consumes: `_t6_last_verdict` (Task 5).
+- Consumes: `_t6_evaluate_battery` and `_t6_last_verdict` — **both already
+  exist** from Task 5, at the fold-block site.
 - Produces:
   - `CoreRecorderV2._t6_suspect: tuple[str, ...]` — failing criteria on a
-    running T6, empty when healthy. Task 9 asserts on it.
-  - `authority_snapshot` gains `t6_suspect_criteria: str` (comma-joined,
-    empty when healthy) and `t6_battery_blocks: int`.
+    running T6, empty when healthy
+  - `CoreRecorderV2._t6_note_verdict(self, verdict) -> None`
+  - `authority_snapshot` gains `t6_suspect_criteria: str` (comma-joined, empty
+    when healthy) and `t6_battery_blocks: int`
+
+⚠ **Read `_t6_evaluate_battery` before editing.** Task 5 put the battery
+evaluation at the fold-block site, upstream of the authority call, behind a
+fail-closed guard. Task 6 hooks into that existing call — it does NOT add a
+second evaluation site. Two evaluations would double the history the ruler and
+unimodality criteria count.
 
 ⛔ **A failed guardrail and a missing estimate are different things.** Never
-route an absent estimate through the suspect path. When estimates stop
-arriving the authority's existing liveness invariant degrades loudly, exactly
-as today. Absence stays visible as absence.
+route an absent estimate through the suspect path. When estimates stop arriving,
+the authority's existing liveness invariant degrades loudly, exactly as today.
+Absence stays visible as absence — spec §5.2.
+
+⛔ **A failed guardrail does NOT demote.** Demoting would reproduce the problem
+this design removes: a transient trip handing the station back to a tier two
+orders of magnitude worse. T6 keeps the anchor, keeps publishing, and alarms.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1578,6 +1590,13 @@ class TestRunningT6(unittest.TestCase):
         r._t6_note_verdict(_verdict(False, ("retention", "shape")))
         self.assertEqual(r._t6_suspect, ("retention", "shape"))
 
+    def test_a_recorder_that_never_acquired_is_not_marked_suspect(self):
+        """Acquisition owns the refusal before an anchor exists."""
+        r = _recorder()
+        r._t6_native_anchor = None
+        r._t6_note_verdict(_verdict(False, ("split_half",)))
+        self.assertEqual(r._t6_suspect, ())
+
     def test_the_alarm_is_throttled(self):
         """A persistent condition reported every cycle blinds the log it
         writes to.  This project has collected five such floods."""
@@ -1595,12 +1614,10 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Run the test and watch it fail**
 
-Run: `python -m pytest tests/test_t6_suspect_assertion.py -v`
+Run: `.venv/bin/python -m pytest tests/test_t6_suspect_assertion.py -v --override-ini addopts=`
 Expected: `AttributeError: type object 'CoreRecorderV2' has no attribute '_t6_note_verdict'`.
 
 - [ ] **Step 3: Write the method**
-
-Add to `CoreRecorderV2`:
 
 ```python
     def _t6_note_verdict(self, verdict) -> None:
@@ -1608,11 +1625,11 @@ Add to `CoreRecorderV2`:
 
         Spec §5.1: a failed guardrail does NOT demote.  Demoting would
         reproduce the problem this design removes -- a transient trip
-        handing the station back to a tier two orders of magnitude worse.
-        T6 keeps asserting, marked suspect, and alarms; the operator
-        decides.
+        handing the station back to a tier two orders of magnitude
+        worse.  T6 keeps asserting, marked suspect, and alarms; the
+        operator decides.
 
-        ⛔ Spec §5.2: this path is for a T6 that is producing estimates
+        ⛔ Spec §5.2: this path is for a T6 that is PRODUCING estimates
         and failing them.  An ABSENT estimate never comes here.  The
         authority's liveness invariant degrades loudly on absence, and
         blurring the two would hide a dead detector behind a warning
@@ -1621,7 +1638,7 @@ Add to `CoreRecorderV2`:
         if getattr(self, '_t6_native_anchor', None) is None:
             return  # not running yet; acquisition owns the refusal
         if verdict.passed:
-            if self._t6_suspect:
+            if getattr(self, '_t6_suspect', ()):
                 logger.info(
                     "T6 self-consistency restored (%s cleared); the "
                     "assertion is no longer marked suspect.",
@@ -1639,49 +1656,46 @@ Add to `CoreRecorderV2`:
                 ", ".join(verdict.failures), self.T6_REPEAT_PERIOD_SEC)
 ```
 
-- [ ] **Step 4: Surface it in the snapshot**
+Initialise `self._t6_suspect = ()` wherever the other `_t6_*` state is
+initialised in `__init__`.
 
-Find where `authority_snapshot` gets built (grep for `authority_snapshot` in
-`core_recorder_v2.py` and `authority_manager.py`) and add two columns beside
-the existing T6 ones:
+- [ ] **Step 4: Hook it into the existing evaluation**
+
+In `_t6_evaluate_battery` (Task 5), after the verdict is stored, call
+`self._t6_note_verdict(verdict)`. Do NOT add a second `evaluate` call.
+
+⚠ That method is upstream of the authority call and already fails closed. Keep
+your addition inside that protection — a raise from `_t6_note_verdict` must not
+stop T6 asserting. Add a test proving it.
+
+- [ ] **Step 5: Surface it in the snapshot**
+
+Find where `authority_snapshot` is built (grep `authority_snapshot` in
+`core_recorder_v2.py` and `authority_manager.py`) and add two columns beside the
+existing T6 ones:
 
 ```python
         snapshot["t6_suspect_criteria"] = ",".join(
             getattr(self, "_t6_suspect", ()) or ())
         snapshot["t6_battery_blocks"] = int(
-            (getattr(self, "_t6_last_verdict", None)
-             and self._t6_last_verdict.criteria.get("blocks", 0)) or 0)
+            ((getattr(self, "_t6_last_verdict", None)
+              and self._t6_last_verdict.criteria.get("blocks", 0)) or 0))
 ```
 
-⚠ Match the surrounding code's style for optional columns — the file already
-has a convention for a value that may not exist yet. Follow it rather than the
-sketch above if they differ.
-
-- [ ] **Step 5: Call it from the estimate path**
-
-At the point where a fine estimate reaches the recorder with T6 already
-anchored (near the call site at `:4990`), evaluate and note:
-
-```python
-                    if self._t6_native_anchor is not None and est is not None:
-                        v = self._t6_battery.evaluate(
-                            est,
-                            implied_chain_delay_ns=self._t6_native_anchor.chain_delay_ns,
-                            reported_sigma_ms=float(
-                                getattr(self, '_t6_sigma_ms', 0.0)),
-                            cn0_db_hz=getattr(self, '_t6_cn0_db_hz', None),
-                        )
-                        self._t6_last_verdict = v
-                        self._t6_note_verdict(v)
-```
-
-⚠ Use the real local names at that call site. If `_t6_battery` can be `None`
-there (T6 never acquired), guard for it.
+⚠ Match the file's own convention for optional columns rather than this sketch
+if they differ. Add a test that a suspect T6 shows its criteria in the snapshot.
 
 - [ ] **Step 6: Run the tests**
 
-Run: `python -m pytest tests/test_t6_suspect_assertion.py tests/test_t6_acquire_on_fold.py -v`
-Expected: PASS.
+Run:
+```
+.venv/bin/python -m pytest tests/test_t6_suspect_assertion.py     tests/test_t6_acquire_on_fold.py tests/test_t6_battery.py     tests/unit/test_t6_say_once.py -v --override-ini addopts=
+```
+Then `.venv/bin/python -m pytest tests/ -k "t6 or bpsk or anchor" --override-ini addopts= -q`
+
+⚠ 13 failures in `tests/test_core_recorder_t6_step_recovery.py` (11) and
+`tests/test_core_recorder_t6_fine_integration.py` (2) are PRE-EXISTING, verified
+at `5cff36e`. Report the count before and after; it must not rise.
 
 - [ ] **Step 7: Commit**
 
@@ -1689,11 +1703,10 @@ Expected: PASS.
 git add src/hf_timestd/core/core_recorder_v2.py tests/test_t6_suspect_assertion.py
 git commit -m "t6: a failed guardrail keeps asserting, marked suspect
 
-A battery failure on a RUNNING T6 does not demote.  Demoting would
-reproduce the problem this design removes -- a transient trip handing the
-station back to a tier two orders of magnitude worse.  T6 keeps the
-anchor, keeps publishing, names the failing criterion, and alarms once per
-throttle period.
+A battery failure on a RUNNING T6 does not demote.  Demoting would reproduce
+the problem this design removes -- a transient trip handing the station back
+to a tier two orders of magnitude worse.  T6 keeps the anchor, keeps
+publishing, names the failing criterion, and alarms once per throttle period.
 
 An absent estimate never reaches this path.  The authority's liveness
 invariant still degrades loudly on absence, so a dead detector cannot hide
