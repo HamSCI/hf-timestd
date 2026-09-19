@@ -2459,13 +2459,15 @@ class CoreRecorderV2:
                             f"METROLOGY.md §4.5."
                         )
                         return offset_ms, sigma_ms, 'T4'
-                    else:
+                    elif self._t6_say_once('disambig_t4_gate'):
                         logger.warning(
                             f"T6 disambiguation: T4 chronyc tracking "
                             f"sigma={sigma_ms:.3f} ms exceeds gate "
                             f"{self.T6_DISAMBIGUATION_MAX_SIGMA_MS:.3f} ms — "
                             f"cannot use as reference.  Calibrator will "
-                            f"accept raw value as-is (likely a wrap error)."
+                            f"accept raw value as-is (likely a wrap error). "
+                            f"(Repeated at most every "
+                            f"{self.T6_REPEAT_PERIOD_SEC:.0f} s.)"
                         )
         except (FileNotFoundError, OSError,
                 subprocess.SubprocessError, ValueError, IndexError) as e:
@@ -2533,6 +2535,36 @@ class CoreRecorderV2:
         places, so it wins on its own merits.
         """
         self._t6_second_namer = probe
+
+    #: Default period for `_t6_say_once`. Matches ACQUIRING_WARN_PERIOD_SEC
+    #: in t6_anchor_authority so the throttled surfaces speak in step.
+    T6_REPEAT_PERIOD_SEC = 300.0
+
+    def _t6_say_once(self, key: str, period: float = None) -> bool:
+        """True at most once per `period` for this `key`.
+
+        ⛔ FOURTH instance of one defect class in this codebase, all found on
+        2026-09-18 by reading a station's journal: a71781a (radiod health,
+        8,640/day), 93293c1 (the T6 lock message, 99,127 per 30 min),
+        0b454e3 (estimate_stale, 3,105/min), and the three DISAMBIG surfaces
+        this gates (3 lines every 5 s on DASI-009.AI6VN).
+
+        The shape is always the same — a condition that PERSISTS, logged from
+        a path that runs per batch or per cycle. The cost is never disk: each
+        time, the flood buried the diagnostics we were trying to read, and
+        each fix made the next fault legible. Route new persistent-condition
+        logging through here rather than adding a fifth private timestamp.
+        """
+        period = self.T6_REPEAT_PERIOD_SEC if period is None else float(period)
+        now = time.monotonic()
+        seen = getattr(self, '_t6_say_once_at', None)
+        if seen is None:
+            seen = self._t6_say_once_at = {}
+        last = seen.get(key)
+        if last is not None and (now - last) < period:
+            return False
+        seen[key] = now
+        return True
 
     def _t6_naming_probe(self):
         """The probe the NAMING path may use — T5 first, namer second.
@@ -4332,11 +4364,13 @@ class CoreRecorderV2:
                 return
             ref = self._get_disambiguation_reference()
             if ref is None:
-                logger.info(
-                    "T6 chain_delay initial accept: no usable non-T6 "
-                    "timing authority for disambiguation; accepting "
-                    "calibrator value as-is"
-                )
+                if self._t6_say_once('disambig_no_authority'):
+                    logger.info(
+                        "T6 chain_delay initial accept: no usable non-T6 "
+                        "timing authority for disambiguation; accepting "
+                        "calibrator value as-is.  (Repeated at most every "
+                        "%.0f s.)", self.T6_REPEAT_PERIOD_SEC
+                    )
                 return
             ref_offset_ms, ref_sigma_ms, ref_tier = ref
             # Compute raw wall-time of the detected edge WITHOUT ka9q
@@ -4970,25 +5004,30 @@ class CoreRecorderV2:
                 # shift to a whole wrap period; both can land anywhere.
                 try:
                     _sr_i = int(self._t6_calibrator.sample_rate)
-                    logger.warning(
-                        "T6 DISAMBIG: path=%s raw=%d ns (%.6f ms) "
-                        "disambig=%d ns (%.6f ms) effective=%d ns "
-                        "(%.6f ms) | shift/wrap=%.4f shift/sample=%.2f | %s",
-                        getattr(self, '_t6_disambig_path', 'fallthrough'),
-                        result.chain_delay_ns,
-                        result.chain_delay_ns / 1e6,
-                        self._t6_disambiguation_ns,
-                        self._t6_disambiguation_ns / 1e6,
-                        effective,
-                        effective / 1e6,
-                        # A legitimate wrap resolution is a whole number of
-                        # template periods (half-second for the MF).  A
-                        # non-integer here means the shift is not a wrap
-                        # correction at all.
-                        self._t6_disambiguation_ns / 500_000_000.0,
-                        self._t6_disambiguation_ns * _sr_i / 1e9,
-                        getattr(self, '_t6_disambig_detail', ''),
-                    )
+                    # Throttled per distinct raw value: a CHANGING disambig is
+                    # news and prints immediately; a stable one repeats at the
+                    # period. On AI6VN this was three identical lines every 5 s.
+                    if self._t6_say_once(
+                            f'disambig_dump:{result.chain_delay_ns}'):
+                        logger.warning(
+                            "T6 DISAMBIG: path=%s raw=%d ns (%.6f ms) "
+                            "disambig=%d ns (%.6f ms) effective=%d ns "
+                            "(%.6f ms) | shift/wrap=%.4f shift/sample=%.2f | %s",
+                            getattr(self, '_t6_disambig_path', 'fallthrough'),
+                            result.chain_delay_ns,
+                            result.chain_delay_ns / 1e6,
+                            self._t6_disambiguation_ns,
+                            self._t6_disambiguation_ns / 1e6,
+                            effective,
+                            effective / 1e6,
+                            # A legitimate wrap resolution is a whole number of
+                            # template periods (half-second for the MF).  A
+                            # non-integer here means the shift is not a wrap
+                            # correction at all.
+                            self._t6_disambiguation_ns / 500_000_000.0,
+                            self._t6_disambiguation_ns * _sr_i / 1e9,
+                            getattr(self, '_t6_disambig_detail', ''),
+                        )
                 except Exception:
                     pass
                 # ---- end instrumentation ----
