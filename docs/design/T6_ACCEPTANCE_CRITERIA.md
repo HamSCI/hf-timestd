@@ -196,6 +196,56 @@ plausibility guard, keeps its anchor capture, and keeps recording
 `captured_via_tier`; it loses its dependence on a reference **offset**, and
 retains a dependence on a reference **second**.
 
+### 3.2.1 Where the battery runs, and why not in acquisition
+
+⛔ The battery evaluates **once per fold block**, at the site where the fine
+stage delivers an estimate. Acquisition *consults* the standing verdict; it
+never evaluates inline.
+
+The reason is arithmetic, and a first implementation got it wrong. Acquisition
+runs once per first lock — the recorder gates it on
+`_t6_last_chain_delay_ns is None`, and that gate closes on the first attempt the
+plausibility guard does not refuse. But criteria 2 and 3 need a *run* of blocks.
+A battery evaluated in acquisition therefore sees one block, fails ruler and
+unimodality forever, and T6 never asserts: the old blocker returns wearing a new
+reason.
+
+So T6 now waits about three folds — 90 s at K = 30 — after first lock before it
+may assert. That delay is honest. A battery cannot claim self-consistency from a
+single block.
+
+⚠ The evaluation sits inside the fine-stage block, **upstream of the authority
+call**. An exception there would skip the authority update and stop T6 asserting
+at all, so the evaluation fails closed behind its own guard: it drops the
+verdict, says so once per throttle period, and lets the authority carry on.
+Anything added to that block inherits this hazard.
+
+⚠ A refused verdict must not move the timing path. The integer-sample shift is
+computed into a local and committed only once the verdict passes and the ±250 ms
+guard clears. An earlier implementation committed it first, so a fold refused for
+a missing reference cable still shifted the clock by the mapping error it
+carried.
+
+### 3.2.2 What the acquisition anchor rests on
+
+⚠ The anchor captured at acquisition reduces algebraically to
+`rtp_to_utc(edge_rtp)` — radiod's own mapping, evaluated at a precisely located
+edge. Its accuracy is therefore bounded by radiod's registration error, and
+radiod's GPS_TIME pairing is host-clock-derived and non-atomic.
+
+⚡ **This bounds the bootstrap, not what T6 asserts.**
+`t6_anchor_authority._build_anchor` constructs the AUTHORITATIVE anchor from the
+fine estimate plus the named second with an **asserted** chain delay
+(`delay_budget_ns + filter_group_delay_ns`), reading neither the acquisition
+anchor nor its disambiguation term. That anchor is `named_second + asserted
+delay` — independent of radiod entirely — and it overwrites the capture seconds
+later. `_t6_anchor_is_authoritative` requires the authority state, so the
+acquisition anchor alone never makes T6 authoritative for the T3 plane.
+
+⛔ Both routes call `_t6_name_integer_second`, so they fail together on a station
+that cannot name a second. That is the single shared dependency, and §8 should
+measure how often it refuses.
+
 ### 3.3 The functional test replaces the reference test
 
 T6 acquires when its own edge passes the battery, not when a worse clock nods.
