@@ -94,24 +94,28 @@ class TestSplitHalfAgreement(unittest.TestCase):
 class TestProminenceAndWidth(unittest.TestCase):
 
     def test_prominence_separates_a_real_edge_from_pure_noise(self):
-        """peak_prominence is now a triangle-fidelity RESIDUAL (fix-round-3):
-        RMS(|T(e)| - ideal_triangle) / peak, where T(e) is the closed-form
-        matched filter over the WHOLE derotated folded second.  For a
+        """peak_prominence is a triangle-fidelity RESIDUAL:
+        RMS(T(e) - ideal_tent) / |T[apex]|, where T(e) is the closed-form
+        matched filter over the WHOLE derotated folded second, fitted
+        SIGNED -- fitting |T| made the residual a function of where in
+        the fold the edge landed (see
+        TestTriangleFidelityIsFitOnTheSignedT).  For a
         clean single flip T(e) is exactly piecewise-linear, so this reads
         LOW for a real edge and HIGH for noise -- the opposite sense of a
         bare peak/median ratio (round 1 and round 2's attempts), which is
         PINNED at 2.000 for any clean flip (a triangle's median sits at
         half its peak) and so cannot separate anything by amplitude alone.
 
-        Measured here (ten seeded pure-complex-Gaussian-noise trials, no
-        BPSK signal at all -- one trial produced no estimate): noise reads
-        0.25 - 0.42.  A real edge at 70 dB-Hz reads 0.0014; at a realistic
-        worst-case 48.4 dB-Hz (T6_ACCEPTANCE_CRITERIA.md §4.3's C/N0
-        floor, five seeded trials) it reads 0.0008 - 0.0017 -- roughly
-        150-500x BELOW the noise floor at every C/N0 tested, a gap wide
-        enough for a production threshold to sit in comfortably.  This is
-        the number that makes criterion 4's shape check actually work at
-        the design's stated worst hour; Task 1 still sets no threshold.
+        Measured 2026-09-19 over nine fold positions (see
+        `BatteryThresholds.max_fidelity_residual`): pure noise reads
+        0.1115 - 0.6760 over 90 blocks; a real edge reads
+        0.0000081 - 0.000031 at 77 dB-Hz and 0.00017 - 0.00039 at the
+        realistic worst case of 48.4 (T6_ACCEPTANCE_CRITERIA.md §4.3's
+        C/N0 floor) -- two to four orders of magnitude BELOW the noise
+        floor at every C/N0 and every position tested, a gap wide enough
+        for a production threshold to sit in comfortably.  That gap is
+        what makes criterion 4's shape check work at the design's stated
+        worst hour.
         """
         edge_est = _drive(BpskEdgeFineStage(sample_rate=SR))
         self.assertIsNotNone(edge_est)
@@ -216,3 +220,72 @@ class TestApexAgreement(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTriangleFidelityIsFitOnTheSignedT(unittest.TestCase):
+    """Criterion 4's residual, taken apart from the stage that feeds it.
+
+    T(e) = C[p-1] - 2*C[e-1] for a clean flip at e has endpoints
+    +A(p-2e) and -A(p-2e): OPPOSITE SIGNS unless the edge splits the
+    fold exactly in half.  Take |T| and a V-notch appears wherever T
+    crosses zero, which no endpoint->apex->endpoint triangle can follow
+    -- so the residual becomes a function of where in the fold the edge
+    landed, which is an accident of when the stream started.
+    """
+
+    P = 9600
+
+    def _clean_tent(self, edge: int, amp: float = 1.0) -> np.ndarray:
+        """The exact T(e) a single clean polarity flip at ``edge``
+        produces: -amp before the flip, +amp after."""
+        x = np.where(np.arange(self.P) < edge, -amp, amp).astype(np.float64)
+        c = np.cumsum(x)
+        return c[-1] - 2.0 * np.concatenate(([0.0], c[:-1]))
+
+    def test_a_clean_flip_reads_zero_at_every_fold_position(self):
+        """The whole point: a perfect tent is a perfect tent wherever
+        its apex sits."""
+        for edge in (1, 100, 1000, 2400, 4800, 7200, 9000, self.P - 2):
+            with self.subTest(edge=edge):
+                t = self._clean_tent(edge)
+                apex = int(np.argmax(np.abs(t)))
+                r = BpskEdgeFineStage._triangle_fidelity(t, apex)
+                self.assertLess(r, 1e-12, f"edge {edge} read {r:.6g}")
+
+    def test_fitting_the_absolute_value_instead_reintroduces_the_defect(self):
+        """The mutation, written down.  Hand the same clean tents in as
+        |T| and the off-centre ones acquire the notch: measured 0.126 at
+        edge 40000 and 0.568 at edge 1000 on the 96 kHz fold, against a
+        0.008 bound."""
+        off_centre = self._clean_tent(1000)
+        apex = int(np.argmax(np.abs(off_centre)))
+        self.assertLess(BpskEdgeFineStage._triangle_fidelity(off_centre, apex),
+                        1e-12)
+        folded = np.abs(off_centre)
+        self.assertGreater(
+            BpskEdgeFineStage._triangle_fidelity(folded, apex), 0.1,
+            "fitting |T| no longer shows the notch, so this test has "
+            "stopped guarding anything")
+
+    def test_a_flipped_polarity_is_scored_the_same(self):
+        """argmax(|T|) finds the extremum whichever sign the flip has,
+        and the signed fit follows it down as readily as up."""
+        t = -self._clean_tent(3000)
+        apex = int(np.argmax(np.abs(t)))
+        self.assertLess(t[apex], 0.0)
+        self.assertLess(BpskEdgeFineStage._triangle_fidelity(t, apex), 1e-12)
+
+    def test_no_measurable_apex_reads_nan_not_the_favourable_zero(self):
+        """0.0 is the BEST value this statistic can take.  A fold that
+        held nothing measurable must never be spelled that way."""
+        flat = np.zeros(self.P)
+        self.assertTrue(math.isnan(
+            BpskEdgeFineStage._triangle_fidelity(flat, 0)))
+        broken = self._clean_tent(2400)
+        broken[17] = np.nan
+        apex = int(np.nanargmax(np.abs(broken)))
+        broken[apex] = np.nan
+        self.assertTrue(math.isnan(
+            BpskEdgeFineStage._triangle_fidelity(broken, apex)))
+        self.assertTrue(math.isnan(
+            BpskEdgeFineStage._triangle_fidelity(np.array([1.0]), 0)))

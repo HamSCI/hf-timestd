@@ -314,11 +314,32 @@ one.
 
     T(e) = sum_{j>=e} x[j] - sum_{j<e} x[j] = C[p-1] - 2*C[e-1]
 
-traces a **triangle** over the folded second when that second holds one clean
-polarity flip: |T| climbs linearly to the apex at the edge and falls linearly
-away. Fitting the ideal triangle and reporting the RMS residual over the peak
-therefore measures whether a flip is present at all, independently of how
-strong it is.
+traces a **tent** over the folded second when that second holds one clean
+polarity flip: T climbs linearly to the apex at the edge and falls linearly
+away. Fitting the ideal tent and reporting the RMS residual over the apex
+magnitude therefore measures whether a flip is present at all, independently of
+how strong it is.
+
+⛔ **Fit the signed T, never |T|.** For an edge at *e* the tent's endpoints are
+`+A(p−2e)` and `−A(p−2e)`, so they carry **opposite signs** unless the edge
+splits the fold exactly in half. Take the absolute value and |T| acquires a
+V-notch wherever T crosses zero. No endpoint → apex → endpoint triangle can
+follow that notch, so the residual grows with how far off-centre the edge sits
+— and where the edge sits inside the fold follows only from where the stream
+started, which changes on every boot. The criterion then reports an arbitrary
+per-boot offset rather than anything about the station.
+
+The shipped code did fit |T| until 2026-09-19. Measured at 77 dB-Hz against the
+0.015 bound then in force:
+
+    edge 47916 → 0.0014    edge 40000 → 0.1260    edge 30000 → 0.2611
+    edge 24000 → 0.3333    edge  9600 → 0.4869    edge  1000 → 0.5683
+
+Every position but mid-fold was refused. Fitting the signed T removes the
+dependence outright: a clean flip fits the tent exactly, whatever the apex
+position, so the residual falls to the noise the fold leaves behind. Locating
+the apex by `argmax |T|` stays correct — it finds the extremum whichever sign
+the flip carries; only the *fit* must run in signed space.
 
 **Apex agreement.** The distance between T(e)'s apex and the edge position the
 stage reports. The 2026-09-04 failure was a lock at a lattice position *away
@@ -333,11 +354,27 @@ power and confines the signal to the ~2 samples of the transition, where T(e)
 *integrates* the whole second and survives. Two orders of magnitude separate
 the two approaches at the condition that governs.
 
-    fidelity residual   pure noise            0.2547 – 0.4199
-                        real, 70 dB-Hz        0.00137
-                        real, 48.4 dB-Hz      0.00079 – 0.00171
+Re-measured 2026-09-19 with the signed fit, over **nine fold positions**
+(37 … 95 960 samples) × six C/N0 × three seeds, and 32 noise seeds:
+
+    fidelity residual   pure noise            0.1115 – 0.6760   (90 blocks)
+                        real, 77 dB-Hz        0.0000081 – 0.000031
+                        real, 58 dB-Hz        0.000060  – 0.00014
+                        real, 48.4 dB-Hz      0.00017   – 0.00039
+                        real, 44 dB-Hz        0.00029   – 0.00064
     apex distance       real                  0.35 – 0.87 samples
                         20 ms displaced lock  −1919.19 samples
+
+Across the nine positions the worst healthy reading at 48.4 dB-Hz moves only
+0.00031 → 0.00039, a 1.3× spread, against the 410× spread the |T| fit produced.
+Separation from the null holds at **every** position at both 77 and
+48.4 dB-Hz. `max_fidelity_residual` is **0.008**: the geometric middle of the
+worst healthy reading at 44 dB-Hz and the nearest noise block, 20.5× above the
+worst reading at the governing 48.4 dB-Hz and 13.9× below the lowest of 90
+noise blocks.
+
+⚠ The earlier table — noise 0.2547–0.4199, real 0.00079–0.00171 — was taken at
+one fold position, 47916, the one place the defect does not show.
 
 ⚠ These come from **synthetic signal**, not a station capture — unlike §8c's
 105×, which was measured on 89 s of real IQ. They establish that the statistic
@@ -460,6 +497,17 @@ back, which is why the battery reads the fold rather than individual seconds.
 A threshold set on an injected pilot and never checked against 48.4 dB-Hz would
 ship a gate that fails every night at exactly the hours §2 of the folded
 acquisition design says we are judged on.
+
+⛔ **Sweep fold position as well as C/N0.** C/N0 is not the only axis a
+criterion can depend on. Where the edge lands inside the folded second is set
+by where the stream started, so it changes on every boot and says nothing about
+the station — and the original sweep held it fixed at 47916 throughout, for
+every criterion. That single choice hid the |T| defect of §4.2 completely: the
+statistic was position-dependent by a factor of 410, and the one position the
+sweep drove was the one where the dependence vanishes. Any re-derivation must
+drive a spread of positions — near the fold origin, near its end, and several
+between — for both the healthy and the null arm, and confirm the separation at
+each. A criterion that survives a C/N0 sweep has been checked on one axis only.
 
 ### 4.6 The battery reads the fold, not individual seconds
 

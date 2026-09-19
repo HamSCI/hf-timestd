@@ -45,6 +45,7 @@ registration it just measured for that very block.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from typing import Optional
 
@@ -99,20 +100,22 @@ class FineEdgeEstimate:
     # sub-fold, in samples.  Two disjoint 30 s folds agreed to 41 ns on
     # captured IQ against 17 ns predicted (n=2).
     split_half_delta_samples: float = 0.0
-    # Triangle-fidelity residual of |T(e)|, the closed-form matched
-    # filter (T6_FOLDED_SELF_ACQUISITION.md §3.1) evaluated over the
-    # WHOLE derotated folded second: RMS(|T| - ideal_triangle) / peak.
+    # Triangle-fidelity residual of the SIGNED T(e), the closed-form
+    # matched filter (T6_FOLDED_SELF_ACQUISITION.md §3.1) evaluated over
+    # the WHOLE derotated folded second: RMS(T - ideal_tent) / |T[apex]|.
     # For a single clean polarity flip, T(e) is exactly piecewise-linear
     # (a tent, apex at the flip) by construction -- NOT an SNR statistic;
     # the bare peak/median ratio is PINNED at 2.000 regardless of C/N0,
-    # because a triangle's median sits at half its peak.  A real flip's
-    # residual measured 0.0008-0.0017 (48.4-70 dB-Hz); pure noise measured
-    # 0.25-0.42 -- roughly two orders of magnitude apart, and unlike the
-    # bare ratio this SEPARATES at 48.4 dB-Hz.  Field name kept from the
-    # original (bare-ratio) definition for the dataclass contract; LOW
-    # values mean a clean triangle (real edge), HIGH values mean noise --
-    # the opposite sense "prominence" suggests, so read the derivation
-    # above, not the name, for what a given value means.
+    # because a triangle's median sits at half its peak.  Measured over 9
+    # fold positions: a real flip reads 0.0000081-0.000031 at 77 dB-Hz and
+    # 0.00017-0.00039 at 48.4; pure noise reads 0.1115-0.6760 -- two to
+    # four orders of magnitude apart, and unlike the bare ratio this
+    # SEPARATES at 48.4 dB-Hz.  Field name kept from the original
+    # (bare-ratio) definition for the dataclass contract; LOW values mean
+    # a clean tent (real edge), HIGH values mean noise -- the opposite
+    # sense "prominence" suggests, so read the derivation above, not the
+    # name, for what a given value means.  NaN when the fold held nothing
+    # measurable: no evidence, never spelled as the favourable 0.0.
     peak_prominence: float = 0.0
     # Width of the fitted transition, in samples.  A +-25 kHz channel
     # filter predicts 1/(2B) = 20 us, about 2 samples at 96 kHz.
@@ -532,29 +535,34 @@ class BpskEdgeFineStage:
         # --- battery evidence (T6_ACCEPTANCE_CRITERIA.md §4) ---
         mean_abs = (self._abs_sum / self._abs_n) if self._abs_n else 0.0
         retention = (float(np.mean(np.abs(avg))) / mean_abs) if mean_abs > 0 else 0.0
-        # peak_prominence: triangle-fidelity residual of |T(e)| over the
-        # WHOLE derotated folded second (fix-round-3; round 1 and round 2's
-        # ratio-based attempts both failed to separate real edges from
-        # noise at 48.4 dB-Hz -- see the fix-round-3 report).  For a clean
-        # single flip, T(e) is exactly piecewise-linear (a tent, apex at
-        # the flip) by construction, so fit that ideal tent through
-        # (0, |T[0]|) -> (apex, peak) -> (p-1, |T[p-1]|) and report the
-        # RMS deviation from it, normalised by the peak.  This is a SHAPE
+        # peak_prominence: triangle-fidelity residual of the SIGNED T(e)
+        # over the WHOLE derotated folded second.  For a clean single
+        # flip, T(e) is exactly piecewise-linear (a tent, apex at the
+        # flip) by construction, so fit that ideal tent through
+        # (0, T[0]) -> (apex, T[apex]) -> (p-1, T[p-1]) and report the RMS
+        # deviation from it, normalised by |T[apex]|.  This is a SHAPE
         # check, not an amplitude ratio: noise never traces a tent, no
         # matter how loud, so unlike a bare peak/median ratio (pinned at
         # 2.000 for any clean flip, since a triangle's median sits at half
         # its peak) it keeps working down to worst-hour C/N0.
+        #
+        # ⛔ Fit the SIGNED T, never |T|.  T's endpoints are +A(p-2e) and
+        # -A(p-2e) for an edge at e, so they carry OPPOSITE SIGNS unless
+        # the edge splits the fold exactly in half.  Wherever T crosses
+        # zero, |T| acquires a V-notch that no endpoint->apex->endpoint
+        # triangle can follow, and the residual becomes a function of how
+        # far off-centre the edge sits -- an arbitrary per-boot offset,
+        # since fold position depends only on where the stream started.
+        # Measured under the |T| fit, at 77 dB-Hz, against a 0.015 bound:
+        # edge 47916 -> 0.0014, 40000 -> 0.1260, 30000 -> 0.2611,
+        # 24000 -> 0.3333, 9600 -> 0.4869, 1000 -> 0.5683.  Every position
+        # but mid-fold was refused.  The signed fit reads ~1e-6 at all of
+        # them (see `max_fidelity_residual` for the current sweep).
+        # argmax(|T|) stays correct for LOCATING the apex -- it finds the
+        # extremum whichever sign the flip has.
         t_full = self._closed_form_T(in_phase)
-        at_full = np.abs(t_full)
-        apex_idx = int(np.argmax(at_full))
-        peak_t = float(at_full[apex_idx])
-        if peak_t > 0.0:
-            ideal = np.empty(p)
-            ideal[: apex_idx + 1] = np.linspace(at_full[0], peak_t, apex_idx + 1)
-            ideal[apex_idx:] = np.linspace(peak_t, at_full[-1], p - apex_idx)
-            prominence = float(np.sqrt(np.mean((at_full - ideal) ** 2)) / peak_t)
-        else:
-            prominence = 0.0
+        apex_idx = int(np.argmax(np.abs(t_full)))
+        prominence = self._triangle_fidelity(t_full, apex_idx)
         # apex_distance_samples: T(e)'s own apex, independent of the
         # zero-crossing fit above, versus the edge this estimate reports.
         # Catches a lock that fits cleanly but sits on the wrong feature
@@ -581,6 +589,32 @@ class BpskEdgeFineStage:
             transition_width_samples=width,
             apex_distance_samples=apex_distance,
         )
+
+    @staticmethod
+    def _triangle_fidelity(t_full: np.ndarray, apex_idx: int) -> float:
+        """RMS deviation of the SIGNED T(e) from the ideal tent through
+        (0, T[0]) -> (apex, T[apex]) -> (p-1, T[-1]), over |T[apex]|.
+
+        Returns NaN when T carries no measurable apex -- a dead-flat
+        curve or a non-finite one.  0.0 is the most FAVOURABLE value this
+        statistic can take, so it must never stand for "no evidence"
+        (T6_ACCEPTANCE_CRITERIA.md §4.4, §5.2); NaN compares false
+        against an upper bound, so the battery reads it as a refusal.
+        """
+        n = int(t_full.shape[0])
+        if n < 2 or not (0 <= apex_idx < n):
+            return float("nan")
+        apex_t = float(t_full[apex_idx])
+        peak_t = abs(apex_t)
+        if not math.isfinite(peak_t) or peak_t <= 0.0:
+            return float("nan")
+        ideal = np.empty(n)
+        ideal[: apex_idx + 1] = np.linspace(float(t_full[0]), apex_t,
+                                            apex_idx + 1)
+        ideal[apex_idx:] = np.linspace(apex_t, float(t_full[-1]),
+                                       n - apex_idx)
+        residual = float(np.sqrt(np.mean((t_full - ideal) ** 2)) / peak_t)
+        return residual if math.isfinite(residual) else float("nan")
 
     @staticmethod
     def _closed_form_T(x: np.ndarray) -> np.ndarray:

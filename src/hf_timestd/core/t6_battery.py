@@ -164,18 +164,36 @@ class BatteryThresholds:
     # measures whether a flip is PRESENT, independent of its strength --
     # which is why it survives at 48.4 dB-Hz where a peak-over-background
     # ratio does not.
-    #     pure noise        0.1016 - 0.6695  (nearest 0.1016)
-    #     real, 77 dB-Hz    0.00136 - 0.00141
-    #     real, 48.4 dB-Hz  0.00039 - 0.00194
-    #     real, 44 dB-Hz    up to 0.00232
-    # ⚠ The 2026-09-18 note put the noise floor at 0.2547 from a handful
-    # of seeds; 32 seeds pull the tail down to 0.1016, and the previous
-    # default of 0.05 sat only 2.0x below it.  0.015 restores the
-    # balance: 7.7x above the worst healthy reading at 48.4 dB-Hz, 6.5x
-    # above the worst at 44, and 6.8x below the lowest of 120 pure-noise
-    # blocks.  A tail that moved once with more seeds can move again --
-    # do not raise this without re-running the null.
-    max_fidelity_residual: float = 0.015
+    #
+    # ⛔ Re-derived 2026-09-19 after the fit moved from |T| to the SIGNED
+    # T (see `_compute_estimate`).  Under the |T| fit this residual was a
+    # function of WHERE IN THE FOLD the edge landed -- an arbitrary
+    # per-boot quantity -- and the old numbers below were all taken at the
+    # one position, 47916, where the defect is invisible.  The sweep now
+    # runs 9 fold positions x 6 C/N0 x 3 seeds, and the signed residual no
+    # longer varies with position at all:
+    #
+    #     pure noise        0.1115 - 0.6760  (nearest 0.1115, 90 blocks,
+    #                                         32 seeds)
+    #     real, 77 dB-Hz    0.0000081 - 0.000031
+    #     real, 58 dB-Hz    0.000060  - 0.00014
+    #     real, 48.4 dB-Hz  0.00017   - 0.00039
+    #     real, 44 dB-Hz    0.00029   - 0.00064
+    #
+    # Across the nine positions the worst healthy reading at 48.4 dB-Hz
+    # moves only 0.00031 -> 0.00039, a 1.3x spread against the 0.0014 ->
+    # 0.5683 (410x) spread the |T| fit produced.
+    #
+    # 0.008 is the geometric middle of the worst healthy reading at
+    # 44 dB-Hz (0.00064) and the nearest pure-noise block (0.1115):
+    # 20.5x above the worst at the governing 48.4 dB-Hz, 12.4x above the
+    # worst at 44, and 13.9x below the lowest of 90 noise blocks.  A ~2x
+    # tightening on the old 0.015, which the signed fit's two-orders-of-
+    # magnitude drop in the healthy population pays for.
+    # ⚠ The noise tail has moved before with seed count (0.2547 -> 0.1016
+    # going from a handful of seeds to 32).  Do not raise this without
+    # re-running the null, and do not re-derive it at one fold position.
+    max_fidelity_residual: float = 0.008
     # Distance from T(e)'s apex to the reported edge, in samples.  This
     # is the statistic that addresses the 2026-09-04 B4 failure: a lock
     # at a 20.000 ms lattice position AWAY from the true apex, measured

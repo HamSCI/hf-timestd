@@ -180,7 +180,9 @@ class TestTheNullIsRefused(unittest.TestCase):
         """The detection cliff is stochastic; so is the null's worst
         case.  The fidelity residual's noise floor moved from 0.2547 to
         0.1016 when the seed count went from a handful to 32, which is
-        why `max_fidelity_residual` came down to 0.015."""
+        why `max_fidelity_residual` came down from 0.05.  The signed-T
+        re-derivation of 2026-09-19 re-measured that floor at 0.1115 over
+        90 blocks and set the bound to 0.008."""
         for seed in range(101, 113):
             with self.subTest(seed=seed):
                 verdicts = _run_noise_blocks(5, seed)
@@ -246,10 +248,13 @@ class TestTheThresholdsSitBetweenTheMeasuredPopulations(unittest.TestCase):
 
     # worst healthy reading at 48.4 dB-Hz, and the nearest noise reading
     HEALTHY_48_4 = dict(retention=0.72729, ruler=1.0, unimodality_ms=0.005646,
-                        fidelity=0.00194, split_half=2.0,
+                        fidelity=0.00039, split_half=2.0,
                         apex=1.311, transition=2.0)
+    # 44 dB-Hz sits below the governing case and carries no promise,
+    # but it is the worst healthy fidelity reading the sweep produced.
+    HEALTHY_44 = dict(fidelity=0.000644)
     NOISE_NEAREST = dict(retention=0.183225, ruler=196.0, unimodality_ms=2.04934,
-                         fidelity=0.101636, split_half=1308.0)
+                         fidelity=0.11150, split_half=1308.0)
 
     def test_retention_admits_48_4_and_refuses_the_null(self):
         self.assertLess(self.t.min_fold_retention, self.HEALTHY_48_4["retention"])
@@ -273,6 +278,28 @@ class TestTheThresholdsSitBetweenTheMeasuredPopulations(unittest.TestCase):
                            self.HEALTHY_48_4["fidelity"])
         self.assertLess(self.t.max_fidelity_residual,
                         self.NOISE_NEAREST["fidelity"])
+
+    def test_the_fidelity_bound_keeps_balanced_headroom_on_both_sides(self):
+        """Sitting between the two populations is necessary but far from
+        sufficient here: the gap spans 173x (0.00064 healthy at 44 dB-Hz
+        to 0.1115 for the nearest noise block), so almost any value
+        clears the two-sided test above while leaving one side with
+        nearly no margin.  The old 0.015, derived before the signed-T
+        fix dropped the healthy population two orders of magnitude, sat
+        only 7.4x below the noise floor -- and that floor has already
+        moved once with seed count (0.2547 -> 0.1016 -> 0.1115).  So the
+        bound must keep at least 10x on BOTH sides, which puts it near
+        the geometric middle of 0.0064 - 0.0112 rather than anywhere in
+        the gap."""
+        b = self.t.max_fidelity_residual
+        self.assertGreaterEqual(
+            b / self.HEALTHY_44["fidelity"], 10.0,
+            f"{b} leaves only {b / self.HEALTHY_44['fidelity']:.1f}x over "
+            f"the worst healthy reading at 44 dB-Hz")
+        self.assertGreaterEqual(
+            self.NOISE_NEAREST["fidelity"] / b, 10.0,
+            f"{b} leaves only {self.NOISE_NEAREST['fidelity'] / b:.1f}x "
+            f"under the nearest of 90 pure-noise blocks")
 
     def test_split_half_admits_48_4_and_refuses_the_null(self):
         self.assertGreater(self.t.max_split_half_delta_samples,
@@ -444,3 +471,75 @@ class TestSigmaCeilingTracksCn0(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheFidelityResidualDoesNotDependOnFoldPosition(unittest.TestCase):
+    """The test whose absence let a position-dependent statistic ship.
+
+    Where the edge lands inside the folded second is arbitrary: it
+    follows from where the stream started, so it changes on every boot
+    and carries no information about the station.  A criterion that
+    moves with it is not measuring the station at all.
+
+    Criterion 4 did exactly that until 2026-09-19.  Fitting the triangle
+    to |T(e)| rather than to the signed T put a V-notch in the curve
+    wherever T crossed zero -- which happens for every edge that does
+    not split the fold evenly -- and the residual grew with the
+    displacement.  At 77 dB-Hz, against the 0.015 bound then in force:
+
+        edge 47916 -> 0.0014   40000 -> 0.1260   30000 -> 0.2611
+        edge 24000 -> 0.3333    9600 -> 0.4869    1000 -> 0.5683
+
+    Every position but mid-fold was refused, and the sweep that derived
+    the thresholds never saw it because it drove one position throughout.
+
+    The signed fit measured 8.1e-06 - 3.1e-05 at 77 dB-Hz and
+    1.7e-04 - 3.9e-04 at 48.4 across nine positions (the full 30 s-fold
+    sweep, 3 seeds each): a 1.3x spread where |T| gave 410x.  This test
+    re-runs the geometry on a short fold so it can run every time.
+    """
+
+    FOLD = 5
+    POSITIONS = (37, 1000, 9600, 24000, 30000, 40000, 47916, 60000,
+                 80000, 95000, SR - 40)
+
+    def _residuals(self, edge: float, cn0: float, seed: int = 11):
+        stage = BpskEdgeFineStage(sample_rate=SR, fold_seconds=self.FOLD)
+        sig = _make_bpsk_signal(
+            duration_s=self.FOLD * 4 + 1.0, sample_rate=SR,
+            edge_offset_samples=edge, noise_std=_noise_std_for(cn0),
+            seed=seed)
+        out = []
+        for i in range(0, len(sig), BATCH):
+            est = stage.process_samples(sig[i:i + BATCH], i)
+            if est is not None:
+                out.append(est.peak_prominence)
+        return out[1:]
+
+    def test_every_fold_position_clears_the_shipped_bound(self):
+        bound = BatteryThresholds().max_fidelity_residual
+        seen = []
+        for pos in self.POSITIONS:
+            with self.subTest(edge=pos):
+                vals = self._residuals(pos + 0.1672, 77.0)
+                self.assertTrue(vals, f"no estimate at edge {pos}")
+                seen += vals
+                self.assertLess(
+                    max(vals), bound,
+                    f"edge {pos}: residual {max(vals):.6g} exceeds the "
+                    f"{bound} bound -- the statistic moved with fold "
+                    f"position, which is a per-boot accident")
+        self.assertLess(max(seen) / min(seen), 20.0,
+                        f"residual spread across fold positions is "
+                        f"{max(seen) / min(seen):.1f}x: "
+                        f"{min(seen):.6g} - {max(seen):.6g}")
+
+    def test_every_fold_position_clears_it_at_the_governing_cn0_too(self):
+        """48.4 dB-Hz, B4's worst hour -- the case the bound governs."""
+        bound = BatteryThresholds().max_fidelity_residual
+        for pos in self.POSITIONS:
+            with self.subTest(edge=pos):
+                vals = self._residuals(pos + 0.1672, B4_WORST_CN0)
+                self.assertTrue(vals, f"no estimate at edge {pos}")
+                self.assertLess(max(vals), bound,
+                                f"edge {pos}: {max(vals):.6g} > {bound}")
