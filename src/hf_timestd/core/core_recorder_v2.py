@@ -2237,6 +2237,19 @@ class CoreRecorderV2:
     # regime, with reliable engagement.
     T6_DISAMBIGUATION_MAX_SIGMA_MS = 0.010
 
+    # ORDINAL resolution — which GPS second the edge belongs to
+    # (T6_ACCEPTANCE_CRITERIA.md §3.1).  A different question from the
+    # one T6_DISAMBIGUATION_MAX_SIGMA_MS was written for, and four
+    # orders of magnitude easier: the physical-plausibility bound is
+    # 250 ms, so a fifth of it leaves four sigma of room to name the
+    # right second.  T2 sits at ~20 ms and never goes away, which makes
+    # this resolver structural rather than conditional.
+    #
+    # ⛔ Do not confuse this with sample-level disambiguation.  No tier
+    # we run reaches the 10.4 us a sample spans at 96 kHz; only the
+    # measurement does.  See §2.1.
+    T6_ORDINAL_MAX_SIGMA_MS = 50.0
+
     # Step-recovery thresholds for the wrap-rejector.  The wrap-rejector
     # locks in the first stable chain_delay after disambiguation; if the
     # underlying (raw) chain_delay later steps to a new value (because the
@@ -2472,6 +2485,64 @@ class CoreRecorderV2:
         except (FileNotFoundError, OSError,
                 subprocess.SubprocessError, ValueError, IndexError) as e:
             logger.debug(f"T4 chrony tracking unavailable: {e}")
+
+        return None
+
+    def _get_ordinal_reference(self):
+        """Return a clock good enough to name the GPS second, or None.
+
+        Walks the tier ranking downward and takes the first source whose
+        sigma clears ``T6_ORDINAL_MAX_SIGMA_MS``.  Returns
+        ``(offset_ms, sigma_ms, tier_name)``.
+
+        This grants the source nothing beyond an integer.  It does not
+        measure a phase, does not gate, and does not slew — the fold
+        supplies the sub-second term (§3.2).  The returned tier name
+        travels into the anchor's ``captured_via_tier`` so provenance
+        survives.
+        """
+        # T3 — HF Fusion.  Sharpens with a real antenna; at any usable
+        # sigma it names the second comfortably.
+        try:
+            fusion_path = Path('/run/hf-timestd/fusion_status.json')
+            data = json.loads(fusion_path.read_text())
+            if data.get('schema') == 'v1':
+                fusion = data.get('fusion') or {}
+                if (fusion.get('available')
+                        and fusion.get('kalman_state') in ('LOCKED', 'ACQUIRING')):
+                    offset_ms = float(fusion['d_clock_fused_ms'])
+                    sigma_ms = float(fusion['uncertainty_ms'])
+                    if sigma_ms <= self.T6_ORDINAL_MAX_SIGMA_MS:
+                        return offset_ms, sigma_ms, 'T3'
+        except (FileNotFoundError, OSError, json.JSONDecodeError,
+                KeyError, ValueError):
+            pass
+
+        # T4/T2 — chrony.  `Last offset` reads (true_time − local_time);
+        # negate for (system_clock − UTC).  Naming the tier T4 vs T2 by
+        # source is the offset judge's job, not ours; for an ordinal the
+        # distinction does not change the answer, so report what chrony
+        # is actually disciplined to.
+        try:
+            import subprocess
+            result = subprocess.run(
+                ['chronyc', 'tracking'],
+                capture_output=True, text=True, timeout=2,
+            )
+            if result.returncode == 0:
+                last_offset_sec = None
+                rms_offset_sec = None
+                for line in result.stdout.splitlines():
+                    if line.startswith('Last offset'):
+                        last_offset_sec = float(line.split(':', 1)[1].split()[0])
+                    elif line.startswith('RMS offset'):
+                        rms_offset_sec = float(line.split(':', 1)[1].split()[0])
+                if last_offset_sec is not None and rms_offset_sec is not None:
+                    sigma_ms = rms_offset_sec * 1000.0
+                    if sigma_ms <= self.T6_ORDINAL_MAX_SIGMA_MS:
+                        return -last_offset_sec * 1000.0, sigma_ms, 'T4'
+        except Exception:
+            pass
 
         return None
 
