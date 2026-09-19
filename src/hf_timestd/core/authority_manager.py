@@ -280,6 +280,8 @@ class AuthorityManager:
         # BpskPpsProbe (spec §4 of the anchor-inversion design).  None
         # until a producer publishes it.
         self._t6_authority_state: Optional[str] = None
+        self._t6_suspect_criteria: Optional[str] = None
+        self._t6_battery_blocks: Optional[int] = None
         self._t6_hpps_publishing: Optional[bool] = None
         self._t6_hpps_publish_mode: Optional[str] = None
         self._t6_authority_violations: Optional[List[str]] = None
@@ -888,6 +890,18 @@ class AuthorityManager:
         self._t6_hpps_publishing = pub if isinstance(pub, bool) else None
         mode = d.get("hpps_publish_mode")
         self._t6_hpps_publish_mode = mode if isinstance(mode, str) else None
+        # Spec §5.1: a failed self-consistency guardrail on a RUNNING T6
+        # marks the assertion suspect and alarms; it never demotes.  The
+        # mark reached the authority_snapshot record but not this file,
+        # so an operator had no queryable state at all -- only a WARNING
+        # in the journal -- and "the operator decides" cannot mean
+        # "the operator greps".  Measured on AC0G-B4 2026-09-19: the
+        # columns were absent from authority.json and from sqlite alike.
+        sus = d.get("suspect_criteria")
+        self._t6_suspect_criteria = sus if isinstance(sus, str) else None
+        blocks = d.get("battery_blocks")
+        self._t6_battery_blocks = (
+            int(blocks) if isinstance(blocks, (int, float)) else None)
 
     def _write_state(self, state: AuthorityState) -> None:
         payload: dict = {
@@ -920,6 +934,15 @@ class AuthorityManager:
             payload["t6_hpps_publishing"] = self._t6_hpps_publishing
             if getattr(self, "_t6_hpps_publish_mode", None) is not None:
                 payload["t6_hpps_publish_mode"] = self._t6_hpps_publish_mode
+        # The self-consistency battery's verdict on a running T6.  Empty
+        # string means healthy; a comma-joined criterion list means the
+        # tier is still asserting but has marked itself suspect.  Omitted
+        # entirely when the producer publishes neither, so legacy output
+        # stays byte-compatible.
+        if getattr(self, "_t6_suspect_criteria", None) is not None:
+            payload["t6_suspect_criteria"] = self._t6_suspect_criteria
+        if getattr(self, "_t6_battery_blocks", None) is not None:
+            payload["t6_battery_blocks"] = self._t6_battery_blocks
 
         # Additive v1 extension: the host-clock verdict.  Present on every
         # normal tick (verdict "unwitnessed" when nothing reported) so a
