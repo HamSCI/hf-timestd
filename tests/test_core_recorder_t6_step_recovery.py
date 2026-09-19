@@ -34,6 +34,13 @@ def _make_recorder_at_locked_state(locked_ns: int, disambig_ns: int = 0):
     cr._use_shared_multistream = True
     cr._t6_first_sample_logged = True
     cr._t6_calibrator = MagicMock()
+    # A REAL int, because production compares against it:
+    #   _locked_now = result.pps_consecutive >= calibrator.consecutive_required
+    # BpskPpsCalibratorMF sets `self.consecutive_required = int(...)`, so a
+    # bare MagicMock here is a fake the real object could never be -- and the
+    # comparison raises TypeError rather than failing an assertion, which is
+    # why 11 tests in this file went red on 93293c1 and stayed red.
+    cr._t6_calibrator.consecutive_required = 10
     cr._t6_last_chain_delay_ns = locked_ns
     cr._t6_disambiguation_ns = disambig_ns
     cr._t6_wrap_rejections = 0

@@ -275,6 +275,11 @@ def _bare_on_samples_recorder():
     cr._use_shared_multistream = True
     cr._t6_first_sample_logged = True
     cr._t6_calibrator = MagicMock()
+    # A REAL int: production compares `result.pps_consecutive >=
+    # calibrator.consecutive_required`, and BpskPpsCalibratorMF sets it with
+    # int().  A bare MagicMock is a fake the real object could never be, and
+    # the comparison RAISES rather than failing an assertion.
+    cr._t6_calibrator.consecutive_required = 10
     cr._t6_calibrator.process_samples.return_value = None
     cr._t6_last_chain_delay_ns = None
     cr._t6_disambiguation_ns = 0
@@ -1015,6 +1020,11 @@ def _recovery_recorder(fine_stage):
     cr._use_shared_multistream = True
     cr._t6_first_sample_logged = True
     cr._t6_calibrator = MagicMock()
+    # A REAL int: production compares `result.pps_consecutive >=
+    # calibrator.consecutive_required`, and BpskPpsCalibratorMF sets it with
+    # int().  A bare MagicMock is a fake the real object could never be, and
+    # the comparison RAISES rather than failing an assertion.
+    cr._t6_calibrator.consecutive_required = 10
     cr._t6_calibrator.process_samples.return_value = None
     cr._t6_fine_stage = fine_stage
     cr._t6_authority = None
