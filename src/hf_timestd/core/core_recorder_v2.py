@@ -3051,6 +3051,7 @@ class CoreRecorderV2:
             # abandoned lock put it and re-installs it within one fold
             # block.  See BpskEdgeFineStage.clear_own_offset.
             self._t6_fine_stage.clear_own_offset()
+        self._t6_battery_forget_run("stale lock abandoned")
         self._t6_last_chain_delay_ns = None
         self._t6_disambiguation_ns = 0
         self._t6_wrap_rejections = 0
@@ -4354,6 +4355,27 @@ class CoreRecorderV2:
             )
             return False
 
+    def _t6_battery_forget_run(self, why: str) -> None:
+        """Drop the battery's block history when the stage position dies.
+
+        Criteria 2 (ruler) and 3 (unimodality) judge a RUN of fold
+        blocks.  After a repudiation the next block belongs to a
+        different acquisition, so the inter-block gap the ruler measures
+        spans the outage -- arbitrarily far from one fold period -- and
+        the battery would refuse a perfectly good new lock on the
+        strength of the old one's last block.
+
+        Absence of history is reported as 'not yet' (both criteria fail
+        until HISTORY_REQUIRED_BLOCKS accumulate again), which is the
+        honest answer.  A stale run is not.
+        """
+        bat = getattr(self, '_t6_battery', None)
+        if bat is None:
+            return
+        bat.reset()
+        self._t6_last_verdict = None
+        logger.debug("T6 battery: block history dropped (%s)", why)
+
     def _t6_reported_sigma_ms(self) -> Optional[float]:
         """Std of the recent chain-delay history, in ms, or None.
 
@@ -4372,17 +4394,13 @@ class CoreRecorderV2:
         return float(np.std(hist, ddof=1)) / 1e6
 
     def _t6_disambiguate_via_external_reference(self, result) -> None:
-        """Acquire the T6 anchor on T6's own fold (acceptance criteria §3).
+        """Acquire the T6 anchor on T6's own edge (acceptance criteria §3).
 
-        Two questions, two different answers, and they used to be asked
-        at one threshold.
+        Two questions, and they used to be asked at one threshold.
 
         * WHICH second — ``_t6_name_integer_second``, the coarse cascade
           already in this file.  It needs ±0.5 s and grants its source
           nothing further (§3.1).
-        * WHERE IN THAT SECOND — the fold, and only the fold.  At 96 kHz
-          one sample spans 10.4 µs and no tier we run resolves that, so
-          the sub-second term comes from the measurement (§3.2).
         * MAY IT ASSERT — the self-consistency battery (§4), not a lesser
           tier's nod.
 
@@ -4395,15 +4413,43 @@ class CoreRecorderV2:
         this runs at every initial accept.
         """
         try:
-            last_edge_rtp = getattr(self._t6_calibrator, '_last_edge_rtp', None)
-            if last_edge_rtp is None or self._t6_channel_info is None:
+            if (getattr(self._t6_calibrator, '_last_edge_rtp', None) is None
+                    or self._t6_channel_info is None):
                 return
+            est = getattr(self, '_t6_last_fine_est', None)
+            if est is None:
+                if self._t6_say_once('no_fine_estimate'):
+                    logger.info(
+                        "T6 acquisition: the matched filter accepted a "
+                        "chain delay but the fold has produced no fine "
+                        "estimate yet, and the fold now locates the edge "
+                        "this anchor registers.  Waiting for one.  "
+                        "(Repeated at most every %.0f s.)",
+                        self.T6_REPEAT_PERIOD_SEC)
+                return
+            if getattr(self, '_t6_battery', None) is None:
+                from .t6_battery import T6Battery
+                self._t6_battery = T6Battery(
+                    sample_rate=int(self._t6_calibrator.sample_rate),
+                    fold_seconds=int(est.n_seconds_folded),
+                )
+
+            # ⛔ ONE edge answers every question below, and it is the
+            # FOLD's.  The whole point of this task is that the fold
+            # locates the edge better than the matched filter does, so
+            # naming the second from one edge and reading the wall time
+            # off another would throw that away.  The two genuinely can
+            # differ: the MF is the demoted coarse witness, and on
+            # 2026-09-04 B4's MF sat on a 20.000 ms lattice position
+            # away from the true apex while the fold did not.
+            edge_rtp = int(est.edge_rtp)
+
             # §3.1 — the ordinal.  The namer already in this file
             # resolves which UTC second the edge belongs to: T5 NMEA
             # preferred, radiod-pair wall as fallback, refusing a
             # residual beyond ±0.4 s.  It needs half a second where the
             # retired gate demanded 10 µs.
-            named_second = self._t6_name_integer_second(last_edge_rtp)
+            named_second = self._t6_name_integer_second(edge_rtp)
             if named_second is None:
                 if self._t6_say_once('ordinal_unnamed'):
                     logger.warning(
@@ -4418,60 +4464,66 @@ class CoreRecorderV2:
             # NAMED by the cascade; nothing else about it was believed.
             ref_tier = 'namer'
 
-            est = getattr(self, '_t6_last_fine_est', None)
-            if est is None:
-                if self._t6_say_once('no_fine_estimate'):
-                    logger.info(
-                        "T6 acquisition: the matched filter accepted a "
-                        "chain delay but the fold has produced no fine "
-                        "estimate yet, and the fold now carries the "
-                        "sub-second term.  Waiting for one.  (Repeated "
-                        "at most every %.0f s.)", self.T6_REPEAT_PERIOD_SEC)
-                return
-            if getattr(self, '_t6_battery', None) is None:
-                from .t6_battery import T6Battery
-                self._t6_battery = T6Battery(
-                    sample_rate=int(self._t6_calibrator.sample_rate),
-                    fold_seconds=int(est.n_seconds_folded),
-                )
-
-            # Compute raw wall-time of the detected edge WITHOUT ka9q
+            # Compute raw wall-time of the fold's edge WITHOUT ka9q
             # applying chain_delay (kept None on ChannelInfo so the
-            # subtraction inside rtp_to_wallclock is a no-op).
+            # subtraction inside rtp_to_wallclock is a no-op).  Masked to
+            # 32 bits because ``_t6_name_integer_second`` masks before it
+            # reads the same mapping, and the two must describe one edge.
             self._t6_channel_info.chain_delay_correction_ns = None
             from ka9q.rtp_recorder import rtp_to_utc
-            raw_wall_time_sec = rtp_to_utc(last_edge_rtp, self._t6_channel_info)
+            raw_wall_time_sec = rtp_to_utc(
+                edge_rtp & 0xFFFFFFFF, self._t6_channel_info)
             if raw_wall_time_sec is None:
                 return
 
-            # §3.2 — the phase.  The fold says where in the second this
-            # edge sits; ``raw_wall_time_sec`` says where radiod's
-            # RTP→UTC mapping puts the SAME edge.  Both are the edge's
-            # own position, so their difference is the integer-sample
-            # shift that moves the mapping onto the measurement — and
-            # the effective chain delay that comes out below is the
-            # fold's position, not a reference tier's opinion of it.
+            # §3.2 — where in the second.  NO PHASE COMPARISON APPEARS
+            # HERE, and that is the point.
             #
-            # ⛔ Compare edge against edge.  Subtracting the raw chain
-            # delay from the wall time first (as the retired path did,
-            # to reach the PPS firing instant) would count that delay
-            # twice, once here and again in effective_chain_delay_ns.
+            # A pulse-per-second fires ON an integer UTC second.  The
+            # namer above says which one.  So the sub-second question is
+            # never "what phase does some other domain report" but "how
+            # far does the firing instant sit from the second it was
+            # named for" — and that deviation is the whole error.
+            #
+            # ⛔ Never difference a fold-domain position against a
+            # UTC-domain one.  ``est.edge_offset_samples`` is indexed
+            # from the fold buffer's origin, i.e.
+            # ``(edge_rtp − registration) mod p`` with a registration
+            # re-derived per block from the declared RTP of that block's
+            # first sample (BpskEdgeFineStage's module docstring says so
+            # at length).  That origin is arbitrary and moves on every
+            # stage reset, so subtracting a wall-clock phase from it
+            # carries the origin straight into the anchor.
+            # ``edge_rtp % sample_rate`` is no better — that is the RTP
+            # counter's own phase, a third origin again.  The fold's
+            # contribution here is a PRECISE ``edge_rtp`` at which to
+            # evaluate the mapping, not a phase to compare against
+            # anything.
             sr_local = self._t6_calibrator.sample_rate
-            fold_phase_samples = float(est.edge_offset_samples)
-            raw_phase_samples = (raw_wall_time_sec % 1.0) * sr_local
-            # Wrapped to (−sr/2, +sr/2]: the disagreement is modular in
-            # the PPS period, so the nearest representative is the only
-            # one with physical meaning.
-            shift_samples = int(round(
-                (fold_phase_samples - raw_phase_samples + sr_local / 2)
-                % sr_local - sr_local / 2))
+            firing_instant_sec = (
+                raw_wall_time_sec - (result.chain_delay_ns / 1e9)
+            )
+            deviation_sec = firing_instant_sec - float(named_second)
+            # Sign, because it is easy to get backwards and expensive to
+            # get wrong.  The caller re-forms
+            # ``result.chain_delay_ns + self._t6_disambiguation_ns`` for
+            # itself, so this value is a CORRECTION TO ADD, and the
+            # property that must hold once it is added is
+            #
+            #     raw_wall_time_sec − effective_chain_delay == named_second
+            #
+            # — the firing instant landing exactly on the second it was
+            # named for.  Substituting gives disambiguation = +deviation.
+            # A minus sign here puts the firing instant at
+            # ``named − deviation``: twice the error, on the wrong side.
+            shift_samples = int(round(deviation_sec * sr_local))
             self._t6_disambiguation_ns = int(round(
                 shift_samples * 1e9 / sr_local
             ))
             # Capture the hf-timestd-native anchor against the
             # cascade-NAMED integer second.  The effective chain delay
-            # just computed (= result.chain_delay_ns + disambig_ns) is
-            # where in that second the edge fell.
+            # (= result.chain_delay_ns + disambig_ns) is where in that
+            # second the edge fell.
             from .native_anchor import NativeAnchor
             effective_chain_delay_ns = wrap_chain_delay_ns(
                 result.chain_delay_ns + self._t6_disambiguation_ns
@@ -4520,7 +4572,7 @@ class CoreRecorderV2:
 
             pps_firing_utc_ns = int(named_second) * 1_000_000_000
             self._t6_native_anchor = NativeAnchor(
-                anchor_rtp=int(last_edge_rtp) & 0xFFFFFFFF,
+                anchor_rtp=edge_rtp & 0xFFFFFFFF,
                 anchor_utc_ns=pps_firing_utc_ns + effective_chain_delay_ns,
                 sample_rate_hz=int(sr_local),
                 chain_delay_ns=effective_chain_delay_ns,
@@ -4534,15 +4586,14 @@ class CoreRecorderV2:
             if _led is not None:
                 _led(self._t6_native_anchor)
             logger.info(
-                f"T6 acquired on the fold: second named {named_second} "
-                f"by the coarse cascade; fold phase "
-                f"{fold_phase_samples:.2f} samples vs raw wall phase "
-                f"{raw_phase_samples:.2f}; shifting {shift_samples} "
-                f"samples ({self._t6_disambiguation_ns} ns); raw="
+                f"T6 acquired on the fold's edge: second named "
+                f"{named_second} by the coarse cascade; firing instant "
+                f"deviated {deviation_sec*1000:+.3f} ms from it, so "
+                f"shifting {shift_samples} samples "
+                f"({self._t6_disambiguation_ns} ns); raw="
                 f"{result.chain_delay_ns} ns implied effective "
                 f"chain_delay {effective_chain_delay_ns/1e6:+.3f} ms; "
-                f"battery passed on {len(verdict.criteria)} criteria "
-                f"(sigma {verdict.sigma_ms:.4f} ms); "
+                f"battery passed (sigma {verdict.sigma_ms:.4f} ms); "
                 f"{format_native_anchor_log(self._t6_native_anchor, ref_tier)}"
             )
         except Exception as e:
@@ -5015,6 +5066,7 @@ class CoreRecorderV2:
                 self._t6_fine_stage.reset()
                 # Repudiate the tracked position too — reset() spares it.
                 self._t6_fine_stage.clear_own_offset()
+            self._t6_battery_forget_run("calibrator stuck unlocked")
             self._t6_last_chain_delay_ns = None
             self._t6_disambiguation_ns = 0
             self._t6_wrap_rejections = 0
@@ -5322,6 +5374,7 @@ class CoreRecorderV2:
                             # stage re-installs the operating point the
                             # step-recovery just admitted was stale.
                             self._t6_fine_stage.clear_own_offset()
+                        self._t6_battery_forget_run("step recovery")
                         self._t6_last_chain_delay_ns = None
                         self._t6_disambiguation_ns = 0
                         self._t6_wrap_rejections = 0
