@@ -88,6 +88,23 @@ class FineEdgeEstimate:
     n_seconds_folded: int
     plateau_amplitude: float
     fit_rms: float
+    # --- battery evidence (T6_ACCEPTANCE_CRITERIA.md §4) ---
+    # Folded amplitude as a fraction of the mean instantaneous amplitude.
+    # ~1.0 when the carrier stays coherent with the ADC clock across
+    # seconds; collapses toward 0 when it does not.  AI6VN measured
+    # 0.006 with the TS-1's REF IN on its internal 10 MHz and 0.9998
+    # once fed from the GPSDO that governs the RX888.  B4 reads 0.98.
+    fold_retention: float = 0.0
+    # Edge position from the even-second sub-fold minus the odd-second
+    # sub-fold, in samples.  Two disjoint 30 s folds agreed to 41 ns on
+    # captured IQ against 17 ns predicted (n=2).
+    split_half_delta_samples: float = 0.0
+    # Peak of the search statistic over its median background.  The
+    # magnitude-difference discriminant read 105x on captured IQ.
+    peak_prominence: float = 0.0
+    # Width of the fitted transition, in samples.  A +-25 kHz channel
+    # filter predicts 1/(2B) = 20 us, about 2 samples at 96 kHz.
+    transition_width_samples: float = 0.0
 
 
 class BpskEdgeFineStage:
@@ -135,6 +152,14 @@ class BpskEdgeFineStage:
         p = self.sample_rate
         self._acc = np.zeros(p, dtype=np.complex128)
         self._cnt = np.zeros(p, dtype=np.int64)
+        # Disjoint sub-folds by second parity, for the split-half check.
+        self._acc_even = np.zeros(p, dtype=np.complex128)
+        self._acc_odd = np.zeros(p, dtype=np.complex128)
+        self._cnt_even = np.zeros(p, dtype=np.int64)
+        self._cnt_odd = np.zeros(p, dtype=np.int64)
+        # Mean |x| over the block: the denominator of fold retention.
+        self._abs_sum = 0.0
+        self._abs_n = 0
         self._cont = 0  # samples received since reset
         self._reg_base: Optional[int] = None
         self._reg_rel: list[int] = []  # per-batch (declared − cont) − reg_base
@@ -281,6 +306,20 @@ class BpskEdgeFineStage:
             sign = 1.0 - 2.0 * (sec & 1).astype(np.float64)
             np.add.at(self._acc, idx, chunk.astype(np.complex128) * sign)
             np.add.at(self._cnt, idx, 1)
+            # Battery evidence.  `idx` and `sign` above are already the
+            # fold-domain index and per-second alternation for every
+            # sample in `chunk`; reuse them rather than recomputing.
+            self._abs_sum += float(np.sum(np.abs(chunk)))
+            self._abs_n += int(chunk.size)
+            # Second parity within the fold: even-parity seconds feed
+            # one sub-fold, odd the other, so the two never share a
+            # sample.  `sign > 0` iff `sec` is even.
+            even = sign > 0
+            contrib = chunk.astype(np.complex128) * sign
+            np.add.at(self._acc_even, idx[even], contrib[even])
+            np.add.at(self._cnt_even, idx[even], 1)
+            np.add.at(self._acc_odd, idx[~even], contrib[~even])
+            np.add.at(self._cnt_odd, idx[~even], 1)
             self._cont += take
             consumed += take
 
@@ -468,6 +507,24 @@ class BpskEdgeFineStage:
         edge_rtp = int(round(edge_rtp_float))
         subsample = float(edge_rtp_float - edge_rtp)
         self._note_block_estimate(float(edge_rtp % p))
+
+        # --- battery evidence (T6_ACCEPTANCE_CRITERIA.md §4) ---
+        mean_abs = (self._abs_sum / self._abs_n) if self._abs_n else 0.0
+        retention = (float(np.mean(np.abs(avg))) / mean_abs) if mean_abs > 0 else 0.0
+        # Prominence: peak of the magnitude-difference discriminant over
+        # its median background (tools/t6_fold_discriminant_bench.py's
+        # magdiff_fold, 105x peak/median on captured IQ).  Taken over the
+        # search segment `seg` rather than the whole folded second: the
+        # transition sits a few samples wide, so the plateau either side
+        # of it -- not the sign-alternation seam at the fold origin --
+        # sets the background.  Sign-invariant (|diff|), so the earlier
+        # `seg = -seg` polarity normalisation does not affect it.
+        seg_diff = np.abs(np.diff(seg))
+        diff_bg = float(np.median(seg_diff))
+        prominence = float(np.max(seg_diff)) / diff_bg if diff_bg > 0 else 0.0
+        width = float(hi - lo)
+        split_delta = self._split_half_delta(phi, edge_offset)
+
         return FineEdgeEstimate(
             edge_offset_samples=float(edge_offset),
             # Continuous (unwrapped) domain — consumers that hand this
@@ -477,4 +534,36 @@ class BpskEdgeFineStage:
             n_seconds_folded=self.fold_seconds,
             plateau_amplitude=A,
             fit_rms=fit_rms,
+            fold_retention=retention,
+            split_half_delta_samples=split_delta,
+            peak_prominence=prominence,
+            transition_width_samples=width,
         )
+
+    def _split_half_delta(self, phi: float, full_edge: float) -> float:
+        """Edge position from the even-second sub-fold minus the odd-second
+        sub-fold, in samples, wrapped to (-p/2, p/2].
+
+        Two disjoint folds of the same stable edge must agree to about
+        sqrt(2) times the single-fold scatter.  A wandering apex -- the
+        nightly B4 behaviour that produces ~270 tier transitions a day --
+        separates them.  Returns 0.0 when either sub-fold is empty, so a
+        short block reports no evidence rather than false evidence.
+        """
+        p = self.sample_rate
+        out = []
+        for acc, cnt in ((self._acc_even, self._cnt_even),
+                         (self._acc_odd, self._cnt_odd)):
+            if not np.any(cnt):
+                return 0.0
+            sub = np.where(cnt > 0, acc / np.maximum(cnt, 1), 0.0)
+            ip = np.real(sub * np.exp(-1j * phi))
+            # Closed-form matched filter for a single polarity flip at e:
+            # T(e) = C[p-1] - 2*C[e-1].  argmax|T| locates the edge.
+            # See T6_FOLDED_SELF_ACQUISITION.md §3.1 -- and note the
+            # prohibition there against a plain CUSUM.
+            c = np.cumsum(ip)
+            t = c[-1] - 2.0 * np.concatenate(([0.0], c[:-1]))
+            out.append(float(np.argmax(np.abs(t))))
+        d = out[0] - out[1]
+        return float((d + p / 2) % p - p / 2)
