@@ -182,5 +182,88 @@ class TestEvidenceDiscipline(unittest.TestCase):
         self.assertNotIn("retention", v.failures)
 
 
+class TestNaNNeverReadsAsHealthy(unittest.TestCase):
+    """A NaN in any evidence field is 'the fold could not compute this',
+    never 'the fold is fine'.  In bare Python, `nan < x` and `nan > x`
+    are both False, so a threshold comparison silently PASSES a NaN
+    unless it is checked for explicitly.  Each fixture here holds
+    exactly one NaN field with everything else healthy (six blocks, so
+    ruler and unimodality are already satisfied) -- so, unlike an
+    'everything NaN' fixture, only the field under test can be
+    responsible for the failure."""
+
+    def test_retention_nan_fails_rather_than_reading_as_healthy(self):
+        v = _run(_battery(), _series(6, fold_retention=float("nan")))
+        self.assertFalse(v.passed)
+        self.assertIn("retention", v.failures)
+
+    def test_shape_transition_width_nan_fails_rather_than_reading_as_healthy(self):
+        v = _run(_battery(),
+                 _series(6, transition_width_samples=float("nan")))
+        self.assertFalse(v.passed)
+        self.assertIn("shape", v.failures)
+
+    def test_shape_apex_distance_nan_fails_in_seeded_mode(self):
+        bat = _battery()
+        v = None
+        for e in _series(6, apex_distance_samples=float("nan")):
+            v = bat.evaluate(e, implied_chain_delay_ns=16_618_000,
+                             reported_sigma_ms=0.001, cn0_db_hz=70.0,
+                             search_mode="seeded")
+        self.assertFalse(v.passed)
+        self.assertIn("shape", v.failures)
+
+    def test_unimodality_nan_position_fails_rather_than_reading_as_healthy(self):
+        # Only ONE block's fold position is NaN (index 2, not 0); edge_rtp
+        # stays on the normal ladder throughout, so ruler cannot be what
+        # fails.  The index matters: with a bare `max(diffs)` over a
+        # single-NaN, otherwise-identical list, `x > current_max` is
+        # always False once `current_max` is NaN, so a NaN landing FIRST
+        # in iteration order happens to survive into the result by
+        # accident, while one at index 1, 2, 4 or 5 is silently dropped
+        # and `max()` returns 0.0 -- a fully healthy-looking spread.
+        # Index 0 would pass even against the unfixed code for the wrong
+        # reason; index 2 does not.
+        bat = _battery()
+        base = 1_000_000 + 47916
+        ests = [
+            _healthy(
+                edge_rtp=base + i * SR * K,
+                edge_offset_samples=(float("nan") if i == 2 else 47916.0),
+            )
+            for i in range(6)
+        ]
+        v = _run(bat, ests)
+        self.assertFalse(v.passed)
+        self.assertIn("unimodality", v.failures)
+
+    def test_plausibility_chain_delay_nan_fails_without_raising(self):
+        # implied_chain_delay_ns is documented as int, but a caller
+        # could still hand back NaN; `int(nan)` raises ValueError, which
+        # must never escape `evaluate` -- see the fix in criterion 7.
+        v = _run(_battery(), _series(6), chain_ns=float("nan"))
+        self.assertFalse(v.passed)
+        self.assertIn("plausibility", v.failures)
+
+    def test_evaluate_raises_no_exception_when_every_evidence_field_is_nan(self):
+        nan = float("nan")
+        est = _healthy(
+            fold_retention=nan,
+            split_half_delta_samples=nan,
+            peak_prominence=nan,
+            apex_distance_samples=nan,
+            transition_width_samples=nan,
+        )
+        bat = _battery()
+        try:
+            v = bat.evaluate(est, implied_chain_delay_ns=nan,
+                             reported_sigma_ms=nan, cn0_db_hz=70.0,
+                             search_mode="seeded")
+        except Exception as exc:  # the thing under test is: no exception
+            self.fail(f"evaluate() raised {exc!r} on all-NaN evidence "
+                      f"instead of returning a failing verdict")
+        self.assertFalse(v.passed)
+
+
 if __name__ == "__main__":
     unittest.main()

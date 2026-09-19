@@ -13,6 +13,15 @@ SELF-CONSISTENCY and nothing about accuracy.  Criteria 1 and 2 test
 COHERENCE: both read healthy when a single oscillator drives everything
 and drifts together.  Never cite either as evidence that a GPSDO holds
 UTC.  See T6_ACCEPTANCE_CRITERIA.md §4.4.
+
+⛔ Evidence the fold could not compute must never be evidence that the
+fold is healthy.  In plain Python, ``nan < x`` and ``nan > x`` are both
+False, so a bare threshold comparison silently PASSES a NaN — the
+opposite of what a missing measurement should mean.  Every numeric
+criterion in this module is routed through ``_fails``, the one place
+that treats a non-finite value (NaN or +-inf) as an automatic FAILURE
+before any threshold is even consulted.  Found 2026-09-19: a NaN
+``fold_retention`` passed the battery outright.
 """
 from __future__ import annotations
 
@@ -151,6 +160,21 @@ class T6Battery:
         p = self.sample_rate
         return (d + p / 2) % p - p / 2
 
+    @staticmethod
+    def _fails(value: float, predicate) -> bool:
+        """The one rule every numeric criterion obeys.
+
+        Returns True (the criterion FAILS) when ``value`` is non-finite
+        (NaN or +-inf) or when ``predicate(value)`` is True.  A bare
+        ``value < threshold`` or ``value > threshold`` lets NaN through
+        silently in both directions -- this is the guard that closes
+        that hole, in one place, so every criterion inherits it rather
+        than re-deriving it.
+        """
+        if not math.isfinite(value):
+            return True
+        return bool(predicate(value))
+
     def _predicted_sigma_ms(self, cn0_db_hz: Optional[float]) -> Optional[float]:
         """Per-block scatter the channel's C/N0 predicts, in ms.
 
@@ -187,7 +211,8 @@ class T6Battery:
 
         # 1 — fold retention.  Coherence of the reference chain.
         criteria[RETENTION] = float(est.fold_retention)
-        if est.fold_retention < self.t.min_fold_retention:
+        if self._fails(est.fold_retention,
+                       lambda v: v < self.t.min_fold_retention):
             failures.append(RETENTION)
 
         # 4 — shape.  A phantom repeats perfectly, so only shape separates
@@ -201,11 +226,12 @@ class T6Battery:
         criteria["apex_distance_samples"] = float(est.apex_distance_samples)
         criteria["transition_width_samples"] = float(est.transition_width_samples)
         bad_shape = (
-            not (fidelity == fidelity)            # NaN
-            or fidelity > self.t.max_fidelity_residual
-            or est.transition_width_samples <= 0.0
-            or est.transition_width_samples
-            > self.t.max_transition_width_samples
+            self._fails(fidelity,
+                       lambda v: v > self.t.max_fidelity_residual)
+            or self._fails(
+                est.transition_width_samples,
+                lambda v: v <= 0.0 or v > self.t.max_transition_width_samples,
+            )
         )
         # Apex agreement only where it carries information.  In bootstrap
         # mode the search centre and the apex come from the same fold, so
@@ -213,8 +239,10 @@ class T6Battery:
         # coarse offset can place the search away from the apex, which is
         # exactly the 2026-09-04 failure.
         if search_mode in ("seeded", "tracking"):
-            if (abs(float(est.apex_distance_samples))
-                    > self.t.max_apex_distance_samples):
+            if self._fails(
+                est.apex_distance_samples,
+                lambda v: abs(v) > self.t.max_apex_distance_samples,
+            ):
                 bad_shape = True
         if bad_shape:
             failures.append(SHAPE)
@@ -225,12 +253,22 @@ class T6Battery:
         # must never read as agreement (spec §4.6, §5.2).  Fail on it.
         sh = float(est.split_half_delta_samples)
         criteria[SPLIT_HALF] = sh
-        if not (sh == sh) or abs(sh) > self.t.max_split_half_delta_samples:
+        if self._fails(sh,
+                       lambda v: abs(v) > self.t.max_split_half_delta_samples):
             failures.append(SPLIT_HALF)
 
         # 7 — physical plausibility of the implied chain delay.
-        criteria[PLAUSIBILITY] = float(implied_chain_delay_ns)
-        if abs(int(implied_chain_delay_ns)) > self.t.max_chain_delay_ns:
+        #
+        # Cast to float rather than int: implied_chain_delay_ns is
+        # documented as int, but `int(nan)` RAISES ValueError instead of
+        # failing the criterion, which would let a NaN escape `evaluate`
+        # as an exception rather than as a verdict.  float() never
+        # raises on NaN, and `_fails` treats it as a failure like every
+        # other non-finite input.
+        chain_delay = float(implied_chain_delay_ns)
+        criteria[PLAUSIBILITY] = chain_delay
+        if self._fails(chain_delay,
+                       lambda v: abs(v) > self.t.max_chain_delay_ns):
             failures.append(PLAUSIBILITY)
 
         # 5 — sigma inside the tier's physical budget.
@@ -239,9 +277,7 @@ class T6Battery:
         ceiling = (predicted * self.t.sigma_margin if predicted is not None
                    else self.t.max_sigma_ms_without_cn0)
         criteria["sigma_ceiling_ms"] = float(ceiling)
-        if not (reported_sigma_ms == reported_sigma_ms):  # NaN
-            failures.append(SIGMA)
-        elif reported_sigma_ms > ceiling:
+        if self._fails(reported_sigma_ms, lambda v: v > ceiling):
             failures.append(SIGMA)
 
         # 2 and 3 need a run of blocks.  Report 'not yet' rather than
@@ -254,19 +290,44 @@ class T6Battery:
             criteria[UNIMODALITY] = float("nan")
         else:
             # 2 — the ruler.  Consecutive blocks exactly one fold apart.
+            #
+            # Structurally safe against the NaN leak: `self._edges` holds
+            # only `int(est.edge_rtp)` (appended above, before any of
+            # this method's own checks run), and edge_rtp is populated
+            # exclusively by the fine stage's `int(round(edge_rtp_float))`
+            # -- a block that could not compute a position returns None
+            # instead of a NaN estimate, so no NaN ever reaches this
+            # list.  All arithmetic here is therefore over real ints and
+            # a bare `>` cannot silently pass bad evidence.
             expected = self.fold_seconds * p
             worst = max(abs((self._edges[i] - self._edges[i - 1]) - expected)
                         for i in range(1, len(self._edges)))
             criteria[RULER] = float(worst)
-            if worst > self.t.max_ruler_error_samples:
+            if self._fails(worst,
+                           lambda v: v > self.t.max_ruler_error_samples):
                 failures.append(RULER)
 
             # 3 — unimodality.  Positions about their median.
+            #
+            # A NaN anywhere in `_positions` must not be laundered away
+            # by `max()`: Python's max() keeps whichever value it saw
+            # first that no later value beat, and `x > nan` is always
+            # False, so a NaN can end up either returned as the "worst"
+            # spread (if seen first) or silently skipped entirely (if
+            # seen later) depending on list order alone -- either way it
+            # is not a measurement of spread.  Check every difference for
+            # finiteness explicitly instead of trusting max() to surface
+            # a non-finite input.
             med = sorted(self._positions)[len(self._positions) // 2]
-            spread = max(abs(self._wrapped(x - med)) for x in self._positions)
-            spread_ms = spread / p * 1000.0
+            diffs = [abs(self._wrapped(x - med)) for x in self._positions]
+            if any(not math.isfinite(d) for d in diffs):
+                spread_ms = float("nan")
+            else:
+                spread_ms = max(diffs) / p * 1000.0
             criteria[UNIMODALITY] = float(spread_ms)
-            if spread_ms > self.t.max_unimodality_spread_ms:
+            if self._fails(
+                spread_ms, lambda v: v > self.t.max_unimodality_spread_ms
+            ):
                 failures.append(UNIMODALITY)
 
         ordered = tuple(c for c in ALL_CRITERIA if c in failures)
