@@ -314,6 +314,29 @@ first and detecting second, rather than the reverse.
 
 ---
 
+## 8d. Newell against the fold, on known truth — 2026-09-19
+
+§8b and §8c measured these on captured IQ, which can show precision but never
+accuracy: a capture carries no truth to compare against. Driving synthetic
+signal with a known edge, swept across twelve sub-sample phases, settles it.
+
+| C/N0 | K | Newell RMS | fold+fit RMS |
+|---|---|---|---|
+| 77.0 | 30 | 5.367 µs | **0.130 µs** |
+| 48.4 | 30 | *no detection* | **2.591 µs** |
+
+⚡ §8b's "128/128, one bit-identical position" and a 3.01 µs error are the same
+fact. A quantised estimator repeats perfectly at a FIXED edge; move the edge
+through a sample and the answer steps, with RMS 1/√12 samples. The error is a
+fixed offset, so averaging cannot reduce it — and its perfect repeatability is
+exactly what hides it.
+
+Full treatment, including what it means for metrology and for the physics
+products: [T6_NEWELL_VS_FOLD.md](T6_NEWELL_VS_FOLD.md).
+Bench: `tools/t6_newell_vs_fold_bench.py`.
+
+---
+
 ## 9. Why not the simpler method
 
 `wd-record` in ka9q-radio (Scott Newell) finds the same flip with a per-sample phase-step state
