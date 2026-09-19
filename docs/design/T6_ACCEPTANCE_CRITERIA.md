@@ -124,6 +124,30 @@ Acquisition stops asking one question at one threshold.
 
 ### 3.1 Ordinal — which GPS second
 
+⚡ **This codebase already resolves the ordinal, and the acquisition path
+simply does not use it.** `core_recorder_v2._t6_name_integer_second` names the
+integer UTC second of a fine-stage edge, and its docstring states this
+document's §3.1 almost word for word: *"The coarse cascade only NAMES the
+second — it needs ±0.5 s accuracy and its noise cannot enter the sub-second
+value."* It prefers the T5 NMEA reading, falls back to the radiod-pair wall
+estimate, refuses a residual beyond ±0.4 s, reconciles whole-second slips, and
+*reports* its disagreement with the radiod pair rather than correcting by it.
+The fine-estimate path has called it since the anchor-inversion work.
+
+So §2's finding widens. The arbitration layer got primacy right; the
+fine-estimate layer got the ordinal right. Only
+`_t6_disambiguate_via_external_reference` remains in the old regime, demanding
+a sub-10 µs reference for a question answered correctly a thousand lines away
+in the same file.
+
+⛔ Acquisition therefore **calls the existing namer**. It does not grow a
+second one. A parallel resolver would be a weaker duplicate of a tested
+function and a second thing to keep in agreement.
+
+The paragraphs below state the requirement the namer already satisfies, and
+remain the specification of what any replacement would owe.
+
+
 The physical-plausibility bound already in
 `_t6_disambiguate_via_external_reference` (`T6_PHYSICAL_CHAIN_DELAY_MAX_NS` =
 250 ms) sets this tolerance. Any clock inside ±250 ms names the right second.
@@ -140,17 +164,16 @@ not slew.
 
 ⚡ The tier least able to do T6's job performs the only job T6 needs from it.
 
-**Selection.** Walk the tier ranking downward and take the first source
-reporting an offset with σ ≤ `T6_ORDINAL_MAX_SIGMA_MS` (50 ms — a fifth of the
-plausibility bound). Record which source supplied it in the anchor's
-`captured_via_tier`, as the code does today, so provenance survives.
+**Selection.** `_t6_name_integer_second` walks T5 NMEA first, then the
+radiod-pair wall estimate, and refuses anything landing more than ±0.4 s from
+an integer second. Provenance survives in the anchor's `captured_via_tier`.
 
-**When no source clears even 50 ms**, T6 does not acquire, names the condition
-once per throttle period, and the station runs its fallback. That looks like
-today's refusal but differs in kind: the threshold sits 5000× looser, so a
-station holding no clock within 50 ms of UTC carries a far larger problem than
-a T6 acquisition. The old gate refused stations that were healthy; this one
-refuses only stations that are not.
+**When the namer returns None**, T6 does not acquire, names the condition once
+per throttle period, and the station runs its fallback. That looks like today's
+refusal but differs in kind: the namer asks for ±0.4 s where the old gate asked
+for 10 µs, so a station it refuses carries a far larger problem than a T6
+acquisition. The old gate refused stations that were healthy; this one refuses
+only stations that are not.
 
 ### 3.2 Phase — where in the second
 
