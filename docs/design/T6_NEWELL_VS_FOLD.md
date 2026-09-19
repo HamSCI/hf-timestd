@@ -180,6 +180,35 @@ sub-sample answer has to come from a stage that *models the transition* —
 §2.3's linear fit through the zero crossing — rather than from repeating a
 stage that only ever reports which sample the edge fell in.
 
+## 5c. The per-sample floor belongs to the channel, not to the method
+
+⚠ **96 kHz came from a configuration choice.** We ask radiod for the T6
+channel at that rate — wide enough for the pulse and no wider — and every
+per-sample figure in §4 inherits it. A quantised estimator errs by at most half
+a sample, so its floor tracks the sample period exactly:
+
+| Channel rate | One sample | Per-sample floor, T/√12 |
+|---|---|---|
+| 48 kHz | 20.833 µs | 6.014 µs |
+| **96 kHz** | **10.417 µs** | **3.007 µs** ← as configured |
+| 192 kHz | 5.208 µs | 1.504 µs |
+| 384 kHz | 2.604 µs | 0.752 µs |
+
+The folded chain does not sit on this ladder. Its precision comes from
+processing gain and the transition's shape, not from the sample grid.
+
+⚡ So why not sample faster and keep the cheap detector? Matching the fold's
+0.130 µs at 77 dB-Hz by rate alone wants a 0.45 µs sample period — **2.2 MHz**,
+about 23× the channel we run, for a pulse occupying ±25 kHz. Twenty-three times
+the samples through every stage downstream, to arrive where 30 s of folding
+already stands.
+
+⛔ And the *character* of the error survives the climb. A higher rate shrinks
+the quantisation step; at any rate the residual stays a fixed offset set by
+where the edge falls between two samples, invisible to every self-check, and
+untouched by repetition. Sampling faster buys a smaller irreducible error, never
+a reducible one.
+
 ## 6. What this does not establish
 
 ⚠ **All synthetic.** Band-limited BPSK plus additive Gaussian noise — no
