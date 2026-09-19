@@ -297,6 +297,27 @@ second, a TS-1 whose pulse marks something other than UTC — falls to the
 ordinal resolver of §3.1 and to calibration against UTC. State that in the
 published uncertainty rather than leave it implied.
 
+### 4.7 Non-finite evidence fails, always
+
+⛔ A criterion whose evidence arrives as NaN or infinity **fails**. It never
+passes, and it never raises.
+
+Python makes this a trap rather than a nicety: `nan < x` and `nan > x` both
+evaluate False, so a naive threshold test admits a NaN silently. Measured on
+2026-09-19 against the first implementation of §4's battery — a six-block run
+with `fold_retention` NaN and every other field healthy returned a PASS. Four
+of the seven criteria leaked that way; a fifth raised `ValueError` instead.
+
+One helper enforces the rule for every criterion, so a criterion added later
+inherits it rather than re-learning it. The principle matches §4.6 for
+split-half and §5.2 for the tier, and it is the same sentence each time:
+evidence the fold could not compute is not evidence that the fold is healthy.
+
+⚠ The masking is worse than the leak. `max()` over a list holding NaN returned
+a *finite* value at four of six block positions, so the unimodality leak
+produced a PASSING test when the NaN sat in the wrong place. A test written
+against one position would have certified the hole. Sweep the whole run.
+
 ### 4.5 Thresholds
 
 Derive every threshold from the C/N0 sweep during implementation, pin each with
