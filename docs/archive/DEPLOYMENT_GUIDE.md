@@ -602,7 +602,7 @@ That's it! The system will automatically use your new processor for streams conf
 
 1. ka9q-radio GitHub Repository: [https://github.com/ka9q/ka9q-radio](https://github.com/ka9q/ka9q-radio)
 2. wsprdaemon GitHub Repository: [https://github.com/rrobinett/wsprdaemon](https://github.com/rrobinett/wsprdaemon)
-3. HamSCI PSWS Network: [https://pswsnetwork.caps.ua.edu](https://pswsnetwork.caps.ua.edu)
+3. HamSCI PSWS Network: [https://pswsnetwork.eng.ua.edu](https://pswsnetwork.eng.ua.edu)
 4. Digital RF Format: [https://github.com/MITHaystack/digital_rf](https://github.com/MITHaystack/digital_rf)
 5. Avahi Documentation: [https://www.avahi.org/](https://www.avahi.org/)
 

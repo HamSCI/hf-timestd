@@ -85,7 +85,7 @@ If you plan to upload data to the Personal Space Weather Station (PSWS) network,
 
 ### Obtaining PSWS IDs
 
-1. **Register at**: [pswsnetwork.org](https://pswsnetwork.org/)
+1. **Register at**: [pswsnetwork.eng.ua.edu](https://pswsnetwork.eng.ua.edu/)
 2. **Request a station ID** (format: `S000XXX`)
 3. **Register your instrument** to get an instrument ID (numeric)
 

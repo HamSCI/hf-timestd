@@ -6,14 +6,20 @@ The HamSCI PSWS (Personal Space Weather Station) network requires SSH key-based 
 
 ## PSWS Server Details
 
-- **Server URL**: `pswsnetwork.eng.ua.edu` (production)
-- **Alternate URL**: `pswsnetwork.caps.ua.edu` (registration portal)
+- **Server URL**: `pswsnetwork.eng.ua.edu` — the portal AND the upload server;
+  there is only one host
 - **Protocol**: SFTP over SSH (port 22)
 - **Authentication**: SSH public key authentication
 
+> ⚠ This guide used to name `pswsnetwork.caps.ua.edu` as a separate
+> "registration portal". That was never a second service and the name no
+> longer resolves at all (checked 2026-09-19 from three networks, alongside
+> `pswsnetwork.org`, also dead). Every occurrence below has been corrected.
+> See HamSCI/hf-timestd#33.
+
 ## Prerequisites
 
-1. **PSWS Account**: You must create an account at https://pswsnetwork.caps.ua.edu/
+1. **PSWS Account**: You must create an account at https://pswsnetwork.eng.ua.edu/
 2. **SSH Key Pair**: Your system needs an SSH public/private key pair
 3. **Network Access**: Your system must be able to reach the PSWS server on port 22
 
@@ -21,7 +27,7 @@ The HamSCI PSWS (Personal Space Weather Station) network requires SSH key-based 
 
 ### Step 1: Create PSWS Account
 
-1. Navigate to https://pswsnetwork.caps.ua.edu/
+1. Navigate to https://pswsnetwork.eng.ua.edu/
 2. Create a new user account
 3. Log in to your account dashboard
 
@@ -282,7 +288,7 @@ chmod +x upload_to_psws.sh
 1. Check firewall rules: `sudo iptables -L -n | grep 22`
 2. Verify DNS resolution: `nslookup pswsnetwork.eng.ua.edu`
 3. Test with longer timeout: `nc -vz -w 10 pswsnetwork.eng.ua.edu 22`
-4. Try alternate server: `pswsnetwork.caps.ua.edu`
+4. Try alternate server: `pswsnetwork.eng.ua.edu`
 
 **Problem**: Connection refused
 
@@ -454,7 +460,7 @@ class PSWSUploader:
 ## References
 
 - [HamSCI GRAPE Project](https://hamsci.org/grape)
-- [PSWS Network Portal](https://pswsnetwork.caps.ua.edu/)
+- [PSWS Network Portal](https://pswsnetwork.eng.ua.edu/)
 - [Digital RF Format](https://github.com/MITHaystack/digital_rf)
 - [wsprdaemon GRAPE Implementation](https://github.com/rrobinett/wsprdaemon)
 - [wsprdaemon Groups.io Discussion](https://groups.io/g/wsprdaemon/message/3319)

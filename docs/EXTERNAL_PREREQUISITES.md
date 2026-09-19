@@ -380,7 +380,7 @@ instructions.
 
 **Summary:**
 
-1. Register at <https://pswsnetwork.caps.ua.edu/>
+1. Register at <https://pswsnetwork.eng.ua.edu/>
 2. Create a site → receive **SITE_ID** (e.g. `S000171`) and **TOKEN**
 3. Add an instrument → receive **INSTRUMENT_ID**
 4. Generate SSH key: `ssh-keygen -t rsa -b 4096 -f ~/.ssh/id_rsa_psws -N ""`

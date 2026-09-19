@@ -913,7 +913,7 @@ if [[ "$UPLOADER_ENABLED" == "true" ]]; then
     echo -e "  ${BOLD}PSWS Key Setup:${NC}"
     echo "    Run after install.sh completes to set up secure SFTP uploads:"
     echo "      sudo ./scripts/setup-psws-keys.sh"
-    echo "    You will need your PSWS TOKEN (from https://pswsnetwork.caps.ua.edu/)"
+    echo "    You will need your PSWS TOKEN (from https://pswsnetwork.eng.ua.edu/)"
     echo ""
 fi
 
