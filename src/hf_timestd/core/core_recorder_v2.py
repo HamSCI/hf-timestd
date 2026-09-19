@@ -330,6 +330,12 @@ class CoreRecorderV2:
         self._peer_rate_hz = None
         self._t6_epoch_last_obs = None
         self._t6_last_fine_est = None
+        # T6's self-consistency battery (T6_ACCEPTANCE_CRITERIA.md §4)
+        # and its most recent verdict.  The battery is built lazily on
+        # first acquisition, because its fold_seconds comes from the
+        # estimate the fine stage actually produced, not from config.
+        self._t6_battery = None
+        self._t6_last_verdict = None
         # Pre-trigger IQ ring; off unless configured (#43).
         self._t6_anomaly = None
         # T6-channel block-drop counter: this channel is not
@@ -4348,12 +4354,42 @@ class CoreRecorderV2:
             )
             return False
 
+    def _t6_reported_sigma_ms(self) -> Optional[float]:
+        """Std of the recent chain-delay history, in ms, or None.
+
+        The recorder already publishes this quantity as the authority's
+        ``t6_sigma_ms`` (see the ``chain_delay_ns_std_ns`` field in the
+        status payload).  The battery's criterion 5 compares it against
+        a ceiling; reusing the same number keeps one definition of T6's
+        uncertainty rather than inventing a second.
+
+        None below two samples: a standard deviation of one reading is
+        not a small uncertainty, it is no uncertainty at all.
+        """
+        hist = list(getattr(self, '_t6_chain_delay_history', ()) or ())
+        if len(hist) < 2:
+            return None
+        return float(np.std(hist, ddof=1)) / 1e6
+
     def _t6_disambiguate_via_external_reference(self, result) -> None:
-        """Fallback disambiguation path used when no fresh persisted
-        chain_delay is available.  Walks the timing-tier hierarchy
-        (T5 > T4 > T3) and sets ``self._t6_disambiguation_ns`` to the
-        integer-sample shift that brings the calibrator's implied
-        wall-time into agreement with the highest-rank available tier.
+        """Acquire the T6 anchor on T6's own fold (acceptance criteria §3).
+
+        Two questions, two different answers, and they used to be asked
+        at one threshold.
+
+        * WHICH second — ``_t6_name_integer_second``, the coarse cascade
+          already in this file.  It needs ±0.5 s and grants its source
+          nothing further (§3.1).
+        * WHERE IN THAT SECOND — the fold, and only the fold.  At 96 kHz
+          one sample spans 10.4 µs and no tier we run resolves that, so
+          the sub-second term comes from the measurement (§3.2).
+        * MAY IT ASSERT — the self-consistency battery (§4), not a lesser
+          tier's nod.
+
+        What this replaces: a gate that demanded a non-T6 reference at
+        sigma < 10 µs.  Nothing at these stations supplies it, so
+        DASI-009.AI6VN never completed acquisition and sat at T2 while
+        its edge landed on one sample position 128 seconds running.
 
         With chain-delay persistence retired (anchor inversion spec §6)
         this runs at every initial accept.
@@ -4362,17 +4398,43 @@ class CoreRecorderV2:
             last_edge_rtp = getattr(self._t6_calibrator, '_last_edge_rtp', None)
             if last_edge_rtp is None or self._t6_channel_info is None:
                 return
-            ref = self._get_disambiguation_reference()
-            if ref is None:
-                if self._t6_say_once('disambig_no_authority'):
-                    logger.info(
-                        "T6 chain_delay initial accept: no usable non-T6 "
-                        "timing authority for disambiguation; accepting "
-                        "calibrator value as-is.  (Repeated at most every "
-                        "%.0f s.)", self.T6_REPEAT_PERIOD_SEC
-                    )
+            # §3.1 — the ordinal.  The namer already in this file
+            # resolves which UTC second the edge belongs to: T5 NMEA
+            # preferred, radiod-pair wall as fallback, refusing a
+            # residual beyond ±0.4 s.  It needs half a second where the
+            # retired gate demanded 10 µs.
+            named_second = self._t6_name_integer_second(last_edge_rtp)
+            if named_second is None:
+                if self._t6_say_once('ordinal_unnamed'):
+                    logger.warning(
+                        "T6 acquisition: could not name the edge's UTC "
+                        "second — neither the T5 NMEA reading nor the "
+                        "radiod-pair wall estimate landed within ±0.4 s "
+                        "of an integer.  T6 does not assert; the station "
+                        "runs its fallback.  (Repeated at most every "
+                        "%.0f s.)", self.T6_REPEAT_PERIOD_SEC)
                 return
-            ref_offset_ms, ref_sigma_ms, ref_tier = ref
+            # Recorded on the anchor as its provenance: the second was
+            # NAMED by the cascade; nothing else about it was believed.
+            ref_tier = 'namer'
+
+            est = getattr(self, '_t6_last_fine_est', None)
+            if est is None:
+                if self._t6_say_once('no_fine_estimate'):
+                    logger.info(
+                        "T6 acquisition: the matched filter accepted a "
+                        "chain delay but the fold has produced no fine "
+                        "estimate yet, and the fold now carries the "
+                        "sub-second term.  Waiting for one.  (Repeated "
+                        "at most every %.0f s.)", self.T6_REPEAT_PERIOD_SEC)
+                return
+            if getattr(self, '_t6_battery', None) is None:
+                from .t6_battery import T6Battery
+                self._t6_battery = T6Battery(
+                    sample_rate=int(self._t6_calibrator.sample_rate),
+                    fold_seconds=int(est.n_seconds_folded),
+                )
+
             # Compute raw wall-time of the detected edge WITHOUT ka9q
             # applying chain_delay (kept None on ChannelInfo so the
             # subtraction inside rtp_to_wallclock is a no-op).
@@ -4381,32 +4443,44 @@ class CoreRecorderV2:
             raw_wall_time_sec = rtp_to_utc(last_edge_rtp, self._t6_channel_info)
             if raw_wall_time_sec is None:
                 return
-            wall_time_sec = raw_wall_time_sec - (result.chain_delay_ns / 1e9)
-            ref_time = round(wall_time_sec)
-            offset_sec = wall_time_sec - ref_time
-            # The reference tier's offset_ms is its estimate of
-            # (system_clock - true_UTC).  Our wall_time_offset is also
-            # that same quantity (modulo BPSK calibration error).
-            # Disagreement reveals the wrap.
-            disagreement_sec = offset_sec - (ref_offset_ms / 1000.0)
+
+            # §3.2 — the phase.  The fold says where in the second this
+            # edge sits; ``raw_wall_time_sec`` says where radiod's
+            # RTP→UTC mapping puts the SAME edge.  Both are the edge's
+            # own position, so their difference is the integer-sample
+            # shift that moves the mapping onto the measurement — and
+            # the effective chain delay that comes out below is the
+            # fold's position, not a reference tier's opinion of it.
+            #
+            # ⛔ Compare edge against edge.  Subtracting the raw chain
+            # delay from the wall time first (as the retired path did,
+            # to reach the PPS firing instant) would count that delay
+            # twice, once here and again in effective_chain_delay_ns.
             sr_local = self._t6_calibrator.sample_rate
-            shift_samples = round(disagreement_sec * sr_local)
+            fold_phase_samples = float(est.edge_offset_samples)
+            raw_phase_samples = (raw_wall_time_sec % 1.0) * sr_local
+            # Wrapped to (−sr/2, +sr/2]: the disagreement is modular in
+            # the PPS period, so the nearest representative is the only
+            # one with physical meaning.
+            shift_samples = int(round(
+                (fold_phase_samples - raw_phase_samples + sr_local / 2)
+                % sr_local - sr_local / 2))
             self._t6_disambiguation_ns = int(round(
                 shift_samples * 1e9 / sr_local
             ))
             # Capture the hf-timestd-native anchor against the
-            # cascade-resolved integer GPS second.  The effective
-            # chain delay just computed (= result.chain_delay_ns +
-            # disambig_ns) lets us back-derive the PPS firing UTC at
-            # this MF edge: ref_time after the integer-sample shift.
-            # captured_via_tier reflects which tier of the cascade
-            # supplied the integer second.
+            # cascade-NAMED integer second.  The effective chain delay
+            # just computed (= result.chain_delay_ns + disambig_ns) is
+            # where in that second the edge fell.
             from .native_anchor import NativeAnchor
             effective_chain_delay_ns = wrap_chain_delay_ns(
                 result.chain_delay_ns + self._t6_disambiguation_ns
             )
             # Layer B physical-plausibility guard — same rationale as
-            # the T5 path; see ``_t6_disambiguate_via_t5_lb1421``.
+            # the T5 path; see ``_t6_disambiguate_via_t5_lb1421``.  This
+            # is also the battery's criterion 7, kept here and ahead of
+            # it: it is the last defence against a gross wrap, and it
+            # must refuse before anything downstream reads the value.
             T6_PHYSICAL_CHAIN_DELAY_MAX_NS = 250_000_000
             if abs(effective_chain_delay_ns) > T6_PHYSICAL_CHAIN_DELAY_MAX_NS:
                 logger.warning(
@@ -4418,8 +4492,33 @@ class CoreRecorderV2:
                     f"anchor; calibrator will retry on next first-lock."
                 )
                 return
-            pps_firing_utc_ns = (ref_time - (ref_offset_ms / 1000.0))
-            pps_firing_utc_ns = int(round(pps_firing_utc_ns * 1e9))
+
+            # §4 — the functional test that replaces the reference test.
+            verdict = self._t6_battery.evaluate(
+                est,
+                implied_chain_delay_ns=effective_chain_delay_ns,
+                reported_sigma_ms=(self._t6_reported_sigma_ms() or 0.0),
+                # The C/N0 reading lives in frontend_probe, not here, and
+                # the sigma ceiling's absolute floor governs from 77 dB-Hz
+                # down to ~36 — the whole operating range — so plumbing it
+                # across modules would change no verdict.  See §4.3.
+                cn0_db_hz=None,
+                search_mode=(getattr(
+                    getattr(self, '_t6_fine_stage', None),
+                    '_last_search_mode', None) or 'bootstrap'),
+            )
+            self._t6_last_verdict = verdict
+            if not verdict.passed:
+                if self._t6_say_once('battery_refused'):
+                    logger.info(
+                        "T6 acquisition held: self-consistency battery "
+                        "failed on %s.  T6 does not assert; the station "
+                        "runs its fallback.  (Repeated at most every "
+                        "%.0f s.)", ", ".join(verdict.failures),
+                        self.T6_REPEAT_PERIOD_SEC)
+                return
+
+            pps_firing_utc_ns = int(named_second) * 1_000_000_000
             self._t6_native_anchor = NativeAnchor(
                 anchor_rtp=int(last_edge_rtp) & 0xFFFFFFFF,
                 anchor_utc_ns=pps_firing_utc_ns + effective_chain_delay_ns,
@@ -4434,24 +4533,18 @@ class CoreRecorderV2:
             _led = getattr(self, '_t6_ledger_append', None)
             if _led is not None:
                 _led(self._t6_native_anchor)
-            if shift_samples != 0:
-                logger.info(
-                    f"T6 chain_delay disambiguated against {ref_tier} "
-                    f"(offset={ref_offset_ms:+.3f} ms, "
-                    f"sigma={ref_sigma_ms:.3f} ms): raw="
-                    f"{result.chain_delay_ns} ns implied wall-time "
-                    f"offset {offset_sec*1000:+.3f} ms; disagreement "
-                    f"{disagreement_sec*1000:+.1f} ms; shifting "
-                    f"{shift_samples} samples ({self._t6_disambiguation_ns} ns); "
-                    f"{format_native_anchor_log(self._t6_native_anchor, ref_tier)}"
-                )
-            else:
-                logger.info(
-                    f"T6 chain_delay disambiguated against {ref_tier}: "
-                    f"already aligned within one sample "
-                    f"(disagreement {disagreement_sec*1000:+.3f} ms); "
-                    f"{format_native_anchor_log(self._t6_native_anchor, ref_tier)}"
-                )
+            logger.info(
+                f"T6 acquired on the fold: second named {named_second} "
+                f"by the coarse cascade; fold phase "
+                f"{fold_phase_samples:.2f} samples vs raw wall phase "
+                f"{raw_phase_samples:.2f}; shifting {shift_samples} "
+                f"samples ({self._t6_disambiguation_ns} ns); raw="
+                f"{result.chain_delay_ns} ns implied effective "
+                f"chain_delay {effective_chain_delay_ns/1e6:+.3f} ms; "
+                f"battery passed on {len(verdict.criteria)} criteria "
+                f"(sigma {verdict.sigma_ms:.4f} ms); "
+                f"{format_native_anchor_log(self._t6_native_anchor, ref_tier)}"
+            )
         except Exception as e:
             logger.warning(f"T6 disambiguation failed: {e}")
 

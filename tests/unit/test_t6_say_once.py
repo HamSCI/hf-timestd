@@ -84,8 +84,15 @@ class TestTheSpammingSitesAreGated:
 
     @pytest.mark.parametrize("key", [
         "disambig_t4_gate",          # "T4 sigma exceeds gate"
-        "disambig_no_authority",     # "no usable non-T6 timing authority"
         "disambig_dump:",            # the per-value DISAMBIG dump
+        # The third of the original trio, "disambig_no_authority", was
+        # RETIRED with the reference gate it announced: acquisition no
+        # longer asks a non-T6 tier for the sub-second term, so there is
+        # no "no usable authority" condition left to report.  Its two
+        # successors on the same per-cycle path are guarded here instead
+        # -- the surface moved, the flood risk did not.
+        "ordinal_unnamed",           # the cascade named no integer second
+        "battery_refused",           # the self-consistency battery failed
     ])
     def test_site_is_throttled(self, key):
         assert key in self._src(), (
