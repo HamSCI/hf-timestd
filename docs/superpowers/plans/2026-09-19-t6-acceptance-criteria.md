@@ -135,7 +135,8 @@ class TestFoldRetention(unittest.TestCase):
         own signal -- AI6VN measured 0.006 with REF IN on the internal
         10 MHz.  1 Hz rotates a full turn per second, so successive
         seconds add in opposition."""
-        est = _drive(BpskEdgeFineStage(sample_rate=SR), carrier_freq_hz=1.0)
+        # NOTE: shipped as 0.5 -- 1 Hz is fold-coherent.  See Task 9.
+        est = _drive(BpskEdgeFineStage(sample_rate=SR), carrier_freq_hz=0.5)
         if est is not None:
             self.assertLess(est.fold_retention, 0.30)
 
@@ -2265,7 +2266,15 @@ class TestTheFailuresWeRefuse(unittest.TestCase):
     def test_a_missing_reference_cable_names_itself(self):
         """Two days of detector theory chased a missing coax.  The
         battery must say 'retention', not 'detector'."""
-        verdicts = _acquire(77.0, carrier_freq_hz=1.0)
+        # 0.5 Hz, NOT 1.0.  The fold runs modulo one second, so a carrier
+        # at exactly 1 Hz presents identical phase at the same fold
+        # position every second and folds COHERENTLY -- the fixture would
+        # prove nothing.  0.5 Hz rotates 180 degrees per second, and the
+        # stage's sign alternation exists to undo the SIGNAL's polarity
+        # flip rather than the carrier's, so it survives as genuinely
+        # destructive.  Measured 2026-09-19: retention 0.998 at 1 Hz,
+        # 0.016 at 0.5 Hz.
+        verdicts = _acquire(77.0, carrier_freq_hz=0.5)
         if verdicts:
             self.assertTrue(any("retention" in v.failures for v in verdicts),
                             f"{[v.failures for v in verdicts]}")
