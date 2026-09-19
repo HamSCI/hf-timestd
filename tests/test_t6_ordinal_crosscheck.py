@@ -96,6 +96,35 @@ class TestNamedSecondCrossCheck(unittest.TestCase):
                 r._t6_check_named_second(edge, named)
         self.assertEqual(len(cm.output), 1, cm.output)
 
+    def test_an_agreeing_namer_survives_the_rtp_wrap(self):
+        """``anchor_rtp`` is masked to 32 bits at capture; ``edge_rtp`` is
+        the fine stage's CONTINUOUS counter.  Once that continuous counter
+        first exceeds 2**32, a RAW subtraction of the two computes an
+        elapsed time wrong by a multiple of 2**32 / SR = 44,739.24 s --
+        here the raw (buggy) subtraction would claim ~44,749 s elapsed
+        instead of the true 10 s, indicting a namer that is working fine.
+        """
+        r = _recorder()
+        edge = (1 << 32) + ANCHOR_RTP + 10 * SR  # continuous, post-wrap
+        named = ANCHOR_UTC_NS // 1_000_000_000 + 10
+        with self.assertNoLogs("hf_timestd.core.core_recorder_v2",
+                               level="WARNING"):
+            d = r._t6_check_named_second(edge, named)
+        self.assertIsNotNone(d)
+        self.assertLess(abs(d), 0.5)
+
+    def test_a_real_two_second_error_still_alarms_post_wrap(self):
+        """The wrap fix must not swallow a genuine disagreement in the
+        same post-wrap regime as the test above."""
+        r = _recorder()
+        edge = (1 << 32) + ANCHOR_RTP + 10 * SR
+        named = ANCHOR_UTC_NS // 1_000_000_000 + 12   # two seconds wrong
+        with self.assertLogs("hf_timestd.core.core_recorder_v2",
+                             level="WARNING") as cm:
+            d = r._t6_check_named_second(edge, named)
+        self.assertAlmostEqual(abs(d), 2.0, places=3)
+        self.assertTrue(any("named" in line.lower() for line in cm.output))
+
     def test_the_check_reads_no_wall_clock(self):
         """CLAUDE.md forbids a new time.time() in the timing path.  The
         anchor and the edge's RTP are sufficient."""

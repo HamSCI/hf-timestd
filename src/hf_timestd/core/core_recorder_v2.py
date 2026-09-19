@@ -2610,7 +2610,31 @@ class CoreRecorderV2:
             sr = float(anchor.sample_rate_hz)
             if sr <= 0:
                 return None
-            elapsed_sec = (int(edge_rtp) - int(anchor.anchor_rtp)) / sr
+            # ``anchor.anchor_rtp`` is MASKED to 32 bits at every
+            # construction site (t6_anchor_authority.py, and this file's
+            # NativeAnchor(...) calls) — ``NativeAnchor`` documents the
+            # field as a 32-bit RTP timestamp.  ``edge_rtp`` (the fine
+            # stage's ``FineEdgeEstimate.edge_rtp``) is CONTINUOUS —
+            # bpsk_edge_fine_stage.py: "consumers that hand this to
+            # 32-bit RTP interfaces mask at their own boundary."  A raw
+            # subtraction of the two is correct only until the continuous
+            # counter first passes 2**32 (~12.4 h at 96 kHz); past that
+            # they differ by a multiple of 2**32 (~44,739 s) and every
+            # check would alarm forever against a namer that is working
+            # fine.  Wrap the difference into signed 32 bits before
+            # converting to seconds — same technique as
+            # bpsk_edge_fine_stage._wrapped_signed, reimplemented locally
+            # rather than reaching across a module boundary for three
+            # lines.  The resulting +/-2**31 window is +/-6.2 hours; T6's
+            # holdover decays at 1.44 us/hr (measured), so even the far
+            # edge of that window costs ~8.6 us against the 0.5 s alarm
+            # threshold, and an anchor older than that is a liveness
+            # problem the authority already owns, not something this
+            # check should paper over.
+            raw_delta = int(edge_rtp) - int(anchor.anchor_rtp)
+            masked = raw_delta & 0xFFFFFFFF
+            signed_delta = masked - (1 << 32) if masked >= (1 << 31) else masked
+            elapsed_sec = signed_delta / sr
             t6_utc_sec = anchor.anchor_utc_ns / 1e9 + elapsed_sec
             disagreement = t6_utc_sec - float(named_second)
         except (TypeError, ValueError, ZeroDivisionError, AttributeError):
