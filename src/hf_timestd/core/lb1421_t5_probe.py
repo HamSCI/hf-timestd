@@ -137,6 +137,19 @@ class Lb1421Reading:
 INCONSISTENCY_WARN_INTERVAL_S = 60.0
 
 
+# Host-clock tolerance for a POLLED (UBX NAV-PVT) naming source.
+#
+# For NMEA the emission window doubles as the staleness bound, because a
+# sentence arrives within a second of the boundary it names.  A polled UBX
+# solution carries its own exact age — gpsdo-monitor publishes the monotonic
+# at which the named second BEGAN — so the reading ages forward precisely and
+# what remains is the host-clock error itself.  That can be judged tightly:
+# half a second is the whole question the namer answers (T6 needs ±0.5 s to
+# pick an integer second), so a host clock inside this bound cannot name the
+# wrong one.
+UBX_HOST_CLOCK_TOLERANCE_S = 0.5
+
+
 class Lb1421T5Probe:
     """Background poller of gpsdo-monitor's per-device JSON.
 
@@ -309,8 +322,40 @@ class Lb1421T5Probe:
         # [-0.5, 1.5] means host clock and NMEA truth disagree at the
         # integer-second level — demote T5.
         host_now = time.time()
-        nmea_emission_delay = (host_now - effective_fix_age) - raw_pps_utc_sec
-        host_gps_consistent = -0.5 <= nmea_emission_delay <= 1.5
+        naming_source = health.get("naming_source")
+        pub_mono = health.get("nmea_host_monotonic_at_read")
+
+        if naming_source == "ubx-nav-pvt" and isinstance(pub_mono, (int, float)):
+            # ⛔ A POLLED source, not an emitted one.  The window above is
+            # shaped for NMEA: an RMC sentence arrives within a second of
+            # the boundary it names, so its staleness and the host clock's
+            # error are the same quantity.  A UBX NAV-PVT solution is read
+            # on gpsdo-monitor's own probe interval (10 s default), so a
+            # perfectly good reading is routinely seconds old and the NMEA
+            # window rejects it for being polled.  Measured on
+            # DASI-009.AI6VN 2026-09-19: +3.964 s, refused, while the
+            # device's own tAcc claimed 6 ns.
+            #
+            # The publisher hands us what separates the two: the monotonic
+            # at which that integer second BEGAN.  Both processes run on
+            # this host, so the clocks are comparable, and ageing the
+            # reading forward gives GPS's view of NOW exactly.  What is
+            # left over IS the host-clock error this check exists to catch
+            # — measured rather than inferred, so the window can be tight.
+            elapsed = time.monotonic() - float(pub_mono)
+            nmea_emission_delay = host_now - (raw_pps_utc_sec + elapsed)
+            host_gps_consistent = (
+                -UBX_HOST_CLOCK_TOLERANCE_S
+                <= nmea_emission_delay
+                <= UBX_HOST_CLOCK_TOLERANCE_S
+            )
+            # Staleness is then judged on the reading's TRUE age, not on a
+            # fix_age the publisher computed before it wrote the file.
+            effective_fix_age = max(0.0, elapsed)
+        else:
+            nmea_emission_delay = (
+                host_now - effective_fix_age) - raw_pps_utc_sec
+            host_gps_consistent = -0.5 <= nmea_emission_delay <= 1.5
 
         fix_fresh = effective_fix_age <= self.nmea_max_age_s
         valid_fix = fix_fresh and host_gps_consistent
@@ -328,11 +373,15 @@ class Lb1421T5Probe:
                 self._last_inconsistency_warn = mono
                 logger.warning(
                     "Lb1421T5Probe: host clock minus GPS second = %+.3f s "
-                    "(outside -0.5..+1.5 s emission window) — the HOST clock "
+                    "(outside the %s window) — the HOST clock "
                     "disagrees with GPS by whole seconds; reading marked "
                     "invalid, T5 disambiguation withheld. Not a GPS-fix "
                     "problem: fix_age %.1f s, pps_utc_sec %d.",
-                    nmea_emission_delay, effective_fix_age, raw_pps_utc_sec,
+                    nmea_emission_delay,
+                    (f"±{UBX_HOST_CLOCK_TOLERANCE_S:.1f} s aged-UBX"
+                     if naming_source == "ubx-nav-pvt"
+                     else "-0.5..+1.5 s emission"),
+                    effective_fix_age, raw_pps_utc_sec,
                 )
 
         return Lb1421Reading(
