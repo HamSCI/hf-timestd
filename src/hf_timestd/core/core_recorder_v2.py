@@ -5004,11 +5004,19 @@ class CoreRecorderV2:
                 # shift to a whole wrap period; both can land anywhere.
                 try:
                     _sr_i = int(self._t6_calibrator.sample_rate)
-                    # Throttled per distinct raw value: a CHANGING disambig is
-                    # news and prints immediately; a stable one repeats at the
-                    # period. On AI6VN this was three identical lines every 5 s.
+                    # Throttled per distinct raw value, QUANTISED to the
+                    # microsecond: a disambiguation that MOVES is news and
+                    # prints at once; jitter within a microsecond is not.
+                    #
+                    # ⛔ Keyed on the raw nanoseconds first, which defeated
+                    # itself — DASI-009's value jitters ~100 ns cycle to cycle
+                    # (443218595, 443218624, 443218668, 443218698), so every
+                    # cycle was a fresh key and the throttle only took 12
+                    # lines/min to 8. A wrap error is half a second; anything
+                    # worth an immediate line is microseconds at the very
+                    # finest.
                     if self._t6_say_once(
-                            f'disambig_dump:{result.chain_delay_ns}'):
+                            f'disambig_dump:{result.chain_delay_ns // 1000}'):
                         logger.warning(
                             "T6 DISAMBIG: path=%s raw=%d ns (%.6f ms) "
                             "disambig=%d ns (%.6f ms) effective=%d ns "

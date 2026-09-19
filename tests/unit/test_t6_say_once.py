@@ -92,9 +92,28 @@ class TestTheSpammingSitesAreGated:
             f"the {key} surface is no longer routed through _t6_say_once; "
             f"it logs from a per-cycle path and the condition persists")
 
-    def test_the_dump_is_keyed_on_the_VALUE(self):
-        """A changing disambiguation is news; a stable one is not. Keying on
-        the raw value prints immediately when it moves and throttles when it
-        does not — which is what made AI6VN's nanosecond-stable value
-        visible instead of drowning."""
-        assert "disambig_dump:{result.chain_delay_ns}" in self._src()
+    def test_the_dump_key_is_QUANTISED(self):
+        """A disambiguation that MOVES is news; jitter is not.
+
+        ⛔ Keyed on raw nanoseconds first, which defeated the throttle:
+        DASI-009's value jitters ~100 ns cycle to cycle (443218595,
+        443218624, 443218668, 443218698), so every cycle minted a fresh key
+        and the fix took 12 lines/min only to 8. A wrap error is half a
+        second; nothing finer than a microsecond deserves an instant line.
+        """
+        src = self._src()
+        assert "disambig_dump:{result.chain_delay_ns // 1000}" in src, (
+            "the DISAMBIG dump key is not quantised; nanosecond jitter will "
+            "mint a fresh key every cycle and defeat the throttle")
+
+    def test_jitter_within_the_quantum_shares_one_key(self, rec):
+        """The behaviour the quantisation buys, at the helper level."""
+        base = 443_218_595
+        spoke = sum(rec._t6_say_once(f"d:{(base + n) // 1000}")
+                    for n in (0, 29, 73, 103))
+        assert spoke == 1, f"{spoke} keys for 103 ns of jitter, want 1"
+
+    def test_a_real_move_still_speaks_at_once(self, rec):
+        """Quantising must not mask a genuine step."""
+        assert rec._t6_say_once(f"d:{443_218_595 // 1000}") is True
+        assert rec._t6_say_once(f"d:{444_000_000 // 1000}") is True
