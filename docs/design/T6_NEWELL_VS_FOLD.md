@@ -242,12 +242,20 @@ stations quantising differently — because their edges sit at different
 sub-sample phases — differ by up to one full sample, 10.4 µs, with nothing in
 either station's self-checks to reveal it.
 
-Against the recorded tolerances — same-site WWV bands agreeing to ~1 ms,
-cross-site to ~4 ms — 10.4 µs sits comfortably inside the noise *today*. That
-is a statement about where HF propagation measurement currently stands, not a
-licence: the whole purpose of a ns-class tier is to stop being the limiting
-term, and a bias that no self-check can see is the wrong thing to carry into a
-measurement that is getting better.
+⛔ **Do not reach for `SAME_SITE_AGREE_MS` / `CROSS_SITE_AGREE_MS` here.**
+Those constants (`registration_acquirer.py`, 1.5 ms and 4.0 ms) separate
+corrections derived from different **transmitters** — Fort Collins, Kauai,
+Lintong — at ONE receiver, and the 4 ms is independent *path-model* error
+between different great-circle paths. The quantity in this section is the
+difference between two **receivers'** registrations: an instrument property
+that shares none of that budget. An earlier draft quoted the transmitter-side
+numbers as though they bounded the receiver-side one. They do not, and the two
+axes must not be conflated — transmitter disagreement is propagation, receiver
+disagreement is instrument.
+
+What holds without a number: the purpose of a ns-class tier is to stop being
+the limiting term, and a bias that no self-check can see is the wrong thing to
+carry into a measurement that is getting better.
 
 ⛔ And one place it matters now: **absolute** arrival timing. Mode
 identification fits an observed delay against geometric path lengths. That fit
@@ -261,9 +269,14 @@ lands directly in the residual the mode selection minimises.
    reference on the same edge.
 2. **Sweep fold position as well as sub-sample phase.** §4.2's lesson, applied
    here.
-3. **Measure the cross-station term directly.** Two stations, one TS-1 epoch,
-   the difference of their registrations. That is the number §8 of this note
-   argues about and nobody has yet put a value on.
+3. **Measure the RECEIVER-to-receiver term directly.** Two stations, one TS-1
+   epoch, the difference of their registrations — the number §8 argues about.
+
+   ⚠ Cross-station work on the **transmitter** axis is long-established here
+   and already carries measured tolerances: the same/cross-site split in
+   `registration_acquirer.py`, multi-broadcast fusion's agreement check across
+   all station pairs, and `MULTI_STATION_MLE_DESIGN.md`'s three-station
+   superposition. This item is the OTHER axis, and only that one is open.
 
 ---
 
