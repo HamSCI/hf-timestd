@@ -93,23 +93,35 @@ class TestSplitHalfAgreement(unittest.TestCase):
 class TestProminenceAndWidth(unittest.TestCase):
 
     def test_prominence_separates_a_real_edge_from_pure_noise(self):
-        """peak_prominence must discriminate real content from the null,
-        not merely clear a fixed constant -- a fixed bound of 5.0 turned
-        out to pass on no signal at all (pure complex Gaussian noise
-        measured 4.2-5.5 across ten seeded trials here; the reviewer's
-        own run separately measured 4.4-6.3).  That floor is simply the
-        order statistic of a ~1150-sample |diff| array: some sample reads
-        several times the median by chance alone, with nothing to detect.
+        """peak_prominence (the folded magnitude-difference discriminant,
+        T6_EDGE_METHODS_COMPARED.md §8c order: |diff| on the raw pre-fold
+        samples, THEN folded across seconds) must discriminate real
+        content from the null, not merely clear a fixed constant.
 
-        A real edge at a healthy 70 dB-Hz C/N0 reads ~40 -- roughly 7-10x
-        the noise ceiling measured below, comfortably material.  At a
-        realistic worst-case 48.4 dB-Hz (T6_ACCEPTANCE_CRITERIA.md §4.3's
-        C/N0 floor) five seeded trials read 4.9-5.5: indistinguishable
-        from the noise floor above.  Task 1 reports these numbers for the
-        later sweep-derived production threshold; it does not set one --
-        this test only asserts the healthy-C/N0 case clearly separates
-        from noise, which is all Task 1 needs to prove the field carries
-        real information.
+        Measured here (ten seeded pure-complex-Gaussian-noise trials, no
+        BPSK signal at all -- one trial produced no estimate):
+        noise reads 1.41 - 1.54.  A real edge at a healthy 70 dB-Hz C/N0
+        reads 3.94 -- about 2.6x the noise ceiling, which this test
+        asserts as the healthy-C/N0 case Task 1 can honestly stand behind.
+
+        ⚠ At a realistic worst-case 48.4 dB-Hz (T6_ACCEPTANCE_CRITERIA.md
+        §4.3's C/N0 floor, five seeded trials) this SAME statistic reads
+        1.41 - 1.48 -- fully inside the noise range above, not merely
+        close to it.  A round-1 candidate (differencing the already
+        *folded* complex average, i.e. folding before differencing
+        instead of after) was tried first and measured worse: 4.9 - 5.5
+        at 48.4 dB-Hz against a 4.2 - 5.3 noise range, and ~2.0 at 70
+        dB-Hz -- *below* its own noise ceiling of 3.8, i.e. no better
+        than chance even on a strong signal, because a single first
+        difference of a signal that already sits near its coherent-fold
+        plateau almost everywhere is dominated by the noise floor, not
+        the transition. §8c's pre-fold order is the more principled of
+        the two and is what production carries forward, but neither
+        separates a real 48.4 dB-Hz edge from noise. That is a measured
+        property of criterion 4 at the design's stated worst hour, not a
+        test gap -- reported to the project owner (fix-round-2 report),
+        not fixed by loosening a bound here. Task 1 sets no threshold;
+        this test asserts only the healthy-C/N0 separation it can prove.
         """
         edge_est = _drive(BpskEdgeFineStage(sample_rate=SR))
         self.assertIsNotNone(edge_est)

@@ -146,6 +146,13 @@ class BpskEdgeFineStage:
         # seam otherwise shifts every phase by 2^32 % sample_rate
         # (23,296 samples = 242.667 ms at 96 kHz) once per ~12.4 h.
         self._rtp_unwrapper = RtpUnwrapper()
+        # Tail sample for the magnitude-difference discriminant (see
+        # reset()'s ``_magdiff_acc``).  Deliberately NOT cleared by
+        # reset(): the raw stream is physically continuous across a
+        # fold-block boundary even though the fold-domain accumulators
+        # restart there, so the first diff of a new block still wants
+        # the true previous sample, not a fabricated one.
+        self._last_raw_sample: Optional[np.complex128] = None
         self.reset()
 
     def reset(self) -> None:
@@ -160,6 +167,12 @@ class BpskEdgeFineStage:
         # Mean |x| over the block: the denominator of fold retention.
         self._abs_sum = 0.0
         self._abs_n = 0
+        # Magnitude-difference discriminant, folded (T6_EDGE_METHODS_COMPARED.md
+        # §8c: |diff(x)| taken on the RAW pre-fold samples, THEN folded --
+        # carrier-free, so unlike the complex fold it does not depend on
+        # Costas having removed residual carrier rotation first.  Measured
+        # 105x peak/median on captured IQ (tools/t6_fold_discriminant_bench.py).
+        self._magdiff_acc = np.zeros(p, dtype=np.float64)
         self._cont = 0  # samples received since reset
         self._reg_base: Optional[int] = None
         self._reg_rel: list[int] = []  # per-batch (declared − cont) − reg_base
@@ -320,6 +333,15 @@ class BpskEdgeFineStage:
             np.add.at(self._cnt_even, idx[even], 1)
             np.add.at(self._acc_odd, idx[~even], contrib[~even])
             np.add.at(self._cnt_odd, idx[~even], 1)
+            # Magnitude-difference discriminant: diff on the RAW samples
+            # (before any folding or sign alternation), carrying the last
+            # sample of the previous chunk across the boundary so the
+            # first diff of this chunk is real, not fabricated.
+            prev = (self._last_raw_sample if self._last_raw_sample is not None
+                    else chunk[0])
+            raw_diff = np.abs(np.diff(chunk, prepend=prev))
+            np.add.at(self._magdiff_acc, idx, raw_diff)
+            self._last_raw_sample = chunk[-1]
             self._cont += take
             consumed += take
 
@@ -511,17 +533,19 @@ class BpskEdgeFineStage:
         # --- battery evidence (T6_ACCEPTANCE_CRITERIA.md §4) ---
         mean_abs = (self._abs_sum / self._abs_n) if self._abs_n else 0.0
         retention = (float(np.mean(np.abs(avg))) / mean_abs) if mean_abs > 0 else 0.0
-        # Prominence: peak of the magnitude-difference discriminant over
-        # its median background (tools/t6_fold_discriminant_bench.py's
-        # magdiff_fold, 105x peak/median on captured IQ).  Taken over the
-        # search segment `seg` rather than the whole folded second: the
-        # transition sits a few samples wide, so the plateau either side
-        # of it -- not the sign-alternation seam at the fold origin --
-        # sets the background.  Sign-invariant (|diff|), so the earlier
-        # `seg = -seg` polarity normalisation does not affect it.
-        seg_diff = np.abs(np.diff(seg))
-        diff_bg = float(np.median(seg_diff))
-        prominence = float(np.max(seg_diff)) / diff_bg if diff_bg > 0 else 0.0
+        # Prominence: peak of the folded magnitude-difference discriminant
+        # (self._magdiff_acc, accumulated in process_samples on the RAW
+        # pre-fold samples) over its median background.  §8c's measured
+        # order matters: differencing BEFORE folding stays carrier-free,
+        # so the fold's K-second average brings noise down instead of
+        # cancelling signal — the opposite of differencing the complex
+        # fold (round-1's approach), which halves the transition's own
+        # width down to ~2 samples and roughly doubles noise power,
+        # leaving nothing to distinguish it from noise at realistic
+        # (worst-hour, 48.4 dB-Hz) C/N0 -- see the fix-round-2 report.
+        folded_magdiff = self._magdiff_acc / np.maximum(self._cnt, 1)
+        diff_bg = float(np.median(folded_magdiff))
+        prominence = float(np.max(folded_magdiff)) / diff_bg if diff_bg > 0 else 0.0
         width = float(hi - lo)
         split_delta = self._split_half_delta(phi, edge_offset)
 
