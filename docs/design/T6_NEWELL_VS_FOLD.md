@@ -297,25 +297,57 @@ that bound now rests on: the healthy spread at low C/N0, not the sample
 grid. A wander smaller than that spread still passes — but the reported
 *value* now carries it, where before it was pinned at exactly `0.0000`.
 
-⚠ **`transition_width_samples` reports the fit bracket, not the rise.** The
-code sets `width = hi − lo`, where `lo, hi` start adjacent and widen only while
-neighbouring samples stay inside a narrow band about zero. A sharp edge keeps
-them adjacent, so the field read **1.00 on every block of both captures**. The
-field comment predicts about 2 samples from the ±25 kHz channel filter; the
-quantity computed cannot reach that number for a clean edge.
+⚠ **`transition_width_samples` is quantised to whole sample intervals.** The
+code sets `width = hi − lo`, the span of the fit bracket, which widens only
+while neighbouring samples stay inside 0.4 of the plateau amplitude. It read
+**1.00 on every block of both captures**.
 
-⚠ **`fit_rms` approaches zero by construction.** With the bracket at two
-points, `np.polyfit(…, 1)` fits a line through two points exactly. Every block
-reported ~1e-13. The field cannot indicate fit quality in the common case.
+That is the right quantity, coarsely measured — not the wrong one. The folded
+samples across B4's edge run
+
+```
+dawn    −0.929  −1.125  −0.960  [ −0.142  +0.797 ]  +1.176  +1.043
+night   −0.931  −1.182  −1.160  [ −0.427  +0.602 ]  +1.130  +1.043
+```
+
+so the transition really does cross in about two sample periods, against the
+1.92 that 1/(2B) predicts for a ±25 kHz channel. Typically one sample lands
+inside the band, so the bracket spans one interval and the field reports 1
+where the physics says 1.92. Widening the band to 0.98 moved the dawn reading
+to 2 and left the night reading at 1 — the grid, not the statistic, sets the
+resolution.
+
+⛔ The consequence is narrow but real: the field cannot separate a correct edge
+from one twice as wide, because both round to the same small integer. Its
+threshold comment already says what it is — "a PHYSICS BOUND, not a
+discriminator", with 30 samples aimed at a fit containing no transition at all
+— so the battery does not lean on it for discrimination. The field's own
+comment in `FineEdgeEstimate`, predicting about 2 samples, reads as a promise
+the statistic cannot keep at this rate, and the two comments should be
+reconciled.
+
+⚠ **`fit_rms` approaches zero by construction, and the battery never reads
+it.** With the bracket at two points, `np.polyfit(…, 1)` fits a line through
+two points exactly; every block reported ~1e-13. It was introduced with the
+zero-crossing localiser as a fit-quality diagnostic — does a straight line
+actually describe this transition region, or is the stage fitting noise? — and
+it is surfaced in the status JSON, never consumed as a criterion. The intent is
+sound; it goes unserved because the bracket almost never holds more than two
+points. Both fields therefore trace back to one cause: at 96 kHz the edge is
+about two samples wide, so there is barely any transition region to characterise.
 
 The other evidence fields did vary and did carry signal: the triangle residual
 moved across 0.000065–0.000779, apex distance across 0.535–0.965 samples, and
 retention across 0.960–0.982.
 
 ⚡ So B4 passing all seven criteria overnight read as weaker evidence than the
-count suggested. Criterion 6 now resolves what it polices; the width and
-fit-residual fields still report what their code computes rather than what
-their comments promise, and remain open.
+count suggested — though less weaker than a first pass suggested. Criterion 6
+was genuinely blind and now resolves what it polices. The width field is
+honest but coarse, and the battery already treats it as a bound rather than a
+discriminator. `fit_rms` is telemetry, not a criterion. The shared root is that
+a ±25 kHz channel at 96 kHz gives an edge about two samples wide, which leaves
+almost no transition region to characterise — a sampling-rate consequence
+(§5c), not a defect in either statistic.
 
 ## 6. What this does not establish
 
