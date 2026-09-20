@@ -266,14 +266,36 @@ Running the shipped `BpskEdgeFineStage` over real samples exercised the
 evidence fields that `T6_ACCEPTANCE_CRITERIA.md` §4 reads. Three of them carry
 less information than their own comments claim.
 
-⛔ **`split_half_delta_samples` resolves only whole samples.**
-`_split_half_delta` locates each sub-fold's apex with `np.argmax(np.abs(t))`
-and interpolates nothing, so it can report only integer differences. Across six
-blocks it read `0.0000` five times and `−1.0000` once. Criterion 6 exists to
-catch the wandering apex behind B4's ~270 tier transitions a day, and it polices
+⛔ **`split_half_delta_samples` resolved only whole samples — since fixed.**
+`_split_half_delta` located each sub-fold's apex with `np.argmax(np.abs(t))`
+and interpolated nothing, so it could report only integer differences. Across
+six blocks it read `0.0000` five times and `−1.0000` once. Criterion 6 exists to
+catch the wandering apex behind B4's ~270 tier transitions a day, and it policed
 that wander at **10.4 µs resolution while the fold's own block-to-block scatter
 runs 0.68 µs** — roughly fifteen times finer than the check watching it. The
-criterion can fire only once the wander exceeds half a sample.
+criterion could fire only once the wander exceeded half a sample.
+
+The stage now refines each sub-fold's apex with `_fit_edge`, the same
+zero-crossing localiser that produces the reported estimate, so the difference
+lands in the same units as the scatter it polices. The same six blocks now read
+0.028–0.308 samples, against the √2 × block-scatter the geometry predicts
+(0.13 dawn, 0.05 night).
+
+⚠ **One wrong way to write that fix, worth recording.** Seeding *both*
+sub-folds from a single shared search centre is the obvious simplification, and
+it silently destroys the criterion. Pinned to the same narrow window, two folds
+of **pure noise** agree to 0.1–0.9 samples — inside the healthy range at
+48.4 dB-Hz, so noise stops being distinguishable from signal. Each sub-fold
+must find its own apex by a global search first; two noise folds then land
+765–39190 samples apart, and that separation is what refuses the null. The
+criterion buys its resolution from the local fit and its discrimination from
+the global search, and it needs both.
+
+The threshold stayed at 10 samples. It clears the worst healthy reading
+(7.37 at 44 dB-Hz) and sits 76× below the nearest noise block. Note what
+that bound now rests on: the healthy spread at low C/N0, not the sample
+grid. A wander smaller than that spread still passes — but the reported
+*value* now carries it, where before it was pinned at exactly `0.0000`.
 
 ⚠ **`transition_width_samples` reports the fit bracket, not the rise.** The
 code sets `width = hi − lo`, where `lo, hi` start adjacent and widen only while
@@ -290,9 +312,10 @@ The other evidence fields did vary and did carry signal: the triangle residual
 moved across 0.000065–0.000779, apex distance across 0.535–0.965 samples, and
 retention across 0.960–0.982.
 
-⚡ So B4 passing all seven criteria overnight reads as weaker evidence than the
-count suggests. Three criteria passed on quantities that could barely have
-failed.
+⚡ So B4 passing all seven criteria overnight read as weaker evidence than the
+count suggested. Criterion 6 now resolves what it polices; the width and
+fit-residual fields still report what their code computes rather than what
+their comments promise, and remain open.
 
 ## 6. What this does not establish
 

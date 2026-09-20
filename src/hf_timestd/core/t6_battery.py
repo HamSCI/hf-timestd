@@ -232,16 +232,27 @@ class BatteryThresholds:
     max_transition_width_samples: float = 30.0
     # Even-second sub-fold position minus odd-second, in samples.  A
     # wandering apex separates the halves; a stable one does not.
-    #     pure noise        |delta| 1308 - 47937  (nearest 1308)
-    #     real, 77 dB-Hz    0
-    #     real, 48.4 dB-Hz  0 - 2
-    #     real, 44 dB-Hz    0 - 1
-    # (Captured IQ agreed to 41 ns against 17 ns predicted, n=2 -- far
-    # tighter than the synthetic, whose 0-2 samples is fit rounding.)
-    # 10 samples = 104 us sits 5x above the worst healthy reading at
-    # 48.4 dB-Hz and 131x below the nearest of 120 noise blocks.  The
-    # gap is wide enough that this stays the battery's strongest single
-    # refusal of the null.
+    # Re-measured 2026-09-20, after the field gained sub-sample
+    # resolution (it previously reported whole samples only, so every
+    # healthy reading rounded to 0 and the criterion could not see a
+    # wander below half a sample):
+    #     pure noise        |delta| 765 - 39190  (nearest 765)
+    #     real, 77 dB-Hz    max 0.051
+    #     real, 60 dB-Hz    max 0.348
+    #     real, 48.4 dB-Hz  max 1.128
+    #     real, 44 dB-Hz    max 7.375
+    # Captured B4 signal read 0.028 - 0.308 across six live blocks,
+    # against sqrt(2) x the block-to-block scatter predicted
+    # (T6_NEWELL_VS_FOLD.md §5d).
+    # 10 samples = 104 us still clears the worst healthy reading, at
+    # 44 dB-Hz, and sits 76x below the nearest of the noise blocks, so
+    # this stays the battery's strongest single refusal of the null.
+    #
+    # ⚠ The bound is set by the healthy spread at low C/N0, NOT by the
+    # sample grid, so a wander smaller than that spread still passes.
+    # What changed is that the reported VALUE now carries it: an apex
+    # drifting a tenth of a sample shows up in the number an operator
+    # can trend, where before it was pinned at exactly 0.0000.
     max_split_half_delta_samples: float = 10.0
     # Implied chain delay.  Not a swept quantity -- it arrives as an
     # argument to `evaluate`, so the sweep can say nothing about it and

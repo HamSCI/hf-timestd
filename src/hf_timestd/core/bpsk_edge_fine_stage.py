@@ -47,7 +47,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import numpy as np
 
@@ -81,6 +81,23 @@ def _wrapped_signed(delta: int) -> int:
     return d - _WRAP if d >= (1 << 31) else d
 
 
+class _EdgeFit(NamedTuple):
+    """One zero-crossing localisation of the folded edge.
+
+    Produced by ``_fit_edge`` and consumed both by ``_compute_estimate``
+    (which reports it) and by ``_split_half_delta`` (which compares two of
+    them).  Sharing the producer is the point: a check that located the
+    edge its own way would compare against a different definition of
+    "where the edge is", and its disagreement would mix real wander with
+    the gap between two estimators.
+    """
+
+    edge_offset: float      # fold domain, sub-sample
+    amplitude: float        # plateau median |A|
+    fit_rms: float          # residual of the linear fit, normalised by A
+    width: float            # samples spanned by the fit bracket
+
+
 @dataclass(frozen=True)
 class FineEdgeEstimate:
     edge_offset_samples: float
@@ -97,8 +114,13 @@ class FineEdgeEstimate:
     # once fed from the GPSDO that governs the RX888.  B4 reads 0.98.
     fold_retention: float = 0.0
     # Edge position from the even-second sub-fold minus the odd-second
-    # sub-fold, in samples.  Two disjoint 30 s folds agreed to 41 ns on
-    # captured IQ against 17 ns predicted (n=2).
+    # sub-fold, in samples, to SUB-SAMPLE resolution.  Each sub-fold is
+    # located globally (argmax|T|, which keeps two noise folds 765-39190
+    # samples apart) and then refined by the shipped zero-crossing fit.
+    # Captured B4 signal read 0.028 - 0.308 across six live blocks.
+    # ⛔ Until 2026-09-20 this reported whole samples only, so it read
+    # exactly 0.0000 on five of six real blocks and could not resolve the
+    # wander it exists to catch -- see T6_NEWELL_VS_FOLD.md §5d.
     split_half_delta_samples: float = 0.0
     # Triangle-fidelity residual of the SIGNED T(e), the closed-form
     # matched filter (T6_FOLDED_SELF_ACQUISITION.md §3.1) evaluated over
@@ -463,17 +485,17 @@ class BpskEdgeFineStage:
             self._bootstrap_history.clear()
             self._failed_blocks = 0
 
-    def _compute_estimate(
-        self, avg: np.ndarray, registration: int
-    ) -> Optional[FineEdgeEstimate]:
-        p = self.sample_rate
-        # Derotate: squaring removes the BPSK sign, leaving 2× carrier phase.
-        phi = 0.5 * float(np.angle(np.mean(avg.astype(np.complex128) ** 2)))
-        in_phase = np.real(avg * np.exp(-1j * phi))
+    def _fit_edge(self, in_phase: np.ndarray, centre: float) -> Optional[_EdgeFit]:
+        """Localise the polarity flip near ``centre`` to sub-sample precision.
 
-        centre = self._search_centre(in_phase, registration)
-        if centre is None:
-            return None
+        Extracted from ``_compute_estimate`` so the split-half check can
+        localise each sub-fold exactly as the estimate localises the whole
+        fold.  Returns None when the window holds no usable crossing; the
+        CALLER decides whether that counts as a failed block, because a
+        sub-fold that yields nothing is missing evidence rather than a
+        failure of the block itself.
+        """
+        p = self.sample_rate
         c = int(round(centre)) % p
         W = max(8, int(self.search_window_ms * 1e-3 * p))
         seg = np.take(in_phase, np.arange(c - W, c + W + 1) % p)
@@ -481,7 +503,6 @@ class BpskEdgeFineStage:
         outer = np.concatenate([seg[: W // 2], seg[-(W // 2) :]])
         A = float(np.median(np.abs(outer)))
         if A <= 0.0:
-            self._note_block_failed()
             return None
 
         # Locate the sign-change candidate nearest the coarse offset
@@ -497,7 +518,6 @@ class BpskEdgeFineStage:
         # consideration; checking locally at the candidate avoids that.
         changes = np.nonzero(np.diff(np.sign(seg)) != 0)[0]
         if len(changes) == 0:
-            self._note_block_failed()
             return None
         k = int(changes[np.argmin(np.abs(changes - W))])
         if seg[k] > seg[k + 1]:
@@ -511,18 +531,39 @@ class BpskEdgeFineStage:
         while hi < len(seg) - 1 and abs(seg[hi + 1]) < band:
             hi += 1
         if hi - lo < 1:
-            self._note_block_failed()
             return None
         xs = np.arange(lo, hi + 1, dtype=np.float64)
         ys = seg[lo : hi + 1].astype(np.float64)
         m, b = np.polyfit(xs, ys, 1)
         if m <= 0.0:
-            self._note_block_failed()
             return None
         x0 = -b / m
         fit_rms = float(np.sqrt(np.mean((ys - (m * xs + b)) ** 2)) / A)
+        return _EdgeFit(
+            edge_offset=float((c - W + x0) % p),
+            amplitude=A,
+            fit_rms=fit_rms,
+            width=float(hi - lo),
+        )
 
-        edge_offset = (c - W + x0) % p
+    def _compute_estimate(
+        self, avg: np.ndarray, registration: int
+    ) -> Optional[FineEdgeEstimate]:
+        p = self.sample_rate
+        # Derotate: squaring removes the BPSK sign, leaving 2× carrier phase.
+        phi = 0.5 * float(np.angle(np.mean(avg.astype(np.complex128) ** 2)))
+        in_phase = np.real(avg * np.exp(-1j * phi))
+
+        centre = self._search_centre(in_phase, registration)
+        if centre is None:
+            return None
+        fit = self._fit_edge(in_phase, centre)
+        if fit is None:
+            self._note_block_failed()
+            return None
+        A = fit.amplitude
+        fit_rms = fit.fit_rms
+        edge_offset = fit.edge_offset
         # Continuity position of the last edge inside this block, then
         # map to RTP via the median registration.
         k_last = (self._cont // p) - 1
@@ -571,7 +612,7 @@ class BpskEdgeFineStage:
         # can trace a clean tent centred on ITS peak, just not on the true
         # edge this estimate names.
         apex_distance = float(((apex_idx - edge_offset + p / 2) % p) - p / 2)
-        width = float(hi - lo)
+        width = fit.width
         split_delta = self._split_half_delta(phi)
 
         return FineEdgeEstimate(
@@ -637,22 +678,58 @@ class BpskEdgeFineStage:
         Two disjoint folds of the same stable edge must agree to about
         sqrt(2) times the single-fold scatter.  A wandering apex -- the
         nightly B4 behaviour that produces ~270 tier transitions a day --
-        separates them.  Returns NaN when either sub-fold is empty.  0.0
-        is the most FAVOURABLE value this criterion can report -- "the
-        two folds land on the same sample" -- so using it for "one fold
-        never ran" would read a missing measurement as a perfect one.
-        An empty sub-fold is no evidence, and no evidence must never be
-        spelled as agreement (T6_ACCEPTANCE_CRITERIA.md §4.4, §5.2).
+        separates them.
+
+        ⛔ Both sub-folds are localised by ``_fit_edge``, the same
+        zero-crossing fit that produces the reported estimate, so the
+        difference lands in the same units and at the same resolution as
+        the scatter it polices.  An earlier version took each sub-fold's
+        apex with an integer ``argmax`` and interpolated nothing, which
+        quantised the answer to one whole sample -- 10.4 us at 96 kHz,
+        against a block-to-block scatter measured at 0.26-0.68 us on
+        captured B4 signal (T6_NEWELL_VS_FOLD.md §5d).  The check sat
+        about fifteen times coarser than the wander it exists to catch and
+        reported the most favourable value, exactly 0.0000, on five of six
+        real blocks.  A criterion that cannot resolve its own failure mode
+        passes everything.
+
+        ⛔ Each sub-fold picks its own centre, by a GLOBAL search over its
+        whole folded second (``argmax|T|``), and only then refines that
+        position locally.  Seeding both searches from one shared centre
+        instead -- the obvious simplification -- destroys this criterion's
+        whole value: pinned to the same narrow window, two sub-folds of
+        PURE NOISE agree to 0.1-0.9 samples, which sits inside the healthy
+        range at 48.4 dB-Hz.  Measured that way, noise becomes
+        indistinguishable from signal.  The global search is what keeps
+        them apart: two noise folds put their maxima 1308-47937 samples
+        apart, and that separation is the battery's strongest single
+        refusal of the null.  Resolution must not be bought with it.
+
+        Returns NaN when either sub-fold is empty or yields no usable
+        crossing.  0.0 is the most FAVOURABLE value this criterion can
+        report -- "the two folds put the edge in the same place" -- so
+        using it for "one fold never ran" would read a missing measurement
+        as a perfect one.  An empty sub-fold is no evidence, and no
+        evidence must never be spelled as agreement
+        (T6_ACCEPTANCE_CRITERIA.md §4.4, §5.2).
         """
         p = self.sample_rate
+        rot = np.exp(-1j * phi)
         out = []
         for acc, cnt in ((self._acc_even, self._cnt_even),
                          (self._acc_odd, self._cnt_odd)):
             if not np.any(cnt):
                 return float("nan")
             sub = np.where(cnt > 0, acc / np.maximum(cnt, 1), 0.0)
-            ip = np.real(sub * np.exp(-1j * phi))
-            t = self._closed_form_T(ip)
-            out.append(float(np.argmax(np.abs(t))))
+            ip = np.real(sub * rot)
+            # Global: where does THIS sub-fold think the flip is?
+            apex = float(np.argmax(np.abs(self._closed_form_T(ip))))
+            # Local: refine to sub-sample with the shipped localiser, so
+            # the answer lands in the same units as the estimate it is
+            # checked against.  A refinement that cannot find a crossing
+            # falls back to the apex rather than discarding the block --
+            # the global disagreement is the measurement that matters.
+            fit = self._fit_edge(ip, apex)
+            out.append(fit.edge_offset if fit is not None else apex)
         d = out[0] - out[1]
         return float((d + p / 2) % p - p / 2)
