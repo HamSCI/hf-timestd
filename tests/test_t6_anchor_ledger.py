@@ -245,3 +245,72 @@ class TestSchemaV2:
                              now_fn=lambda: 1_700_000_000.0)
         bad = object()   # unserialisable
         assert led.append(make_anchor(), quality=bad) is False
+
+
+class TestBatteryEvidenceIsLedgered:
+    """The battery's evidence has to reach a reader, or it is not evidence.
+
+    Criterion 6 gained sub-sample resolution on 2026-09-20 precisely so a
+    wandering apex could be SEEN before it trips a threshold -- B4's ~270
+    tier transitions a day are the thing it exists to catch.  That buys
+    nothing while the number is computed and discarded: until this test,
+    `split_half_delta_samples` appeared nowhere outside the stage that
+    produces it and the battery that judges it.  No status JSON, no journal
+    line, nothing an operator could trend.  A criterion whose value is
+    invisible can only ever report pass or fail, which is the coarse
+    behaviour the resolution work was undoing.
+    """
+
+    def _recorder(self, tmp_path):
+        from hf_timestd.core.core_recorder_v2 import CoreRecorderV2
+        from hf_timestd.core.t6_anchor_authority import T6AnchorAuthority
+        r = CoreRecorderV2.__new__(CoreRecorderV2)
+        r._t6_channel_info = SimpleNamespace()
+        r._t6_native_anchor = None
+        r._t6_authority = T6AnchorAuthority(
+            96_000, 10_000, filter_group_delay_ns=16_618_000)
+        r._t6_authority_last_decision = None
+        r._t6_rate_reset = lambda reason: None
+        r._t6_anchor_ledger = T6AnchorLedger(
+            dir_path=tmp_path, now_fn=lambda: 0.0)
+        return r
+
+    def _estimate(self):
+        from hf_timestd.core.bpsk_edge_fine_stage import FineEdgeEstimate
+        return FineEdgeEstimate(
+            edge_offset_samples=43_181.0, edge_rtp=1_000_000,
+            edge_subsample=0.0, n_seconds_folded=30,
+            plateau_amplitude=30.0, fit_rms=0.05,
+            fold_retention=0.9998,
+            split_half_delta_samples=-0.0657,
+            peak_prominence=0.000224,
+            apex_distance_samples=0.81,
+            transition_width_samples=1.0,
+        )
+
+    def _row(self, tmp_path):
+        r = self._recorder(tmp_path)
+        e = self._estimate()
+        r._t6_last_fine_est = e
+        d = r._t6_authority.on_fine_estimate(
+            e, (e.edge_rtp + e.edge_subsample) % 96_000, SECOND)
+        r._t6_apply_authority_decision(d)
+        rows = read_rows(tmp_path)
+        assert rows, "no ledger row written"
+        return rows[-1]
+
+    def test_split_half_reaches_the_ledger(self, tmp_path):
+        q = self._row(tmp_path)["quality"]
+        assert q.get("split_half_delta_samples") == -0.0657
+
+    def test_sub_sample_value_survives_the_round_trip(self, tmp_path):
+        """A ledger that rounded to whole samples would undo the fix."""
+        q = self._row(tmp_path)["quality"]
+        assert abs(q["split_half_delta_samples"]) != 0.0
+        assert abs(q["split_half_delta_samples"]) < 1.0
+
+    def test_the_other_battery_evidence_is_there_too(self, tmp_path):
+        q = self._row(tmp_path)["quality"]
+        assert q.get("fold_retention") == 0.9998
+        assert q.get("triangle_residual") == 0.000224
+        assert q.get("apex_distance_samples") == 0.81

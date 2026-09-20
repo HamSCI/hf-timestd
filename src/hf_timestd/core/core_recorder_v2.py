@@ -3694,6 +3694,32 @@ class CoreRecorderV2:
                 "fit_rms": getattr(est, 'fit_rms', None),
                 "n_seconds_folded": getattr(est, 'n_seconds_folded', None),
                 "edge_subsample": getattr(est, 'edge_subsample', None),
+                # --- battery evidence (T6_ACCEPTANCE_CRITERIA.md §4) ---
+                #
+                # ⛔ These are here so the evidence can be TRENDED, not
+                # merely thresholded.  The battery publishes only which
+                # criterion failed (`t6_suspect_criteria`), so before this
+                # the underlying numbers reached no reader at all: they were
+                # computed per block and discarded.  That mattered most for
+                # split_half, which gained sub-sample resolution on
+                # 2026-09-20 precisely so a wandering apex could be watched
+                # BEFORE it trips a bound -- the ~270 tier transitions a day
+                # on B4 are what it exists to catch, and a pass/fail bit
+                # cannot show an apex drifting toward the edge of its budget.
+                #
+                # Names follow the field's MEANING, not the dataclass: the
+                # shape statistic is a residual where low is good, and
+                # `peak_prominence` kept its old name only for dataclass
+                # contract stability (see FineEdgeEstimate).  A ledger read
+                # years from now should not have to know that history.
+                "fold_retention": getattr(est, 'fold_retention', None),
+                "split_half_delta_samples": getattr(
+                    est, 'split_half_delta_samples', None),
+                "triangle_residual": getattr(est, 'peak_prominence', None),
+                "apex_distance_samples": getattr(
+                    est, 'apex_distance_samples', None),
+                "transition_width_samples": getattr(
+                    est, 'transition_width_samples', None),
             }
         # peer_rtp is WITHHELD pending hf-timestd#37.  It was derived
         # from channel_info.rtp_timesnap, and B4 2026-08-25 shows that
