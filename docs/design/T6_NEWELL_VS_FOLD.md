@@ -349,6 +349,90 @@ a ±25 kHz channel at 96 kHz gives an edge about two samples wide, which leaves
 almost no transition region to characterise — a sampling-rate consequence
 (§5c), not a defect in either statistic.
 
+## 5e. Widening the channel — measured, B4, 2026-09-20
+
+§5c argued that a faster sample rate buys a smaller irreducible error and never
+a reducible one, and concluded that matching the fold by rate alone was absurd.
+That argument stands, and it turns out to have been answering the wrong
+question. The lever is not the sample rate. It is the **channel bandwidth**,
+and it was already paid for.
+
+B4 runs the T6 channel at ±25 kHz inside a 96 kHz complex channel that admits
+±48. A spectrum of the capture shows why that matters: the filter is a brick
+wall, in-band at −42.5 dB and −166 dB by 30 kHz, which is below what complex64
+can represent. Everything the estimator could use, it already has — **and half
+the available band is switched off.**
+
+### Method
+
+`ka9q-python` created a second channel at 45.375 MHz, identical to the
+production one in rate, preset, gain and encoding, differing only in filter
+edges (±45 kHz). Both were subscribed simultaneously, folded on-station by the
+shipped `BpskEdgeFineStage`, for thirty minutes.
+
+⛔ **Let the library own the SSRC and the destination.** A first attempt passed
+a hand-picked multicast address. `allocate_ssrc` hashes the destination but
+*not* the filter edges, so an explicit address is both unnecessary and load-
+bearing in ways that are easy to get wrong: the run returned full-scale samples
+with no 1 Hz structure and a fold retention of 0.174 — which is 1/√30, the
+signature of folding thirty uncorrelated seconds. Constructing
+`RadiodControl(client_id=…)` derives both (CONTRACT v0.3 §7), and the pair then
+came back matched at 1.04e−5 against 1.06e−5 mean amplitude. A bandwidth
+experiment that also moves the gain measures neither.
+
+### Result — 60 fold blocks a side, zero gaps, zero packets lost
+
+| | ±25 kHz | ±45 kHz |
+|---|---|---|
+| 10–90% edge rise | 18.23 µs | **10.42 µs** |
+| 1/(2B) predicts | 20.0 | 11.1 |
+| block-to-block sd | 0.510 µs | **0.390 µs** |
+| MAD | 0.256 µs | 0.203 µs |
+| fold retention (median) | 0.973 | 0.952 |
+
+**Timing scatter improves 1.309×, against the 1.342 that √(45/25) predicts.**
+F = 1.713 on 59 and 59 degrees of freedom, p = 0.041, with the sd ratio's 95%
+interval running 1.012–1.693. The prediction sits comfortably inside it.
+
+Three consequences.
+
+**The σ_t ∝ 1/√B model holds for this signal.** Bandwidth buys precision, and
+it buys it at the rate theory says. Nothing about the sample rate changed.
+
+**The TS-1 is still not the limiter.** At ±45 kHz the rise tracks 1/(2B) to
+within 6%, so the injector's own transition is faster than 10.4 µs. Headroom
+remains above this.
+
+**25–45 kHz holds no interference**, at least at this hour: −42.6 dB against
+the in-band −42.5. Widening admits noise, not signals.
+
+### What this does not establish
+
+⚠ **One band condition.** Thirty minutes, mid-morning. The dawn capture in §5d
+showed Newell's scatter degrading 17× between quiet night and grey line while
+the fold moved 2.6×; admitting 20 kHz more spectrum plausibly interacts with
+that. A clean result here argues for repeating at local midnight, not for
+stopping.
+
+⚠ **p = 0.041 is one run.** The point estimate matches theory well, but the
+interval's lower bound sits at 1.012 — the evidence excludes "no effect" only
+narrowly.
+
+⚠ **Nothing here measures the calibration cost.** radiod's channel-filter group
+delay *is* the T6 chain-delay constant — 16.618 ms on B4, IQR 1.41 ms — and it
+follows the filter width. The experimental channel never fed the authority, so
+this run says nothing about the new value. Any real change to a station's T6
+filter has to re-measure it from `shadow_residuals.T6.shadow_residual_ns` over
+~15 minutes immediately afterwards. That, not CPU, is what the change costs.
+
+### An independent confirmation of the criterion-6 defect
+
+The station folded with `6c2bbd0`, before the split-half fix. Across all 120
+blocks, both filters, `split_half_delta_samples` read a median of **exactly
+0.00000** — the integer-argmax behaviour of §5d reproduced on twenty times the
+sample. `transition_width_samples` likewise read 1.00 throughout, including on
+the wide channel whose edge spans a single sample period.
+
 ## 6. What this does not establish
 
 ⚠ **§4's sweep ran on synthetic signal** — band-limited BPSK plus additive
