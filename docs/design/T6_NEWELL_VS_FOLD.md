@@ -1,7 +1,7 @@
 # Newell's detector and the fold — what each buys, and what neither does
 
 **Date:** 2026-09-19
-**Status:** Measured; synthetic only (see §6)
+**Status:** Measured on synthetic sweep (§4) and on captured B4 signal (§5d)
 **Companion to:** `T6_EDGE_METHODS_COMPARED.md` §8b and §8c, which measured
 these on captured IQ from one station at one signal condition. This note adds
 the thing a capture cannot supply: **known truth**.
@@ -209,11 +209,100 @@ where the edge falls between two samples, invisible to every self-check, and
 untouched by repetition. Sampling faster buys a smaller irreducible error, never
 a reducible one.
 
+## 5d. On real signal — B4, two band conditions, 2026-09-20
+
+§6 below opened by conceding that everything above ran on synthetic signal.
+That concession no longer holds. Two captures of B4's own TS-1 channel now
+carry the comparison onto real samples.
+
+Both methods read the **same bytes**. A capture supplies no truth, so what
+follows measures precision and mutual agreement, never accuracy.
+
+| | dawn, live | night, stored |
+|---|---|---|
+| captured | 2026-09-20 11:34:28Z, 120 s | 2026-09-11 04:00Z, 60 s |
+| band | grey line, HF opening | quiet |
+| source | passive subscriber, SSRC 2072147062 | `t6-anomaly` ring, zero-fill trigger |
+| gaps | 0 packets lost | — |
+
+### What the two methods reported
+
+| | dawn | night |
+|---|---|---|
+| Newell raw candidates | 8809 (**73.4/s**) | 892 (**14.9/s**) |
+| Newell, unaided, per-pulse sd | 6178 samples | 19176 samples |
+| Newell, ±30-sample tracking gate, sd | 2.304 samples = **24.0 µs** | 0.132 samples = **1.38 µs** |
+| seconds yielding an edge | 109/120 | 56/60 |
+| fold, block-to-block sd (K=30) | 0.0657 samples = **0.684 µs** | 0.0251 samples = **0.261 µs** |
+| fold retention | 0.96–0.98 | 0.967 |
+| precision ratio, Newell ÷ fold | **35.1×** | **5.3×** |
+
+### Three things the captures show that the sweep could not
+
+**Newell's 128/128 does not transfer between stations.** On AI6VN the detector
+placed every edge at one bit-identical sample. On B4 it fires **73 times a
+second** at dawn against one real edge, and an unaided search over the whole
+second lands nowhere useful — sd of 6178 samples, which names no edge at all.
+Only a tracking gate that already knows where to look recovers a usable answer,
+and a gate needs something else to acquire it first. AI6VN's result measured
+that station's signal-to-background, not the algorithm's portability.
+
+**Band condition dominates the per-sample detector and barely touches the
+fold.** Between quiet night and grey-line dawn Newell's gated scatter degrades
+**17×** (1.38 → 24.0 µs). The fold degrades **2.6×** (0.261 → 0.684 µs). The
+detector that integrates nothing inherits the whole diurnal swing; the one that
+folds 30 seconds absorbs most of it.
+
+**The half-sample bias §4 predicted appears on real signal.** §4 derived it from
+first principles: Newell attributes a difference between samples *i−1* and *i*
+to index *i*, so its answer lands half a sample late. The captures measure the
+fold minus Newell at **−0.4334** and **−0.5419** samples, bracketing the
+predicted −0.5. A synthetic prediction reproduced on captured HF. Nothing in
+either station's self-checks would have surfaced it.
+
+### What the captures say about the acceptance battery
+
+Running the shipped `BpskEdgeFineStage` over real samples exercised the
+evidence fields that `T6_ACCEPTANCE_CRITERIA.md` §4 reads. Three of them carry
+less information than their own comments claim.
+
+⛔ **`split_half_delta_samples` resolves only whole samples.**
+`_split_half_delta` locates each sub-fold's apex with `np.argmax(np.abs(t))`
+and interpolates nothing, so it can report only integer differences. Across six
+blocks it read `0.0000` five times and `−1.0000` once. Criterion 6 exists to
+catch the wandering apex behind B4's ~270 tier transitions a day, and it polices
+that wander at **10.4 µs resolution while the fold's own block-to-block scatter
+runs 0.68 µs** — roughly fifteen times finer than the check watching it. The
+criterion can fire only once the wander exceeds half a sample.
+
+⚠ **`transition_width_samples` reports the fit bracket, not the rise.** The
+code sets `width = hi − lo`, where `lo, hi` start adjacent and widen only while
+neighbouring samples stay inside a narrow band about zero. A sharp edge keeps
+them adjacent, so the field read **1.00 on every block of both captures**. The
+field comment predicts about 2 samples from the ±25 kHz channel filter; the
+quantity computed cannot reach that number for a clean edge.
+
+⚠ **`fit_rms` approaches zero by construction.** With the bracket at two
+points, `np.polyfit(…, 1)` fits a line through two points exactly. Every block
+reported ~1e-13. The field cannot indicate fit quality in the common case.
+
+The other evidence fields did vary and did carry signal: the triangle residual
+moved across 0.000065–0.000779, apex distance across 0.535–0.965 samples, and
+retention across 0.960–0.982.
+
+⚡ So B4 passing all seven criteria overnight reads as weaker evidence than the
+count suggests. Three criteria passed on quantities that could barely have
+failed.
+
 ## 6. What this does not establish
 
-⚠ **All synthetic.** Band-limited BPSK plus additive Gaussian noise — no
-multipath, no AGC excursion, no registration jitter, no real receiver. The
-*separations* are real; their margins on a real antenna are not yet known.
+⚠ **§4's sweep ran on synthetic signal** — band-limited BPSK plus additive
+Gaussian noise, with no multipath, no AGC excursion, no registration jitter and
+no real receiver. §5d since carried the comparison onto two captures of B4's
+own TS-1 channel, which confirmed the half-sample bias and the fold's
+advantage, and which revealed a station-to-station spread in Newell's
+behaviour that the sweep could not have shown. Only B4 has supplied captures;
+AI6VN and any third station may differ again.
 
 ⚠ **One edge position family.** The sweep moves the edge within a sample but
 holds it near mid-fold. Criterion 4's fold-position dependence (see
