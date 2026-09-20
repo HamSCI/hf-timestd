@@ -251,8 +251,12 @@ class BatteryThresholds:
     # ⚠ The bound is set by the healthy spread at low C/N0, NOT by the
     # sample grid, so a wander smaller than that spread still passes.
     # What changed is that the reported VALUE now carries it: an apex
-    # drifting a tenth of a sample shows up in the number an operator
-    # can trend, where before it was pinned at exactly 0.0000.
+    # drifting a tenth of a sample shows up in the number, where before
+    # it was pinned at exactly 0.0000 -- and that number reaches a reader
+    # via the anchor ledger's `quality` block (d68d14a).  Until then it
+    # reached none: this battery publishes only WHICH criterion failed,
+    # so every underlying value was computed per block and discarded,
+    # and the resolution bought a pass/fail bit rather than a trend.
     max_split_half_delta_samples: float = 10.0
     # Implied chain delay.  Not a swept quantity -- it arrives as an
     # argument to `evaluate`, so the sweep can say nothing about it and
