@@ -90,10 +90,23 @@ two domains relate by the decimation ratio and share one ADC clock. That
 makes the mapping exact in principle and a place to get it wrong in practice.
 Any implementation must derive the ratio, never assume 4.
 
-**⛔ Not every station has a TS-1.** AC0G-ND cannot reach T6 at all. The
-design must fall back to today's arithmetic wherever no edge exists, and the
-fallback must be the default, not an error path someone discovers in the
-field.
+**Not every station has a TS-1, and that settles itself.** AC0G-ND cannot
+reach T6 at all, so it places boundaries by today's arithmetic. That needs no
+decision and no new branch of behaviour: we always archive the receptions, and
+the sidecar's `timing` block already declares the authority that governed the
+sampling — `_chunk_timing_block` writes a schema v2 state record carrying
+`judge_tier`, `counter_space`, `counter_epoch_id`, `f_s_hz`, `gps_time_ns`
+and `rtp_timesnap` per chunk.
+
+⚡ So "which method placed this boundary" becomes **one more field in a block
+that already exists**, beside the tier that governed it. A reader of any chunk
+can tell. Nothing is refused, nothing is silent, and a station without T6
+differs from one with T6 exactly as much as its metadata says it does — which
+is the point of recording it.
+
+Channels do not diverge either. Every channel on a station shares one ADC
+clock and one timing authority; only `counter_space` and `f_s_hz` differ, and
+those already vary by channel and are already recorded.
 
 **⚠ Adopting it moves the boundaries once.** Chunks will start up to a few
 hundred milliseconds from where they used to. Downstream — GRAPE spectrograms,
@@ -135,12 +148,20 @@ within a sample of the detected edge, across a day that includes an anchor
 excursion, then the anchor arithmetic is good enough and this work should
 stop. That outcome would be worth knowing and cheap to obtain.
 
-## 7. Open questions for Michael
+## 7. The division of labour, stated once
 
-- Do we want the boundary on the pulse, or on the pulse *plus* the calibrated
-  chain delay? The pulse marks the TS-1 injection point, not the antenna
-  terminals. For a file boundary that distinction may not matter; for anything
-  that reads the boundary as a time, it does.
-- Should a station without T6 refuse to archive at all, or fall back quietly?
-  Falling back quietly is what we do everywhere else, and it is also how a
-  station ends up producing something subtly different from its neighbours.
+**Scott's method places the cut. Our estimator produces the time.**
+
+A file or segment starts at a sample and cannot start between two, so the act
+of cutting quantises the answer and a sub-sample estimate buys nothing there.
+Reporting a time forces no such grid, and there the fraction is the whole
+point — 0.444 us measured against the 3.007 us a rounded answer inherits.
+
+The two never compete. They answer different questions about the same pulse.
+
+## 8. Open question
+
+Do we want the boundary on the pulse, or on the pulse *plus* the calibrated
+chain delay? The pulse marks the TS-1 injection point, not the antenna
+terminals. For choosing where to cut a file that distinction may not matter;
+for anything that later reads the boundary as a time, it does.
