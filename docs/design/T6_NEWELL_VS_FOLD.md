@@ -1,7 +1,8 @@
 # Newell's detector and the fold — what each buys, and what neither does
 
 **Date:** 2026-09-19
-**Status:** Measured on synthetic sweep (§4) and on captured B4 signal (§5d)
+**Status:** Measured on synthetic sweep (§4), on captured B4 signal (§5d),
+and live on B4's injected pilot (§5f, §5g, 2026-09-22)
 **Companion to:** `T6_EDGE_METHODS_COMPARED.md` §8b and §8c, which measured
 these on captured IQ from one station at one signal condition. This note adds
 the thing a capture cannot supply: **known truth**.
@@ -433,6 +434,146 @@ blocks, both filters, `split_half_delta_samples` read a median of **exactly
 sample. `transition_width_samples` likewise read 1.00 throughout, including on
 the wide channel whose edge spans a single sample period.
 
+## 5f. Choosing by the job — a cut, or a measurement
+
+The two detectors answer to two different jobs, and which one wins turns on a
+single question: **does the act of using the answer quantise it?**
+
+### Starting a recording on a UTC minute — Newell
+
+A file begins at a sample. Nothing lets it begin between two. So the act
+quantises the answer, and any fraction we computed goes in the bin the moment
+we use it. Newell supplies exactly what the job wants: one integer position,
+no interpolation, and no fold to fill first. It decides on a single pulse,
+where the folded chain waits K blocks before it says anything at all. On B4
+over 2026-09-22 it returned one distinct position, cycle after cycle.
+
+⚡ **Quantise the act, never the record of it.** Starting on a sample boundary
+does not oblige us to *describe* the start that way. Begin at the integer
+sample, then write the residual offset into the sidecar at full sub-sample
+precision — `start_rtp_timestamp`, `starting_offset`, `pipeline_offset_samples`
+already carry it. A consumer can then place the first sample against UTC far
+more closely than the cut itself allowed. Losing the fraction is a property of
+where we cut, not of what we know.
+
+### Measuring time of arrival or time of flight — the fold
+
+Nothing here forces a grid. The deliverable is a number, so interpolation stops
+being a luxury and becomes the point. Measured on B4, 2026-09-22, on the
+injected pilot:
+
+| | scatter |
+|---|---|
+| nearest-sample pick, 96 kHz (Newell's granularity) | 0.289 samples = 3.007 µs |
+| magdiff fold + fit, measured over 14 cycles | **0.034 samples = 0.36 µs** |
+
+About 8× better. And on TS-1 that scatter accounts for the whole error, because
+the pilot enters the chain immediately ahead of the RX888 — the edge does not
+fade, hop or walk. Truth stands flat, so repeatability *is* accuracy, with no
+real variation hiding inside the spread.
+
+⚠ The two methods disagreed by a constant **−1.883 µs** across those cycles.
+On a constant input one of them owns that offset outright. Newell cannot
+adjudicate it: an integer detector holds no opinion about a fraction of a
+sample.
+
+### The floor, and where it actually binds
+
+§5c sets out the per-sample ladder and why climbing it costs 23× the samples to
+reach where folding already stands. The distinction this section adds:
+
+**The sample rate floors the cut. The bandwidth floors the knowledge.**
+
+A quantised decision inherits T/√12 and cannot do better — 3.007 µs on the
+96 kHz pilot channel, and **12.028 µs on the 24 kHz WWV metrology channels**,
+which carry the propagation we actually want to measure. An estimate inherits
+no such floor: it answers to bandwidth and SNR, falling as 1/√B and 1/√SNR,
+with K looks adding 1/√K. §5e measured the bandwidth term directly — widening
+±25 kHz to ±45 kHz, a factor 1.8, improved scatter 1.31×, against √1.8 = 1.34.
+The rate did not move.
+
+Sample rate still earns its place, as conditioning rather than as information.
+It must clear Nyquist for the bandwidth, and it must put enough points on a
+transition that rises in about 1/(2B) for the fit to determine itself. At
+96 kHz on a ±25 kHz channel we oversample 1.92×, which is why a three-point
+parabola behaves.
+
+## 5g. Scott's two-second period on a carrier-free discriminant — the plan
+
+`wd-record` carries `--leaky-folding` (off by default), which folds over
+**two seconds** rather than one and averages with an exponential, not a boxcar:
+
+```c
+acc[i] = acc[i]*filter + sample;          // filter defaults to 0.99
+out    = acc[i]*(1 - filter);
+i      = (i + 1) % (samprate * 2);        // TWO seconds
+```
+
+### Measured, B4, 2026-09-22 — the period alone does not rescue it
+
+Reproduced faithfully in Python and run beside the other discriminants on
+identical samples:
+
+| discriminant | peak / median |
+|---|---|
+| magnitude difference, boxcar fold | **3.50** |
+| leaky 2 s fold (Scott's) | 1.20 |
+| complex fold (our current path) | 1.21 |
+
+The leaky fold forms no peak, and lands statistically on top of the complex
+fold it was meant to improve.
+
+### Why — two cancellations, not one
+
+The chain suffers **two** distinct cancellations, and the two-second period
+addresses only the first.
+
+1. **Alternation.** A BPSK pulse that inverts on alternate seconds averages
+   itself away in a one-second fold. Folding over two seconds keeps it. Scott's
+   period is correct, and this mechanism is real.
+2. **Carrier.** Residual carrier rotates the phase between blocks, so a
+   *complex* accumulation cancels regardless of period. Scott's accumulator
+   holds complex samples, so it inherits this exactly as our complex fold does.
+
+The second dominates, which is why fixing the first changed nothing measurable.
+
+### The plan
+
+Put Scott's period under a discriminant that carries no carrier: fold the
+**magnitude difference** over two seconds instead of one. The magnitude
+difference already survives without carrier recovery (§5d, and 3.50 above), and
+the two-second period preserves the alternation it currently averages across.
+
+Falsifiable, and cheaply: if the two mechanisms act independently, a 2 s magdiff
+fold should hold its peak ratio near the 1 s figure while gaining the
+alternation now discarded. If the ratio instead collapses toward 1.2, the
+carrier explanation was incomplete and something else cancels it.
+
+⚠ Keep the exponential out of it unless we want its memory. At filter 0.99 the
+time constant runs 100 periods — 200 s — so a transient contaminates for
+minutes and a gain step is carried forward with decaying weight. A boxcar over
+K blocks at least states its window.
+
+### ⛔ Two bugs in the C, patched but not shipped
+
+Both follow from one line pair:
+
+```c
+static float complex acc[32000];             // fixed
+acc_i = (acc_i + 1) % (sp->samprate * 2);    // rate-dependent
+```
+
+1. The array fits exactly at 16 kHz and overruns above it. At our 96 kHz the
+   index reaches 191,999 — 160,000 entries past a static array.
+2. `acc` and `acc_i` sit `static` inside `bpsk_state_machine(struct session *sp,
+   …)`, a **per-session** function, so every SSRC shares one accumulator and one
+   index.
+
+Patch (2026-09-22) moves both into `struct session`, sizes from
+`sp->samprate * 2`, frees in `close_session`. It applies cleanly to upstream
+`401992cd`. Not built and not installed anywhere — worth sending to Phil and
+Scott rather than carrying.
+
 ## 6. What this does not establish
 
 ⚠ **§4's sweep ran on synthetic signal** — band-limited BPSK plus additive
@@ -534,6 +675,31 @@ lands directly in the residual the mode selection minimises.
    `registration_acquirer.py`, multi-broadcast fusion's agreement check across
    all station pairs, and `MULTI_STATION_MLE_DESIGN.md`'s three-station
    superposition. This item is the OTHER axis, and only that one is open.
+
+4. **Fold the magnitude difference over two seconds** — §5g. The cheapest open
+   question, and the one with a stated prediction to fail.
+
+5. **Catch the AGC actually stepping.** Running overnight on B4 from
+   2026-09-22 03:00Z: four discriminants on identical samples, with radiod's
+   own `rf_gain`, `rf_atten` and `input_power_dbm` read passively off the
+   status group beside every cycle.
+
+   ⚠ The loop sat still for the first hour — one distinct `rf_gain` value while
+   input power wandered 2.15 dB, so the AGC never left its dead zone. Every
+   precision figure above therefore describes the QUIET regime. Scott Newell's
+   concern is about the other one, and only the dawn enhancement will supply it.
+
+   ⛔ Read `rf_gain`, never the sample RMS. The AGC steers its OUTPUT to the
+   midpoint of its thresholds, so output level is the quantity the loop labours
+   to hold constant — measured span 0.075 dB while the loop was entirely free
+   to move. Measuring the regulated variable of a control loop shows the
+   regulation, not the disturbance.
+
+   The mechanism to look for: a gain step INSIDE a fold window weights its
+   blocks unequally and biases the centroid, rather than merely adding scatter.
+   A diurnal gain pattern would make that bias diurnal. On the injected pilot
+   no propagation exists to confuse it with, so anything diurnal there belongs
+   to us.
 
 ---
 
