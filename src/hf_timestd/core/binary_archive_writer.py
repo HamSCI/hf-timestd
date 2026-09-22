@@ -97,6 +97,14 @@ class BinaryArchiveConfig:
     # RTP↔GPS offset: flush + adopt the new mapping (re-anchor).  Matches
     # the fleet-wide trigger in ka9q-python ChannelInfo (sigmond, 2026-06-07).
     anchor_step_threshold_sec: float = 0.25
+    # ⛔ Place chunk boundaries on the detected TS-1 pulse instead of on
+    # radiod's GPS_TIME/RTP_TIMESNAP arithmetic.  DEFAULT OFF, and it must
+    # stay off until B4's shadow measurement says the anchor error is worth
+    # correcting — two boxes leave for McMurdo and none should meet this
+    # first.  Off still computes the pulse position and records the
+    # difference, which is the whole point of shipping it off.
+    # See docs/design/ARCHIVE_BOUNDARY_ON_THE_EDGE.md §5.
+    boundary_on_pulse: bool = False
 
     # File duration: how many seconds of IQ data per file.
     # 600s (10 minutes) reduces filesystem overhead 10x vs 60s (1 minute),
@@ -293,6 +301,14 @@ class BinaryArchiveWriter:
         # convention (BPSK was applied via ka9q's rtp_to_wallclock).
         self._bpsk_chain_delay_ns: Optional[int] = None
         self._bpsk_chain_delay_applied: bool = False
+
+        # Most recent TS-1 pulse, in THIS channel's counter space, set
+        # externally by core_recorder.  None on a station without a TS-1, and
+        # before T6 acquires — in which case the boundary stays on the anchor
+        # whatever the flag says.
+        self._pulse_edge_rtp: Optional[int] = None
+        # The last placement decision, for the sidecar's timing block.
+        self._last_boundary_placement = None
         
         # Time reference - GPS_TIME/RTP_TIMESNAP from radiod
         # In RTP mode, the GPSDO-disciplined RTP clock IS the timing authority.
@@ -369,6 +385,19 @@ class BinaryArchiveWriter:
         """
         self._bpsk_chain_delay_ns = chain_delay_ns
         self._bpsk_chain_delay_applied = bool(applied)
+
+    def set_pulse_edge_rtp(self, edge_rtp: Optional[int]) -> None:
+        """Record the latest TS-1 pulse position for boundary placement.
+
+        ⛔ ``edge_rtp`` must already sit in THIS channel's counter space.  The
+        TS-1 channel runs at 96 kHz while the archived WWV channels run at
+        24 kHz, so the caller owns the conversion; passing the TS-1 channel's
+        raw value here would place boundaries four times too far out.
+
+        Passing None returns the writer to anchor placement, which is also
+        what happens on a station with no TS-1 and before T6 acquires.
+        """
+        self._pulse_edge_rtp = None if edge_rtp is None else int(edge_rtp)
 
     def set_label_anchor_provider(self, provider) -> None:
         """Install the label-plane anchor provider (task 14b).
@@ -551,6 +580,25 @@ class BinaryArchiveWriter:
                          if getattr(verdict, 'rate_ppm', None) is not None else None),
         }
 
+    def _boundary_fields(self) -> dict:
+        """The boundary-placement fields for a chunk's `timing` block.
+
+        Empty when no placement was recorded — an older chunk, or a failure
+        that fell back to the anchor.  Never raises; provenance must not
+        disturb recording.
+        """
+        # ⚠ getattr, not attribute access.  Tests and older pickles build this
+        # object by paths that skip __init__, and a provenance helper that
+        # raises AttributeError would take recording down with it — which is
+        # precisely what the "never disturbs recording" rule exists to stop.
+        placement = getattr(self, '_last_boundary_placement', None)
+        if placement is None:
+            return {}
+        try:
+            return placement.sidecar_fields()
+        except Exception:  # noqa: BLE001
+            return {}
+
     def _chunk_timing_block(self, verdict, chunk_boundary_utc_ns: int,
                             label=None) -> Optional[dict]:
         """The `timing` block of a chunk's JSON sidecar.
@@ -569,6 +617,14 @@ class BinaryArchiveWriter:
                   if verdict is not None else None)
         provider = self._time_map_provider
         if provider is None:
+            # ⛔ Return exactly what today returns, including None.  I tried
+            # adding boundary provenance here and it made a `timing` block
+            # appear on chunks that have none today — test_offset_judge's
+            # "judge absent behaves as today" and "none verdict identical to
+            # no judge" both caught it.  Step 1's whole premise is that the
+            # flag off changes nothing, and a sidecar gaining a block it never
+            # had is a change.  Provenance for these chunks waits for the
+            # step that turns the flag on.
             return legacy
         from hf_timestd.core.time_map_producer import TimeMapInputs
         from hamsci_dsp.timing_map import null_map
@@ -602,6 +658,7 @@ class BinaryArchiveWriter:
         block = tmap.to_state_record(int(chunk_boundary_utc_ns))
         if legacy is not None:
             block.update(legacy)      # top-level mirror, one release
+        block.update(self._boundary_fields())
         return block
 
     def _judge_register_pair(self, gps_time_ns: int, rtp_timesnap: int) -> None:
@@ -849,6 +906,29 @@ class BinaryArchiveWriter:
         time_delta = chunk_boundary - offset_s - self._gps_time_unix
         rtp_delta = int(time_delta * self.config.sample_rate)
         chunk_boundary_rtp = (self._rtp_timesnap + rtp_delta) & 0xFFFFFFFF
+
+        # Boundary placement (ARCHIVE_BOUNDARY_ON_THE_EDGE.md).  With the flag
+        # off — the default, and the fleet's state — this returns
+        # chunk_boundary_rtp unchanged and merely RECORDS what the detected
+        # pulse would have said.  That shadow number measures radiod's anchor
+        # error without altering a stored file.  Never raises: a boundary is
+        # not the place to discover a new exception.
+        try:
+            from hf_timestd.core.archive_boundary import place_boundary
+            placement = place_boundary(
+                chunk_boundary_rtp,
+                int(self.config.sample_rate),
+                edge_rtp=self._pulse_edge_rtp,
+                use_pulse=bool(getattr(self.config, 'boundary_on_pulse', False)),
+                chain_delay_ns=self._bpsk_chain_delay_ns,
+            )
+            self._last_boundary_placement = placement
+            chunk_boundary_rtp = placement.chunk_boundary_rtp
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                f"{self.config.channel_name}: boundary placement failed, "
+                f"keeping the anchor value: {exc}")
+            self._last_boundary_placement = None
 
         # Allocate the chunk buffer as a memmap backed by a scratch
         # file in the chunk's destination directory.  Mode ``'w+'``
