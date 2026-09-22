@@ -83,12 +83,37 @@ a sample; the record of where it landed need not. `start_rtp_timestamp`,
 
 ## 4. Four things that could go wrong
 
-**⛔ The channels run at different rates.** We detect the edge on the TS-1
-channel at 96 kHz. The archived WWV channels run at **24 kHz** — the sidecars
-say so. radiod's RTP timestamps are `input_sample_index / decimation`, so the
-two domains relate by the decimation ratio and share one ADC clock. That
-makes the mapping exact in principle and a place to get it wrong in practice.
-Any implementation must derive the ratio, never assume 4.
+**The channels run at different rates — and the mapping is exact. Measured.**
+We detect the edge on the TS-1 channel at 96 kHz; the archived WWV channels
+run at **24 kHz**. The worry was that transferring the edge between them would
+have to route through UTC via each channel's own anchor, reintroducing the
+error this design exists to escape.
+
+It does not. Measured on B4, 2026-09-22, 35 status rounds paired within 20 ms:
+
+```
+snap_24k - snap_96k/4     spread 0.00 samples   (exactly constant)
+gps_time_24k - gps_time_96k   wanders +-1.9 ms
+```
+
+Two channels at the same rate showed the same thing: a fixed 3,840-sample
+offset, spread zero, while their gps_times wandered +-950 us.
+
+⚡ **The counter substrate is exact and shared; the anchor is the noisy layer
+sitting on top of it.** So the edge transfers between channels by arithmetic
+on counters, and never touches `gps_time` at all. That is the same insight the
+whole design rests on, now measured on the transfer step too.
+
+⚠ One harness lesson worth keeping. A first run reported the offset jittering
+by 1,920 samples and would have condemned the design. It paired the i-th
+reading of each channel, and the last row compared a fresh 96 kHz snap against
+a stale 24 kHz one — the channels update on their own schedules. Pairing on
+gps_time instead gave spread 0.00. Seven of the eight original rows had
+already agreed exactly, which is what prompted the second look.
+
+Any implementation must still derive the ratio from the two rates rather than
+assume 4, and must handle the 32-bit wrap: dividing a wrapped counter is not
+the same as wrapping a divided one.
 
 **Not every station has a TS-1, and that settles itself.** AC0G-ND cannot
 reach T6 at all, so it places boundaries by today's arithmetic. That needs no
