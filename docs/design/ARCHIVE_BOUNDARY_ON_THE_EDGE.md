@@ -159,9 +159,41 @@ point — 0.444 us measured against the 3.007 us a rounded answer inherits.
 
 The two never compete. They answer different questions about the same pulse.
 
-## 8. Open question
+## 8. Both planes, recorded — decided 2026-09-22 (mjh)
 
-Do we want the boundary on the pulse, or on the pulse *plus* the calibrated
-chain delay? The pulse marks the TS-1 injection point, not the antenna
-terminals. For choosing where to cut a file that distinction may not matter;
-for anything that later reads the boundary as a time, it does.
+The pulse marks the TS-1 injection point. The antenna terminals sit a
+calibrated chain delay away. Rather than choose, **record both and apply
+neither**.
+
+⚡ This follows a convention the archive already keeps. `binary_archive_writer`
+carries `_bpsk_chain_delay_ns` beside `_bpsk_chain_delay_applied`, and the
+comment there states the rule:
+
+> As of 2026-05, archive wall_times are RAW RTP-derived values — the
+> chain_delay is reported in metadata but NOT applied to the stored
+> timestamps. Downstream consumers apply chain_delay (if they want
+> UTC-aligned timing) using the value here.
+
+So the boundary follows the timestamps, and the decision is precedented
+rather than new.
+
+What the sidecar gains, in the `timing` block beside `judge_tier`:
+
+| field | meaning |
+|---|---|
+| boundary source | which method placed the cut — detected pulse, or anchor arithmetic |
+| boundary plane | `ts1_injection_point` for a pulse-placed cut |
+| chain delay ns | the calibrated offset to the antenna terminals |
+| chain delay applied | `false` — the cut sits on the pulse, uncorrected |
+
+⛔ **Apply nothing at write time.** A correction folded into a stored boundary
+cannot be undone by a reader who disagrees with the calibration, and
+`MEASUREMENT_MODEL.md` treats a correction and a measurement as different
+objects. Declaring the offset lets a consumer place the boundary on either
+plane; baking it in forecloses that and hides which plane the number belongs
+to.
+
+The measurand and calibration planes are already named per chain in
+`timing_chain.json` (`measurand_plane: antenna_terminals`,
+`calibration_plane: ts1_injection_point`), so the vocabulary exists; this
+puts the same distinction on the boundary.
