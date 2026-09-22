@@ -2558,6 +2558,74 @@ class CoreRecorderV2:
     #: in t6_anchor_authority so the throttled surfaces speak in step.
     T6_REPEAT_PERIOD_SEC = 300.0
 
+
+    def _feed_pulse_edge_to_writers(self, est) -> None:
+        """Hand the accepted T6 edge to each archive writer, in ITS counters.
+
+        ARCHIVE_BOUNDARY_ON_THE_EDGE.md step 2.  With `boundary_on_pulse`
+        off — the default and the fleet's state — this changes no stored
+        boundary.  It only lets each writer record where the pulse WOULD have
+        put the cut, which is the shadow measurement the design rests on.
+
+        ⛔ Only an ACCEPTED estimate comes here.  Feeding a rejected one would
+        write a bad edge into the very measurement meant to judge the anchor.
+
+        ⛔ The transfer is arithmetic on counters and never touches gps_time.
+        Measured on B4 2026-09-22: ``snap_24k - snap_96k/4`` held constant to
+        0.00 samples over 35 status rounds while the two channels' gps_times
+        wandered ±1.9 ms.  gps_time enters here only as a FRESHNESS CHECK on
+        the two snaps, never as a quantity we compute with.
+
+        ⚠ Fails to None, never to a guess.  A writer given no edge reports no
+        shadow, which reads as "not measured" — an absent measurement must
+        never masquerade as agreement.
+        """
+        from hf_timestd.core.archive_boundary import transfer_edge
+
+        src_ci = getattr(self, '_t6_channel_info', None)
+        edge_rtp = getattr(est, 'edge_rtp', None) if est is not None else None
+        src_snap = getattr(src_ci, 'rtp_timesnap', None) if src_ci else None
+        src_rate = getattr(src_ci, 'sample_rate', None) if src_ci else None
+        src_gps = getattr(src_ci, 'gps_time', None) if src_ci else None
+
+        # ⚠ Honest note: removing this guard changes no behaviour.  A None
+        # estimate reaches transfer_edge as int(None), raises, and the except
+        # below sets the edge to None regardless — mutation testing showed
+        # the guard is not load-bearing.  It stays because reaching the right
+        # answer through an exception is not the same as intending it, and a
+        # genuine failure should be distinguishable from the ordinary
+        # "no estimate this block" path.
+        usable = None not in (edge_rtp, src_snap, src_rate) and int(src_rate or 0) > 0
+
+        for desc, recorder in self.recorders.items():
+            writer = getattr(recorder, 'archive_writer', None)
+            if writer is None or not hasattr(writer, 'set_pulse_edge_rtp'):
+                continue
+            if not usable:
+                writer.set_pulse_edge_rtp(None)
+                continue
+            dst_ci = getattr(recorder, 'channel_info', None)
+            dst_snap = getattr(dst_ci, 'rtp_timesnap', None) if dst_ci else None
+            dst_rate = getattr(dst_ci, 'sample_rate', None) if dst_ci else None
+            dst_gps = getattr(dst_ci, 'gps_time', None) if dst_ci else None
+            if None in (dst_snap, dst_rate) or int(dst_rate or 0) <= 0:
+                writer.set_pulse_edge_rtp(None)
+                continue
+            # The two snaps must describe the same moment; they are what
+            # aligns the counter spaces.  Measured spread between channels is
+            # ~2 ms, so 50 ms is generous and still excludes a stale reading.
+            if (src_gps is not None and dst_gps is not None
+                    and abs(int(src_gps) - int(dst_gps)) > 50_000_000):
+                writer.set_pulse_edge_rtp(None)
+                continue
+            try:
+                writer.set_pulse_edge_rtp(transfer_edge(
+                    int(edge_rtp), src_rate=int(src_rate), dst_rate=int(dst_rate),
+                    src_timesnap=int(src_snap), dst_timesnap=int(dst_snap)))
+            except Exception:  # noqa: BLE001 — never disturb recording
+                writer.set_pulse_edge_rtp(None)
+
+
     def _t6_say_once(self, key: str, period: float = None) -> bool:
         """True at most once per `period` for this `key`.
 
@@ -5393,6 +5461,20 @@ class CoreRecorderV2:
                                 e, exc_info=True)
                     decision = self._t6_authority.on_fine_estimate(
                         fine, coarse, named)
+                    # Step 2: hand the edge to the archive writers, in each
+                    # writer's own counter space.  Only when the authority
+                    # ACCEPTED it — a rejected estimate must never reach the
+                    # measurement that judges the anchor.  Changes no stored
+                    # boundary while boundary_on_pulse stays off.
+                    try:
+                        accepted = getattr(decision, 'state', None)
+                        from hf_timestd.core.t6_anchor_authority import (
+                            T6AuthorityState)
+                        self._feed_pulse_edge_to_writers(
+                            fine if accepted == T6AuthorityState.AUTHORITATIVE
+                            else None)
+                    except Exception:  # noqa: BLE001 — never disturb recording
+                        pass
                     # Spec §3.3: demotion follows N consecutive blocks
                     # that fail their fit OR are rejected for
                     # edge_period.  The stage sees only the first half;
