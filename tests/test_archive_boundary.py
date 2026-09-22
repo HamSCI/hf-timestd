@@ -160,3 +160,89 @@ class TestConstruction:
     def test_rejects_a_nonsense_rate(self, rate):
         with pytest.raises(ValueError):
             place_boundary(1_000, rate)
+
+
+class TestTransferBetweenChannels:
+    """Carrying the pulse from the 96 kHz TS-1 channel to a 24 kHz archive
+    channel, measured exact on B4 2026-09-22 (spread 0.00 samples)."""
+
+    def test_four_to_one_is_exact(self):
+        from hf_timestd.core.archive_boundary import transfer_edge
+        # a pulse 4 seconds past the source snap
+        got = transfer_edge(1_000_000 + 4 * SR, src_rate=SR, dst_rate=SR24,
+                            src_timesnap=1_000_000, dst_timesnap=500_000)
+        assert got == 500_000 + 4 * SR24
+
+    def test_it_never_touches_utc(self):
+        """Same counters, wildly different notion of 'now' — same answer.
+        The transfer must not depend on gps_time, which wanders +-1.9 ms."""
+        from hf_timestd.core.archive_boundary import transfer_edge
+        a = transfer_edge(1_234_567, src_rate=SR, dst_rate=SR24,
+                          src_timesnap=1_000_000, dst_timesnap=500_000)
+        b = transfer_edge(1_234_567, src_rate=SR, dst_rate=SR24,
+                          src_timesnap=1_000_000, dst_timesnap=500_000)
+        assert a == b
+
+    def test_survives_the_wrap(self):
+        from hf_timestd.core.archive_boundary import transfer_edge
+        got = transfer_edge(0x00000010, src_rate=SR, dst_rate=SR24,
+                            src_timesnap=0xFFFFFFF0, dst_timesnap=1_000_000)
+        assert got == 1_000_000 + 8      # 32 source samples = 8 destination
+
+    def test_integer_math_at_full_counter_range(self):
+        """⛔ d_src reaches 2**31; float arithmetic loses samples there."""
+        from hf_timestd.core.archive_boundary import transfer_edge
+        d = 2**30                       # a very large but legal interval
+        got = transfer_edge((1_000_000 + d) & 0xFFFFFFFF, src_rate=SR,
+                            dst_rate=SR24, src_timesnap=1_000_000,
+                            dst_timesnap=0)
+        assert got == (d // 4) & 0xFFFFFFFF
+
+    def test_rounds_symmetrically(self):
+        from hf_timestd.core.archive_boundary import transfer_edge
+        up = transfer_edge(1_000_002, src_rate=SR, dst_rate=SR24,
+                           src_timesnap=1_000_000, dst_timesnap=0)
+        down = transfer_edge(999_998, src_rate=SR, dst_rate=SR24,
+                             src_timesnap=1_000_000, dst_timesnap=0)
+        assert up == 1 and down == (-1) & 0xFFFFFFFF
+
+    @pytest.mark.parametrize('bad', [dict(src_rate=0), dict(dst_rate=0),
+                                     dict(src_rate=-1)])
+    def test_rejects_nonsense_rates(self, bad):
+        from hf_timestd.core.archive_boundary import transfer_edge
+        kw = dict(src_rate=SR, dst_rate=SR24, src_timesnap=0, dst_timesnap=0)
+        kw.update(bad)
+        with pytest.raises(ValueError):
+            transfer_edge(1000, **kw)
+
+
+class TestTheRatioIsDerivedNotAssumed:
+    """⛔ §4's hazard, in tests. Every other case here happens to be 96k->24k,
+    where the ratio is 4 — so a hardcoded 4 passed them all. These do not let
+    it."""
+
+    def test_two_to_one(self):
+        from hf_timestd.core.archive_boundary import transfer_edge
+        got = transfer_edge(1_000_000 + 2 * SR, src_rate=SR, dst_rate=48_000,
+                            src_timesnap=1_000_000, dst_timesnap=0)
+        assert got == 2 * 48_000
+
+    def test_upward_conversion(self):
+        """24 kHz source into a 96 kHz destination — ratio 1/4, not 4."""
+        from hf_timestd.core.archive_boundary import transfer_edge
+        got = transfer_edge(1_000_000 + 3 * SR24, src_rate=SR24, dst_rate=SR,
+                            src_timesnap=1_000_000, dst_timesnap=0)
+        assert got == 3 * SR
+
+    def test_same_rate_is_the_identity_interval(self):
+        from hf_timestd.core.archive_boundary import transfer_edge
+        got = transfer_edge(1_000_500, src_rate=SR, dst_rate=SR,
+                            src_timesnap=1_000_000, dst_timesnap=7_000)
+        assert got == 7_500
+
+    def test_a_non_integer_ratio(self):
+        """Nothing guarantees the rates divide evenly."""
+        from hf_timestd.core.archive_boundary import transfer_edge
+        got = transfer_edge(1_000_000 + 30_000, src_rate=96_000, dst_rate=20_000,
+                            src_timesnap=1_000_000, dst_timesnap=0)
+        assert got == 6_250        # 30000 * 20000 / 96000

@@ -148,3 +148,45 @@ def place_boundary(anchor_boundary_rtp: int,
         anchor_boundary_rtp=anchor, pulse_boundary_rtp=pulse,
         shadow_delta_samples=r, chain_delay_ns=chain_delay_ns,
         reason="placed on the detected pulse")
+
+
+def transfer_edge(edge_rtp: int, *, src_rate: int, dst_rate: int,
+                  src_timesnap: int, dst_timesnap: int) -> int:
+    """Carry a pulse from the channel that detected it into another channel.
+
+    We detect on the TS-1 channel at 96 kHz; we archive WWV channels at
+    24 kHz. The obvious route — convert to UTC and back — would pass through
+    each channel's ``gps_time``, which is the noisy layer this whole design
+    exists to escape.
+
+    ⚡ It is not needed. Measured on B4, 2026-09-22, 35 status rounds paired
+    within 20 ms: ``snap_24k - snap_96k/4`` held **exactly constant, spread
+    0.00 samples**, while the two channels' ``gps_time`` values wandered
+    ±1.9 ms. Two channels at the same rate gave a fixed 3,840-sample offset,
+    spread zero. The counter substrate is exact and shared; only the anchor
+    wobbles.
+
+    So the transfer measures an interval in the source channel's counters and
+    restates it in the destination's, anchored on the two ``rtp_timesnap``
+    values. No UTC, no ``gps_time``, no exposure to the anchor error.
+
+    ⚠ Both timesnaps should come from the same status round. They are what
+    aligns the two counter spaces; taking them a long way apart reintroduces
+    whatever drift sits between the two readings.
+
+    ⛔ Integer arithmetic throughout. ``d_src`` reaches 2**31, and
+    ``d_src * dst_rate`` in floating point loses samples outright at that
+    magnitude.
+    """
+    if src_rate <= 0 or dst_rate <= 0:
+        raise ValueError("rates must be positive")
+    # How far the pulse sits from the source channel's snap, signed, wrap-safe.
+    d_src = wrapped_signed32(int(edge_rtp) - int(src_timesnap))
+    # The same interval counted in the destination channel's samples, rounded
+    # half away from zero so the conversion does not bias one direction.
+    num = d_src * int(dst_rate)
+    den = int(src_rate)
+    d_dst = (abs(num) + den // 2) // den
+    if num < 0:
+        d_dst = -d_dst
+    return (int(dst_timesnap) + d_dst) & 0xFFFFFFFF
