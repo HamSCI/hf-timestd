@@ -574,6 +574,77 @@ Patch (2026-09-22) moves both into `struct session`, sizes from
 `401992cd`. Not built and not installed anywhere — worth sending to Phil and
 Scott rather than carrying.
 
+## 5h. The magnitude difference runs exactly half a sample late
+
+⚠ A bench result, not a product one — but it explains a number that looked
+like an open question for a day, so it belongs in the record.
+
+The 2026-09-22 overnight comparison reported Newell and the magnitude
+difference sitting a steady **1.74 µs** apart on B4, stable all night across
+14 dB of gain movement. On a pilot whose position cannot move, that reads as
+an unresolved disagreement. It is not one.
+
+Swept against synthetic truth:
+
+| true fraction | magdiff − truth | magdiff − Newell |
+|---|---|---|
+| 0.00 | +0.5000 | +5.208 µs |
+| 0.20 | +0.5273 | −2.848 µs |
+| 0.40 | +0.5156 | −0.895 µs |
+| 0.50 | +0.5000 | 0.000 µs |
+| 0.60 | +0.4844 | +0.895 µs |
+| 0.80 | +0.4727 | +2.848 µs |
+
+⛔ **A constant +0.5000 sample.** `np.abs(np.diff(x, prepend=x[0]))` stores the
+difference between samples n−1 and n at index n, so the discriminant is a
+filter centred at n − ½ and its feature lands exactly half a sample late. Not
+an error in the signal; an error in the discriminant's definition.
+
+⚠ **Plus a ±0.027 sample ripple**, antisymmetric about a half sample —
+parabolic interpolation on an asymmetric peak. Ten times the ±0.0078 sample
+S-curve the shipped fit shows (§5i), because the magdiff peak is far less
+symmetric than what the shipped chain fits.
+
+Those two account for the 1.74 µs completely. Newell quantises to an integer;
+magdiff sits half a sample late plus ripple; the residue between them depends
+on where the true edge falls and runs −2.85 to +5.21 µs across one sample.
+
+⚡ **A free by-product.** Inverting it, the measured +1.74 µs implies B4's
+edge sits about **0.72** of the way between two samples.
+
+⛔ None of this touches the shipped estimator, which was checked in the same
+harness against the same synthetic truth and tracks it to ±81 ns. Any bench
+that compares the magnitude difference against another method must subtract
+the half sample first.
+
+## 5i. Does the shipped estimator care where the edge falls?
+
+Prompted by Scott Newell's fractional-delay plots and Phil Karn's reading of
+them — one continuous sinc, sampled at different points. We apply no
+fractional delay anywhere, so that asymmetry cannot arise here, but the
+question transfers to any sub-sample estimator.
+
+Swept noise-free across one sample interval, shipped fold-and-fit:
+
+```
+frac  0.000  0.100  0.200  0.300  0.400  0.500
+err   0.000 +0.061 +0.081 +0.071 +0.041  0.000   µs
+frac  0.600  0.700  0.800  0.900  1.000
+err  -0.041 -0.071 -0.081 -0.061  0.000   µs
+```
+
+A clean S-curve, zero at 0, ½ and 1, peaking at **±81 ns**.
+
+⚠ It does NOT average away. The pilot is injected coherently and the ADC is
+GPSDO-disciplined, so the edge holds the same fractional position for hours —
+the bias is a constant offset, not a zero-mean wobble.
+
+⛔ We do not correct it, and the reason is not that it is small. It sits below
+the **200 ns** type-B uncertainty `timing_chain.json` already declares for
+`ts1_modulator_delay` (designer statement, P. Elliott WB6CXC). Correcting it
+would assert a precision the injector's own stated uncertainty cannot support.
+Harness: `tools/t6_fractional_response.py`.
+
 ## 6. What this does not establish
 
 ⚠ **§4's sweep ran on synthetic signal** — band-limited BPSK plus additive
