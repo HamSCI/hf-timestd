@@ -489,6 +489,27 @@ for _entry in "${_SIBLINGS[@]}"; do
     mkdir -p "$(dirname "$_sib_path")"
     git clone "https://github.com/HamSCI/$_sib_name" "$_sib_path" \
         || { log_error "Failed to clone $_sib_name"; exit 1; }
+    # ⛔ The clone lands owned by whoever ran this script, and nothing used to
+    # correct it -- the venv six lines below gets an explicit chown, this did
+    # not.  On AC0G-B4 that left 117 paths in hamsci-physics owned by
+    # `timestd`, 36 of them under .git/objects, with mtimes matching the
+    # 2026-09-05/06 deploys.  That is precisely the SPLIT ownership the ⛔
+    # comment further up this file exists to prevent, and its consequence is
+    # the same: the component silently declines every future update, and
+    # `smd doctor` reports paths whose cause nobody can place months later.
+    #
+    # A sibling checkout belongs to the same owner as this one.  sigmond's
+    # installer clones every component and chowns it to sigmond, so read that
+    # owner off $PROJECT_DIR rather than hardcoding a name -- a station that
+    # arranges ownership differently then stays self-consistent.
+    _sib_own=$(stat -c '%U:%G' "$PROJECT_DIR" 2>/dev/null)
+    if [[ -n "$_sib_own" && "$_sib_own" != ":" ]]; then
+        chown -R "$_sib_own" "$_sib_path" \
+            || log_warn "could not chown $_sib_path to $_sib_own -- smd doctor will report split ownership"
+        log_info "$_sib_name cloned and owned by $_sib_own"
+    else
+        log_warn "could not read owner of $PROJECT_DIR -- $_sib_path keeps the invoking user's ownership"
+    fi
 done
 
 # Create venv if missing.  --seed populates pip/setuptools/wheel for
