@@ -65,6 +65,12 @@ from .t6_shm_pair import PRECISION_CEILING
 
 logger = logging.getLogger(__name__)
 
+# How long an accepted TS-1 edge stays usable after the last acceptance.
+# One chunk (300 s): an edge older than the chunk it would place has no
+# business placing it, while anything shorter throws away a good phase over
+# a single refused fold block.  See _feed_pulse_edge_to_writers.
+PULSE_EDGE_STALE_AFTER_S = 300.0
+
 # radiod auto-destruct timer for our channels (units: radiod main-loop
 # frames, ~50 Hz at default 20 ms blocktime → 6000 frames ≈ 120 s).
 # Without this, channels we allocated stay live in radiod forever after
@@ -2581,6 +2587,36 @@ class CoreRecorderV2:
         never masquerade as agreement.
         """
         from hf_timestd.core.archive_boundary import transfer_edge
+
+        # ⛔ A refused fold block does not invalidate the edge we already have.
+        #
+        # The first version passed None on every non-AUTHORITATIVE decision,
+        # which ERASED a good edge recorded 30 s earlier.  Chunks close every
+        # 5 minutes, so whichever estimate happened to be last before the cut
+        # decided whether that chunk carried a shadow at all — one refusal in
+        # ten wiped the lot.  Measured on B4 2026-09-23: 6 of 42 sidecars,
+        # 14 %.
+        #
+        # So hold the last accepted edge and drop it only when it goes STALE.
+        # The authority itself works this way, with a dwell before demoting
+        # rather than a drop on one bad block.  A refusal means we learned
+        # nothing new, not that what we knew became wrong.
+        #
+        # ⚡ The edge is a PHASE — where the second begins — and the ADC is
+        # GPSDO-disciplined, so that phase is stable to well under a sample
+        # across minutes.  place_boundary reduces it modulo the second
+        # anyway.  One chunk's worth of staleness is conservative.
+        now = time.monotonic()
+        if est is not None:
+            self._last_good_pulse_est = est
+            self._last_good_pulse_at = now
+        else:
+            last_at = getattr(self, '_last_good_pulse_at', None)
+            if (last_at is not None
+                    and (now - last_at) <= PULSE_EDGE_STALE_AFTER_S):
+                # Still fresh: leave every writer holding what it has.
+                return
+            est = None
 
         src_ci = getattr(self, '_t6_channel_info', None)
         edge_rtp = getattr(est, 'edge_rtp', None) if est is not None else None

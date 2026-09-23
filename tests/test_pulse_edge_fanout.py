@@ -123,3 +123,49 @@ class TestItFailsToNoneNeverToAGuess:
         c = _core(_ci(1_000_000, SR96), {"x": r})
         c._feed_pulse_edge_to_writers(_est(1_000_000 + SR96))
         assert r.archive_writer.edge is None
+
+
+class TestTheEdgeSurvivesARefusedBlock:
+    """⛔ The first version cleared the edge on every refused fold block,
+    erasing a good phase recorded 30 s earlier.  Chunks close every 5 min, so
+    one refusal in ten decided whether a chunk carried a shadow at all —
+    measured 6 of 42 sidecars on B4, 2026-09-23."""
+
+    def test_a_single_refusal_does_not_erase_a_fresh_edge(self):
+        r = _rec(500_000, SR24)
+        c = _core(_ci(1_000_000, SR96), {"x": r})
+        c._feed_pulse_edge_to_writers(_est(1_000_000 + SR96))
+        good = r.archive_writer.edge
+        assert good is not None
+        r.archive_writer.edge = "untouched"
+        c._feed_pulse_edge_to_writers(None)          # a refused block
+        assert r.archive_writer.edge == "untouched"  # writers left alone
+
+    def test_a_stale_edge_IS_dropped(self):
+        """An edge older than the chunk it would place has no business
+        placing it."""
+        import hf_timestd.core.core_recorder_v2 as m
+        r = _rec(500_000, SR24)
+        c = _core(_ci(1_000_000, SR96), {"x": r})
+        c._feed_pulse_edge_to_writers(_est(1_000_000 + SR96))
+        c._last_good_pulse_at -= (m.PULSE_EDGE_STALE_AFTER_S + 1)
+        c._feed_pulse_edge_to_writers(None)
+        assert r.archive_writer.edge is None
+
+    def test_a_new_acceptance_refreshes_the_clock(self):
+        import hf_timestd.core.core_recorder_v2 as m
+        r = _rec(500_000, SR24)
+        c = _core(_ci(1_000_000, SR96), {"x": r})
+        c._feed_pulse_edge_to_writers(_est(1_000_000 + SR96))
+        c._last_good_pulse_at -= (m.PULSE_EDGE_STALE_AFTER_S - 5)
+        c._feed_pulse_edge_to_writers(_est(1_000_000 + 2 * SR96))   # fresh
+        r.archive_writer.edge = "untouched"
+        c._feed_pulse_edge_to_writers(None)
+        assert r.archive_writer.edge == "untouched"
+
+    def test_a_refusal_before_any_edge_still_clears(self):
+        """No edge has ever arrived — there is nothing to hold."""
+        r = _rec(500_000, SR24)
+        c = _core(_ci(1_000_000, SR96), {"x": r})
+        c._feed_pulse_edge_to_writers(None)
+        assert r.archive_writer.edge is None
