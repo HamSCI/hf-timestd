@@ -92,6 +92,14 @@ class StreamRecorderConfig:
     compression: str = 'none'  # 'none', 'zstd', or 'lz4'
     compression_level: int = 3  # zstd: 1-22, lz4: 1-12
     file_duration_sec: int = 600  # Raw IQ file chunk duration (seconds)
+    # Place chunk boundaries on the detected TS-1 pulse rather than on
+    # radiod's GPS_TIME/RTP_TIMESNAP arithmetic.  ⛔ DEFAULT OFF.  Reachable
+    # from the station TOML so a site can be switched WITHOUT a code change
+    # or a rebuild — the shadow measurement it enables is meant to be turned
+    # on at one station at a time, and needing an edit to do that would put
+    # the decision in the wrong place.
+    # See docs/design/ARCHIVE_BOUNDARY_ON_THE_EDGE.md §5.
+    boundary_on_pulse: bool = False
     
     # RTP Destination
     destination: Optional[str] = None
@@ -252,6 +260,7 @@ class StreamRecorderV2:
                 compression_level=config.compression_level,
                 use_tiered_storage=config.tiered_storage,
                 file_duration_sec=config.file_duration_sec,
+                boundary_on_pulse=getattr(config, 'boundary_on_pulse', False),
             )
 
             self.archive_writer = BinaryArchiveWriter(archive_config)

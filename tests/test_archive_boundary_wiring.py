@@ -129,3 +129,35 @@ class TestTheSidecarDeclaresIt:
         recording down with it."""
         w = BinaryArchiveWriter.__new__(BinaryArchiveWriter)
         assert w._boundary_fields() == {}
+
+
+class TestTheFlagIsReachableFromConfig:
+    """⛔ Without this, switching one station on means editing code.  The
+    shadow is meant to be enabled a station at a time, and needing a code
+    change to do that puts the decision in the wrong place."""
+
+    def test_the_recorder_config_carries_it_and_defaults_off(self):
+        from hf_timestd.core.stream_recorder_v2 import StreamRecorderConfig
+        import inspect
+        sig = inspect.signature(StreamRecorderConfig)
+        assert 'boundary_on_pulse' in sig.parameters
+        assert sig.parameters['boundary_on_pulse'].default is False
+
+    def test_it_reaches_the_archive_config(self):
+        """The value has to survive the hop into BinaryArchiveConfig."""
+        import inspect
+        from hf_timestd.core import stream_recorder_v2 as m
+        src = inspect.getsource(m)
+        assert 'boundary_on_pulse=getattr(config' in src, (
+            "the recorder builds BinaryArchiveConfig without passing "
+            "boundary_on_pulse — the flag would be unreachable from the TOML")
+
+    def test_the_station_template_documents_it_switched_off(self):
+        from pathlib import Path
+        t = (Path(__file__).resolve().parent.parent
+             / 'config' / 'timestd-config.toml.template').read_text()
+        assert 'boundary_on_pulse' in t
+        # present but COMMENTED, so a fresh station inherits the default
+        assert '# boundary_on_pulse = false' in t
+        assert '\nboundary_on_pulse' not in t, (
+            "the template sets the flag live; a fresh station would inherit it")

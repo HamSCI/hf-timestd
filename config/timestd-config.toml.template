@@ -60,6 +60,19 @@ compression_level = 3
 # Values must divide evenly into 3600.  Common choices: 60, 300, 600, 900.
 file_duration_sec = 600
 
+# Place raw-chunk boundaries on the detected TS-1 pulse instead of on radiod's
+# GPS_TIME/RTP_TIMESNAP arithmetic.  Leave this OFF unless you mean it.
+#
+# With it off — the default — every chunk is cut exactly where it is cut today,
+# and the sidecar additionally records where the pulse WOULD have put the cut
+# (boundary_pulse_minus_anchor_samples).  That shadow is how we measure whether
+# the anchor error is worth correcting, and it costs nothing.
+#
+# Turning it ON moves every boundary once, by up to half a second, and changes
+# what downstream products see.  Do that at one station at a time.
+# docs/design/ARCHIVE_BOUNDARY_ON_THE_EDGE.md
+# boundary_on_pulse = false
+
 # Digital RF HDF5 output (uses significant storage ~1.5GB/day/channel)
 save_digital_rf = false
 
