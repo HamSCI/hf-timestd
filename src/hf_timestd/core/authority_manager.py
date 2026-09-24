@@ -72,6 +72,59 @@ TIER_SHM_REFID: Dict[str, str] = {
 # ChronyTrackingProbe.healthy_state_chars.
 CHRONY_HEALTHY_STATES = "*+"
 
+# chrony's own config: the main file plus its standard include directory.
+# _check_chrony_self_feedback reads these (never chronyc selectdata, which
+# needs the privileged socket hf-timestd doesn't have -- verified on B4:
+# "501 Not authorised") to learn whether a refid is declared `noselect`.
+CHRONY_MAIN_CONF = Path("/etc/chrony/chrony.conf")
+CHRONY_CONF_D = Path("/etc/chrony/conf.d")
+
+
+def _default_chrony_conf_paths() -> List[Path]:
+    """Chrony's main conf file plus every ``conf.d/*.conf``, in read
+    order.  Re-globbed on each call rather than cached at import time,
+    since conf.d gains/loses drop-ins independently of this process."""
+    paths: List[Path] = [CHRONY_MAIN_CONF]
+    try:
+        paths.extend(sorted(CHRONY_CONF_D.glob("*.conf")))
+    except OSError:
+        pass
+    return paths
+
+
+def _refid_carries_noselect(refid: str, conf_paths: Sequence[Path]) -> bool:
+    """True if any ``refclock`` line in ``conf_paths`` declares ``refid``
+    (case-insensitively, via ``refid <NAME>``) with a bare ``noselect``
+    option token.  ``# ...`` comments are stripped before tokenising, so
+    a `noselect` mentioned only in a comment does not count.  Missing or
+    unreadable files are skipped silently -- this must never raise."""
+    target = refid.upper()
+    found = False
+    for path in conf_paths:
+        try:
+            text = Path(path).read_text()
+        except OSError:
+            continue
+        for raw in text.splitlines():
+            line = raw.split("#", 1)[0].strip()
+            if not line:
+                continue
+            tokens = line.split()
+            if not tokens or tokens[0].lower() != "refclock":
+                continue
+            try:
+                refid_idx = next(
+                    i for i, t in enumerate(tokens) if t.lower() == "refid")
+            except StopIteration:
+                continue
+            if refid_idx + 1 >= len(tokens):
+                continue
+            if tokens[refid_idx + 1].upper() != target:
+                continue
+            found = any(t.lower() == "noselect" for t in tokens)
+    return found
+
+
 # Cross-check disagreement thresholds per METROLOGY.md §4.5:
 # expected_agreement = 3 * sqrt(sigma_A² + sigma_B²), FLOORED at these
 # per-pair values so a noisy witness can't mask a real disagreement by
@@ -544,11 +597,22 @@ class AuthorityManager:
 
         return active, witnesses, disagreement_flags
 
-    def _check_chrony_self_feedback(self, active: Optional[str]) -> Optional[str]:
+    def _check_chrony_self_feedback(
+        self,
+        active: Optional[str],
+        conf_paths: Optional[Sequence[Path]] = None,
+    ) -> Optional[str]:
         """V7 — verify chrony's verdict on the SHM segment we feed for the
         active tier.  If chrony has rejected our source (state ``#x``
         falseticker, ``#?`` unselectable, etc.) while authority is
         claiming the tier as active, return a disagreement flag.
+
+        §7.1.1 ships every refclock (FUSE, HPPS) `noselect`, so chrony
+        never selects them and reports their state as `?` permanently;
+        that is a configuration fact, not chrony's verdict on our
+        source, so a `noselect` refid is exempt from this check except
+        for the "missing from chronyc sources entirely" case, which
+        still means chrony isn't consuming the segment at all.
 
         Silently no-ops when chronyc is missing, times out, or returns
         garbage — we never want this check to fail the cascade.  An
@@ -577,6 +641,10 @@ class AuthorityManager:
         if proc.returncode != 0:
             return None
 
+        if conf_paths is None:
+            conf_paths = _default_chrony_conf_paths()
+        noselect = _refid_carries_noselect(refid, conf_paths)
+
         for line in (proc.stdout or "").splitlines():
             parts = [p.strip() for p in line.split(",")]
             if len(parts) < 3:
@@ -586,13 +654,19 @@ class AuthorityManager:
                 continue  # refclocks only; "^" rows are NTP peers
             if name.upper() != refid.upper():
                 continue
+            if noselect:
+                # chrony never selects this source by our own
+                # configuration; its state is uninformative.
+                return None
             if state in CHRONY_HEALTHY_STATES:
                 return None
             return f"chrony-rejected-{refid}:state={state}"
 
         # Refid not present in chrony's source list at all — chrony either
         # isn't configured to consume our SHM segment, or the segment
-        # hasn't seen its first sample yet.  Surface as a distinct flag.
+        # hasn't seen its first sample yet.  Surface as a distinct flag,
+        # even when the refid is noselect: chrony not consuming the
+        # segment stays worth saying regardless.
         return f"chrony-missing-{refid}"
 
     def _check_pair(
