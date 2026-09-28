@@ -57,8 +57,11 @@ from hf_timestd.core.gnss_tec import GNSSTECAnalyzer
 from hamsci_physics.cddis import CDDISDownloader
 from hf_timestd.io import make_data_product_writer
 
+# INFO by default; [logging] level in the config overrides it in main().
+# This used to be DEBUG, which logged every RXM-RAWX / NAV-SAT frame and every
+# skipped satellite -- several journal lines a second, forever (B4 2026-09-28).
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s %(levelname)s: %(message)s'
 )
 logger = logging.getLogger("live_vtec")
@@ -87,6 +90,8 @@ def main():
     # Load Config
     config = load_config(args.config)
     gnss_cfg = config.get("gnss_vtec", {})
+    _level = str(config.get("logging", {}).get("level", "INFO")).upper()
+    logging.getLogger().setLevel(getattr(logging, _level, logging.INFO))
     
     # Determine settings (CLI > Config > Default)
     host = args.host if args.host else gnss_cfg.get("host", "192.168.0.202")
@@ -199,12 +204,14 @@ def main():
     VTEC_PLAUSIBLE_MIN = -1.0   # allow slight noise around zero
     VTEC_PLAUSIBLE_MAX = 150.0
     CONSECUTIVE_REJECT_LIMIT = 300  # ~5 min at 1 Hz
+    VTEC_LOG_INTERVAL_S = 60.0      # one INFO summary a minute; each epoch at DEBUG
 
     bytes_received = 0
     msg_count = 0
     last_log_time = time.time()
     last_data_time = time.time()
     consecutive_rejects = 0
+    last_vtec_log = 0.0
     hdf5_write_buffer = []
     BATCH_FLUSH_INTERVAL = 60
     last_hdf5_flush = time.time()
@@ -317,7 +324,12 @@ def main():
                         valid_vtecs = [r['vtec_u'] for r in results.values() if r['elev'] > 20]
                         if valid_vtecs:
                             avg_vtec = sum(valid_vtecs) / len(valid_vtecs)
-                            logger.info(f"VTEC: {avg_vtec:.2f} TECU (Sats: {len(valid_vtecs)})")
+                            # One summary line a minute; every epoch at DEBUG.
+                            if time.time() - last_vtec_log >= VTEC_LOG_INTERVAL_S:
+                                logger.info(f"VTEC: {avg_vtec:.2f} TECU (Sats: {len(valid_vtecs)})")
+                                last_vtec_log = time.time()
+                            else:
+                                logger.debug(f"VTEC: {avg_vtec:.2f} TECU (Sats: {len(valid_vtecs)})")
 
                             # ── Plausibility gate ──
                             if not (VTEC_PLAUSIBLE_MIN <= avg_vtec <= VTEC_PLAUSIBLE_MAX):
@@ -336,9 +348,10 @@ def main():
                             
                             # Write to CSV
                             line = f"{timestamp},{week},{rcvTow},{avg_vtec:.2f},{len(valid_vtecs)},{offset_s},{offset_mean_s},{offset_std_s}\n"
-                            print(line, end='')
                             if csv_file:
                                 csv_file.write(line)
+                            else:
+                                print(line, end='')  # no CSV file: stdout is the only record
                             
                             # Update data watchdog on every valid VTEC
                             last_data_time = time.time()
