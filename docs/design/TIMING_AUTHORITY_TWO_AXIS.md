@@ -113,10 +113,13 @@ reaches the recorded data.
 | deployment | A | T available |
 |---|---|---|
 | DASI2: TS-1 + LBE-1421 | A1 | T6, T5, T3 |
-| PSWS kit: LBE-1421 / 1420 / mini GPS, no injector | A1 | T5, T3 |
+| PSWS kit: LBE-1421 / 1423 (PPS on USB), no injector | A1 | T5, T3 |
+| PSWS kit: LBE-1420 / LBE-mini (no PPS on USB), no injector | A1 | T3 only (the mini names the second; see note) |
 | older GPSDO, disciplines the RX-888 but no NMEA/PPS out | A1 | T3 only |
 | separate GPS receiver, undisciplined ADC | **A0** | **T5**, T3 |
 | radio only | A0 | T3 only |
+
+_Corrected 2026-09-28 (HamSCI/hf-timestd#51): the 2026-08-25 row grouped the LBE-1420 and the mini with the 1421 under T5. T5 requires PPS edges (`resolve_t5_capability`), and neither the 1420 nor the mini exposes a pulse on USB, so hf-timestd refuses T5 for them by design. The mini's UBX NAV-PVT names the second and may serve as an independent witness against integer-second and rate faults; a measurement on AC0G-ND will say how tightly._
 
 The fourth row — good origin, bad ruler — **cannot be expressed on a single
 ladder at all**.  That alone retires the ladder.
