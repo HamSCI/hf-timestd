@@ -385,7 +385,7 @@ instructions.
 3. Add an instrument → receive **INSTRUMENT_ID**
 4. Generate SSH key: `ssh-keygen -t rsa -b 4096 -f ~/.ssh/id_rsa_psws -N ""`
 5. Upload public key: `ssh-copy-id -i ~/.ssh/id_rsa_psws.pub SITE_ID@pswsnetwork.eng.ua.edu`
-6. Configure `[uploader]` section in `timestd-config.toml`
+6. Set `[station] id` and `instrument_id` in `timestd-config.toml`; hs-uploader (configured by sigmond) does the uploading
 
 ### Verify
 

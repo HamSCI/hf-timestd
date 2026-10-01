@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Removed — hf-timestd's uploader config, which nothing read (2026-10-01)
+
+hf-timestd uploads nothing.  hs-uploader has been a station's single path to
+PSWS since 2026-07-15, and GRAPE packaging moved to hamsci-physics on
+2026-08-24.  The template still shipped `[uploader] enabled = true`, and
+`setup-station.sh` still wrote it, along with a key path
+(`id_rsa_psws_<ID>`) that nothing creates.  AC0G-B4's v3.65 install,
+2026-10-01, carried exactly that: a switch wired to nothing.
+
+- `[uploader]` is now a retired section.  `validate` warns on any config
+  that still carries one; `config apply` keeps accepting it, because
+  deployed configs hold it and sigmond's editor sends the whole file back.
+- The template, `help.toml` and `setup-station.sh` stop writing it.  The
+  wizard's PSWS section now collects only the station and instrument ids,
+  which hs-uploader uses for identity.
+- Gone: `scripts/backfill-grape.sh` (it called a `grape` subcommand this CLI
+  does not have), the unintegrated `interfaces/upload.py` with `UploadTask`,
+  `UploadStatus` and `FileMetadata`, and the PSWS SFTP login check in
+  `start-services.sh`, which tested a key nobody uploads with.
+- Docs corrected: README, INSTALLATION, STATION_SETUP_GUIDE,
+  EXTERNAL_PREREQUISITES, PATH_MANAGEMENT, REQUIREMENTS and two design docs.
+
 ### Fixed — ring content from a previous RTP numbering can no longer register a plane (2026-09-11)
 
 AC0G-ND, 2026-09-10 23:18–23:20Z. radiod restarted and re-based its RTP

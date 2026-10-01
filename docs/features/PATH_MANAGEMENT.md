@@ -204,9 +204,6 @@ PathResolver still supports legacy config options:
 [recorder]
 archive_dir = "/custom/path"  # Overrides mode-based paths
 quality_metrics_dir = "/custom/metrics"
-
-[uploader]
-queue_dir = "/custom/upload"
 ```
 
 ### Fallback Defaults

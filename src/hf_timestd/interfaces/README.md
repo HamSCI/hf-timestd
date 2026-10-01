@@ -1,5 +1,9 @@
 # GRAPE Signal Recorder API Interfaces
 
+> **Status 2026-10-01:** hf-timestd keeps Functions 1-3 only.  Decimation and
+> Digital RF (4-5) moved to hamsci-physics in the 2026-08-24 split; upload (6)
+> is hs-uploader's, and its interface (`upload.py`, `UploadTask`) was removed.
+
 This directory defines the **API contracts** between the 6 core functions of the GRAPE signal recorder.
 
 ## Purpose
@@ -181,33 +185,6 @@ class ToneDetectionResult:
 
 ---
 
-### 6. `UploadTask` - Upload Tracking
-
-**For Function 6 (repository upload)**
-
-```python
-class UploadStatus(Enum):
-    PENDING = "pending"
-    UPLOADING = "uploading"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-
-@dataclass
-class UploadTask:
-    task_id: str
-    local_path: str               # Digital RF file
-    remote_path: str              # Destination on repository
-    metadata: FileMetadata        # File metadata
-    status: UploadStatus
-    created_at: float
-    attempts: int
-    bytes_uploaded: int
-    total_bytes: int
-```
-
----
-
 ## Example Usage
 
 ### Creating a SampleBatch (Function 1 output)
@@ -340,6 +317,5 @@ With these data models defined, we can now create:
 2. **`archive.py`** - Interface for Function 2 (storage)
 3. **`tone_detection.py`** - Interface for Function 3 (WWV/WWVH/CHU)
 4. **`decimation.py`** - Interface for Function 4+5 (decimate + Digital RF)
-5. **`upload.py`** - Interface for Function 6 (repository upload)
 
 Each interface will use these data models as inputs/outputs, creating a complete API specification for the entire system.

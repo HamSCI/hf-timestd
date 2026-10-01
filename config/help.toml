@@ -11,7 +11,7 @@
 #   * tier 1 — install-canonical paths, radiod / Grape protocol
 #              constants, internal algorithm tuning; hidden.
 #   * tier 2 — operator-facing knobs (station identity, ka9q mDNS
-#              host, uploader account, feature flags); surfaced.
+#              host, feature flags); surfaced.
 #
 # The [recorder.channel_group.timestd] block and its inner
 # [[...channels]] array-of-tables (the WWV/CHU/WWVB sample list) are
@@ -187,9 +187,9 @@ hidden = true
 title          = "Service profile"
 help           = """Which services run on this host:
 
-  full      All hf-timestd services (recorder + metrology + uploader
-            + GNSS VTEC + L6 PPS + web UI).  Default for production.
-  minimal   Recorder + uploader only.  Use for resource-constrained
+  full      All hf-timestd services (recorder + metrology + GNSS VTEC
+            + T6 PPS + web UI).  Default for production.
+  minimal   Recorder only.  Use for resource-constrained
             hosts where metrology isn't needed.
 """
 example        = "full"
@@ -254,79 +254,6 @@ hidden = true
 hidden = true
 
 [gnss_vtec.save_hdf5]
-hidden = true
-
-# --- Uploader (PSWS-Grape) -----------------------------------------
-
-[uploader.enabled]
-title          = "Upload to PSWS-Grape?"
-help           = """When ON (default), hf-timestd runs its daily
-SFTP upload of compressed Digital RF cycles to PSWS.  Turn OFF
-for offline / development runs."""
-required       = false
-
-[uploader.upload_time]
-title          = "Daily upload time (HH:MM)"
-help           = """When the daily SFTP upload runs.  Format HH:MM
-in upload_timezone (default UTC).  00:30 is the canonical default
-(off-peak in most timezones)."""
-example        = "00:30"
-validator_hint = "HH:MM, 24-hour"
-required       = false
-
-# Tier 1 — UTC is the canonical PSWS timezone; never overridden.
-[uploader.upload_timezone]
-hidden = true
-
-# Tier 1 — sftp is the only supported protocol.
-[uploader.protocol]
-hidden = true
-
-# Tier 1 — retry / queue / backoff are internal defaults.
-[uploader.exponential_backoff]
-hidden = true
-
-[uploader.max_queue_size_gb]
-hidden = true
-
-[uploader.max_retries]
-hidden = true
-
-[uploader.retry_delay_seconds]
-hidden = true
-
-# Tier 1 — PSWS endpoint is fixed.
-[uploader.sftp.host]
-hidden = true
-
-[uploader.sftp.user]
-title          = "PSWS SFTP user (station ID)"
-help           = """SFTP login user on pswsnetwork.eng.ua.edu.
-Defaults to the PSWS station ID (the common case)."""
-example        = "S000171"
-required       = true
-
-[uploader.sftp.ssh_key]
-title          = "PSWS SSH private key path"
-help           = """Path to the SSH private key registered with PSWS.
-On hosts running mag-recorder too, this is typically
-/home/timestd/.ssh/id_rsa_psws -- the same key authorises uploads
-for any instrument under one operator's PSWS account."""
-example        = "/home/timestd/.ssh/id_rsa_psws"
-required       = true
-
-[uploader.sftp.bandwidth_limit_kbps]
-title          = "Upload bandwidth cap (kbit/s)"
-help           = """Max outbound bandwidth used by the daily SFTP
-upload.  500 kbit/s is the canonical default; raise on fast
-uplinks, lower if you share with realtime traffic.
-
-Special value: 0 means UNLIMITED."""
-example        = "500"
-validator_hint = "integer kbit/s; 0 = unlimited"
-required       = false
-
-[uploader.metadata.include_extended_metadata]
 hidden = true
 
 # --- Web UI --------------------------------------------------------

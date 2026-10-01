@@ -1,5 +1,9 @@
 # GRAPE Signal Recorder - Complete API Specification
 
+> **Status 2026-10-01:** hf-timestd keeps Functions 1-3 only.  Decimation and
+> Digital RF (4-5) moved to hamsci-physics in the 2026-08-24 split; upload (6)
+> is hs-uploader's, and its interface (`upload.py`, `UploadTask`) was removed.
+
 **Status:** ✅ Complete interface definitions for all 6 core functions  
 **Location:** `/src/signal_recorder/interfaces/`  
 **Purpose:** Define contracts without implementation details
@@ -39,7 +43,6 @@
 | 2 | `ArchiveWriter` | `SampleBatch` | NPZ files |
 | 3 | `ToneDetector` | `SampleBatch` | `ToneDetectionResult` |
 | 4+5 | `DecimatorWriter` | `SampleBatch` | Digital RF files |
-| 6 | `UploadQueue` | Digital RF path + metadata | `UploadTask` |
 
 ---
 
@@ -386,82 +389,6 @@ class DigitalRFReader(ABC):
 
 ---
 
-### Function 6: `UploadQueue`
-
-**Role:** Manage upload to remote repository
-
-**Key Methods:**
-
-```python
-class UploadQueue(ABC):
-    @abstractmethod
-    def queue_file(
-        self,
-        local_path: Path,
-        metadata: FileMetadata,
-        priority: int = 0
-    ) -> str:
-        """Queue file, return task_id"""
-        
-    @abstractmethod
-    def get_task_status(self, task_id: str) -> Optional[UploadTask]:
-        """Check upload progress"""
-        
-    @abstractmethod
-    def get_pending_count(self) -> int:
-        """Files waiting to upload"""
-        
-    @abstractmethod
-    def retry_failed_tasks(self) -> int:
-        """Retry all failed uploads"""
-        
-    @abstractmethod
-    def set_bandwidth_limit(self, kbps: int) -> None:
-        """Limit upload rate"""
-        
-    @abstractmethod
-    def register_completion_callback(
-        self, callback: Callable[[str, bool], None]
-    ) -> None:
-        """Notify on completion"""
-```
-
-**Companion: `UploadProtocol`**
-```python
-class UploadProtocol(ABC):
-    @abstractmethod
-    def upload_file(
-        self,
-        local_path: Path,
-        remote_path: str,
-        progress_callback: Optional[Callable] = None
-    ) -> bool:
-        """Upload via specific protocol (rsync, sftp, etc.)"""
-```
-
-**Usage:**
-```python
-# Function 5 queues completed file
-completed_file = writer.write_decimated(...)
-if completed_file:
-    task_id = upload_queue.queue_file(
-        local_path=completed_file,
-        metadata=FileMetadata(
-            channel_name="WWV 5.0 MHz",
-            frequency_hz=5e6,
-            start_time=...,
-            end_time=...,
-            sample_rate=10,
-            sample_count=36000,
-            file_format='digital_rf',
-            quality_summary={'completeness': 99.8},
-            time_snap_used=time_snap.to_dict()
-        )
-    )
-```
-
----
-
 ## Benefits of This API Design
 
 ### 1. **Clear Separation of Concerns**
@@ -516,7 +443,6 @@ Interface definitions serve as definitive specifications. No ambiguity about con
 | 2 | `ArchiveWriter` | `MinuteFileWriter` | ✅ Exists, needs interface wrapper |
 | 3 | `ToneDetector` | `MultiStationToneDetector` (in recorder) | ✅ Exists, needs extraction |
 | 4+5 | `DecimatorWriter` | `DigitalRFWriter` | ✅ Exists, needs interface wrapper |
-| 6 | `UploadQueue` | `UploadManager` | ⚠️ Exists but NOT integrated |
 
 ### Next Steps
 
@@ -540,7 +466,6 @@ src/signal_recorder/interfaces/
 ├── archive.py                # Function 2 interface
 ├── tone_detection.py         # Function 3 interface
 ├── decimation.py             # Functions 4+5 interface
-└── upload.py                 # Function 6 interface
 ```
 
 **Total:** 2000+ lines of interface definitions, fully documented

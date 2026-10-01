@@ -171,28 +171,8 @@ feed_fusion = false
 # learned_delay_ms = 4.6
 # learned_sigma_ms = 0.8
 
-[uploader]
-enabled = true
-protocol = "sftp"
-upload_time = "00:30"
-upload_timezone = "UTC"
-max_retries = 5
-retry_delay_seconds = 300
-exponential_backoff = true
-max_queue_size_gb = 100
-
-[uploader.sftp]
-host = "pswsnetwork.eng.ua.edu"
-port = 22
-ssh_key = "/home/timestd/.ssh/id_rsa_psws"
-remote_base_path = "/"
-bandwidth_limit_kbps = 0                # 0 = unlimited (default). Set a KB/s cap ONLY if the site has known bandwidth restrictions.
-verify_after_upload = true
-delete_after_upload = false
-create_trigger_directory = true
-
-[uploader.metadata]
-include_extended_metadata = false       # true adds timing quality data
+# Uploads: hf-timestd has none.  hs-uploader carries GRAPE to PSWS (its
+# grape-psws pipeline, configured by sigmond); see `smd admin uploader`.
 
 [logging]
 level = "INFO"                          # DEBUG for troubleshooting

@@ -66,11 +66,10 @@ HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/BPM time standard bro
 **WWV/WWVH Test Signal Analysis:**
 - **Minutes :08/:44** — Multi-tone power (2, 3, 4, 5 kHz), Frequency Selectivity Score, chirp delay spread, transient detection
 
-**HamSCI GRAPE:**
-- **10 Hz IQ decimation** — All 9 channels decimated from 24 kHz for GRAPE compatibility
-- **Digital RF packaging** — PSWS/wsprdaemon-compatible DRF format
-- **Automated daily upload** — SFTP to HamSCI PSWS network
-- **Spectrograms** — Daily spectrogram generation from decimated data
+**HamSCI GRAPE** — in [hamsci-physics](https://github.com/mijahauan/hamsci-physics), not this repo
+(since the 2026-08-24 split): 10 Hz decimation, Digital RF packaging and
+spectrograms.  hs-uploader carries the packaged datasets to PSWS; hf-timestd
+uploads nothing.
 
 **Web UI & API** — in [station-web](https://github.com/mijahauan/station-web), not this repo:
 - **Dashboard** — Metrology, dTEC, ionogram, GRAPE, logs, propagation conditions pages

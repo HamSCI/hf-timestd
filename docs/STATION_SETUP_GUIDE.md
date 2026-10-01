@@ -109,19 +109,9 @@ ssh-keygen -t ed25519 -f ~/.ssh/psws_key -N ""
 cat ~/.ssh/psws_key.pub
 ```
 
-Configure the uploader:
-
-```toml
-[uploader]
-enabled = true
-protocol = "sftp"
-
-[uploader.sftp]
-host = "pswsnetwork.eng.ua.edu"
-port = 22
-user = "S000171"              # Same as station.id
-ssh_key = "~/.ssh/psws_key"
-```
+hf-timestd has no uploader to configure.  hs-uploader carries GRAPE to PSWS
+with its own key (`/etc/hs-uploader/keys/id_ed25519_host`); sigmond configures
+it from `[station] id` and `instrument_id` (`smd admin uploader manifest`).
 
 ---
 

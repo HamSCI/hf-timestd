@@ -333,6 +333,15 @@ RETIRED_SECTIONS = {
         'of the host clock\'s electorate with a permanent `noselect`, so nothing '
         'may re-offer them; the gate that did is gone. Remove the section and '
         '/etc/sudoers.d/timestd-chrony-gate'),
+    # Nothing in hf-timestd reads [uploader] and uploads: hs-uploader has been
+    # a station's single path to PSWS since 2026-07-15, and GRAPE packaging
+    # left for hamsci-physics on 2026-08-24.  Deployed configs still carry the
+    # block (often `enabled = true`), a switch wired to nothing.
+    'uploader': (
+        'retired 2026-10-01: hf-timestd has no uploader; hs-uploader carries '
+        'GRAPE to PSWS (its grape-psws pipeline) and uses its own key, '
+        '/etc/hs-uploader/keys/id_ed25519_host, so [uploader.sftp] ssh_key '
+        'is read by nothing that uploads'),
 }
 
 

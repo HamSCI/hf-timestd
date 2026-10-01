@@ -302,30 +302,6 @@ if command -v chronyc &> /dev/null; then
     chronyc sources 2>/dev/null | grep -E "TSL|192.168" | head -5 | sed 's/^/    /'
 fi
 
-# Verify PSWS SFTP connectivity (non-fatal)
-read -r SSH_KEY STATION_ID < <($VENV_DIR/bin/python3 -c "
-import tomllib
-with open('$MAIN_CONFIG', 'rb') as f:
-    cfg = tomllib.load(f)
-ssh_key = cfg.get('uploader', {}).get('sftp', {}).get('ssh_key', '')
-station_id = cfg.get('station', {}).get('id', '')
-print(ssh_key, station_id)
-" 2>/dev/null || echo "")
-if [[ -n "$SSH_KEY" && -n "$STATION_ID" && -f "$SSH_KEY" ]]; then
-    if sudo -u timestd sftp \
-            -i "$SSH_KEY" \
-            -o BatchMode=yes \
-            -o ConnectTimeout=10 \
-            -P 22 \
-            "${STATION_ID}@pswsnetwork.eng.ua.edu" <<< "quit" &>/dev/null; then
-        log_info "  PSWS SFTP ($STATION_ID): ✓ connected"
-    else
-        log_warn "  PSWS SFTP ($STATION_ID): ✗ cannot connect (run: sudo scripts/setup-psws-keys.sh)"
-    fi
-else
-    log_warn "  PSWS SFTP: key not configured (run: sudo scripts/setup-psws-keys.sh)"
-fi
-
 echo ""
 log_info "Startup complete. Monitor with: journalctl -u timestd-fusion -f"
 echo ""

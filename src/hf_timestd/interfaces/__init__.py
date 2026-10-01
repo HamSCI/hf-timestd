@@ -23,11 +23,6 @@ from .data_models import (
     # Tone detection
     ToneDetectionResult,
     StationType,
-    
-    # Upload
-    UploadTask,
-    UploadStatus,
-    FileMetadata,
 )
 
 # Interface definitions (abstract base classes)
@@ -46,11 +41,6 @@ from .tone_detection import (
     MultiStationToneDetector,
 )
 
-from .upload import (
-    UploadQueue,
-    UploadProtocol,
-)
-
 __all__ = [
     # ===== Data Models =====
     # Core
@@ -64,11 +54,6 @@ __all__ = [
     'ToneDetectionResult',
     'StationType',
     
-    # Upload
-    'UploadTask',
-    'UploadStatus',
-    'FileMetadata',
-    
     # ===== Interfaces =====
     # Function 1: Sample provider (producer)
     'QualityAnalyzedSampleProvider',
@@ -81,8 +66,4 @@ __all__ = [
     # Function 3: Tone detection
     'ToneDetector',
     'MultiStationToneDetector',
-    
-    # Function 6: Upload
-    'UploadQueue',
-    'UploadProtocol',
 ]

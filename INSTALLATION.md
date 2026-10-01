@@ -304,7 +304,6 @@ it just refreshes the editable install and restarts the units already enabled.
 | **`timestd-pipeline-watchdog.timer`** | Pipeline health watchdog |
 | **`timestd-ionex-download.timer`** | Daily IONEX map download from NASA CDDIS |
 | **`timestd-iono-reanalysis.timer`** | Ionospheric reanalysis |
-| **`grape-daily.timer`** | Daily GRAPE decimation, spectrograms, DRF packaging, PSWS upload |
 | **`timestd-prune.timer`** | Nightly data retention enforcement |
 
 ---

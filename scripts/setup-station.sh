@@ -295,7 +295,7 @@ if [[ -z "${STATION_GRID:-}" && ( -z "${STATION_LAT:-}" || -z "${STATION_LON:-}"
 fi
 [[ -z "${SIGMOND_RADIOD_STATUS:-}" ]] && echo "    - Your ka9q-radio status multicast address"
 echo "    - Timing source (radiod's clock authority)"
-echo "    - Optional: PSWS station/instrument IDs + TOKEN (for GRAPE uploads)"
+echo "    - Optional: PSWS station/instrument IDs (for GRAPE uploads via hs-uploader)"
 echo "    - Optional: GNSS VTEC receiver address (if you have a ZED-F9P)"
 echo ""
 [[ "${NON_INTERACTIVE:-false}" == "true" ]] || read -rp "  Press Enter to continue..."
@@ -368,25 +368,27 @@ fi
 prompt DESCRIPTION "Station description" "${CALLSIGN} hf-timestd" "Free text description of your setup"
 
 # =============================================================================
-# Section 2: PSWS Upload (Optional)
+# Section 2: PSWS Identity (Optional)
 # =============================================================================
+# hf-timestd uploads nothing.  hs-uploader carries GRAPE to PSWS and takes the
+# station and instrument ids from here ([station] id / instrument_id), so the
+# ids are identity, not an upload switch.
 echo ""
-echo -e "${BOLD}${BLUE}━━━ Section 2: PSWS / GRAPE Upload ━━━${NC}"
+echo -e "${BOLD}${BLUE}━━━ Section 2: PSWS Identity ━━━${NC}"
 echo ""
 echo -e "  ${DIM}The Personal Space Weather Station network collects HF propagation data.${NC}"
 echo -e "  ${DIM}If you have a PSWS account, enter your station and instrument IDs.${NC}"
-echo -e "  ${DIM}You can set this up later by re-running this wizard.${NC}"
+echo -e "  ${DIM}Uploads run through hs-uploader, which sigmond configures from these ids.${NC}"
 echo ""
 
 # If sigmond published PSWS ids (from site-profile.toml via `smd config render`),
 # default the toggle on so the operator isn't asked to re-enter what's known.
 _psws_default="n"
 [[ -n "${STATION_PSWS_STATION_ID:-}" ]] && _psws_default="y"
-prompt_yn PSWS_ENABLED "Enable PSWS/GRAPE uploads?" "$_psws_default"
+prompt_yn PSWS_ENABLED "Is this station registered with PSWS?" "$_psws_default"
 
 STATION_ID=""
 INSTRUMENT_ID=""
-UPLOADER_ENABLED="false"
 
 if [[ "$PSWS_ENABLED" == "true" ]]; then
     # Auto-fill from sigmond's STATION_PSWS_* (site-profile) when present,
@@ -395,7 +397,6 @@ if [[ "$PSWS_ENABLED" == "true" ]]; then
         "e.g. S000171 (shown on your PSWS site admin page)" true
     auto_or_prompt INSTRUMENT_ID "PSWS Instrument ID" STATION_PSWS_INSTRUMENT_ID \
         "e.g. 172 (shown on your PSWS site admin page)" true
-    UPLOADER_ENABLED="true"
 fi
 
 # =============================================================================
@@ -557,11 +558,11 @@ else
 echo "    Enabled:      no"
 fi
 echo ""
-echo -e "  ${BOLD}PSWS Upload:${NC}"
-if [[ "$UPLOADER_ENABLED" == "true" ]]; then
-echo "    Enabled:      yes (Station: $STATION_ID, Instrument: $INSTRUMENT_ID)"
+echo -e "  ${BOLD}PSWS Identity:${NC}"
+if [[ -n "$STATION_ID" ]]; then
+echo "    Station:      $STATION_ID, Instrument: $INSTRUMENT_ID"
 else
-echo "    Enabled:      no"
+echo "    Not registered"
 fi
 echo ""
 echo -e "  ${BOLD}Storage:${NC}"
@@ -608,7 +609,6 @@ export WIZ_COMPRESSION="$COMPRESSION"
 export WIZ_VTEC_ENABLED="$VTEC_ENABLED"
 export WIZ_VTEC_HOST="$VTEC_HOST"
 export WIZ_VTEC_PORT="$VTEC_PORT"
-export WIZ_UPLOADER_ENABLED="$UPLOADER_ENABLED"
 export WIZ_L6_PPS_ENABLED="$L6_PPS_ENABLED"
 export WIZ_L6_PPS_FREQUENCY="$L6_PPS_FREQUENCY"
 export WIZ_ARCHIVE_ENABLED="$ARCHIVE_ENABLED"
@@ -627,7 +627,7 @@ output_path   = sys.argv[2]
 
 # Substitutions: (section_prefix, key) -> new_value
 # section_prefix uses dotted form matching the TOML header,
-# e.g. "station", "ka9q", "uploader.sftp", "gnss_vtec"
+# e.g. "station", "ka9q", "timing.t6_pps", "gnss_vtec"
 # A value of None means "leave template default".
 import os
 env = os.environ
@@ -795,15 +795,6 @@ vtec_port = e("WIZ_VTEC_PORT")
 if vtec_port:
     set_bare("gnss_vtec", "port", vtec_port)
 
-# Uploader
-set_bare("uploader", "enabled", e("WIZ_UPLOADER_ENABLED"))
-
-# SFTP key path
-station_id = e("WIZ_STATION_ID")
-if station_id:
-    set_str("uploader.sftp", "ssh_key",
-            f"/home/timestd/.ssh/id_rsa_psws_{station_id}")
-
 # --- Process template ---
 KEY_RE = re.compile(r'^(\s*)([\w_]+)(\s*=\s*)(.*)')
 SECTION_RE = re.compile(r'^\s*\[([^\]]+)\]')
@@ -909,11 +900,9 @@ echo "  ║              Station Configuration Complete              ║"
 echo "  ╚══════════════════════════════════════════════════════════╝"
 echo -e "${NC}"
 
-if [[ "$UPLOADER_ENABLED" == "true" ]]; then
-    echo -e "  ${BOLD}PSWS Key Setup:${NC}"
-    echo "    Run after install.sh completes to set up secure SFTP uploads:"
-    echo "      sudo ./scripts/setup-psws-keys.sh"
-    echo "    You will need your PSWS TOKEN (from https://pswsnetwork.eng.ua.edu/)"
+if [[ -n "$STATION_ID" ]]; then
+    echo -e "  ${BOLD}PSWS Uploads:${NC}"
+    echo "    hs-uploader carries GRAPE to PSWS; sigmond configures it from these ids."
     echo ""
 fi
 

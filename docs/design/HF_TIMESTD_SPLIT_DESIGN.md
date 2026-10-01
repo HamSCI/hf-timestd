@@ -236,7 +236,8 @@ looks.
   `[storage]`. **Add explicit `[timing.authority_manager]`** — currently an
   undeclared namespace resolved entirely from code defaults.
 - **wwv-h-iono:** `/etc/wwv-h-iono/config.toml` — `[station]` mirror,
-  `[uploader.*]` (GRAPE/PSWS), reanalysis/ionex settings, toggles.
+  reanalysis/ionex settings, toggles.  (GRAPE upload is hs-uploader's, not a
+  client's: `[uploader.*]` retired 2026-10-01.)
 - **gnss-vtec:** `[station]` mirror + `[gnss_vtec]` contents.
 - **station-web:** `[web_ui]` + docs-roots list + DB path.
 - Wizard chain under sigmond's one-init-per-deploy.toml constraint: catalog

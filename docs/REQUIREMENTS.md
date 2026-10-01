@@ -173,8 +173,8 @@ sources (IONEX/Earthdata, IRI-2020, space-weather).
   broadcasts WWV/WWVH/BPM).
 - `/etc/hf-timestd/timestd-config.toml` — operator MUST set: `[station]`
   callsign/id/instrument_id/grid (or lat+lon); `[ka9q].status`;
-  `[recorder.channel_group.*].channels`; `[uploader.sftp]` host/ssh_key if
-  uploading; `[services].profile`. Optional: `[timing.l6_pps]`, `[gnss_vtec]`,
+  `[recorder.channel_group.*].channels`; `[services].profile`.  (No uploader:
+  hs-uploader carries GRAPE to PSWS.) Optional: `[timing.l6_pps]`, `[gnss_vtec]`,
   `[metrology]` physics/realtime toggles.
 - External data: IONEX (Earthdata), IRI-2020, space-weather indices.
 - Coordination/identity from `/etc/sigmond/coordination.env`.
