@@ -292,15 +292,6 @@ class PathResolver:
         
         return self.get_path('upload_state_dir')
     
-    def get_upload_queue_file(self) -> Path:
-        """Get upload queue JSON file path"""
-        uploader_config = self.config.get('uploader', {})
-        
-        if 'queue_file' in uploader_config:
-            return Path(uploader_config['queue_file'])
-        
-        return self.get_upload_state_dir() / 'queue.json'
-    
     def get_status_dir(self) -> Path:
         """Get runtime status directory"""
         recorder_config = self.config.get('recorder', {})
@@ -327,26 +318,6 @@ class PathResolver:
     def get_credentials_dir(self) -> Path:
         """Get credentials directory (restrictive permissions)"""
         return self.get_path('credentials_dir')
-    
-    def get_ssh_key_path(self) -> Optional[Path]:
-        """Get SSH key path for PSWS uploads"""
-        uploader_config = self.config.get('uploader', {})
-        rsync_config = uploader_config.get('rsync', {})
-        
-        if 'ssh_key' not in rsync_config:
-            return None
-        
-        ssh_key = rsync_config['ssh_key']
-        
-        # Resolve template variables
-        paths = self.get_paths_config()
-        ssh_key = Template(ssh_key).safe_substitute(paths=paths)
-        
-        # Expand env vars and user home
-        ssh_key = os.path.expandvars(ssh_key)
-        ssh_key = os.path.expanduser(ssh_key)
-        
-        return Path(ssh_key)
     
     def get_jwt_secret_file(self) -> Path:
         """Get JWT secret file path"""
@@ -445,12 +416,7 @@ class PathResolver:
         
         print("Specific Files:")
         print(f"  Recording Stats:      {self.get_status_file()}")
-        print(f"  Upload Queue:         {self.get_upload_queue_file()}")
         print(f"  WWV Timing CSV:       {self.get_wwv_timing_csv()}")
-        
-        ssh_key = self.get_ssh_key_path()
-        if ssh_key:
-            print(f"  SSH Key:              {ssh_key}")
         
         print("="*70 + "\n")
 
