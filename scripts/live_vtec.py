@@ -227,6 +227,8 @@ def main():
     BATCH_FLUSH_INTERVAL = 60
     last_hdf5_flush = time.time()
     reconnect_delay = 5  # seconds, grows with backoff
+    RECV_SLICE_S = 20.0        # each recv() wait — well inside WatchdogSec=60
+    SILENCE_LIMIT_S = 60.0     # this much silence on a live socket => reconnect
     MAX_RECONNECT_DELAY = 120
 
     gps_epoch_unix = 315964800.0
@@ -242,8 +244,16 @@ def main():
         try:
             logger.info(f"Connecting to {host}:{port}...")
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(60.0)
+            # ⛔ Every blocking wait must end well inside WatchdogSec=60.  A
+            # connected-but-silent receiver used to block recv() for the full
+            # 60 s socket timeout, so systemd killed the process (ABRT,
+            # 'watchdog') before the timeout handler could reconnect: AC0G-ND,
+            # 2026-10-04, three kills in four minutes while its GNSS box sat
+            # silent.  Connect is bounded at 10 s; recv waits in 20 s slices
+            # and pets the watchdog on each; 60 s of silence reconnects.
+            sock.settimeout(10.0)
             sock.connect((host, port))
+            sock.settimeout(RECV_SLICE_S)
             logger.info("Connected!")
             reconnect_delay = 5  # reset backoff on success
             last_data_time = time.time()  # reset data watchdog on fresh connection
@@ -256,13 +266,21 @@ def main():
             continue
 
         # ── Inner data loop ──
+        silent_s = 0.0
         try:
           while True:
             try:
                 data = sock.recv(4096)
             except socket.timeout:
-                logger.warning("Socket timeout (60s no data) — will reconnect")
-                break  # break inner loop → reconnect
+                if SYSTEMD_AVAILABLE:
+                    systemd_daemon.notify('WATCHDOG=1')
+                silent_s += RECV_SLICE_S
+                if silent_s >= SILENCE_LIMIT_S:
+                    logger.warning(f"No data for {silent_s:.0f}s on a connected socket "
+                                   "— receiver silent; will reconnect")
+                    break  # break inner loop → reconnect
+                continue
+            silent_s = 0.0
             
             if not data:
                 logger.warning("Socket closed by peer — will reconnect")
@@ -290,6 +308,8 @@ def main():
                     parser = UBXParser()
                     logger.info("Receiver speaks UBX (RXM-RAWX + NAV-SAT)")
                 else:
+                    if SYSTEMD_AVAILABLE:
+                        systemd_daemon.notify('WATCHDOG=1')
                     continue          # keep sniffing; nothing is lost
                 data, sniff = sniff, b""
             
