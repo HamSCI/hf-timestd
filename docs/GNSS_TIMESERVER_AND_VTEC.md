@@ -22,11 +22,12 @@ u-blox receivers and only the VTEC half; the first two now live in `archive/`.
 
 | | AC0G home | AC0G-ND, Fargo |
 |---|---|---|
-| Box | *(to confirm)* | `AC0G-ND-TIME`, Raspberry Pi 4, Debian 13 |
+| Box | `ScreenPI4`, Raspberry Pi 4, Debian 12 | `AC0G-ND-TIME`, Raspberry Pi 4, Debian 13 |
 | LAN address | 192.168.1.80 | 192.168.8.144 |
 | Receiver | u-blox ZED-F9P | Quectel LG290P |
 | What it streams | **UBX**: `RXM-RAWX` + `NAV-SAT` | **RTCM 3.3**: MSM7 + 1005 + 1033 |
-| Relay to the LAN | TCP port 9000 *(relay to confirm)* | `str2str` (RTKLIB), TCP port 9000 |
+| Relay to the LAN | `str2str` (RTKLIB), TCP port 9000 | `str2str` (RTKLIB), TCP port 9000 |
+| chrony on PPS | ±224 ns | ±4.5 µs |
 | Station it serves | AC0G-B4 | AC0G-ND |
 
 hf-timestd tells the two apart by itself (§6), so a station needs only the
@@ -101,8 +102,19 @@ sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=tt
 ls -l /dev/ttyGNSS
 ```
 
-Use `/dev/ttyGNSS` everywhere below. (The LG290P board on ND presents a CH9102
-USB-serial chip, 1a86:55d3; a ZED-F9P board presents u-blox's own 1546:01a9.)
+Use `/dev/ttyGNSS` everywhere below.
+
+The LG290P board on ND presents a CH9102 USB-serial chip (1a86:55d3) with a
+serial number, as above.  A ZED-F9P presents u-blox's own USB (1546:01a9)
+**with no serial number**, so key its rule on vendor and product alone — fine
+while the box carries one u-blox receiver:
+
+```
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1546", ATTRS{idProduct}=="01a9", SYMLINK+="ttyGNSS"
+```
+
+(The home box still names `ttyACM0` directly; it has run 50 days without a
+reset, but the same failure waits for it.)
 
 **Only one program may own the port.** If gpsd is installed and set to the same
 device, it fights the relay. Either disable it (`sudo systemctl disable --now
@@ -130,8 +142,8 @@ sudo systemctl restart chrony
 chronyc -n sources
 ```
 
-Expect `#* PPS` within a few minutes, with an error of a few microseconds
-(`AC0G-ND-TIME`: `+568ns … +/- 4511ns`). If the box must keep time without
+Expect `#* PPS` within a few minutes, with an error of a few microseconds or
+better (`ScreenPI4`: `+/- 224ns`; `AC0G-ND-TIME`: `+/- 4511ns`). If the box must keep time without
 internet, chrony needs the seconds from the receiver itself — gpsd's shared
 memory driver (`refclock SHM 0`) does that, at the cost of gpsd owning the
 serial port (§4).
@@ -182,7 +194,10 @@ of it; §6.3 supplies the orbits instead.
 
 hf-timestd connects *to* the box, so the box must **listen**.
 
-**RTCM, with RTKLIB's `str2str`** (`sudo apt install rtklib`). `/etc/systemd/system/str2str.service`:
+Both boxes use RTKLIB's `str2str` (`sudo apt install rtklib`), which passes
+the receiver's bytes through unchanged, whatever their format.
+
+**RTCM** (the LG290P box). `/etc/systemd/system/str2str.service`:
 
 ```ini
 [Unit]
@@ -206,7 +221,15 @@ older RTKLIB builds prefix `/dev/` themselves. `tcpsvr://` listens;
 `tcpcli://` would push to one address, and nothing at the station listens.
 `str2str` serves several clients at once.
 
-**UBX, with ser2net** (`sudo apt install ser2net`). `/etc/ser2net.yaml`:
+**UBX** (the home box, `/etc/systemd/system/rawx-server.service`): the same
+unit, with the u-blox's port speed and a `#ubx` format tag on the input:
+
+```
+ExecStart=/usr/bin/str2str -in serial://ttyGNSS:115200:8:n:1#ubx -out tcpsvr://:9000
+```
+
+**UBX with ser2net instead** (`sudo apt install ser2net`), if you prefer it.
+`/etc/ser2net.yaml`:
 
 ```yaml
 connection: &gnss
