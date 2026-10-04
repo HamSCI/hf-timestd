@@ -603,7 +603,15 @@ sqlite_path = "/var/lib/timestd/phase2/timestd.db"
 [gnss_vtec]
 enabled = false                         # Set to true if you have a GNSS receiver
 host = "<YOUR_GNSS_HOST>"               # IP of GNSS receiver or ser2net bridge
-port = 9000                             # GNSS data stream port (UBX protocol)
+port = 9000                             # GNSS data stream port (UBX or RTCM3)
+# protocol: "auto" (default) decides from the first bytes; "ubx" for a u-blox
+# ZED-F9P (RXM-RAWX + NAV-SAT); "rtcm3" for an RTCM 3.3 base stream such as a
+# Quectel LG290P (MSM7 1077 or legacy 1004, plus 1005 antenna position).  An
+# RTCM receiver sends no ephemeris, so elevations come from BKG's multi-GNSS
+# broadcast file, fetched every 15 min into ephemeris_dir (no login needed).
+protocol = "auto"
+ephemeris_dir = "data/brdc"
+# ephemeris_url = "https://igs.bkg.bund.de/root_ftp/IGS/BRDC/{year}/{doy}/BRDC00WRD_S_{year}{doy}0000_01D_MN.rnx.gz"
 save_csv = true
 csv_path = "data/gnss_vtec.csv"
 save_hdf5 = true

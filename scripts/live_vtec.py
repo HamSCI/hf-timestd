@@ -53,6 +53,9 @@ except ImportError:
     SYSTEMD_AVAILABLE = False
 
 from hf_timestd.core.ubx_parser import UBXParser
+from hf_timestd.core.rtcm3_adapter import RTCM3Adapter, looks_like_rtcm3
+from hf_timestd.core.broadcast_ephemeris import BroadcastEphemeris
+from hf_timestd.core.brdc_fetcher import BrdcFetcher, DEFAULT_BRDC_URL
 from hf_timestd.core.gnss_tec import GNSSTECAnalyzer
 from hamsci_physics.cddis import CDDISDownloader
 from hf_timestd.io import make_data_product_writer
@@ -137,7 +140,15 @@ def main():
         return
 
     # 2. Processing components (persist across reconnections)
-    parser_ubx = UBXParser()
+    # The receiver's protocol: UBX (u-blox ZED-F9P: RAWX + NAV-SAT) or RTCM3
+    # (e.g. Quectel LG290P: MSM7 + 1005, elevations from broadcast ephemeris).
+    # `auto` decides from the first bytes; both parsers yield the same
+    # (class, id, payload) triples, so everything below is shared.
+    protocol = str(gnss_cfg.get("protocol", "auto")).lower()
+    parser = None
+    sniff = b""
+    ephemeris = BroadcastEphemeris()
+    brdc_fetcher = None
     analyzer = GNSSTECAnalyzer(dcb_data)
 
     # Startup self-test: catch physics regressions before entering main loop
@@ -264,11 +275,32 @@ def main():
                 break  # break inner loop → reconnect
             
             bytes_received += len(data)
+
+            if parser is None:
+                sniff += data
+                if protocol == "rtcm3" or (protocol == "auto" and looks_like_rtcm3(sniff)):
+                    parser = RTCM3Adapter(ephemeris)
+                    brdc_fetcher = BrdcFetcher(
+                        gnss_cfg.get("ephemeris_dir", "data/brdc"), ephemeris,
+                        url_template=gnss_cfg.get("ephemeris_url", DEFAULT_BRDC_URL))
+                    brdc_fetcher.start()
+                    logger.info("Receiver speaks RTCM3: observations from MSM/1004, "
+                                "elevations from broadcast ephemeris + RTCM 1005")
+                elif protocol == "ubx" or (protocol == "auto" and len(sniff) >= 4096):
+                    parser = UBXParser()
+                    logger.info("Receiver speaks UBX (RXM-RAWX + NAV-SAT)")
+                else:
+                    continue          # keep sniffing; nothing is lost
+                data, sniff = sniff, b""
             
             # Log data reception rate every 10 seconds
             now = time.time()
             if now - last_log_time > 10:
-                logger.info(f"Receiving data: {bytes_received} bytes, {msg_count} UBX messages processed")
+                proto = "RTCM3" if isinstance(parser, RTCM3Adapter) else "UBX"
+                logger.info(f"Receiving data: {bytes_received} bytes, "
+                            f"{msg_count} {proto} epochs/messages processed")
+                if isinstance(parser, RTCM3Adapter) and msg_count == 0:
+                    logger.warning(f"RTCM3 stream yields nothing usable: {parser.status()}")
                 last_log_time = now
                 bytes_received = 0
                 msg_count = 0
@@ -288,7 +320,7 @@ def main():
                 hdf5_write_buffer = []
                 last_hdf5_flush = now
                 
-            for msg_class, msg_id, payload in parser_ubx.process_data(data):
+            for msg_class, msg_id, payload in parser.process_data(data):
                 msg_count += 1
                 timestamp = time.time()
                 

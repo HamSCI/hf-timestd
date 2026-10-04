@@ -244,6 +244,23 @@ title          = "GNSS-VTEC server port"
 example        = "9000"
 required       = false
 
+[gnss_vtec.protocol]
+title          = "What the GNSS receiver speaks"
+help           = """auto (default) decides from the first bytes.  ubx is a
+u-blox receiver such as the ZED-F9P, which sends its own raw measurements and
+satellite positions.  rtcm3 is an RTCM 3.3 base-station stream, such as a
+Quectel LG290P's MSM7; it carries no satellite orbits, so hf-timestd fetches
+the day's broadcast orbits from BKG every 15 minutes (internet needed, no
+login)."""
+example        = "auto"
+required       = false
+
+[gnss_vtec.ephemeris_dir]
+hidden = true
+
+[gnss_vtec.ephemeris_url]
+hidden = true
+
 [gnss_vtec.csv_path]
 hidden = true
 
