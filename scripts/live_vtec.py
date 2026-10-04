@@ -69,6 +69,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger("live_vtec")
 
+
+def _sleep_petting_watchdog(seconds: float, slice_s: float = 20.0) -> None:
+    """Sleep ``seconds`` without starving the unit's WatchdogSec=60.
+
+    The reconnect backoff grows to 120 s.  As one time.sleep() it outlived
+    the watchdog and systemd killed the process mid-backoff (AC0G-ND,
+    2026-10-04 21:32:03Z, while its GNSS port refused connections)."""
+    end = time.monotonic() + seconds
+    while True:
+        if SYSTEMD_AVAILABLE:
+            systemd_daemon.notify('WATCHDOG=1')
+        left = end - time.monotonic()
+        if left <= 0:
+            return
+        time.sleep(min(slice_s, left))
+
 import tomllib
 import os
 
@@ -115,9 +131,7 @@ def main():
                 systemd_daemon.notify('READY=1')
                 systemd_daemon.notify('STATUS=GNSS VTEC disabled in config')
             while True:
-                time.sleep(60)
-                if SYSTEMD_AVAILABLE:
-                    systemd_daemon.notify('WATCHDOG=1')
+                _sleep_petting_watchdog(3600)   # 60 s sleeps raced WatchdogSec=60
 
     # 1. Prepare DCB Data (only if GNSS VTEC is enabled)
     dcb_data = {}
@@ -261,7 +275,7 @@ def main():
             logger.warning(f"Connection failed: {e} — retrying in {reconnect_delay}s")
             if SYSTEMD_AVAILABLE:
                 systemd_daemon.notify('WATCHDOG=1')
-            time.sleep(reconnect_delay)
+            _sleep_petting_watchdog(reconnect_delay)
             reconnect_delay = min(reconnect_delay * 2, MAX_RECONNECT_DELAY)
             continue
 
@@ -483,7 +497,7 @@ def main():
             if SYSTEMD_AVAILABLE:
                 systemd_daemon.notify('WATCHDOG=1')
             logger.info(f"Reconnecting in {reconnect_delay}s...")
-            time.sleep(reconnect_delay)
+            _sleep_petting_watchdog(reconnect_delay)
 
       # end outer reconnection loop
     except KeyboardInterrupt:
