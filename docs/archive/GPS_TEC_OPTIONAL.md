@@ -1,3 +1,5 @@
+> **Superseded 2026-10-04** by [GNSS_TIMESERVER_AND_VTEC.md](../GNSS_TIMESERVER_AND_VTEC.md), which covers u-blox and RTCM receivers, the time server and the station side in one place. Kept for the record; parts below are out of date (VTEC reads `RXM-RAWX` pseudoranges, not `NAV-SAT` ionospheric delay).
+
 # TEC Measurement - Optional GPS Validation
 
 ## Overview

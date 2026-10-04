@@ -395,7 +395,7 @@ sudo -u timestd /opt/hf-timestd/venv/bin/hf-timestd grape test-upload
 
 ---
 
-## 6. GNSS Receiver (ZED-F9P)
+## 6. GNSS Receiver (u-blox ZED-F9P or an RTCM 3.3 receiver)
 
 | | |
 |---|---|
@@ -406,16 +406,16 @@ sudo -u timestd /opt/hf-timestd/venv/bin/hf-timestd grape test-upload
 
 ### Setup
 
-See **[ZED_F9P_TEC_CONFIGURATION.md](ZED_F9P_TEC_CONFIGURATION.md)** for
-detailed receiver configuration, and **[GPS_TEC_OPTIONAL.md](GPS_TEC_OPTIONAL.md)**
-for architecture details.
+See **[GNSS_TIMESERVER_AND_VTEC.md](GNSS_TIMESERVER_AND_VTEC.md)** for the
+receiver, the GNSS box (time server and TCP relay) and the station settings.
 
 **Summary:**
 
-1. Connect ZED-F9P via USB
-2. Enable UBX protocol output (UBX-NAV-SAT messages)
-3. Expose via TCP using `ser2net` (port 9000)
-4. Configure `[gnss_vtec]` section in `timestd-config.toml`
+1. A dual-frequency receiver: u-blox ZED-F9P sending `RXM-RAWX` + `NAV-SAT`,
+   or an RTCM 3.3 receiver (e.g. Quectel LG290P) sending MSM7 + 1005
+2. Expose its stream on TCP port 9000 (`ser2net` for UBX, RTKLIB `str2str` for RTCM)
+3. Configure `[gnss_vtec]` in `timestd-config.toml` (`protocol = "auto"` tells them apart)
+4. An RTCM receiver also needs internet access: its orbits come from BKG (below)
 
 ---
 
@@ -429,6 +429,7 @@ registration:
 | **WAM-IPE** | Real-time NmF2, hmF2, TEC grids | `s3://noaa-nws-wam-ipe-pds` (public) | `iono_data_service.py` |
 | **GIRO** | Real-time ionosonde measurements | `https://lgdc.uml.edu/common/DIDBFast498` | `iono_data_service.py` |
 | **NOMADS** | WAM-IPE fallback | `https://nomads.ncep.noaa.gov/` | `iono_data_service.py` |
+| **BKG BRDC** | Multi-GNSS broadcast ephemeris, refreshed every 15 min (RTCM receivers only) | `https://igs.bkg.bund.de/root_ftp/IGS/BRDC/` | `brdc_fetcher.py` (`timestd-vtec`) |
 
 ---
 
@@ -454,5 +455,4 @@ Each adds capability without disrupting running services.
 - [STATION_SETUP_GUIDE.md](STATION_SETUP_GUIDE.md) — Site-specific config (`timestd-config.toml`)
 - [NASA_EARTHDATA_SETUP.md](https://github.com/HamSCI/hamsci-physics/blob/main/docs/NASA_EARTHDATA_SETUP.md) — IONEX/DCB credential setup (hamsci-physics)
 - [PSWS_SETUP_GUIDE.md](https://github.com/HamSCI/hamsci-physics/blob/main/docs/PSWS_SETUP_GUIDE.md) — PSWS registration and SSH key setup (hamsci-physics)
-- [ZED_F9P_TEC_CONFIGURATION.md](ZED_F9P_TEC_CONFIGURATION.md) — GNSS receiver configuration
-- [GPS_TEC_OPTIONAL.md](GPS_TEC_OPTIONAL.md) — VTEC architecture and optional capabilities
+- [GNSS_TIMESERVER_AND_VTEC.md](GNSS_TIMESERVER_AND_VTEC.md) — GNSS time server and VTEC: receivers, relay, station settings

@@ -249,7 +249,7 @@ host = "192.168.0.202"   # IP of GNSS receiver or ser2net bridge
 port = 9000              # TCP port for UBX data stream
 ```
 
-See [docs/ZED_F9P_TEC_CONFIGURATION.md](docs/ZED_F9P_TEC_CONFIGURATION.md) for receiver setup.
+See [docs/GNSS_TIMESERVER_AND_VTEC.md](docs/GNSS_TIMESERVER_AND_VTEC.md) for the receiver, the GNSS box and the station settings.
 
 ---
 

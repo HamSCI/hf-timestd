@@ -141,56 +141,22 @@ auto_create_channels = true
 
 ---
 
-## 4. GNSS VTEC Configuration (Optional)
+## 4. GNSS time server and VTEC (Optional)
 
-If you have a u-blox ZED-F9P or similar dual-frequency GNSS receiver, you can enable local VTEC monitoring for improved ionospheric corrections.
+A GNSS box on the LAN can serve the station stratum-1 NTP time and stream raw
+GNSS measurements for VTEC.  Setting up the box, the receiver (u-blox UBX or an
+RTCM 3.3 receiver such as the Quectel LG290P), chrony on PPS, the TCP relay and
+the station's `[gnss_vtec]` settings all live in one guide:
+**[GNSS_TIMESERVER_AND_VTEC.md](GNSS_TIMESERVER_AND_VTEC.md)**.
 
-### Hardware Setup
-
-See [ZED_F9P_TEC_CONFIGURATION.md](ZED_F9P_TEC_CONFIGURATION.md) for detailed receiver configuration.
-
-**Typical setup:**
-1. ZED-F9P connected via USB or network
-2. UBX protocol enabled (specifically UBX-NAV-SAT for ionospheric delay)
-3. Data stream accessible via TCP (using ser2net or similar)
-
-### Network Streaming with ser2net
-
-If your GNSS receiver is connected via USB, use ser2net to expose it over TCP:
-
-```bash
-# Install ser2net
-sudo apt install ser2net
-
-# Add to /etc/ser2net.yaml:
-connection: &gnss
-  accepter: tcp,9000
-  connector: serialdev,/dev/ttyACM0,115200n81,local
-  options:
-    kickolduser: true
-```
-
-### Configuration
+The station side, in brief:
 
 ```toml
 [gnss_vtec]
 enabled = true
-host = "192.168.0.202"    # IP of GNSS receiver or ser2net host
-port = 9000               # TCP port for UBX data stream
-save_csv = true
-csv_path = "data/gnss_vtec.csv"
-save_hdf5 = true
-hdf5_path = "data/gnss_vtec"
-```
-
-### Verification
-
-```bash
-# Test GNSS connection
-nc -v 192.168.0.202 9000 | xxd | head
-
-# Look for UBX frames (start with b5 62)
-# If you see only NMEA ($GP...), UBX output needs to be enabled
+host = "192.168.8.144"    # the GNSS box
+port = 9000
+protocol = "auto"         # ubx | rtcm3 | auto
 ```
 
 ---
@@ -529,6 +495,5 @@ port = 8000
 
 - [EXTERNAL_PREREQUISITES.md](EXTERNAL_PREREQUISITES.md) — All external dependencies (hardware, accounts, licensed software)
 - [INSTALLATION.md](../INSTALLATION.md) — Full installation guide
-- [ZED_F9P_TEC_CONFIGURATION.md](ZED_F9P_TEC_CONFIGURATION.md) — GNSS receiver setup
-- [GPS_TEC_OPTIONAL.md](GPS_TEC_OPTIONAL.md) — Optional GPS TEC capabilities and VTEC architecture
+- [GNSS_TIMESERVER_AND_VTEC.md](GNSS_TIMESERVER_AND_VTEC.md) — LAN GNSS time server and VTEC (u-blox or RTCM)
 - [NASA_EARTHDATA_SETUP.md](https://github.com/HamSCI/hamsci-physics/blob/main/docs/NASA_EARTHDATA_SETUP.md) — IONEX data access setup (hamsci-physics)

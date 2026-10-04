@@ -48,7 +48,7 @@ are marked ★ — when two docs disagree, the canonical one wins.
 | [IONOSPHERIC_REANALYSIS.md](IONOSPHERIC_REANALYSIS.md) | Hourly post-hoc physics filter (foF2/foE MUF validation, mode correction). |
 | [IONOSPHERIC_RESOLUTION.md](IONOSPHERIC_RESOLUTION.md) | Error-source hierarchy (ionospheric path delay dominates). |
 | [PHARLAP_RAYTRACING.md](PHARLAP_RAYTRACING.md) | PHaRLAP/pyLAP ray tracing (advisory overlay), the `raytrace` CLI, worked examples. |
-| [GPS_TEC_OPTIONAL.md](GPS_TEC_OPTIONAL.md) · [ZED_F9P_TEC_CONFIGURATION.md](ZED_F9P_TEC_CONFIGURATION.md) | Optional dual-frequency GNSS TEC validation. |
+| [GNSS_TIMESERVER_AND_VTEC.md](GNSS_TIMESERVER_AND_VTEC.md) ★ | A LAN GNSS box as stratum-1 NTP server and VTEC source: u-blox (UBX) or RTCM 3.3 receivers, chrony on PPS, the TCP relay, the station settings, troubleshooting. |
 | [PHASE_ENGINE_ARCHITECTURE.md](PHASE_ENGINE_ARCHITECTURE.md) | ⚠️ **Planned** coherent multi-antenna array — design only; the array DSP is not implemented (channel registry + external phase-engine source selection exist). |
 
 ## 5. Data products, upload & integration

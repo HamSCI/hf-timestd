@@ -333,7 +333,7 @@ if __name__ == '__main__':
             print("  1. UBX protocol not enabled (only NMEA)")
             print("  2. UBX-NAV-SAT message not configured")
             print("  3. Need to configure ZED-F9P")
-            print("\nSee docs/ZED_F9P_TEC_CONFIGURATION.md for setup instructions")
+            print("\nSee docs/GNSS_TIMESERVER_AND_VTEC.md for setup instructions")
     
     except Exception as e:
         print(f"\n❌ Error: {e}")
