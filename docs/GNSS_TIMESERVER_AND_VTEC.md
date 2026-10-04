@@ -27,7 +27,7 @@ u-blox receivers and only the VTEC half; the first two now live in `archive/`.
 | Receiver | u-blox ZED-F9P | Quectel LG290P |
 | What it streams | **UBX**: `RXM-RAWX` + `NAV-SAT` | **RTCM 3.3**: MSM7 + 1005 + 1033 |
 | Relay to the LAN | `str2str` (RTKLIB), TCP port 9000 | `str2str` (RTKLIB), TCP port 9000 |
-| chrony on PPS | ±224 ns | ±4.5 µs |
+| chrony on PPS | ±224 ns | ±218 ns (±4.5 µs while settling) |
 | Station it serves | AC0G-B4 | AC0G-ND |
 
 hf-timestd tells the two apart by itself (§6), so a station needs only the
@@ -113,8 +113,9 @@ while the box carries one u-blox receiver:
 SUBSYSTEM=="tty", ATTRS{idVendor}=="1546", ATTRS{idProduct}=="01a9", SYMLINK+="ttyGNSS"
 ```
 
-(The home box still names `ttyACM0` directly; it has run 50 days without a
-reset, but the same failure waits for it.)
+Both boxes carry these rules since 2026-10-04: `90-lg290p-ttygnss.rules` on
+`AC0G-ND-TIME`, `90-gnss-receiver.rules` on `ScreenPI4`, each with a
+`stable-device.conf` drop-in for its relay unit.
 
 **Only one program may own the port.** If gpsd is installed and set to the same
 device, it fights the relay. Either disable it (`sudo systemctl disable --now
@@ -143,7 +144,8 @@ chronyc -n sources
 ```
 
 Expect `#* PPS` within a few minutes, with an error of a few microseconds or
-better (`ScreenPI4`: `+/- 224ns`; `AC0G-ND-TIME`: `+/- 4511ns`). If the box must keep time without
+better (`ScreenPI4`: `+/- 224ns`; `AC0G-ND-TIME`: `+/- 4511ns` in its first
+hours, `+/- 218ns` once settled). If the box must keep time without
 internet, chrony needs the seconds from the receiver itself — gpsd's shared
 memory driver (`refclock SHM 0`) does that, at the cost of gpsd owning the
 serial port (§4).
