@@ -23,7 +23,7 @@ gracefully — the system runs without them but loses specific capabilities.
 | 3 | [PHaRLAP 4.7.4](#3-pharlap-474-numerical-raytracing) | No | Numerical ionospheric raytracing (pyLAP) | Geometric propagation model only |
 | 4 | [NASA Earthdata](#4-nasa-earthdata-account) | No | IONEX global TEC maps, DCB corrections | Parametric IRI / zero-bias fallback |
 | 5 | [PSWS account](#5-psws-account--ssh-key) | No | GRAPE Digital RF uploads to HamSCI | No data sharing |
-| 6 | [GNSS receiver](#6-gnss-receiver-zed-f9p) | No | Local VTEC monitoring, carrier-phase TEC | No local TEC |
+| 6 | [GNSS receiver](#6-gnss-receiver-u-blox-zed-f9p-or-an-rtcm-33-receiver) | No | Local VTEC monitoring, carrier-phase TEC | No local TEC |
 | 7 | [sqlite3 CLI](#7-sqlite3-cli) | **Yes** | Pipeline freshness checks | Watchdog restarts healthy services every 5 min |
 
 **No user action needed** for WAM-IPE (public S3 bucket), GIRO ionosonde
