@@ -262,3 +262,16 @@ def test_fetcher_takes_yesterday_too_just_after_midnight(tmp_path):
                 opener=lambda u, timeout: calls.append(u) or io.BytesIO(b'')
                 ).refresh_once(datetime(2026, 10, 5, 1, 0, tzinfo=timezone.utc))
     assert [u.split('/')[-1][12:19] for u in calls] == ['2026277', '2026278']
+
+
+def test_an_ephemeris_filled_after_the_adapter_starts_is_used():
+    """live_vtec's real order: an EMPTY ephemeris goes to the adapter, and the
+    fetcher thread fills that same object later.  An empty BroadcastEphemeris
+    is falsy, so `ephemeris or BroadcastEphemeris()` silently replaced it."""
+    e = BroadcastEphemeris()
+    ad = RTCM3Adapter(e, now=lambda: CAPTURED)
+    assert ad.ephem is e
+    e.load_file(BRDC)                     # the fetcher's load, after the fact
+    out = list(ad.process_data(RTCM.read_bytes()))
+    nav = [p for c, m, p in out if (c, m) == (1, 0x35)]
+    assert nav and len(nav[-1]['sats']) >= 6

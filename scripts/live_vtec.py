@@ -163,6 +163,7 @@ def main():
     sniff = b""
     ephemeris = BroadcastEphemeris()
     brdc_fetcher = None
+    parser_since = 0.0
     analyzer = GNSSTECAnalyzer(dcb_data)
 
     # Startup self-test: catch physics regressions before entering main loop
@@ -312,6 +313,7 @@ def main():
                 sniff += data
                 if protocol == "rtcm3" or (protocol == "auto" and looks_like_rtcm3(sniff)):
                     parser = RTCM3Adapter(ephemeris)
+                    parser_since = time.time()
                     brdc_fetcher = BrdcFetcher(
                         gnss_cfg.get("ephemeris_dir", "data/brdc"), ephemeris,
                         url_template=gnss_cfg.get("ephemeris_url", DEFAULT_BRDC_URL))
@@ -333,7 +335,10 @@ def main():
                 proto = "RTCM3" if isinstance(parser, RTCM3Adapter) else "UBX"
                 logger.info(f"Receiving data: {bytes_received} bytes, "
                             f"{msg_count} {proto} epochs/messages processed")
-                if isinstance(parser, RTCM3Adapter) and msg_count == 0:
+                # Grace period: right after detection no frame has been decoded
+                # yet, and an "empty" status there is noise, not a fault.
+                if (isinstance(parser, RTCM3Adapter) and msg_count == 0
+                        and now - parser_since > 30):
                     logger.warning(f"RTCM3 stream yields nothing usable: {parser.status()}")
                 last_log_time = now
                 bytes_received = 0

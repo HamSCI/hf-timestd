@@ -109,7 +109,12 @@ class RTCM3Adapter:
                  now=time.time, leap_s: int = GPS_UTC_LEAP_S):
         from pyrtcm import RTCMReader  # station venvs carry it via pyubx2
         self._parse = RTCMReader.parse
-        self.ephem = ephemeris or BroadcastEphemeris()
+        # ⛔ `is None`, never `or`: an EMPTY BroadcastEphemeris is falsy (it has
+        # __len__), and live_vtec hands over an empty one that its fetcher
+        # fills seconds later.  `ephemeris or BroadcastEphemeris()` swapped it
+        # for a private, forever-empty one, so every elevation was missing and
+        # no VTEC came out (AC0G-ND, 2026-10-04 21:40-21:48Z).
+        self.ephem = ephemeris if ephemeris is not None else BroadcastEphemeris()
         self._now = now
         self.leap_s = leap_s
         self.buffer = b''
