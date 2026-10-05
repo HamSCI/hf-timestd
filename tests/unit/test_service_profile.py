@@ -11,6 +11,7 @@ Covers:
 - get_unit_status() handles missing systemctl
 """
 
+import os
 import subprocess
 from unittest.mock import MagicMock, patch
 
@@ -303,6 +304,43 @@ class TestApplyProfile:
         inactive_units = profile.systemd_units(active=False)
         for unit in inactive_units:
             assert actions[unit] == 'disabled'
+
+    def test_disabling_a_linked_unit_never_uninstalls_it(self, tmp_path):
+        # systemd 257: `systemctl disable` removes a linked unit itself
+        # (verified on the devbox 2026-10-05).  Simulate that, and require the
+        # unit to exist afterwards -- AC0G-ND lost timestd-vtec.service so.
+        profile = ServiceProfile(profile_name='archive')
+        inactive = sorted(profile.systemd_units(active=False))
+        assert inactive, 'archive must suppress something for this test'
+        unit = inactive[0]
+        repo = tmp_path / 'repo'; repo.mkdir()
+        (repo / unit).write_text('[Service]\nExecStart=/bin/true\n')
+        units = tmp_path / 'etc'; units.mkdir()
+        (units / unit).symlink_to(repo / unit)
+
+        def fake_run(cmd, *args, **kwargs):
+            if cmd[:2] == ['systemctl', 'disable'] and cmd[-1] == unit:
+                (units / unit).unlink()          # what systemd really does
+            return MagicMock(returncode=0, stderr='')
+
+        with patch('hf_timestd.service_profile.subprocess.run',
+                   side_effect=fake_run) as mock_run:
+            actions = apply_profile(profile, dry_run=False, unit_dir=str(units))
+
+        assert actions[unit] == 'disabled'
+        assert (units / unit).is_symlink(), 'suppressing a unit must not remove it'
+        assert os.readlink(units / unit) == str(repo / unit)
+        assert ['systemctl', 'daemon-reload'] in [c.args[0] for c in mock_run.call_args_list[1:]]
+
+    def test_a_regular_unit_file_is_left_alone(self, tmp_path):
+        profile = ServiceProfile(profile_name='archive')
+        unit = sorted(profile.systemd_units(active=False))[0]
+        units = tmp_path / 'etc'; units.mkdir()
+        (units / unit).write_text('[Service]\nExecStart=/bin/true\n')
+        with patch('hf_timestd.service_profile.subprocess.run') as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stderr='')
+            apply_profile(profile, dry_run=False, unit_dir=str(units))
+        assert (units / unit).is_file() and not (units / unit).is_symlink()
 
     def test_disable_failure_for_unknown_unit_is_treated_as_skipped(self):
         profile = ServiceProfile(profile_name='archive')

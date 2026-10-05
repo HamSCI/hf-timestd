@@ -13,6 +13,7 @@ Usage:
 """
 
 import logging
+import os
 import subprocess
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Set, List, Any
@@ -226,7 +227,12 @@ def get_unit_status(unit: str) -> Dict[str, str]:
         }
 
 
-def apply_profile(profile: ServiceProfile, dry_run: bool = False) -> Dict[str, str]:
+# Where link-installed units live (deploy.toml kind = "link").
+SYSTEMD_UNIT_DIR = '/etc/systemd/system'
+
+
+def apply_profile(profile: ServiceProfile, dry_run: bool = False,
+                  unit_dir: str = SYSTEMD_UNIT_DIR) -> Dict[str, str]:
     """Enable/disable systemd units to match the profile.
 
     Returns a dict of {unit: action} where action is 'enabled',
@@ -287,10 +293,21 @@ def apply_profile(profile: ServiceProfile, dry_run: bool = False) -> Dict[str, s
             except (subprocess.TimeoutExpired, FileNotFoundError) as e:
                 actions[unit] = f'error: {e}'
 
+    # ⛔ `systemctl disable` DELETES a linked unit, not only its wants/ links.
+    # deploy.toml installs every unit as a symlink into the checkout
+    # (kind = "link"), and to systemd a symlink in /etc/systemd/system that
+    # points outside the unit path IS a linked unit.  So suppressing a unit
+    # used to uninstall it: AC0G-ND, 2026-10-05 02:17:08, the 'full' profile
+    # suppressed vtec ([gnss_vtec] still off) and timestd-vtec.service was
+    # gone after the reboot, drop-ins and all orphaned.  Suppressed means
+    # "stopped, not started at boot" -- never "removed".  Put the link back.
+    relinked = False
     for unit in profile.systemd_units(active=False):
         if dry_run:
             actions[unit] = 'would disable'
         else:
+            path = os.path.join(unit_dir, unit)
+            link_target = os.readlink(path) if os.path.islink(path) else None
             try:
                 subprocess.run(
                     ['systemctl', 'disable', '--no-reload', '--now', unit],
@@ -298,6 +315,11 @@ def apply_profile(profile: ServiceProfile, dry_run: bool = False) -> Dict[str, s
                     check=True,
                 )
                 actions[unit] = 'disabled'
+                if link_target and not os.path.lexists(path):
+                    os.symlink(link_target, path)
+                    relinked = True
+                    logger.info(f"{unit}: disable removed the linked unit; "
+                                f"re-linked -> {link_target}")
             except subprocess.CalledProcessError as e:
                 # Not-found or already disabled is fine
                 stderr = e.stderr.strip()
@@ -308,5 +330,13 @@ def apply_profile(profile: ServiceProfile, dry_run: bool = False) -> Dict[str, s
                     actions[unit] = f'error: {stderr}'
             except (subprocess.TimeoutExpired, FileNotFoundError) as e:
                 actions[unit] = f'error: {e}'
+
+    if relinked:
+        try:
+            subprocess.run(['systemctl', 'daemon-reload'],
+                           capture_output=True, text=True, timeout=10, check=True)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+                FileNotFoundError) as e:
+            logger.warning(f"daemon-reload after re-link failed: {e}")
 
     return actions
