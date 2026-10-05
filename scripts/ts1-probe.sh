@@ -10,7 +10,10 @@
 #   TS1_MODE=PPS
 #   TS1_GPS_LOCK=yes|no  TS1_SATS=N
 #   TS1_REF_HZ=27000000
+#   TS1_REF_SOURCE=external|internal                (internal = REF IN dead:
+#                                                    the B4 09-28 / AI6VN fault)
 #   TS1_TX_HZ=84225000
+#   TS1_REF_OUT_HZ=27000000                         (v2.x: out[2], to the RX888)
 #   TS1_INJECTED_HZ=<alias under ADC_HZ>           (when ADC_HZ given)
 #
 # Usage: ts1-probe.sh [ADC_HZ]     e.g. ts1-probe.sh 129600000
@@ -18,6 +21,13 @@
 # firmware banner disambiguates it from any other Trinket.
 set -u
 ADC_HZ="${1:-}"
+
+# TS1_PROBE_STAT_FILE: parse a captured console transcript instead of the
+# port (tests; post-mortems).  The parser below is the only thing it skips to.
+if [ -n "${TS1_PROBE_STAT_FILE:-}" ]; then
+    port="(file) $TS1_PROBE_STAT_FILE"
+    out=$(cat "$TS1_PROBE_STAT_FILE")
+else
 
 port=""
 for p in /dev/serial/by-id/usb-Adafruit_Trinket_M0_*; do
@@ -48,6 +58,7 @@ out=$(
     wait $CATPID 2>/dev/null
     exec 3>&-
 )
+fi
 
 echo "TS1_PRESENT=yes"
 echo "TS1_PORT=$port"
@@ -55,17 +66,36 @@ fw=$(printf '%s' "$out" | grep -m1 -oE 'TimeSync v[^,]+, Board ID #[^\r]*')
 [ -n "$fw" ] && echo "TS1_FIRMWARE=$fw"
 mode=$(printf '%s' "$out" | grep -m1 -oE 'Mode: *[A-Za-z0-9-]+' | awk '{print $2}')
 [ -n "$mode" ] && echo "TS1_MODE=$mode"
-if printf '%s' "$out" | grep -qiE 'GPS +locked'; then
+# Two console dialects.  v1.x: "GPS locked", "11 satellites in view",
+# "Reference clock(external): 27,000,000 Hz", "Output frequency ...".
+# v2.4 (AC0G-ND, 2026-10-05): "GPS lock, Satellites in view: 11",
+# "ref (external) : 27,000,000 Hz", and one "out[N]: ... : <Hz>" line per
+# Si5351 output -- out[1] the 84.225 MHz carrier, out[2] REF OUT to the RX888.
+# The old patterns matched none of it: a locked v2.4 unit read GPS_LOCK=no
+# and gave no carrier, so T6 auto-arm could never compute its alias.
+if printf '%s' "$out" | grep -qiE '(^|[^a-z])(no|not|without) +GPS +lock|GPS +(un|not +)lock'; then
+    echo "TS1_GPS_LOCK=no"
+elif printf '%s' "$out" | grep -qiE 'GPS +lock(ed)?([^a-z]|$)'; then
     echo "TS1_GPS_LOCK=yes"
 else
     echo "TS1_GPS_LOCK=no"
 fi
 sats=$(printf '%s' "$out" | grep -m1 -oiE '[0-9]+ satellites in view' | grep -oE '^[0-9]+')
+[ -n "$sats" ] || sats=$(printf '%s' "$out" | grep -m1 -oiE 'satellites in view *: *[0-9]+' | grep -oE '[0-9]+$')
 [ -n "$sats" ] && echo "TS1_SATS=$sats"
-ref=$(printf '%s' "$out" | grep -m1 -iE 'Reference clock ?\(' | grep -oE '[0-9,]+ *Hz' | tr -d ', ' | sed 's/Hz//')
+refline=$(printf '%s' "$out" | grep -m1 -iE 'Reference clock ?\(|^ *ref *\(')
+ref=$(printf '%s' "$refline" | grep -oE '[0-9,]+ *Hz' | tr -d ', ' | sed 's/Hz//')
 [ -n "$ref" ] && echo "TS1_REF_HZ=$ref"
+src=$(printf '%s' "$refline" | grep -oiE '\((external|internal)\)' | tr -d '()' | tr 'A-Z' 'a-z')
+[ -n "$src" ] && echo "TS1_REF_SOURCE=$src"
+_outhz() {  # _outhz N -> integer Hz of the "out[N]:" line (v2.x)
+    printf '%s' "$out" | grep -m1 -E "^ *out\[$1\]:" | grep -oE '[0-9,]+\.[0-9]+ *Hz' | tr -d ', ' | sed 's/Hz//' | cut -d. -f1
+}
 tx=$(printf '%s' "$out" | grep -m1 -iE '^Output frequency' | grep -oE '[0-9,]+\.[0-9]+' | tr -d ',' | cut -d. -f1)
+[ -n "$tx" ] || tx=$(_outhz 1)
 [ -n "$tx" ] && echo "TS1_TX_HZ=$tx"
+refout=$(_outhz 2)
+[ -n "$refout" ] && echo "TS1_REF_OUT_HZ=$refout"
 if [ -n "${tx:-}" ] && [ -n "$ADC_HZ" ] && [ "$ADC_HZ" -gt 0 ]; then
     # Fold TX into the first Nyquist zone. Reduce modulo the sample rate
     # FIRST, then reflect: the injector sits in whichever zone the ADC
