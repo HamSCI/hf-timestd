@@ -109,3 +109,25 @@ def test_a_missing_transcript_is_not_a_present_ts1(tmp_path):
 def test_setup_station_never_passes_the_fixture_env():
     sh = (REPO / 'scripts' / 'setup-station.sh').read_text()
     assert 'env -u TS1_PROBE_STAT_FILE "$PROJECT_DIR/scripts/ts1-probe.sh"' in sh
+
+
+def test_inline_prompt_echo_anchors_the_status(tmp_path):
+    # The console prints its prompt before the echo: "TS>STAT".  Help text
+    # before it names "GPS lock"; the real status says no lock.
+    help_ = "?\r\nCommands:\r\n  STAT  show status (GPS lock, outputs)\r\nTS>"
+    text = help_ + V24.read_text().replace('GPS lock, Satellites in view: 11',
+                                            'No GPS lock, Satellites in view: 0')
+    assert probe(text, tmp_path)['TS1_GPS_LOCK'] == 'no'
+    locked = help_ + V24.read_text()
+    assert probe(locked, tmp_path)['TS1_GPS_LOCK'] == 'yes'
+
+
+def test_without_any_echo_a_negative_anywhere_wins(tmp_path):
+    text = ("Commands: STAT shows GPS lock\r\nMode: GPS-PPS\r\n"
+            "No GPS lock, Satellites in view: 0\r\n")
+    assert probe(text, tmp_path)['TS1_GPS_LOCK'] == 'no'
+
+
+def test_setup_station_surfaces_the_probe_warning():
+    sh = (REPO / 'scripts' / 'setup-station.sh').read_text()
+    assert "TS1_WARN=" in sh and 'log_warn "TS-1 probe: $_ts1_warn"' in sh

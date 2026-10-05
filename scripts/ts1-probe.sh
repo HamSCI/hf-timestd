@@ -81,9 +81,16 @@ mode=$(printf '%s' "$out" | grep -m1 -oE 'Mode: *[A-Za-z0-9-]+' | awk '{print $2
 # Judge lock from the STAT reply only -- the '?' help printed before it may
 # mention "lock" -- and from the line that names it.  Negative wording
 # (lost, waiting, no, not, unlocked, searching) is never read as lock.
-stat=$(printf '%s' "$out" | tr -d '\r' | awk 'f{print} /^ *STAT *$/{f=1}')
-[ -n "$stat" ] || stat=$(printf '%s' "$out" | tr -d '\r')
-lockline=$(printf '%s' "$stat" | grep -m1 -iE 'GPS[^a-z]+(un)?lock')
+# The echo can sit on its own line ("STAT") or after the prompt ("TS>STAT");
+# take everything after the LAST such line.  With no echo at all, fall back to
+# the whole transcript -- and there a negative phrase ANYWHERE wins, because
+# the help text may name "GPS lock" before the status does (review round 2).
+stat=$(printf '%s' "$out" | tr -d '\r' | awk '/(^|>) *STAT *$/{buf=""; f=1; next} f{buf=buf $0 "\n"} END{printf "%s", buf}')
+if [ -n "$stat" ]; then
+    lockline=$(printf '%s' "$stat" | grep -m1 -iE 'GPS[^a-z]+(un)?lock')
+else
+    lockline=$(printf '%s' "$out" | tr -d '\r' | grep -iE 'GPS[^a-z]+(un)?lock' | tr '\n' ' ')
+fi
 if [ -z "$lockline" ]; then
     echo "TS1_GPS_LOCK=no"
 elif printf '%s' "$lockline" | grep -qiE '(^|[^a-z])(no|not|without|waiting|searching|lost)([^a-z]|$)|unlock|lock *: *(no|false|0)'; then

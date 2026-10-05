@@ -449,6 +449,8 @@ if grep -q "^TS1_PRESENT=yes" <<< "$TS1_INFO" && ! grep -q "^TS1_ERROR=" <<< "$T
     _ts1_tx=$(sed -n 's/^TS1_TX_HZ=//p' <<< "$TS1_INFO")
     _ts1_lock=$(sed -n 's/^TS1_GPS_LOCK=//p' <<< "$TS1_INFO")
     log_info "TS-1 TimeSync injector detected: ${_ts1_fw:-unknown firmware}, TX ${_ts1_tx:-?} Hz, GPS lock: ${_ts1_lock:-?}"
+    _ts1_warn=$(sed -n 's/^TS1_WARN=//p' <<< "$TS1_INFO")
+    [[ -n "$_ts1_warn" ]] && log_warn "TS-1 probe: $_ts1_warn"
     auto_or_prompt RX888_ADC_HZ "RX888 ADC sample rate (Hz)" STATION_RX888_ADC_HZ \
         "ADC clock the injector aliases under (129600000 or 64800000)" false
     RX888_ADC_HZ="${RX888_ADC_HZ:-129600000}"
