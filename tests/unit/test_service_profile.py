@@ -332,6 +332,29 @@ class TestApplyProfile:
         assert os.readlink(units / unit) == str(repo / unit)
         assert ['systemctl', 'daemon-reload'] in [c.args[0] for c in mock_run.call_args_list[1:]]
 
+    def test_relinked_even_when_disable_fails_after_removing_the_link(self, tmp_path):
+        # disable removes the link first and stops second; a failed stop
+        # must not leave the unit uninstalled.
+        profile = ServiceProfile(profile_name='archive')
+        unit = sorted(profile.systemd_units(active=False))[0]
+        repo = tmp_path / 'repo'; repo.mkdir()
+        (repo / unit).write_text('[Service]\nExecStart=/bin/true\n')
+        units = tmp_path / 'etc'; units.mkdir()
+        (units / unit).symlink_to(repo / unit)
+
+        def fake_run(cmd, *args, **kwargs):
+            if cmd[:2] == ['systemctl', 'disable'] and cmd[-1] == unit:
+                (units / unit).unlink()
+                err = subprocess.CalledProcessError(1, cmd)
+                err.stderr = 'Job for stop canceled'
+                raise err
+            return MagicMock(returncode=0, stderr='')
+
+        with patch('hf_timestd.service_profile.subprocess.run', side_effect=fake_run):
+            actions = apply_profile(profile, dry_run=False, unit_dir=str(units))
+        assert actions[unit].startswith('error')
+        assert (units / unit).is_symlink(), 'a failed disable must not uninstall the unit'
+
     def test_a_regular_unit_file_is_left_alone(self, tmp_path):
         profile = ServiceProfile(profile_name='archive')
         unit = sorted(profile.systemd_units(active=False))[0]

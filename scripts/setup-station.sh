@@ -440,7 +440,9 @@ echo ""
 # injected frequency seen by radiod is the alias under the ADC clock.
 TS1_INFO=""
 if [[ -x "$PROJECT_DIR/scripts/ts1-probe.sh" ]]; then
-    TS1_INFO=$("$PROJECT_DIR/scripts/ts1-probe.sh" 2>/dev/null || true)
+    # env -u: TS1_PROBE_STAT_FILE is for tests and post-mortems; a leftover
+    # export must never make bring-up read a stale transcript.
+    TS1_INFO=$(env -u TS1_PROBE_STAT_FILE "$PROJECT_DIR/scripts/ts1-probe.sh" 2>/dev/null || true)
 fi
 if grep -q "^TS1_PRESENT=yes" <<< "$TS1_INFO" && ! grep -q "^TS1_ERROR=" <<< "$TS1_INFO"; then
     _ts1_fw=$(sed -n 's/^TS1_FIRMWARE=//p' <<< "$TS1_INFO")

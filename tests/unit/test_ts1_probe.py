@@ -16,7 +16,8 @@ PROBE = REPO / 'scripts' / 'ts1-probe.sh'
 FIXTURES = REPO / 'tests' / 'fixtures' / 'ts1'
 V24 = FIXTURES / 'stat-v2.4-ac0g-nd-20261005.txt'
 
-# v1.x wording, as recorded from B4 and AI6VN (2026-09-18).
+# The "Output frequency" dialect, as recorded from B4 (v2.6) and AI6VN (v2.7),
+# 2026-09-18.  The version numbers do not predict the dialect.
 V1X = ("TimeSync v1.8, Board ID # 1234abcd\r\n"
        "Mode: PPS\r\n"
        "GPS locked, 9 satellites in view\r\n"
@@ -70,7 +71,41 @@ def test_internal_reference_is_reported(tmp_path):
 
 @pytest.mark.parametrize('line', ['No GPS lock, Satellites in view: 0',
                                   'GPS not locked, 0 satellites in view',
-                                  'GPS unlocked'])
+                                  'GPS unlocked',
+                                  'GPS lock lost, Satellites in view: 3',
+                                  'Waiting for GPS lock, Satellites in view: 2',
+                                  'GPS lock: no, Satellites in view: 0'])
 def test_no_lock_is_never_read_as_lock(tmp_path, line):
     text = V24.read_text().replace('GPS lock, Satellites in view: 11', line)
     assert probe(text, tmp_path)['TS1_GPS_LOCK'] == 'no'
+
+
+def test_help_text_before_stat_cannot_claim_lock(tmp_path):
+    # Production sends '?' then STAT; only the STAT reply may decide lock.
+    help_ = ("?\r\nCommands:\r\n  STAT  show status (GPS lock, outputs)\r\n"
+             "  REF   set reference clock\r\nTS>\r\n")
+    text = help_ + V24.read_text().replace('GPS lock, Satellites in view: 11',
+                                            'No GPS lock, Satellites in view: 0')
+    assert probe(text, tmp_path)['TS1_GPS_LOCK'] == 'no'
+
+
+def test_a_zero_hz_carrier_is_withheld_not_armed(tmp_path):
+    text = V24.read_text().replace('84,225,000.000000 Hz', '0.000000 Hz')
+    kv = probe(text, tmp_path)
+    assert 'TS1_TX_HZ' not in kv and 'TS1_INJECTED_HZ' not in kv
+    assert 'implausible' in kv['TS1_WARN']
+    assert 'TS1_ERROR' not in kv          # the TS-1 itself is still usable
+
+
+def test_a_missing_transcript_is_not_a_present_ts1(tmp_path):
+    r = subprocess.run(['bash', str(PROBE)],
+                       env={'PATH': '/usr/bin:/bin',
+                            'TS1_PROBE_STAT_FILE': str(tmp_path / 'nope.txt')},
+                       capture_output=True, text=True, timeout=30)
+    assert r.returncode == 1
+    assert 'TS1_PRESENT=no' in r.stdout
+
+
+def test_setup_station_never_passes_the_fixture_env():
+    sh = (REPO / 'scripts' / 'setup-station.sh').read_text()
+    assert 'env -u TS1_PROBE_STAT_FILE "$PROJECT_DIR/scripts/ts1-probe.sh"' in sh

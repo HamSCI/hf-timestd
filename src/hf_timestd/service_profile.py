@@ -315,11 +315,6 @@ def apply_profile(profile: ServiceProfile, dry_run: bool = False,
                     check=True,
                 )
                 actions[unit] = 'disabled'
-                if link_target and not os.path.lexists(path):
-                    os.symlink(link_target, path)
-                    relinked = True
-                    logger.info(f"{unit}: disable removed the linked unit; "
-                                f"re-linked -> {link_target}")
             except subprocess.CalledProcessError as e:
                 # Not-found or already disabled is fine
                 stderr = e.stderr.strip()
@@ -330,6 +325,18 @@ def apply_profile(profile: ServiceProfile, dry_run: bool = False,
                     actions[unit] = f'error: {stderr}'
             except (subprocess.TimeoutExpired, FileNotFoundError) as e:
                 actions[unit] = f'error: {e}'
+            # Whatever disable returned: it removes the link FIRST and stops
+            # second, so a stop that fails or times out has already uninstalled
+            # the unit (v3.68 pre-build review).  Restore it on every path.
+            if link_target and not os.path.lexists(path):
+                try:
+                    os.symlink(link_target, path)
+                    relinked = True
+                    logger.info(f"{unit}: disable removed the linked unit; "
+                                f"re-linked -> {link_target}")
+                except OSError as e:
+                    logger.error(f"{unit}: disable removed the linked unit and "
+                                 f"re-linking failed: {e}")
 
     if relinked:
         try:
