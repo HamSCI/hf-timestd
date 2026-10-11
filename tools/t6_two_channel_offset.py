@@ -72,6 +72,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import signal
 import sys
 import threading
 import time
@@ -204,6 +205,11 @@ def analyze(directory: Path, fold_seconds: int, cfo: bool) -> dict:
             "hz": meta[f"{name}_hz"], "seconds": len(x) / sr,
             "carrier_offset_hz": f, "blocks": len(ests[name]),
         }
+    secs = [c["seconds"] for c in report["channels"].values()]
+    if abs(secs[0] - secs[1]) > 0.01 * max(secs):
+        sys.exit(f"ref holds {secs[0]:.1f} s and test {secs[1]:.1f} s of samples: "
+                 "one channel lost data (or radiod re-made it), so the two do not "
+                 "cover one span of time.  Record again.")
     rows = pair_blocks(ests["ref"], ests["test"], olen)
     report["blocks"] = rows
     report["summary"] = summarise(rows, sr)
@@ -272,7 +278,13 @@ def record(args) -> None:
     # shared id would hand back ONE channel twice.  Either id also keeps these
     # channels apart from hf-timestd's own T6 channel, which this tool never
     # touches.
-    controls = {name: RadiodControl(args.status, client_id=f"{CLIENT_ID}-{name}")
+    #
+    # And one pair of ids per RUN (from the output directory, which must be
+    # new).  On 2026-10-11 a second run re-derived the first run's ids, so
+    # ensure_channel re-adopted the ref channel the first run had just told
+    # to expire; that channel then delivered half its samples.
+    controls = {name: RadiodControl(args.status,
+                                    client_id=f"{CLIENT_ID}-{out.name}-{name}")
                 for name in ("ref", "test")}
 
     channels = {}
@@ -303,6 +315,9 @@ def record(args) -> None:
     for s in streams.values():
         s.start()
 
+    # A background job ignores SIGINT; make SIGTERM run the cleanup below.
+    signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+
     deadline = time.monotonic() + args.seconds
     next_refresh = time.monotonic() + REFRESH_S
     try:
@@ -315,6 +330,8 @@ def record(args) -> None:
             got = {k: s.samples / args.sample_rate for k, s in sinks.items()}
             print(f"\r  ref {got['ref']:7.1f} s   test {got['test']:7.1f} s",
                   end="", flush=True)
+    except KeyboardInterrupt:
+        print("\n  stopped early")
     finally:
         print()
         for s in streams.values():
@@ -328,6 +345,7 @@ def record(args) -> None:
             except Exception:  # noqa: BLE001
                 pass
         meta["stopped_utc"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        meta["samples"] = {k: s.samples for k, s in sinks.items()}
         (out / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
     print(f"recorded into {out}; now: {Path(__file__).name} analyze {out}")
 
