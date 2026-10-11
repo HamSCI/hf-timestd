@@ -96,3 +96,22 @@ def test_without_the_correction_the_fold_loses_the_drifting_carrier(tmp_path):
     rets = [r["test_retention"] for r in rep["blocks"]]
     # Either no block survives, or what survives kept little of the carrier.
     assert not rets or max(rets) < 0.5
+
+
+class _Q:
+    def __init__(self, rtp):
+        self.delivered_rtp_start = rtp
+
+
+def test_sink_flags_a_doubled_sample_count(tmp_path):
+    # The 2026-10-11 failure: packets and RTP steps as usual, but each batch
+    # holds twice the samples the RTP clock advanced.
+    ok, bad = tco._Sink(tmp_path, "ok"), tco._Sink(tmp_path, "bad")
+    rtp = (1 << 32) - 3 * 1740          # cross the wrap on the way
+    for _ in range(8):
+        ok(np.zeros(1740, np.complex64), _Q(rtp))
+        bad(np.zeros(3480, np.complex64), _Q(rtp))
+        rtp = (rtp + 1740) & 0xFFFFFFFF
+    ok.close(), bad.close()
+    assert ok.miscounts == 0
+    assert bad.miscounts >= tco.MISCOUNT_LIMIT

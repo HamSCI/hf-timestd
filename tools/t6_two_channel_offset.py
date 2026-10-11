@@ -241,13 +241,27 @@ def print_report(rep: dict) -> None:
 
 # ---------------------------------------------------------------------- record
 
+IQ_WAIT_S = 30.0
+MISCOUNT_LIMIT = 3
+
+
 class _Sink:
-    """Appends one channel's samples and batch labels to disk."""
+    """Appends one channel's samples and batch labels to disk.
+
+    Each batch must hold exactly as many samples as the RTP clock advanced
+    since the one before.  On 2026-10-11 a test channel decoded each I/Q pair
+    as two real samples: same packets, same RTP steps, twice the count, and
+    nothing in the stream complained.  A few such batches mark the channel
+    as misread and stop the recording.
+    """
 
     def __init__(self, directory: Path, name: str):
+        self.name = name
         self.iq = open(directory / f"{name}.c64", "wb")
         self.labels = open(directory / f"{name}.batches", "w")
         self.samples = 0
+        self.miscounts = 0
+        self._prev = None
         self.lock = threading.Lock()
 
     def __call__(self, samples, quality):
@@ -257,6 +271,11 @@ class _Sink:
         if rtp is None or len(samples) == 0:
             return
         with self.lock:
+            if self._prev is not None:
+                prev_rtp, prev_n = self._prev
+                if (int(rtp) - prev_rtp) & 0xFFFFFFFF != prev_n:
+                    self.miscounts += 1
+            self._prev = (int(rtp) & 0xFFFFFFFF, len(samples))
             self.iq.write(np.asarray(samples, dtype=np.complex64).tobytes())
             self.labels.write(f"{int(rtp) & 0xFFFFFFFF} {len(samples)}\n")
             self.samples += len(samples)
@@ -265,6 +284,36 @@ class _Sink:
         with self.lock:
             self.iq.close()
             self.labels.close()
+
+
+def _await_format(status: str, channels: dict, encoding: int) -> None:
+    """Hold until a FRESH status read shows every channel as F32 I/Q, or exit.
+
+    RadiodStream decodes each packet with the encoding and channel count
+    that ensure_channel captured, and ensure_channel returns the FIRST
+    status packet it sees, which can predate its own encoding command
+    (memory: reference_ka9q_encoding_race).  On 2026-10-11 it twice handed
+    back S16 for a channel radiod already sent as F32; the stream then read
+    each float as two shorts, twice the samples per RTP step.  So trust only
+    a later status read, and copy what it says onto the channel.
+    """
+    from ka9q import discover_channels
+
+    deadline = time.monotonic() + IQ_WAIT_S
+    pending = dict(channels)
+    while pending:
+        if time.monotonic() >= deadline:
+            sys.exit(f"radiod never reported F32 I/Q for {', '.join(pending)} "
+                     f"within {IQ_WAIT_S:.0f} s; not recording")
+        seen = discover_channels(status, listen_duration=2.0)
+        for name, c in list(pending.items()):
+            info = seen.get(c.ssrc)
+            if (info is not None and getattr(info, "output_channels", None) == 2
+                    and int(getattr(info, "encoding", -1)) == int(encoding)):
+                c.output_channels = 2
+                c.encoding = info.encoding
+                c.demod_type = getattr(info, "demod_type", c.demod_type)
+                del pending[name]
 
 
 def record(args) -> None:
@@ -297,6 +346,7 @@ def record(args) -> None:
             timeout=30.0, lifetime=LIFETIME_FRAMES)
     if channels["ref"].ssrc == channels["test"].ssrc:
         sys.exit("ref and test resolved to ONE channel; nothing to compare")
+    _await_format(args.status, channels, Encoding.F32)
 
     meta = {
         "ref_hz": args.ref_hz, "test_hz": args.test_hz,
@@ -327,6 +377,11 @@ def record(args) -> None:
                 for k, c in channels.items():
                     controls[k].set_channel_lifetime(c.ssrc, LIFETIME_FRAMES)
                 next_refresh += REFRESH_S
+            bad = [k for k, s in sinks.items() if s.miscounts >= MISCOUNT_LIMIT]
+            if bad:
+                print(f"\n  ⛔ {', '.join(bad)}: samples per batch disagree with the RTP "
+                      "clock (stale encoding?); this recording is void")
+                break
             got = {k: s.samples / args.sample_rate for k, s in sinks.items()}
             print(f"\r  ref {got['ref']:7.1f} s   test {got['test']:7.1f} s",
                   end="", flush=True)
