@@ -101,7 +101,7 @@ class TestRtpRegistration:
 
 def make_bpsk(sr, seconds, edge_offset_samples, edge_width_us=52.0,
               amp=1.0, tilt_per_s=0.0, phase=0.3, noise_rms=0.0,
-              start_second=0, seed=1):
+              start_second=0, seed=1, bandlimit_hz=None):
     """Synthetic TS-1 baseband: one smooth polarity flip per second at
     edge_offset_samples, base polarity alternating per second (so the
     signal is continuous across second boundaries), constant carrier
@@ -109,14 +109,26 @@ def make_bpsk(sr, seconds, edge_offset_samples, edge_width_us=52.0,
 
     10–90% transition width edge_width_us (tanh ramp; 10–90% of tanh
     spans 2.197·tau, so tau = width/2.197).
+
+    bandlimit_hz, when given, replaces the tanh with the step a brick-wall
+    filter of that cutoff makes: (2/pi)·Si(2·pi·B·t).  That edge is
+    band-limited, as radiod's channel filter makes the real pilot, and at
+    B = 30-40 kHz it rises in about one sample -- the case where a
+    straight line through the two straddling samples misreads the edge
+    by up to ±150 ns (WB6CXC-7 jig, 2026-10-11).
     """
     n = sr * seconds
     t = np.arange(n)
     sec = t // sr + start_second
     pos = t % sr
     base = (1 - 2 * (sec & 1)).astype(np.float64)
-    tau = (edge_width_us * 1e-6 * sr) / 2.197
-    ramp = np.tanh((pos - edge_offset_samples) / tau)
+    if bandlimit_hz:
+        from scipy.special import sici
+        ramp = (2 / np.pi) * sici(2 * np.pi * bandlimit_hz
+                                  * (pos - edge_offset_samples) / sr)[0]
+    else:
+        tau = (edge_width_us * 1e-6 * sr) / 2.197
+        ramp = np.tanh((pos - edge_offset_samples) / tau)
     env = amp * (1.0 + tilt_per_s * (pos / sr))
     sig = env * base * ramp * np.exp(1j * phase)
     if noise_rms:
@@ -142,6 +154,30 @@ def run_stage(sr, iq, coarse, fold_seconds, rtp0=123_456, **stage_kw):
     stage.set_coarse_offset_samples((rtp0 + coarse) % sr)
     ests = feed_batches(stage, iq, rtp0=rtp0)
     return stage, ests
+
+
+class TestSubSampleBias:
+    """The edge must read true wherever it falls within a sample.
+
+    On the real TS-1 pilot the transition rises in about one sample, so
+    only the two samples straddling the zero crossing sit inside the fit
+    band, and a straight line through them misses the band-limited edge
+    by an amount that cycles once per sample: ±150 ns, 302 ns peak to
+    peak, measured on WB6CXC-7's wired jig on 2026-10-11
+    (ops/scratch-investigations/t6-fine-stage-bias-20261011/).
+    """
+
+    @pytest.mark.parametrize("bandlimit_hz", [30_000.0, 40_000.0])
+    @pytest.mark.parametrize("frac", [0.0, 0.1, 0.2, 0.3, 0.4, 0.5,
+                                      0.6, 0.7, 0.8, 0.9])
+    def test_a_band_limited_edge_reads_true_at_every_fraction(
+            self, frac, bandlimit_hz):
+        edge = 43_181.0 + frac
+        iq = make_bpsk(SR, 10, edge, bandlimit_hz=bandlimit_hz)
+        _, ests = run_stage(SR, iq, coarse=edge, fold_seconds=10)
+        assert len(ests) == 1
+        err_ns = (ests[0].edge_offset_samples - edge) / SR * 1e9
+        assert abs(err_ns) < 5.0
 
 
 class TestLocalisation:

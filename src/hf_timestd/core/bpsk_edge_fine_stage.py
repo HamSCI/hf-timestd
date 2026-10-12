@@ -485,6 +485,50 @@ class BpskEdgeFineStage:
             self._bootstrap_history.clear()
             self._failed_blocks = 0
 
+    # Bisection steps on the one-sample bracket: 2**-40 of a sample.
+    CROSSING_ITERATIONS = 40
+
+    @classmethod
+    def _band_limited_crossing(
+        cls, in_phase: np.ndarray, a: int, sign: float
+    ) -> float:
+        """Zero of the fold's Fourier-series interpolant between samples
+        ``a`` and ``a + 1`` (fold indices, either may wrap), where the
+        samples change sign.  ``sign`` = -1 for a falling flip.  Returns
+        the crossing in the same unwrapped coordinate as ``a``."""
+        n = len(in_phase)
+        spec = np.fft.rfft(in_phase.astype(np.float64))
+        w = np.full(len(spec), 2.0)
+        w[0] = 1.0
+        if n % 2 == 0:
+            w[-1] = 1.0
+        coef = w * spec / n
+        kk = np.arange(len(spec))
+
+        def value(t: float) -> float:
+            return sign * float(np.real(
+                np.sum(coef * np.exp(2j * np.pi * kk * t / n))))
+
+        # The interpolant passes through every sample, so the bracket's
+        # ends take the samples' own values: a sample that reads exactly
+        # zero IS the crossing, and the interpolant's rounding there
+        # (1e-16, either sign) must not send the search to the far end.
+        v_lo = sign * float(in_phase[a % n])
+        v_hi = sign * float(in_phase[(a + 1) % n])
+        if v_lo == 0.0:
+            return float(a)
+        if v_hi == 0.0:
+            return float(a + 1)
+        lo, hi = float(a), float(a + 1)
+        for _ in range(cls.CROSSING_ITERATIONS):
+            mid = 0.5 * (lo + hi)
+            v_mid = value(mid)
+            if (v_mid > 0.0) == (v_lo > 0.0):
+                lo, v_lo = mid, v_mid
+            else:
+                hi = mid
+        return 0.5 * (lo + hi)
+
     def _fit_edge(self, in_phase: np.ndarray, centre: float) -> Optional[_EdgeFit]:
         """Localise the polarity flip near ``centre`` to sub-sample precision.
 
@@ -520,7 +564,8 @@ class BpskEdgeFineStage:
         if len(changes) == 0:
             return None
         k = int(changes[np.argmin(np.abs(changes - W))])
-        if seg[k] > seg[k + 1]:
+        flipped = bool(seg[k] > seg[k + 1])
+        if flipped:
             # Falling locally: normalise so the fit sees a rising edge.
             seg = -seg
 
@@ -537,8 +582,18 @@ class BpskEdgeFineStage:
         m, b = np.polyfit(xs, ys, 1)
         if m <= 0.0:
             return None
-        x0 = -b / m
         fit_rms = float(np.sqrt(np.mean((ys - (m * xs + b)) ** 2)) / A)
+        # The line names the bracket and the fit's quality, but not the
+        # edge.  On the real pilot the flip rises in about one sample, so
+        # only the two samples straddling the crossing sit in the band,
+        # and the line through them misses the band-limited edge by up to
+        # ±150 ns, cycling once per sample (WB6CXC-7 wired jig,
+        # 2026-10-11).  The folded second repeats every second and holds
+        # only what radiod's channel filter passed, so its Fourier series
+        # IS the signal between samples: take the zero of that, inside the
+        # bracket the sign change at k names.
+        sign = -1.0 if flipped else 1.0
+        x0 = self._band_limited_crossing(in_phase, c - W + k, sign) - (c - W)
         return _EdgeFit(
             edge_offset=float((c - W + x0) % p),
             amplitude=A,

@@ -26,18 +26,22 @@ from hf_timestd.core.bpsk_edge_fine_stage import BpskEdgeFineStage
 
 P = 9600            # a small rate keeps the arrays cheap; >= 8000 is enforced
 AMP = 1.0
-RAMP = 1.0          # transition half-width, in samples
+BAND = 0.4          # brick-wall cutoff, as a fraction of the sample rate
 
 
-def _flip(p: int, edge: float, amp: float = AMP, ramp: float = RAMP):
+def _flip(p: int, edge: float, amp: float = AMP, band: float = BAND):
     """A single polarity flip whose zero crossing sits exactly at ``edge``.
 
-    Negative before, positive after, joined by a linear ramp -- so the
-    crossing carries a true sub-sample position rather than snapping to
-    the nearest index.
+    Negative before, positive after, joined by the step a brick-wall
+    filter makes, (2/pi)·Si(2·pi·band·n) -- band-limited, as radiod's
+    channel filter makes the real pilot, so the crossing carries a true
+    sub-sample position.  At band 0.4 it rises in about one sample.  (A
+    clipped straight ramp served here until 2026-10-12; no receiver can
+    pass its kinks, and only the old two-sample line read it exactly.)
     """
+    from scipy.special import sici
     n = np.arange(p, dtype=np.float64)
-    return amp * np.clip((n - edge) / ramp, -1.0, 1.0)
+    return amp * (2 / np.pi) * sici(2 * np.pi * band * (n - edge))[0]
 
 
 def _stage_with(even_edge: float, odd_edge: float, p: int = P):
