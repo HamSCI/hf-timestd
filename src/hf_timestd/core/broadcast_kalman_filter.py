@@ -81,6 +81,8 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
+from hf_timestd.core.condition_log import ConditionLog
+
 
 @dataclass
 class BroadcastCharacteristics:
@@ -134,7 +136,8 @@ class BroadcastKalmanFilter:
         self.broadcast_id = broadcast_id
         self.station = station
         self.frequency_mhz = frequency_mhz
-        
+        self._conditions = ConditionLog(logger)
+
         # Get broadcast-specific characteristics
         self.characteristics = self._get_broadcast_characteristics()
         
@@ -365,7 +368,15 @@ class BroadcastKalmanFilter:
         mode_status = self.detect_mode_transition(innovation)
         if mode_status == 'MODE_CHANGE':
             self.last_mode_transition_time = time.time()
-            logger.info(f"{self.broadcast_id}: Mode transition detected")
+            # A noisy broadcast flags a transition on most updates; log the
+            # first, then a count every 10 min (v3.73 row 18).
+            self._conditions.note(
+                f"{self.broadcast_id} mode transitions",
+                f"{self.broadcast_id}: Mode transition detected",
+                level=logging.INFO,
+            )
+        else:
+            self._conditions.sweep()
         # POSSIBLE_CHANGE / STABLE: no transition — leave the timestamp as is.
 
         # Adaptive process noise, then the covariance predict (dt=1.0 minute)

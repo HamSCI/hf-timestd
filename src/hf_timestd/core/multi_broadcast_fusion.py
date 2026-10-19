@@ -237,6 +237,8 @@ except ImportError:
 # Initialize logger FIRST (before any code that might use it)
 logger = logging.getLogger(__name__)
 
+from hf_timestd.core.condition_log import ConditionLog
+
 # Data-product I/O for reading L1A and L2 products from the SQLite
 # tables that hf-timestd uses post-Phase-4.
 from hf_timestd.io import make_data_product_reader
@@ -611,6 +613,10 @@ class MultiBroadcastFusion:
         # no-op context manager so fuse() is unaffected outside a
         # service context (e.g., unit tests, ad-hoc REPL calls).
         self.loop_metrics = None
+        # Conditions that persist across cycles (a rejected outlier on the
+        # same channel, a cross-frequency failure) log once, then as a
+        # count every 10 min, then once when they clear (v3.73 row 18).
+        self._conditions = ConditionLog(logger)
         self.timing_authority_level = timing_authority_level.upper()
         if self.timing_authority_level not in self.GRADE_THRESHOLDS:
             logger.warning(f"Unknown timing authority level '{timing_authority_level}', defaulting to L5")
@@ -1641,7 +1647,7 @@ class MultiBroadcastFusion:
         
         if by_channel:
             total = sum(len(m) for pm in by_channel.values() for m in pm.values())
-            logger.info(f"Read {total} tick timing observations from {len(by_channel)} channels")
+            logger.debug(f"Read {total} tick timing observations from {len(by_channel)} channels")
         
         return by_channel
 
@@ -1831,7 +1837,7 @@ class MultiBroadcastFusion:
             except Exception as e:
                 logger.warning(f"Error reading L1 for {channel}: {e}")
         
-        logger.info(f"L1 metrology read: {len(l1_data)} entries from {len(self.channels)} channels")
+        logger.debug(f"L1 metrology read: {len(l1_data)} entries from {len(self.channels)} channels")
         return l1_data
 
     def _read_l2_physics(
@@ -1886,7 +1892,7 @@ class MultiBroadcastFusion:
             except Exception as e:
                 logger.warning(f"Error reading L2 for {channel}: {e}")
 
-        logger.info(f"L2 physics read: {len(l2_data)} entries from {len(self.channels)} channels")
+        logger.debug(f"L2 physics read: {len(l2_data)} entries from {len(self.channels)} channels")
         return l2_data
 
     def _read_latest_measurements(
@@ -2407,18 +2413,22 @@ class MultiBroadcastFusion:
                         # Large ionospheric shift (mode change, sunrise/sunset)
                         hw_alpha = 0.15
                         max_delta = 5.0  # Track fast at 5ms/cycle
-                        logger.info(
+                        self._conditions.note(
+                            f"HW Calibration UN-CONVERGE FAST {broadcast_key}",
                             f"HW Calibration UN-CONVERGE FAST {broadcast_key}: "
                             f"residual={broadcast_mean:+.2f}ms > 10ms, "
-                            f"alpha={hw_alpha}, max_delta={max_delta}ms"
+                            f"alpha={hw_alpha}, max_delta={max_delta}ms",
+                            level=logging.INFO,
                         )
                     elif calibrated_residual > 2.0:
                         hw_alpha = 0.10
                         max_delta = 1.0  # Moderate tracking
-                        logger.info(
+                        self._conditions.note(
+                            f"HW Calibration UN-CONVERGE {broadcast_key}",
                             f"HW Calibration UN-CONVERGE {broadcast_key}: "
                             f"residual={broadcast_mean:+.2f}ms > 2ms, "
-                            f"alpha={hw_alpha}, max_delta={max_delta}ms"
+                            f"alpha={hw_alpha}, max_delta={max_delta}ms",
+                            level=logging.INFO,
                         )
                     else:
                         # Truly converged: near-frozen, only track thermal drift
@@ -2962,10 +2972,11 @@ class MultiBroadcastFusion:
                         f"{station}: {max_diff:.2f}ms spread across frequencies "
                         f"(threshold: {CROSS_FREQ_THRESHOLD_MS}ms). [{freq_info}]"
                     )
-                    logger.warning(
+                    self._conditions.note(
+                        f"Cross-frequency {station}",
                         f"Cross-frequency validation FAILED for {station}: "
                         f"{max_diff:.2f}ms max deviation. Physics model error suspected. "
-                        f"Frequencies: {freq_info}"
+                        f"Frequencies: {freq_info}",
                     )
                 else:
                     logger.debug(
@@ -3003,6 +3014,7 @@ class MultiBroadcastFusion:
         Returns:
             FusedResult with fused D_clock and statistics
         """
+        self._conditions.sweep()
         global_result = None
         global_n_obs = 0
         try:
@@ -3090,10 +3102,12 @@ class MultiBroadcastFusion:
                 if deviations[i] < filter_threshold:
                     keep_indices.append(i)
                 else:
-                    logger.warning(
-                        f"Rejecting outlier: {measurements[i].station}_{measurements[i].frequency_mhz}MHz "
+                    channel = f"{measurements[i].station}_{measurements[i].frequency_mhz}MHz"
+                    self._conditions.note(
+                        f"Outlier {channel}",
+                        f"Rejecting outlier: {channel} "
                         f"cal_d_clock={d:.2f}ms (median={median_d:.2f}ms, dev={deviations[i]:.2f}ms > {filter_threshold:.1f}ms, "
-                        f"raw={measurements[i].d_clock_ms:.2f}ms)"
+                        f"raw={measurements[i].d_clock_ms:.2f}ms)",
                     )
             
             if len(keep_indices) == 0:
@@ -3205,7 +3219,7 @@ class MultiBroadcastFusion:
         # If available, use local GNSS VTEC to refine ionospheric delays.
         # This replaces the empirical/model delay with one derived from live data.
         
-        logger.info(">>> VTEC INTEGRATION: Starting VTEC check <<<")
+        logger.debug(">>> VTEC INTEGRATION: Starting VTEC check <<<")
         
         gnss_vtec_data = self._read_gnss_vtec()
         
@@ -3219,7 +3233,7 @@ class MultiBroadcastFusion:
             logger.debug(f"VTEC data: {vtec_tecu:.2f} TECU, age={age_seconds:.1f}s")
             
             if age_seconds < 300:
-                logger.info(f"GNSS VTEC available: {vtec_tecu:.2f} TECU (age: {age_seconds:.1f}s)")
+                logger.debug(f"GNSS VTEC available: {vtec_tecu:.2f} TECU (age: {age_seconds:.1f}s)")
                 
                 # ================================================================
                 # GNSS VTEC CROSS-CHECK (v6.1 - 2026-01-24; check-only since
@@ -3387,7 +3401,9 @@ class MultiBroadcastFusion:
         )
         
         if not freq_valid:
-            logger.warning(f"Cross-frequency validation failed: {freq_reason}")
+            # The per-station line in _validate_cross_frequency_d_clock
+            # carries this at WARNING, rate-limited (v3.73 row 18).
+            logger.debug(f"Cross-frequency validation failed: {freq_reason}")
             # Flag in consistency if physics model is suspect
             if cross_valid:  # Don't overwrite cross-station failure
                 cross_reason = f"PHYSICS_MODEL_SUSPECT: {freq_reason}"
@@ -4190,7 +4206,7 @@ class MultiBroadcastFusion:
                 break
             sats = row.get('n_satellites') or 0
             qflag = row.get('quality_flag', '')
-            logger.info(
+            logger.debug(
                 f"Read VTEC from SQLite: {vtec:.2f} TECU, "
                 f"{sats} sats, quality={qflag} (age: {age:.1f}s)"
             )
@@ -4662,7 +4678,7 @@ def run_fusion_service(
                 logger.error(f"L2 fusion calculation CRASHED: {e_fuse}", exc_info=True)
             
             # BREADCRUMB: Fusion returned (INFO level for visibility)
-            logger.info(f"Dual fusion: L1={result_l1 is not None}, L2={result_l2 is not None}")
+            logger.debug(f"Dual fusion: L1={result_l1 is not None}, L2={result_l2 is not None}")
             
             # Use L2 result for logging (primary feed)
             result = result_l2 if result_l2 else result_l1
