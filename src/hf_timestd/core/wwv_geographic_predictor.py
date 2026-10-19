@@ -160,6 +160,8 @@ from .wwv_constants import WWV_LAT, WWV_LON, WWVH_LAT, WWVH_LON, BPM_LAT, BPM_LO
 
 logger = logging.getLogger(__name__)
 
+from hf_timestd.core.condition_log import ConditionLog
+
 
 class WWVGeographicPredictor:
     """Predicts WWV/WWVH time-of-arrival based on geographic locations"""
@@ -189,6 +191,9 @@ class WWVGeographicPredictor:
             max_history: Maximum number of historical measurements to retain
         """
         self.receiver_grid = receiver_grid
+        # The delay mismatch below persists for hours on a SHARED
+        # channel; log it once, then as a count (v3.73 row 18).
+        self._conditions = ConditionLog(logger)
         self.receiver_lat, self.receiver_lon = self.grid_to_latlon(receiver_grid)
         self.history_file = history_file
         self.max_history = max_history
@@ -563,8 +568,11 @@ class WWVGeographicPredictor:
         if expected_diff > 0:
             diff_error = abs(measured_diff - expected_diff) / expected_diff
             if diff_error > 0.5:  # >50% error
-                logger.warning(f"Measured delay diff ({measured_diff:.2f}ms) differs "
-                              f"significantly from expected ({expected_diff:.2f}ms)")
+                self._conditions.note(
+                    f"Delay diff mismatch {frequency_mhz} MHz",
+                    f"Measured delay diff ({measured_diff:.2f}ms) differs "
+                    f"significantly from expected ({expected_diff:.2f}ms)",
+                )
         
         # Update history with the assigned classifications
         self._update_history(frequency_mhz, early_station, peak_early_delay_ms, peak_early_amplitude)
