@@ -262,3 +262,40 @@ def test_snapshot_columns_are_none_when_unwitnessed(tmp_path):
     row = store.rows[-1]
     assert row["host_clock_verdict"] == "unwitnessed"
     assert row["host_clock_t2_ms"] is None and row["host_clock_lb1421_s"] is None
+
+
+def test_snapshot_row_carries_the_published_counter_epoch_id(tmp_path, monkeypatch):
+    """v3.73 row 14: the history row names the counter epoch authority.json
+    published, so a day's rows count the radiod re-bases."""
+    import json
+    from hf_timestd.core import authority_manager as am
+    epochs = iter(["ep-1", "ep-2"])
+    monkeypatch.setattr(am, "registration_block",
+                        lambda: {"state": "ACQUIRED", "counter_epoch_id": next(epochs)})
+    store = _RecordingStore()
+    m = _manager(tmp_path, [FakeProbe("T6", _rtp("T6", 0.0, 0.004))], snapshot_store=store)
+    m.tick()
+    published = json.loads(m.output_path.read_text())["registration"]["counter_epoch_id"]
+    m.tick()
+    assert [r["counter_epoch_id"] for r in store.rows] == ["ep-1", "ep-2"]
+    assert published == "ep-1"
+
+
+def test_snapshot_counter_epoch_id_is_none_when_registration_fails(tmp_path, monkeypatch):
+    from hf_timestd.core import authority_manager as am
+
+    """A tick whose registration block fails records NULL, not the previous
+    tick's epoch."""
+    calls = iter([{"counter_epoch_id": "ep-1"}, OSError("no summary")])
+
+    def block():
+        v = next(calls)
+        if isinstance(v, Exception):
+            raise v
+        return v
+    monkeypatch.setattr(am, "registration_block", block)
+    store = _RecordingStore()
+    m = _manager(tmp_path, [FakeProbe("T6", _rtp("T6", 0.0, 0.004))], snapshot_store=store)
+    m.tick()
+    m.tick()
+    assert [r["counter_epoch_id"] for r in store.rows] == ["ep-1", None]

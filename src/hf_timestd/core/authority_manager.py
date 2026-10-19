@@ -304,6 +304,9 @@ class AuthorityManager:
         # overwritten in authority.json) is queryable hours/days
         # later.  None = no archiving (legacy behaviour preserved).
         self.snapshot_store = snapshot_store
+        # The registration block the last _write_state published, so the
+        # snapshot row records the same counter_epoch_id authority.json did.
+        self._published_registration: Optional[dict] = None
         # Receiver operating point.  radiod's RX888 AGC re-adjusts the
         # analog front-end gain once per second from TOTAL band power,
         # and 0.52 dB of the T6 pilot's C/N0 rides on every dB of it
@@ -1043,8 +1046,10 @@ class AuthorityManager:
         # file, unreadable JSON, unwritable /run) must never block
         # authority.json itself, so it's caught and the block just falls
         # back to its no-summary shape.
+        self._published_registration = None
         try:
             payload["registration"] = registration_block()
+            self._published_registration = payload["registration"]
         except Exception as e:
             log.debug("registration_block raised: %s", e)
 
@@ -1119,6 +1124,10 @@ class AuthorityManager:
         snapshot["host_clock_since_utc"] = hc.get("since_utc")
         snapshot["host_clock_t2_ms"] = (witnesses.get("T2") or {}).get("value")
         snapshot["host_clock_lb1421_s"] = (witnesses.get("lb1421") or {}).get("value")
+        # The radiod counter epoch this tick's registration names; a change
+        # between rows is a radiod re-base (v3.73 row 14).
+        snapshot["counter_epoch_id"] = (self._published_registration or {}).get(
+            "counter_epoch_id")
 
         if self.governor_radiod_provider is not None:
             try:
