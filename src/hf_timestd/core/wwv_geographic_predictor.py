@@ -564,6 +564,10 @@ class WWVGeographicPredictor:
                     f"(Δτ_geo={delta_geo:+.2f}ms, measured_diff={measured_diff:.2f}ms, "
                     f"expected_diff={expected_diff:.2f}ms)")
         
+        # Sweep on every pass, so the clear line arrives when the
+        # mismatch stops, not at the next mismatch.
+        self._conditions.sweep()
+
         # Validate: measured differential should be close to expected
         if expected_diff > 0:
             diff_error = abs(measured_diff - expected_diff) / expected_diff

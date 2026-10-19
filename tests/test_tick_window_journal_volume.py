@@ -57,3 +57,30 @@ def test_geographic_delay_mismatch_logs_once(caplog):
             if r.name == name and r.getMessage().startswith("Measured delay diff")]
     assert len(hits) == 1
     assert hits[0].levelno == logging.WARNING
+
+
+def test_geographic_delay_mismatch_clears_on_a_clean_pass(caplog):
+    """Every classify_dual_peaks pass sweeps, so the clear line arrives
+    when the mismatch stops, not at the next mismatch."""
+    from hf_timestd.core.condition_log import ConditionLog
+    from hf_timestd.core.wwv_geographic_predictor import WWVGeographicPredictor
+
+    name = "hf_timestd.core.wwv_geographic_predictor"
+    t = [1000.0]
+    p = WWVGeographicPredictor("EM38ww")
+    p._conditions = ConditionLog(logging.getLogger(name), clock=lambda: t[0])
+    caplog.set_level(logging.DEBUG, logger=name)
+    p.toa_history = {}
+    expected = p.calculate_expected_delays(10.0)  # geometry, no history
+    gap = abs(expected["wwv_delay_ms"] - expected["wwvh_delay_ms"])
+    p.classify_dual_peaks(4.0, 5.0, 1.0, 1.0, 10.0)  # mismatch
+    t[0] += 601.0
+    p.toa_history = {}
+    p.classify_dual_peaks(4.0, 4.0 + gap, 1.0, 1.0, 10.0)  # agrees
+    cleared = [r for r in caplog.records
+               if r.name == name and "cleared" in r.getMessage()]
+    assert len(cleared) == 1
+    assert cleared[0].levelno == logging.WARNING
+    mismatches = [r for r in caplog.records if r.name == name
+                  and r.getMessage().startswith("Measured delay diff")]
+    assert len(mismatches) == 1  # the second pass agreed with geometry
