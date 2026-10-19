@@ -124,7 +124,14 @@ class BroadcastKalmanFilter:
     for one specific broadcast. Each broadcast is an independent ionospheric probe.
     """
     
-    def __init__(self, broadcast_id: str, station: str, frequency_mhz: float):
+    def __init__(
+        self,
+        broadcast_id: str,
+        station: str,
+        frequency_mhz: float,
+        conditions: Optional[ConditionLog] = None,
+        log_label: Optional[str] = None,
+    ):
         """
         Initialize Kalman filter for a specific broadcast.
         
@@ -132,11 +139,17 @@ class BroadcastKalmanFilter:
             broadcast_id: Unique identifier (e.g., "WWV_10000")
             station: Station name (WWV, WWVH, BPM)
             frequency_mhz: Frequency in MHz
+            conditions: Shared ConditionLog for repeated lines.  Fusion
+                passes its own, which it sweeps every cycle, so the clear
+                line arrives even after this broadcast stops updating.
+                None gives the filter a private log, swept on update.
+            log_label: Name in log lines (fusion adds the feed, "L2 WWV_10").
         """
         self.broadcast_id = broadcast_id
         self.station = station
         self.frequency_mhz = frequency_mhz
-        self._conditions = ConditionLog(logger)
+        self._conditions = conditions if conditions is not None else ConditionLog(logger)
+        self._log_label = log_label or broadcast_id
 
         # Get broadcast-specific characteristics
         self.characteristics = self._get_broadcast_characteristics()
@@ -371,8 +384,8 @@ class BroadcastKalmanFilter:
             # A noisy broadcast flags a transition on most updates; log the
             # first, then a count every 10 min (v3.73 row 18).
             self._conditions.note(
-                f"{self.broadcast_id} mode transitions",
-                f"{self.broadcast_id}: Mode transition detected",
+                f"{self._log_label} mode transitions",
+                f"{self._log_label}: Mode transition detected",
                 level=logging.INFO,
             )
         else:

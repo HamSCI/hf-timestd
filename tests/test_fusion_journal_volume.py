@@ -59,6 +59,9 @@ def fusion_and_clock():
         fusion._conditions = ConditionLog(
             logging.getLogger(FUSION_LOGGER), clock=clock
         )
+        fusion._kalman_conditions = ConditionLog(
+            logging.getLogger(KALMAN_LOGGER), clock=clock
+        )
         yield fusion, clock
 
 
@@ -157,3 +160,119 @@ def test_kalman_repeated_mode_transition_logs_once():
     finally:
         lg.removeHandler(handler)
         lg.setLevel(old)
+
+
+# ---------------------------------------------------------------------
+# Fix round 1: each feed keeps its own conditions; every call site and
+# the Kalman bank's sweep are covered.
+# ---------------------------------------------------------------------
+
+CLEAN_SET = OUTLIER_SET[:3]
+
+
+def _first_lines(caplog, prefix):
+    return [r for r in caplog.records
+            if r.name == FUSION_LOGGER and r.getMessage().startswith(prefix)]
+
+
+def test_each_feed_logs_its_own_outlier_and_clear(fusion_and_clock, caplog):
+    """L1 and L2 run separate fuse() passes; L2 publishes D_clock.  An L1
+    condition must not hide the onset or the clear of the same one on L2."""
+    fusion, clock = fusion_and_clock
+    fusion._read_latest_measurements = lambda *a, **k: list(OUTLIER_SET)
+    caplog.set_level(logging.DEBUG, logger=FUSION_LOGGER)
+    fusion.fuse(force_l1_only=True, skip_write=True)
+    fusion.fuse(skip_write=True)
+    firsts = _first_lines(caplog, "Rejecting outlier")
+    assert len(firsts) == 2
+    assert any("(L1)" in r.getMessage() for r in firsts)
+    assert any("(L2)" in r.getMessage() for r in firsts)
+
+    # L2 goes clean, L1 keeps its outlier.
+    fusion._read_latest_measurements = lambda *a, **k: list(
+        OUTLIER_SET if k.get("force_l1_only") else CLEAN_SET
+    )
+    for _ in range(80):
+        clock.t += 8.0
+        fusion.fuse(force_l1_only=True, skip_write=True)
+        fusion.fuse(skip_write=True)
+    cleared = [r.getMessage() for r in _records(caplog, "cleared")]
+    assert any(m.startswith("L2 outlier WWVH_15.0MHz") for m in cleared)
+    assert not any(m.startswith("L1 outlier") for m in cleared)
+
+
+def test_outlier_summary_carries_the_worst_deviation(fusion_and_clock, caplog):
+    fusion, clock = fusion_and_clock
+    fusion._read_latest_measurements = lambda *a, **k: list(OUTLIER_SET)
+    caplog.set_level(logging.DEBUG, logger=FUSION_LOGGER)
+    for _ in range(80):
+        clock.t += 8.0
+        fusion.fuse(skip_write=True)
+    summary = _records(caplog, "still present")
+    assert len(summary) == 1
+    assert "max |dev|" in summary[0].getMessage()
+
+
+def test_cross_frequency_feeds_keep_separate_keys(fusion_and_clock, caplog):
+    fusion, clock = fusion_and_clock
+    spread = [_m("WWVH", 10.0, 1.0), _m("WWVH", 15.0, 20.0)]
+    caplog.set_level(logging.DEBUG, logger=FUSION_LOGGER)
+    fusion._validate_cross_frequency_d_clock(spread, feed="L1")
+    fusion._validate_cross_frequency_d_clock(spread, feed="L2")
+    failed = _first_lines(caplog, "Cross-frequency validation FAILED")
+    assert len(failed) == 2
+    assert {("(L1)" in r.getMessage(), "(L2)" in r.getMessage())
+            for r in failed} == {(True, False), (False, True)}
+
+
+def _seed_converged(fusion, station, freq):
+    from hf_timestd.core.multi_broadcast_fusion import BroadcastCalibration
+    key = fusion._get_broadcast_key(station, freq)
+    fusion.calibration[key] = BroadcastCalibration(
+        station=station, frequency_mhz=freq, offset_ms=0.0,
+        uncertainty_ms=1.0, n_samples=50, last_updated=time.time(),
+        hardware_offset_ms=0.0, hardware_converged=True,
+    )
+    fusion.calibration_update_count = 1000  # past bootstrap
+
+
+@pytest.mark.parametrize("d_clock, prefix", [
+    (15.0, "HW Calibration UN-CONVERGE FAST"),
+    (5.0, "HW Calibration UN-CONVERGE WWV"),
+])
+def test_unconverge_logs_once_per_broadcast(fusion_and_clock, caplog,
+                                            d_clock, prefix):
+    fusion, clock = fusion_and_clock
+    _seed_converged(fusion, "WWV", 10.0)
+    caplog.set_level(logging.DEBUG, logger=FUSION_LOGGER)
+    for _ in range(12):
+        clock.t += 8.0
+        fusion._update_calibration([_m("WWV", 10.0, d_clock)])
+    lines = _first_lines(caplog, prefix)
+    assert len(lines) == 1
+    assert lines[0].levelno == logging.INFO
+
+
+def test_kalman_bank_line_names_feed_and_clears_when_off_air(
+        fusion_and_clock, caplog):
+    """A broadcast that goes off air stops calling update(); fuse() must
+    still sweep its condition so the clear line and its count arrive."""
+    fusion, clock = fusion_and_clock
+    caplog.set_level(logging.DEBUG)
+    kf = fusion._get_or_create_broadcast_kalman("WWVH_10", "WWVH", 10.0, "l2")
+    kf.update(0.0, 20.0)
+    for i in range(10):
+        clock.t += 8.0
+        kf.update(80.0 if i % 2 == 0 else -80.0, 20.0)
+    lines = [r.getMessage() for r in caplog.records
+             if r.name == KALMAN_LOGGER and "Mode transition" in r.getMessage()]
+    assert lines == ["L2 WWVH_10: Mode transition detected"]
+
+    # Off air: no more updates for this broadcast; fuse() keeps cycling.
+    fusion._read_latest_measurements = lambda *a, **k: []
+    clock.t += 601.0
+    fusion.fuse(skip_write=True)
+    cleared = [r for r in caplog.records
+               if "mode transitions: cleared" in r.getMessage()]
+    assert len(cleared) == 1
+    assert cleared[0].getMessage().startswith("L2 WWVH_10 mode transitions")

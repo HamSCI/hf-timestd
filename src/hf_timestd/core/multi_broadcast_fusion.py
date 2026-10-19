@@ -617,6 +617,10 @@ class MultiBroadcastFusion:
         # same channel, a cross-frequency failure) log once, then as a
         # count every 10 min, then once when they clear (v3.73 row 18).
         self._conditions = ConditionLog(logger)
+        # The per-broadcast Kalman bank logs under its own module's name.
+        self._kalman_conditions = ConditionLog(
+            logging.getLogger('hf_timestd.core.broadcast_kalman_filter')
+        )
         self.timing_authority_level = timing_authority_level.upper()
         if self.timing_authority_level not in self.GRADE_THRESHOLDS:
             logger.warning(f"Unknown timing authority level '{timing_authority_level}', defaulting to L5")
@@ -1183,7 +1187,11 @@ class MultiBroadcastFusion:
                     frequency_mhz = state_data.get('frequency_mhz')
 
                     if broadcast_id and station and frequency_mhz:
-                        kalman = BroadcastKalmanFilter(broadcast_id, station, frequency_mhz)
+                        kalman = BroadcastKalmanFilter(
+                            broadcast_id, station, frequency_mhz,
+                            conditions=self._kalman_conditions,
+                            log_label=f"{feed.upper()} {broadcast_id}",
+                        )
                         if kalman.load_state(feed_dir):
                             self.broadcast_kalmans[f"{feed}:{broadcast_id}"] = kalman
                             loaded_count += 1
@@ -1212,8 +1220,13 @@ class MultiBroadcastFusion:
         key = f"{feed}:{broadcast_id}"
         if key not in self.broadcast_kalmans:
             from .broadcast_kalman_filter import BroadcastKalmanFilter
+            # The bank shares fusion's ConditionLog, which fuse() sweeps
+            # every cycle: a broadcast that goes off air stops calling
+            # update(), and its clear line must still arrive.
             self.broadcast_kalmans[key] = BroadcastKalmanFilter(
-                broadcast_id, station, frequency_mhz
+                broadcast_id, station, frequency_mhz,
+                conditions=self._kalman_conditions,
+                log_label=f"{feed.upper()} {broadcast_id}",
             )
             logger.info(f"Created new Kalman filter for {broadcast_id} ({feed} feed)")
 
@@ -2889,7 +2902,8 @@ class MultiBroadcastFusion:
     
     def _validate_cross_frequency_d_clock(
         self,
-        measurements: List[BroadcastMeasurement]
+        measurements: List[BroadcastMeasurement],
+        feed: str = 'L2',
     ) -> Tuple[bool, str, Dict[str, float]]:
         """
         Cross-validate raw D_clock across frequencies for the same station.
@@ -2973,8 +2987,8 @@ class MultiBroadcastFusion:
                         f"(threshold: {CROSS_FREQ_THRESHOLD_MS}ms). [{freq_info}]"
                     )
                     self._conditions.note(
-                        f"Cross-frequency {station}",
-                        f"Cross-frequency validation FAILED for {station}: "
+                        f"{feed} cross-frequency {station}",
+                        f"Cross-frequency validation FAILED ({feed}) for {station}: "
                         f"{max_diff:.2f}ms max deviation. Physics model error suspected. "
                         f"Frequencies: {freq_info}",
                     )
@@ -3015,6 +3029,7 @@ class MultiBroadcastFusion:
             FusedResult with fused D_clock and statistics
         """
         self._conditions.sweep()
+        self._kalman_conditions.sweep()
         global_result = None
         global_n_obs = 0
         try:
@@ -3043,6 +3058,10 @@ class MultiBroadcastFusion:
         # ====================================================================
         # Each broadcast's d_clock is filtered by its own Kalman filter.
         # This rejects detection glitches while preserving real ionospheric dynamics.
+        # The two feeds run separate fuse() passes; each keeps its own
+        # logged conditions, so an L1 condition never masks the onset or
+        # the clear of the same one on L2, the feed that publishes D_clock.
+        feed_label = 'L1' if force_l1_only else 'L2'
         with self._phase("kalman_apply"):
             measurements = self._apply_broadcast_kalmans(
                 measurements, feed='l1' if force_l1_only else 'l2'
@@ -3104,10 +3123,11 @@ class MultiBroadcastFusion:
                 else:
                     channel = f"{measurements[i].station}_{measurements[i].frequency_mhz}MHz"
                     self._conditions.note(
-                        f"Outlier {channel}",
-                        f"Rejecting outlier: {channel} "
+                        f"{feed_label} outlier {channel}",
+                        f"Rejecting outlier ({feed_label}): {channel} "
                         f"cal_d_clock={d:.2f}ms (median={median_d:.2f}ms, dev={deviations[i]:.2f}ms > {filter_threshold:.1f}ms, "
                         f"raw={measurements[i].d_clock_ms:.2f}ms)",
+                        value=float(deviations[i]), value_name="|dev|", unit="ms",
                     )
             
             if len(keep_indices) == 0:
@@ -3397,7 +3417,7 @@ class MultiBroadcastFusion:
         # Systematic trends indicate propagation model errors.
         
         freq_valid, freq_reason, freq_deviations = self._validate_cross_frequency_d_clock(
-            measurements
+            measurements, feed=feed_label
         )
         
         if not freq_valid:
