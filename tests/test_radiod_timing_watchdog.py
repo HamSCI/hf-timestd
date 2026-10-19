@@ -99,3 +99,93 @@ def test_capture_never_raises(monkeypatch):
     # Should swallow the exception, not raise.
     w.on_mapping_jump(channel="c", gps_time_ns=0, rtp_timesnap=1,
                       radiod_utc=1.0, old_utc=0.0, delta_sec=99.0)
+
+
+# ── radiod restart: a new counter space, not a clock fault ───────────────
+# B4 2026-10-17/18: radiod quit on each RX888 stall and systemd restarted it.
+# The new process started every channel's RTP counter near zero, and the old
+# mapping, applied to that small rtp_timesnap, landed at the previous restart,
+# so the "jump" equalled the time between restarts (900 to 9,000 s) while
+# chrony held microseconds.  Values below come from the 22:03:47Z incident.
+
+B4_RATE = 24000.0
+B4_NOW = 1792361027.048
+
+
+def _fire_restart(monkeypatch, *, rtp_timesnap, radiod_utc, delta,
+                  sample_rate=B4_RATE, system_now=B4_NOW):
+    monkeypatch.setattr(wd.time, "time", lambda: system_now)
+    monkeypatch.setattr(wd, "_read_gpsd", lambda now: _ext(errors=["gpspipe-not-found"]))
+    monkeypatch.setattr(wd, "_read_chrony", lambda ec: None)
+    w = wd.RadiodTimingWatchdog()
+    w.on_mapping_jump(channel="WWV_25000", gps_time_ns=1476396245029834723,
+                      rtp_timesnap=rtp_timesnap, radiod_utc=radiod_utc,
+                      old_utc=radiod_utc + delta, delta_sec=delta,
+                      sample_rate=sample_rate)
+
+
+def test_restart_counter_near_zero_is_radiod_restart(status_dir, monkeypatch):
+    _fire_restart(monkeypatch, rtp_timesnap=12240, radiod_utc=1792361027.03,
+                  delta=-2562.337)
+    st = json.loads((status_dir / "radiod-timing-watchdog.json").read_text())
+    assert st["verdict"] == "RADIOD_RESTART"
+    assert st["severity"] == "info"
+    assert "not a clock fault" in st["detail"]
+    assert st["radiod"]["counter_age_sec"] == pytest.approx(0.51)
+
+
+def test_counter_far_from_zero_stays_mapping_jump(status_dir, monkeypatch):
+    """The same jump inside a long-running process (counter hours old) is still a slip."""
+    _fire_restart(monkeypatch, rtp_timesnap=int(3 * 3600 * B4_RATE),
+                  radiod_utc=1792361027.03, delta=-2562.337)
+    st = json.loads((status_dir / "radiod-timing-watchdog.json").read_text())
+    assert st["verdict"] == "MAPPING_JUMP"
+    assert st["severity"] == "warn"
+
+
+def test_restart_needs_a_sane_epoch(status_dir, monkeypatch):
+    """A counter near zero with radiod's epoch a minute off the host is not a clean restart."""
+    _fire_restart(monkeypatch, rtp_timesnap=12000, radiod_utc=B4_NOW - 300.0,
+                  delta=-2562.337)
+    st = json.loads((status_dir / "radiod-timing-watchdog.json").read_text())
+    assert st["verdict"] == "MAPPING_JUMP"
+
+
+def test_restart_unknown_without_sample_rate(status_dir, monkeypatch):
+    """Callers that pass no sample rate keep the old classification."""
+    _fire_restart(monkeypatch, rtp_timesnap=12000, radiod_utc=1792361027.03,
+                  delta=-2562.337, sample_rate=None)
+    st = json.loads((status_dir / "radiod-timing-watchdog.json").read_text())
+    assert st["verdict"] == "MAPPING_JUMP"
+
+
+def test_archive_writer_passes_its_sample_rate(tmp_path, monkeypatch):
+    """The writer must hand the watchdog its sample rate, or no restart is ever named."""
+    import time as _time
+    from hf_timestd.core import offset_judge as oj
+    from hf_timestd.core.binary_archive_writer import (
+        BinaryArchiveConfig, BinaryArchiveWriter)
+
+    def gps_ns(unix_s):
+        guess = int((unix_s - 315964800) * 1e9)
+        return guess + int(round((unix_s - oj.gps_time_ns_to_unix(guess)) * 1e9))
+
+    calls = []
+
+    class Spy:
+        def on_mapping_jump(self, **kw):
+            calls.append(kw)
+
+    monkeypatch.setattr(wd, "get_watchdog", lambda: Spy())
+    w = BinaryArchiveWriter(BinaryArchiveConfig(
+        channel_name="WWV_25000", frequency_hz=25e6, sample_rate=24000,
+        output_dir=tmp_path / "raw", compression="none"))
+    try:
+        now = _time.time()
+        w.add_timing_snapshot(gps_time_ns=gps_ns(now - 2562.0), rtp_timesnap=12000)
+        w.add_timing_snapshot(gps_time_ns=gps_ns(now), rtp_timesnap=12240)
+    finally:
+        w.close()
+    assert len(calls) == 1
+    assert calls[0]["sample_rate"] == 24000
+    assert calls[0]["delta_sec"] == pytest.approx(-2561.99, abs=0.05)

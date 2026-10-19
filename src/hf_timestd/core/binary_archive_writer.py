@@ -808,6 +808,7 @@ class BinaryArchiveWriter:
                                 radiod_utc=gps_unix_sec,
                                 old_utc=old_utc,
                                 delta_sec=utc_diff,
+                                sample_rate=self.config.sample_rate,
                             )
                         except Exception:  # noqa: BLE001 — never disturb recording
                             pass

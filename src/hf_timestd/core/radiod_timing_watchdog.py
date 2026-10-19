@@ -55,6 +55,16 @@ INCIDENT_COOLDOWN_SEC = 60.0
 # treated as a same-epoch mapping slip, not an epoch fault.
 EPOCH_INSANE_SEC = 86400.0
 
+# A radiod restart is not a timing fault.  The new process starts each
+# channel's RTP counter near zero, so the old mapping, applied to the new
+# small rtp_timesnap, lands at the previous counter origin and the "jump"
+# equals the time between restarts.  B4 2026-10-17/18 logged 34 of these
+# (900 to 9,000 s) during an RX888 stall storm while chrony held µs.
+# A counter younger than RESTART_COUNTER_MAX_SEC, with radiod's epoch within
+# RESTART_EPOCH_SANE_SEC of the host clock, reads as a restart.
+RESTART_COUNTER_MAX_SEC = 120.0
+RESTART_EPOCH_SANE_SEC = 5.0
+
 _STATUS_DIR = Path(os.environ.get("TIMESTD_STATUS_DIR", "/var/lib/timestd/status"))
 INCIDENTS_PATH = _STATUS_DIR / "radiod-timing-incidents.jsonl"
 STATUS_PATH = _STATUS_DIR / "radiod-timing-watchdog.json"  # latest verdict, read by smd
@@ -140,10 +150,11 @@ def _read_chrony(ec: _ExternalClocks) -> None:
 
 
 def _verdict(delta_sec: float, radiod_utc: float, system_now: float,
-             ec: _ExternalClocks) -> tuple:
+             ec: _ExternalClocks, counter_age_sec: Optional[float] = None) -> tuple:
     """Classify the jump → (code, severity, human).
 
-    severity ∈ {"warn", "fail"}.  The verdict isolates GPS-source-bad from
+    severity ∈ {"info", "warn", "fail"}; "info" marks a radiod restart, which
+    moves no clock.  The verdict isolates GPS-source-bad from
     radiod-bad so the operator knows whether to fix hardware or raise an
     upstream ka9q-radio issue.
     """
@@ -175,6 +186,18 @@ def _verdict(delta_sec: float, radiod_utc: float, system_now: float,
             f"can't yet isolate source-vs-radiod; check the GPS receiver first.",
         )
 
+    if (counter_age_sec is not None
+            and 0.0 <= counter_age_sec <= RESTART_COUNTER_MAX_SEC
+            and abs(radiod_off) <= RESTART_EPOCH_SANE_SEC):
+        return (
+            "RADIOD_RESTART", "info",
+            f"radiod started a new RTP counter {counter_age_sec:.1f}s ago "
+            f"(radiod restarted or re-created the channel); the old mapping "
+            f"lands {delta_sec:+.1f}s away, which is the time since the "
+            f"previous counter began, not a clock fault. radiod's epoch "
+            f"agrees with the host clock ({radiod_off:+.3f}s).",
+        )
+
     gps_note = (
         f"gpsd epoch sane (off {gps_off:+.1f}s)" if gps_off is not None
         else "gpsd unread"
@@ -197,7 +220,8 @@ class RadiodTimingWatchdog:
 
     def on_mapping_jump(self, *, channel: str, gps_time_ns: int,
                         rtp_timesnap: int, radiod_utc: float, old_utc: float,
-                        delta_sec: float) -> None:
+                        delta_sec: float,
+                        sample_rate: Optional[float] = None) -> None:
         """Called by the archive detector on a non-wrap 'RTP counter space
         CHANGED'.  Cheap and re-entrant; only large, cooled-down jumps capture
         evidence.  Never raises (the caller is on the recording path)."""
@@ -212,17 +236,19 @@ class RadiodTimingWatchdog:
                 suppressed = self._suppressed_since_last
                 self._suppressed_since_last = 0
                 self._last_incident_mono = now_mono
+            counter_age = (rtp_timesnap / sample_rate) if sample_rate else None
             self._capture(channel, gps_time_ns, rtp_timesnap, radiod_utc,
-                          old_utc, delta_sec, suppressed)
+                          old_utc, delta_sec, suppressed, counter_age)
         except Exception:  # noqa: BLE001 — must never disturb recording
             logger.exception("radiod timing watchdog: capture failed")
 
     def _capture(self, channel, gps_time_ns, rtp_timesnap, radiod_utc, old_utc,
-                 delta_sec, suppressed) -> None:
+                 delta_sec, suppressed, counter_age=None) -> None:
         system_now = time.time()
         ec = _read_gpsd(system_now)
         _read_chrony(ec)
-        code, severity, human = _verdict(delta_sec, radiod_utc, system_now, ec)
+        code, severity, human = _verdict(delta_sec, radiod_utc, system_now, ec,
+                                         counter_age)
 
         incident = {
             "ts": datetime.now(timezone.utc).isoformat(),
@@ -238,12 +264,14 @@ class RadiodTimingWatchdog:
                 "implied_utc": round(radiod_utc, 3),
                 "old_mapping_utc": round(old_utc, 3),
                 "epoch_off_sec": round(radiod_utc - system_now, 3),
+                "counter_age_sec": None if counter_age is None else round(counter_age, 3),
             },
             "external": asdict(ec),
             "system_unix": round(system_now, 3),
         }
 
-        logger.error(
+        log = logger.warning if severity == "info" else logger.error
+        log(
             "RADIOD TIMING INCIDENT [%s/%s] %s — %s", severity.upper(), code,
             f"{channel} jumped {delta_sec:+.1f}s", human,
         )
