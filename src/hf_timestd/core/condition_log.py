@@ -18,8 +18,13 @@ dropped two days of history to make room.
   on every cycle needs no separate sweep; a caller that may go quiet
   should call ``sweep()`` once per cycle.
 
-The count never drops: every occurrence appears in a first line, a
-summary or a clear line.
+While the process runs, every occurrence appears in a first line, a
+summary or a clear line.  A restart drops the counts not yet reported
+(at most one summary interval's worth per key).
+
+A caller may pass a ``value`` with each note (for an outlier, its
+deviation).  The summary and the clear line then report the largest
+magnitude since the last line for that key.
 """
 
 from __future__ import annotations
@@ -45,6 +50,19 @@ class _Condition:
     total: int = 1
     since_report: int = 0
     latest: str = ""
+    worst: Optional[float] = None
+    value_name: str = "value"
+    unit: str = ""
+
+    def take(self, value: Optional[float]) -> None:
+        if value is not None and (self.worst is None or abs(value) > self.worst):
+            self.worst = abs(value)
+
+    def worst_note(self) -> str:
+        if self.worst is None:
+            return ""
+        unit = f" {self.unit}" if self.unit else ""
+        return f"; max {self.value_name} {self.worst:.2f}{unit}"
 
 
 class ConditionLog:
@@ -66,15 +84,26 @@ class ConditionLog:
         self._clock = clock
         self._active: Dict[str, _Condition] = {}
 
-    def note(self, key: str, message: str, level: int = logging.WARNING) -> bool:
+    def note(
+        self,
+        key: str,
+        message: str,
+        level: int = logging.WARNING,
+        *,
+        value: Optional[float] = None,
+        value_name: str = "value",
+        unit: str = "",
+    ) -> bool:
         """Record one occurrence of ``key``.  Return True if it logged."""
         now = self._clock()
         self.sweep(now)
         cond = self._active.get(key)
         if cond is None:
+            # The first line already carries this occurrence's value.
             self._active[key] = _Condition(
                 level=level, first_s=now, last_seen_s=now,
                 last_report_s=now, latest=message,
+                value_name=value_name, unit=unit,
             )
             self.logger.log(level, message)
             return True
@@ -82,15 +111,18 @@ class ConditionLog:
         cond.since_report += 1
         cond.last_seen_s = now
         cond.latest = message
+        cond.take(value)
         if now - cond.last_report_s < self.summary_interval_s:
             return False
         self.logger.log(
             cond.level,
             f"{key}: still present; {cond.since_report} more in the last "
-            f"{_span(now - cond.last_report_s)} ({cond.total} since it began "
-            f"{_span(now - cond.first_s)} ago). Latest: {message}",
+            f"{_span(now - cond.last_report_s)}{cond.worst_note()} "
+            f"({cond.total} since it began {_span(now - cond.first_s)} ago). "
+            f"Latest: {message}",
         )
         cond.since_report = 0
+        cond.worst = None
         cond.last_report_s = now
         return True
 
@@ -106,7 +138,8 @@ class ConditionLog:
                 f"{key}: cleared; none for {_span(now - cond.last_seen_s)}, "
                 f"after {cond.total} occurrences over "
                 f"{_span(cond.last_seen_s - cond.first_s)} "
-                f"({cond.since_report} since the last report)",
+                f"({cond.since_report} since the last report"
+                f"{cond.worst_note()})",
             )
 
     def active_keys(self) -> List[str]:

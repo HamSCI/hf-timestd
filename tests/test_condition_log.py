@@ -144,3 +144,19 @@ def test_clear_after_defaults_to_summary_interval(clock):
     c = ConditionLog(logging.getLogger("x"), summary_interval_s=120.0,
                      clock=clock)
     assert c.clear_after_s == 120.0
+
+
+def test_summary_and_clear_carry_the_worst_value(log, clock, caplog):
+    caplog.set_level(logging.DEBUG, logger="test.condition_log")
+    log.note("k", "first", value=3.0, value_name="|dev|", unit="ms")
+    for v in (-12.5, 4.0, 7.0):
+        clock.t += 200.0
+        log.note("k", "again", value=v, value_name="|dev|", unit="ms")
+    summary = _msgs(caplog)[1][1]
+    assert "max |dev| 12.50 ms" in summary
+    clock.t += 50.0
+    log.note("k", "again", value=2.0, value_name="|dev|", unit="ms")
+    clock.t += 301.0
+    log.sweep()
+    clear = _msgs(caplog)[-1][1]
+    assert "max |dev| 2.00 ms" in clear  # reset after the summary
