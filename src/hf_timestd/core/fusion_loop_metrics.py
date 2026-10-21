@@ -7,9 +7,14 @@ Two sinks per cycle:
 
   - /run/hf-timestd/fusion_metrics.json — atomic point-in-time snapshot
     (same tempfile + fsync + os.replace pattern as fusion_status.json).
-  - One structured INFO line to journald, prefixed `fusion_metrics`,
-    so historical analysis can use `journalctl -u timestd-fusion
-    -g '^fusion_metrics'`.
+  - One structured line to journald, prefixed `fusion_metrics`, so
+    historical analysis can use `journalctl -u timestd-fusion
+    -g '^fusion_metrics'`.  The line goes out at INFO on the first
+    cycle, on any cycle that carries an event or spends at least
+    ``SLOW_CYCLE_WD_PCT`` of the watchdog budget, and otherwise once
+    per ``log_interval_s``; the cycles between log at DEBUG.  One INFO
+    line per 8 s cycle had made it a top-three journal line on AC0G-B4
+    (v3.74 row 11); the JSON snapshot still updates every cycle.
 
 Used by the fusion parsimony/stability audit (see the fusion audit
 memory). This is the measurement-phase data source that decides which
@@ -52,12 +57,14 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterator, List
+from typing import Callable, Dict, Iterator, List, Optional
 
 log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = "v1"
 DEFAULT_PATH = Path("/run/hf-timestd/fusion_metrics.json")
+DEFAULT_LOG_INTERVAL_S = 60.0
+SLOW_CYCLE_WD_PCT = 25.0
 
 
 class FusionLoopMetrics:
@@ -73,8 +80,13 @@ class FusionLoopMetrics:
         self,
         watchdog_sec: float,
         path: Path = DEFAULT_PATH,
+        log_interval_s: float = DEFAULT_LOG_INTERVAL_S,
+        clock: Callable[[], float] = time.monotonic,
     ):
         self.watchdog_sec = float(watchdog_sec)
+        self.log_interval_s = float(log_interval_s)
+        self._clock = clock
+        self._last_info_s: Optional[float] = None
         self.path = Path(path)
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -150,7 +162,19 @@ class FusionLoopMetrics:
         phases = payload["phases"]
         phase_str = " ".join(f"{k}={v:.3f}" for k, v in sorted(phases.items()))
         events_str = ",".join(payload["events"]) if payload["events"] else "-"
-        log.info(
+        now = self._clock()
+        notable = (
+            bool(payload["events"])
+            or payload["watchdog_consumed_pct"] >= SLOW_CYCLE_WD_PCT
+        )
+        if (notable or self._last_info_s is None
+                or now - self._last_info_s >= self.log_interval_s):
+            level = logging.INFO
+            self._last_info_s = now
+        else:
+            level = logging.DEBUG
+        log.log(
+            level,
             "fusion_metrics cycle=%d loop=%.3fs wd_pct=%.1f rss_kb=%d %s events=%s",
             payload["cycle_index"],
             payload["loop_duration_sec"],

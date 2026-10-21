@@ -276,3 +276,157 @@ def test_kalman_bank_line_names_feed_and_clears_when_off_air(
                if "mode transitions: cleared" in r.getMessage()]
     assert len(cleared) == 1
     assert cleared[0].getMessage().startswith("L2 WWVH_10 mode transitions")
+
+
+# ---------------------------------------------------------------------
+# v3.74 row 11: after row 18, timestd-fusion still wrote up to 24,000
+# lines an hour on AC0G-B4.  Most were the arrival matrix's window line,
+# because fusion fed each L1 row to the matrix on every cycle.
+# ---------------------------------------------------------------------
+
+from hf_timestd.core.fusion_loop_metrics import FusionLoopMetrics  # noqa: E402
+from hf_timestd.core.multi_broadcast_fusion import (  # noqa: E402
+    cycle_summary_due,
+    demote_iri2020_command_line,
+)
+
+
+class CountingMatrix:
+    """Stands in for ArrivalPatternMatrix; counts validate_detection()."""
+
+    def __init__(self, verdict=True):
+        self.calls = 0
+        self.verdict = verdict
+
+    def validate_detection(self, **kwargs):
+        self.calls += 1
+        return self.verdict, 0.5, "stub"
+
+
+def _l1_rows(*minutes):
+    rows = {}
+    for minute in minutes:
+        ts = f"2026-10-21T20:{minute:02d}:00Z"
+        rows[f"{ts}|WWV"] = {
+            "timestamp_utc": ts, "station_id": "WWV",
+            "frequency_mhz": 10.0, "raw_toa_ms": 1.0, "snr_db": 20.0,
+            "quality_flag": "A", "channel_name": "SHARED_10000",
+        }
+    return rows
+
+
+def _reader_fusion(fusion, matrix, rows):
+    fusion.arrival_matrix = matrix
+    fusion._check_upstream_freshness = lambda: (True, 1.0)
+    fusion._read_l1_metrology = lambda lookback: dict(rows())
+    fusion._read_l2_physics = lambda lookback: {}
+
+
+def test_each_l1_row_trains_the_arrival_window_once(fusion_and_clock):
+    """Both feeds read the whole lookback every cycle; the matrix must see
+    each detection once, or its window line floods the journal."""
+    fusion, _clock = fusion_and_clock
+    matrix = CountingMatrix()
+    rows = {"now": _l1_rows(1, 2)}
+    _reader_fusion(fusion, matrix, lambda: rows["now"])
+    for _ in range(5):
+        assert len(fusion._read_latest_measurements(30, force_l1_only=True)) == 2
+        assert len(fusion._read_latest_measurements(30)) == 2
+    assert matrix.calls == 2
+
+    # A new row is judged once; a row that left the lookback is forgotten.
+    rows["now"] = _l1_rows(2, 3)
+    fusion._read_latest_measurements(30)
+    fusion._read_latest_measurements(30)
+    assert matrix.calls == 3
+    assert len(fusion._physics_verdicts) == 2
+
+
+def test_cached_physics_verdict_still_lowers_confidence(fusion_and_clock):
+    fusion, _clock = fusion_and_clock
+    matrix = CountingMatrix(verdict=False)
+    _reader_fusion(fusion, matrix, lambda: _l1_rows(1))
+    first = fusion._read_latest_measurements(30)[0].confidence
+    again = fusion._read_latest_measurements(30)[0].confidence
+    assert matrix.calls == 1
+    assert first == again == pytest.approx(0.25)  # 0.5 fallback, halved
+
+
+def test_moderate_discontinuity_logs_once_then_a_count(fusion_and_clock, caplog):
+    fusion, clock = fusion_and_clock
+    caplog.set_level(logging.DEBUG, logger=FUSION_LOGGER)
+    for i in range(80):
+        clock.t += 8.0
+        fusion._update_long_term_stats(
+            [_m("WWVH", 10.0, 20.0 if i % 2 else 0.0)])
+    firsts = _first_lines(caplog, "Discontinuity detected for WWVH_10")
+    assert len(firsts) == 1
+    assert firsts[0].levelno == logging.INFO
+    summary = _records(caplog, "Discontinuity WWVH_10.00: still present")
+    assert len(summary) == 1
+    assert "max Δ 20.00 ms" in summary[0].getMessage()
+
+
+def test_severe_discontinuity_still_logs_every_time(fusion_and_clock, caplog):
+    fusion, clock = fusion_and_clock
+    caplog.set_level(logging.DEBUG, logger=FUSION_LOGGER)
+    for i in range(6):
+        clock.t += 8.0
+        fusion._update_long_term_stats(
+            [_m("WWVH", 10.0, 80.0 if i % 2 else 0.0)])
+    severe = _records(caplog, "SEVERE DISCONTINUITY")
+    assert len(severe) == 5
+    assert all(r.levelno == logging.WARNING for r in severe)
+
+
+def test_fusion_metrics_line_info_once_a_minute(tmp_path, caplog):
+    clock = FakeClock()
+    m = FusionLoopMetrics(watchdog_sec=1e6, path=tmp_path / "m.json",
+                          clock=clock)
+    caplog.set_level(logging.DEBUG, logger="hf_timestd.core.fusion_loop_metrics")
+    for _ in range(16):  # 16 cycles of 8 s: t = 0 .. 120 s
+        m.start_cycle()
+        m.finalize_and_emit()
+        clock.t += 8.0
+    levels = [r.levelno for r in caplog.records
+              if r.getMessage().startswith("fusion_metrics")]
+    assert len(levels) == 16  # every cycle still reaches DEBUG
+    assert levels.count(logging.INFO) == 2  # t = 0 and t = 64 s
+
+    # A cycle that carries an event goes out at INFO at once.
+    m.start_cycle()
+    m.mark_event("shm_reconnect_l1")
+    m.finalize_and_emit()
+    assert caplog.records[-1].levelno == logging.INFO
+
+
+def test_cycle_summary_due():
+    assert cycle_summary_due(0.0, None, "B", None)
+    assert not cycle_summary_due(30.0, 0.0, "B", "B")
+    assert cycle_summary_due(60.0, 0.0, "B", "B")
+    # A grade change goes out at once.
+    assert cycle_summary_due(8.0, 0.0, "D", "B")
+
+
+def test_iri2020_command_line_goes_to_debug():
+    root = logging.getLogger()
+    old = root.level
+    root.setLevel(logging.INFO)
+    try:
+        rec = logging.LogRecord(
+            "root", logging.INFO,
+            "/venv/lib/python3.11/site-packages/iri2020/base.py", 56,
+            "/venv/.../iri2020_driver 2026 10 21", None, None)
+        assert demote_iri2020_command_line(rec) is False
+        assert rec.levelno == logging.DEBUG
+        root.setLevel(logging.DEBUG)
+        assert demote_iri2020_command_line(rec) is True
+        # Anything else, and iri2020's own warnings, pass unchanged.
+        other = logging.LogRecord(
+            "root", logging.WARNING,
+            "/venv/lib/python3.11/site-packages/iri2020/base.py", 56,
+            "IRI failed", None, None)
+        assert demote_iri2020_command_line(other) is True
+        assert other.levelno == logging.WARNING
+    finally:
+        root.setLevel(old)

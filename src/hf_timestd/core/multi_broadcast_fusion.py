@@ -656,6 +656,14 @@ class MultiBroadcastFusion:
                 logger.info("ArrivalPatternMatrix initialized for physics-based validation")
             except Exception as e:
                 logger.warning(f"ArrivalPatternMatrix init failed ({e}); physics-based validation disabled")
+        # Each L1 row stays in the lookback for about 30 min, and both
+        # feeds read it on every cycle.  validate_detection() also trains
+        # the matrix's search window, so judging a row once per read fed
+        # each detection to the window about 450 times, and the window's
+        # "±a → ±b" line ran at up to 24,000 lines an hour on AC0G-B4
+        # (v3.74 row 11).  Judge each row once and keep its verdict
+        # while the row stays in the lookback.
+        self._physics_verdicts: Dict[str, Tuple[bool, str]] = {}
 
         from .differential_time_solver import GlobalDifferentialSolver
         self.global_solver = GlobalDifferentialSolver(
@@ -1957,7 +1965,8 @@ class MultiBroadcastFusion:
                 logger.warning("Fusion Reader: L1 data found but L2 map empty! Physics/Fusion path mismatch?")
 
         measurements = []
-        
+        seen_verdicts = set()
+
         # 2. Iterate through L1 items (Driving table)
         for key, l1_item in l1_map.items():
             try:
@@ -2029,18 +2038,25 @@ class MultiBroadcastFusion:
                 physics_reason = "no_validation"
                 
                 if hasattr(self, 'arrival_matrix') and self.arrival_matrix is not None:
-                    # Convert raw_toa_ms to sample offset for validation
-                    detected_sample = int(raw_toa * self.sample_rate / 1000)
-                    snr_db_val = float(l1_item.get('snr_db', 0))
-                    
-                    is_valid, phys_conf, reason = self.arrival_matrix.validate_detection(
-                        station=station,
-                        frequency_mhz=freq_mhz,
-                        detected_sample=detected_sample,
-                        snr_db=snr_db_val,
-                        utc_time=dt
-                    )
-                    
+                    verdict_key = f"{key}|{l1_item.get('channel_name')}|{freq_mhz}"
+                    seen_verdicts.add(verdict_key)
+                    verdict = self._physics_verdicts.get(verdict_key)
+                    if verdict is None:
+                        # Convert raw_toa_ms to sample offset for validation
+                        detected_sample = int(raw_toa * self.sample_rate / 1000)
+                        snr_db_val = float(l1_item.get('snr_db', 0))
+
+                        is_valid, phys_conf, reason = self.arrival_matrix.validate_detection(
+                            station=station,
+                            frequency_mhz=freq_mhz,
+                            detected_sample=detected_sample,
+                            snr_db=snr_db_val,
+                            utc_time=dt
+                        )
+                        verdict = (is_valid, reason)
+                        self._physics_verdicts[verdict_key] = verdict
+                    is_valid, reason = verdict
+
                     physics_valid = is_valid
                     physics_reason = reason
                     
@@ -2084,6 +2100,10 @@ class MultiBroadcastFusion:
             except Exception as e:
                 logger.debug(f"Error processing item {key}: {e}")
                 continue
+
+        # A row that has left the lookback never returns; forget its verdict.
+        for stale in self._physics_verdicts.keys() - seen_verdicts:
+            del self._physics_verdicts[stale]
 
         return measurements
     
@@ -2592,11 +2612,17 @@ class MultiBroadcastFusion:
                             del self.long_term_stats[broadcast_key]
                     else:
                         # Moderate discontinuity - log but continue
-                        # Linear regression will handle this as noise over time
-                        logger.info(
+                        # Linear regression will handle this as noise over time.
+                        # A noisy WWVH path trips this on most cycles (8,800
+                        # lines a day on AC0G-B4, v3.74 row 11), so it logs
+                        # once per broadcast, then a count with the largest Δ.
+                        self._conditions.note(
+                            f"Discontinuity {broadcast_key}",
                             f"Discontinuity detected for {broadcast_key}: "
                             f"Δ={delta:.1f}ms (>{self.long_term_discontinuity_threshold}ms). "
-                            f"Continuing accumulation (regression is robust to outliers)."
+                            f"Continuing accumulation (regression is robust to outliers).",
+                            level=logging.INFO,
+                            value=delta, value_name="Δ", unit="ms",
                         )
             
             # Update last value for next discontinuity check
@@ -4292,6 +4318,37 @@ class MultiBroadcastFusion:
 # station running a shorter interval.
 ANCHOR_SIGN_LOG_INTERVAL_S = 60.0
 
+# The per-cycle summary ("Fused D_clock", "L1-L2 difference").  AC0G-B4
+# cycles every 8 s, so one INFO line per cycle came to 880 lines an hour
+# for two numbers the status file and the fused store already keep
+# (v3.74 row 11).  They go out at INFO once a minute, and at once when
+# the quality grade changes; the cycles between log at DEBUG.
+CYCLE_SUMMARY_LOG_INTERVAL_S = 60.0
+
+
+def demote_iri2020_command_line(record: logging.LogRecord) -> bool:
+    """Root-logger filter: iri2020's driver command line goes to DEBUG.
+
+    The iri2020 package logs each Fortran call's command line on the
+    root logger at INFO, 180 to 290 lines an hour in timestd-fusion on
+    AC0G-B4 (v3.74 row 11).  It says only which grid point IRI ran for.
+    """
+    if (record.name == 'root' and record.levelno == logging.INFO
+            and 'iri2020' in (record.pathname or '')):
+        record.levelno = logging.DEBUG
+        record.levelname = 'DEBUG'
+        return logging.getLogger().isEnabledFor(logging.DEBUG)
+    return True
+
+
+def cycle_summary_due(now_s: float, last_log_s: Optional[float],
+                      grade: Optional[str], last_grade: Optional[str],
+                      interval_s: float = CYCLE_SUMMARY_LOG_INTERVAL_S) -> bool:
+    """Whether this cycle's summary lines go out at INFO."""
+    return (last_log_s is None
+            or grade != last_grade
+            or now_s - last_log_s >= interval_s)
+
 
 def _ms_or_na(value: Optional[float]) -> str:
     if value is None or not math.isfinite(float(value)):
@@ -4427,6 +4484,9 @@ def run_fusion_service(
     # Task 17c: when the sign-contradiction line was last written
     # (monotonic), so it comes out once a minute rather than once a cycle.
     _last_anchor_sign_log = 0.0
+    # When the per-cycle summary last went out at INFO, and its grade.
+    _last_cycle_summary_log = None
+    _last_summary_grade = None
     # The arrival last handed to chrony, so one measurement is offered
     # once however many fusion cycles see it.
     _last_anchor_mono = None
@@ -4751,6 +4811,13 @@ def run_fusion_service(
             #
             # This is the metrologically meaningful comparison.
             if result:
+                _now_summary = time.monotonic()
+                _summary_level = logging.DEBUG
+                if cycle_summary_due(_now_summary, _last_cycle_summary_log,
+                                     result.quality_grade, _last_summary_grade):
+                    _summary_level = logging.INFO
+                    _last_cycle_summary_log = _now_summary
+                    _last_summary_grade = result.quality_grade
                 # Record L1 vs L2 comparison for propagation correction validation
                 if result_l1 is not None:
                     result.d_clock_l1_ms = result_l1.d_clock_raw_ms
@@ -4758,7 +4825,8 @@ def run_fusion_service(
                     result.d_clock_l2_ms = result_l2.d_clock_raw_ms
                 if result_l1 is not None and result_l2 is not None:
                     result.l1_l2_difference_ms = result_l1.d_clock_raw_ms - result_l2.d_clock_raw_ms
-                    logger.info(
+                    logger.log(
+                        _summary_level,
                         f"L1-L2 difference: {result.l1_l2_difference_ms:+.3f} ms "
                         f"(L1_raw={result_l1.d_clock_raw_ms:+.3f}, L2_raw={result_l2.d_clock_raw_ms:+.3f}) "
                         f"[propagation correction quality]"
@@ -4904,8 +4972,9 @@ def run_fusion_service(
                 logger.debug(f"anchor sign line unavailable: {_sign_exc}")
 
             if result:
-                # Log summary
-                logger.info(
+                # Log summary (INFO once a minute or on a grade change)
+                logger.log(
+                    _summary_level,
                     f"Fused D_clock: {result.d_clock_fused_ms:+.3f} ms "
                     f"(raw: {result.d_clock_raw_ms:+.3f} ms) "
                     f"± {result.uncertainty_ms:.3f} ms "
@@ -5283,6 +5352,7 @@ if __name__ == '__main__':
         format='%(asctime)s %(levelname)s:%(name)s:%(message)s',
         force=True
     )
+    logging.getLogger().addFilter(demote_iri2020_command_line)
     
     # Read receiver coordinates from config if provided
     receiver_lat = None
