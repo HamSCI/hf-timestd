@@ -286,6 +286,7 @@ def test_kalman_bank_line_names_feed_and_clears_when_off_air(
 
 from hf_timestd.core.fusion_loop_metrics import FusionLoopMetrics  # noqa: E402
 from hf_timestd.core.multi_broadcast_fusion import (  # noqa: E402
+    GRADE_CHANGE_HOLDOFF_S,
     cycle_summary_due,
     demote_iri2020_command_line,
 )
@@ -384,20 +385,46 @@ def test_fusion_metrics_line_info_once_a_minute(tmp_path, caplog):
     m = FusionLoopMetrics(watchdog_sec=1e6, path=tmp_path / "m.json",
                           clock=clock)
     caplog.set_level(logging.DEBUG, logger="hf_timestd.core.fusion_loop_metrics")
-    for _ in range(16):  # 16 cycles of 8 s: t = 0 .. 120 s
+    for _ in range(10):  # 10 cycles of 8 s: t = 0 .. 72 s
         m.start_cycle()
         m.finalize_and_emit()
         clock.t += 8.0
     levels = [r.levelno for r in caplog.records
               if r.getMessage().startswith("fusion_metrics")]
-    assert len(levels) == 16  # every cycle still reaches DEBUG
+    assert len(levels) == 10  # every cycle still reaches DEBUG
     assert levels.count(logging.INFO) == 2  # t = 0 and t = 64 s
+    assert levels[-1] == logging.DEBUG  # t = 72 s, 8 s after an INFO
 
-    # A cycle that carries an event goes out at INFO at once.
+    # t = 80 s, 16 s after the last INFO: only the event can make it INFO.
     m.start_cycle()
     m.mark_event("shm_reconnect_l1")
     m.finalize_and_emit()
     assert caplog.records[-1].levelno == logging.INFO
+
+
+def test_fusion_metrics_slow_cycle_goes_to_info_at_once(
+        tmp_path, caplog, monkeypatch):
+    """A cycle that spends 25 % of the watchdog budget is close to an
+    alarm: it must reach the journal at once, not at the next minute."""
+    import hf_timestd.core.fusion_loop_metrics as flm
+    clock = FakeClock()
+    monkeypatch.setattr(flm.time, "monotonic", clock)
+    m = FusionLoopMetrics(watchdog_sec=10.0, path=tmp_path / "m.json",
+                          clock=clock)
+    caplog.set_level(logging.DEBUG, logger="hf_timestd.core.fusion_loop_metrics")
+
+    def cycle(start_gap_s, loop_s):
+        clock.t += start_gap_s
+        m.start_cycle()
+        clock.t += loop_s
+        payload = m.finalize_and_emit()
+        return payload["watchdog_consumed_pct"], caplog.records[-1].levelno
+
+    assert cycle(0.0, 1.0)[1] == logging.INFO  # the first cycle
+    pct, level = cycle(7.0, 2.0)  # 9 s later, 20 % of the budget
+    assert pct == pytest.approx(20.0) and level == logging.DEBUG
+    pct, level = cycle(0.0, 3.0)  # 3 s later, 30 % of the budget
+    assert pct == pytest.approx(30.0) and level == logging.INFO
 
 
 def test_cycle_summary_due():
@@ -406,6 +433,60 @@ def test_cycle_summary_due():
     assert cycle_summary_due(60.0, 0.0, "B", "B")
     # A grade change goes out at once.
     assert cycle_summary_due(8.0, 0.0, "D", "B")
+    assert cycle_summary_due(8.0, 0.0, "C", "B", last_grade_log_s=None)
+
+
+def test_grade_flapping_on_a_boundary_stays_quiet():
+    """A grade sitting on a boundary flips each cycle.  One-step changes
+    log at most once per GRADE_CHANGE_HOLDOFF_S; a move of two or more
+    steps logs at once."""
+    # A one-step change 8 s after the last grade-change line waits.
+    assert not cycle_summary_due(16.0, 8.0, "B", "C", last_grade_log_s=8.0)
+    # The holdoff ends, or the minute comes round.
+    assert cycle_summary_due(8.0 + GRADE_CHANGE_HOLDOFF_S, 8.0 + 50.0,
+                             "B", "C", last_grade_log_s=8.0)
+    # Two steps (B to D) go out at once.
+    assert cycle_summary_due(16.0, 8.0, "D", "B", last_grade_log_s=8.0)
+    # An unknown grade is news.
+    assert cycle_summary_due(16.0, 8.0, "X", "B", last_grade_log_s=8.0)
+
+
+def test_flapping_grade_logs_info_about_once_a_minute():
+    """Drive the caller's bookkeeping over 30 cycles of B/C flapping."""
+    last_log = last_grade = last_grade_log = None
+    info = 0
+    for i in range(30):  # 240 s
+        now = 8.0 * i
+        grade = "B" if i % 2 == 0 else "C"
+        if cycle_summary_due(now, last_log, grade, last_grade,
+                             last_grade_log_s=last_grade_log):
+            info += 1
+            if last_grade is not None and grade != last_grade:
+                last_grade_log = now
+            last_log, last_grade = now, grade
+    # Without the holdoff every cycle would log: 30.  With it, about one
+    # line per minute plus the occasional grade change.
+    assert info <= 8
+
+
+def test_run_fusion_service_installs_the_iri2020_filter(monkeypatch):
+    """The CLI path (cli.py) calls run_fusion_service directly, so the
+    filter must be installed there, not only under __main__."""
+    import hf_timestd.core.multi_broadcast_fusion as mbf
+    root = logging.getLogger()
+    monkeypatch.setattr(root, "filters", [])
+
+    class Stop(Exception):
+        pass
+
+    def stop(*a, **k):
+        raise Stop
+
+    monkeypatch.setattr(mbf, "MultiBroadcastFusion", stop)
+    with pytest.raises(Stop):
+        mbf.run_fusion_service(data_root=Path("/nonexistent"),
+                               enable_chrony=False)
+    assert demote_iri2020_command_line in root.filters
 
 
 def test_iri2020_command_line_goes_to_debug():

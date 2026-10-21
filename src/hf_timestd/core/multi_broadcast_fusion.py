@@ -4341,13 +4341,37 @@ def demote_iri2020_command_line(record: logging.LogRecord) -> bool:
     return True
 
 
+# An uncertainty sitting on a grade boundary flips the grade every
+# cycle.  A one-step grade change brings the summary to INFO at most once
+# per holdoff (about 10 cycles); a move of two or more steps, or to an
+# unknown grade, goes out at once.
+GRADE_CHANGE_HOLDOFF_S = 80.0
+_GRADE_ORDER = "ABCD"
+
+
+def _grade_steps(grade: Optional[str], last_grade: Optional[str]) -> int:
+    if (grade is None or last_grade is None
+            or grade not in _GRADE_ORDER or last_grade not in _GRADE_ORDER):
+        return len(_GRADE_ORDER)
+    return abs(_GRADE_ORDER.index(grade) - _GRADE_ORDER.index(last_grade))
+
+
 def cycle_summary_due(now_s: float, last_log_s: Optional[float],
                       grade: Optional[str], last_grade: Optional[str],
-                      interval_s: float = CYCLE_SUMMARY_LOG_INTERVAL_S) -> bool:
-    """Whether this cycle's summary lines go out at INFO."""
-    return (last_log_s is None
-            or grade != last_grade
-            or now_s - last_log_s >= interval_s)
+                      interval_s: float = CYCLE_SUMMARY_LOG_INTERVAL_S,
+                      last_grade_log_s: Optional[float] = None) -> bool:
+    """Whether this cycle's summary lines go out at INFO.
+
+    ``last_grade_log_s`` is when a grade change last brought the summary
+    to INFO; the caller records it.
+    """
+    if last_log_s is None or now_s - last_log_s >= interval_s:
+        return True
+    if grade == last_grade:
+        return False
+    return (_grade_steps(grade, last_grade) >= 2
+            or last_grade_log_s is None
+            or now_s - last_grade_log_s >= GRADE_CHANGE_HOLDOFF_S)
 
 
 def _ms_or_na(value: Optional[float]) -> str:
@@ -4451,6 +4475,9 @@ def run_fusion_service(
             quality diagnostics.  Consumed by wd-ka9q-record to align wav
             start times.
     """
+    # Here, not under __main__, so the hf-timestd CLI path gets it too.
+    # addFilter() ignores a filter already installed.
+    logging.getLogger().addFilter(demote_iri2020_command_line)
     # [storage] backend selection from config
     _storage_config = {}
     try:
@@ -4487,6 +4514,7 @@ def run_fusion_service(
     # When the per-cycle summary last went out at INFO, and its grade.
     _last_cycle_summary_log = None
     _last_summary_grade = None
+    _last_grade_change_log = None
     # The arrival last handed to chrony, so one measurement is offered
     # once however many fusion cycles see it.
     _last_anchor_mono = None
@@ -4814,8 +4842,12 @@ def run_fusion_service(
                 _now_summary = time.monotonic()
                 _summary_level = logging.DEBUG
                 if cycle_summary_due(_now_summary, _last_cycle_summary_log,
-                                     result.quality_grade, _last_summary_grade):
+                                     result.quality_grade, _last_summary_grade,
+                                     last_grade_log_s=_last_grade_change_log):
                     _summary_level = logging.INFO
+                    if (_last_summary_grade is not None
+                            and result.quality_grade != _last_summary_grade):
+                        _last_grade_change_log = _now_summary
                     _last_cycle_summary_log = _now_summary
                     _last_summary_grade = result.quality_grade
                 # Record L1 vs L2 comparison for propagation correction validation
@@ -5352,7 +5384,6 @@ if __name__ == '__main__':
         format='%(asctime)s %(levelname)s:%(name)s:%(message)s',
         force=True
     )
-    logging.getLogger().addFilter(demote_iri2020_command_line)
     
     # Read receiver coordinates from config if provided
     receiver_lat = None
