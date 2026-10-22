@@ -1032,6 +1032,14 @@ class OffsetJudge:
     # Tier preference, best first (P1 bench set + holdover).
     TIER_ORDER = ("T6", "T5", "T4", "T3", "T2", "T1", "T0")
 
+    # Benches that witness but are never adopted (review of T3 steps 2-5,
+    # finding C1, 2026-10-22).  The tick registration may win the judge's
+    # T3 slot only after its shadow run beside T6 on B4 (Michael's ruling
+    # 4; step 7 of the ruled order).  Until then its readings feed the
+    # shadow residuals and the label-plane anchor, and never correct a
+    # label.  Step 7 removes it from this set.
+    SHADOW_ONLY_BENCHES = frozenset({"hf_acquired"})
+
     def __init__(
         self,
         config: Optional[Dict] = None,
@@ -1600,6 +1608,14 @@ class OffsetJudge:
             if tier in self.TIER_ORDER else len(self.TIER_ORDER)
         )
 
+    def _adoptable(self, r: BenchReading) -> bool:
+        """May this reading be adopted?  Not if its bench is shadow-only,
+        and not if it says it is not authoritative."""
+        detail = r.detail or {}
+        if detail.get("bench") in self.SHADOW_ONLY_BENCHES:
+            return False
+        return detail.get("authoritative", True) is not False
+
     def _select_bench_locked(
         self, readings: List[BenchReading]
     ) -> Optional[BenchReading]:
@@ -1628,6 +1644,11 @@ class OffsetJudge:
         precision") says the tighter reading should win instead, so
         sigma_ns is the secondary sort key within one tier.
         """
+        # Adoption is for authoritative readings only.  A shadow-only
+        # bench (SHADOW_ONLY_BENCHES) and any reading that says it is not
+        # authoritative (a WITNESS-state plane) still reach the shadow
+        # residuals through tick(), but never this selection.
+        readings = [r for r in readings if self._adoptable(r)]
         if not readings:
             self._candidate_tier = None
             self._candidate_count = 0
