@@ -129,7 +129,8 @@ from corrupting the fused estimate.
 OUTPUT
 ================================================================================
 The fusion produces:
-    - d_clock_fused_ms: Calibrated weighted mean (should → 0)
+    - d_clock_fused_ms: Calibrated weighted mean (zeroed by construction;
+      not evidence about the clock, review section 15)
     - d_clock_raw_ms: Uncalibrated mean (for comparison)
     - uncertainty_ms: Weighted standard deviation
     - n_broadcasts: Number of broadcasts contributing
@@ -381,7 +382,7 @@ StationCalibration = BroadcastCalibration
 class FusedResult:
     """Result of multi-broadcast fusion."""
     timestamp: float
-    d_clock_fused_ms: float      # Fused D_clock (should converge to 0)
+    d_clock_fused_ms: float      # Fused D_clock, CALIBRATED (zeroed by construction)
     d_clock_raw_ms: float        # Unweighted mean before calibration
     uncertainty_ms: float        # Combined uncertainty (RSS of components)
     n_broadcasts: int            # Number of broadcasts used
@@ -401,6 +402,15 @@ class FusedResult:
     
     # Calibration applied
     calibration_applied: bool = False
+
+    # The same WLS weighted mean, taken BEFORE the per-broadcast
+    # calibration offsets, with its own sigma (review section 15, step 2).
+    # ``_update_calibration`` pulls each broadcast's mean D_clock to zero,
+    # so ``d_clock_fused_ms`` reads near zero whatever the host clock
+    # does; this value keeps what the calibration removed.  Same sign as
+    # d_clock: host minus UTC.  None when fusion did not compute it.
+    d_clock_uncalibrated_ms: Optional[float] = None
+    uncalibrated_uncertainty_ms: Optional[float] = None
     
     # Quality
     outliers_rejected: int = 0
@@ -3652,6 +3662,13 @@ class MultiBroadcastFusion:
         
         # Raw mean for comparison (raw_d_clocks already defined above)
         raw_mean = np.mean(raw_d_clocks)
+
+        # The uncalibrated fused value's own sigma: the same WLS rule as
+        # the calibrated LOCKED branch, applied to the raw values.  Their
+        # scatter carries the per-broadcast offsets the calibration would
+        # have removed, so this sigma honestly reads wider.
+        uncalibrated_uncertainty = self._wls_uncertainty(
+            w, d_raw, fused_d_clock_uncalibrated)
         
         # ====================================================================
         # ENHANCED UNCERTAINTY CALCULATION
@@ -4159,6 +4176,10 @@ class MultiBroadcastFusion:
             d_clock_fused_ms=fused_d_clock,
             d_clock_raw_ms=raw_mean,
             uncertainty_ms=uncertainty,
+            d_clock_uncalibrated_ms=float(fused_d_clock_uncalibrated),
+            uncalibrated_uncertainty_ms=(
+                float(uncalibrated_uncertainty)
+                if np.isfinite(uncalibrated_uncertainty) else None),
             n_broadcasts=len(measurements),
             n_stations=len(stations),
             global_solve_verified=bool(getattr(global_result, 'verified', False)) if global_result is not None else False,
@@ -4531,6 +4552,30 @@ def _ms_or_na(value: Optional[float]) -> str:
     return f"{round(float(value), 1) + 0.0:+.1f} ms"
 
 
+def cycle_summary_line(result: "FusedResult") -> str:
+    """The per-cycle summary, with the fused value labelled calibrated.
+
+    ``d_clock_fused_ms`` has passed through the calibration, which pulls
+    each broadcast's mean to zero, so it reads near zero whatever the
+    host clock does.  The line says so, and prints the value before the
+    calibration offsets beside it (review section 15, step 2).
+    """
+    uncal = getattr(result, "d_clock_uncalibrated_ms", None)
+    uncal_sigma = getattr(result, "uncalibrated_uncertainty_ms", None)
+    if uncal is None:
+        uncal_txt = "uncalibrated n/a"
+    elif uncal_sigma is None:
+        uncal_txt = f"uncalibrated {uncal:+.3f} ms"
+    else:
+        uncal_txt = f"uncalibrated {uncal:+.3f} ± {uncal_sigma:.3f} ms"
+    return (
+        f"Fused D_clock (calibrated): {result.d_clock_fused_ms:+.3f} ms "
+        f"± {result.uncertainty_ms:.3f} ms | {uncal_txt} "
+        f"(raw mean: {result.d_clock_raw_ms:+.3f} ms) "
+        f"[{result.n_broadcasts} broadcasts, grade {result.quality_grade}]"
+    )
+
+
 def anchor_sign_line(
     anchor_reference_minus_system_ms: float,
     pool_median_system_minus_reference_ms: Optional[float],
@@ -4571,6 +4616,11 @@ def anchor_sign_line(
     double-counts the very clock it was meant to cancel.  So the check
     that matters: a station whose ring plane and registration agree
     prints ``+0.0 ms`` here however far the host has walked.
+
+    The line ends ``(d_clock calibrated)``: the fused d_clock it takes
+    has passed through ``_update_calibration``, which pulls it to zero,
+    so with the calibration on the third term reads about ``-anchor``
+    and says little about the ring plane (review section 15, step 2).
     """
     anchor = float(anchor_reference_minus_system_ms)
     pool: Optional[float] = None
@@ -4584,7 +4634,8 @@ def anchor_sign_line(
     return (
         "anchor-direct WOULD feed (reference−system, +ve = host slow): "
         f"anchor {_ms_or_na(anchor)} | NTP pool {_ms_or_na(pool)} | "
-        f"ring−registration {_ms_or_na(ring_minus_reg)}"
+        f"ring−registration {_ms_or_na(ring_minus_reg)} "
+        "(d_clock calibrated)"
     )
 
 
@@ -5152,13 +5203,7 @@ def run_fusion_service(
 
             if result:
                 # Log summary (INFO once a minute or on a grade change)
-                logger.log(
-                    _summary_level,
-                    f"Fused D_clock: {result.d_clock_fused_ms:+.3f} ms "
-                    f"(raw: {result.d_clock_raw_ms:+.3f} ms) "
-                    f"± {result.uncertainty_ms:.3f} ms "
-                    f"[{result.n_broadcasts} broadcasts, grade {result.quality_grade}]"
-                )
+                logger.log(_summary_level, cycle_summary_line(result))
                 
                 # Log consistency check results
                 intra_stds = []

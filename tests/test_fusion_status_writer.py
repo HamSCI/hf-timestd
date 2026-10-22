@@ -30,6 +30,8 @@ class _StubResult:
     quality_grade: str = "A"
     consistency_flag: str = "OK"
     calibration_applied: bool = True
+    d_clock_uncalibrated_ms: Optional[float] = 4.2
+    uncalibrated_uncertainty_ms: Optional[float] = 1.3
 
 
 class TestFusionStatusWriter(unittest.TestCase):
@@ -69,6 +71,32 @@ class TestFusionStatusWriter(unittest.TestCase):
         self.assertEqual(fusion["stations_used"], ["WWV", "WWVH"])
         self.assertEqual(fusion["kalman_state"], "LOCKED")
         self.assertEqual(fusion["quality_grade"], "A")
+
+    def test_fused_value_is_labelled_calibrated_with_raw_beside_it(self) -> None:
+        """Step 2 of the ruled order (review section 15): the fused value
+        says plainly that it is calibrated, and the value before the
+        calibration offsets rides beside it with its own sigma."""
+        self.writer.update(result=_StubResult(), chrony_fed=False, skip_reasons=[])
+        fusion = self._read()["fusion"]
+        self.assertIs(fusion["d_clock_fused_calibrated"], True)
+        self.assertIn("calibrated", fusion["d_clock_fused_note"])
+        self.assertIn("not evidence about the clock", fusion["d_clock_fused_note"])
+        self.assertAlmostEqual(fusion["d_clock_uncalibrated_ms"], 4.2)
+        self.assertAlmostEqual(fusion["uncalibrated_uncertainty_ms"], 1.3)
+        # The calibrated value and its sigma stay where they were.
+        self.assertAlmostEqual(fusion["d_clock_fused_ms"], 0.812)
+        self.assertAlmostEqual(fusion["uncertainty_ms"], 0.94)
+
+    def test_missing_raw_value_publishes_null_not_zero(self) -> None:
+        """A result without the uncalibrated value must not read as a
+        clock that runs right."""
+        result = _StubResult(d_clock_uncalibrated_ms=None,
+                             uncalibrated_uncertainty_ms=None)
+        self.writer.update(result=result, chrony_fed=False, skip_reasons=[])
+        fusion = self._read()["fusion"]
+        self.assertIsNone(fusion["d_clock_uncalibrated_ms"])
+        self.assertIsNone(fusion["uncalibrated_uncertainty_ms"])
+        self.assertIs(fusion["d_clock_fused_calibrated"], True)
 
     def test_stations_used_order_and_filtering(self) -> None:
         result = _StubResult(

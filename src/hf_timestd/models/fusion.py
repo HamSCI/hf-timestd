@@ -33,7 +33,7 @@ class L3FusionTiming(BaseModel):
     # Core Timing
     timestamp_utc: str = Field(..., description="Measurement timestamp in UTC (ISO 8601)")
     minute_boundary: int = Field(..., description="Unix epoch timestamp of minute boundary")
-    d_clock_fused_ms: float = Field(..., description="Fused D_clock estimate (calibrated, weighted mean)")
+    d_clock_fused_ms: float = Field(..., description="Fused D_clock estimate, CALIBRATED: zeroed by construction, not evidence about the clock (review-fusion-kalman-20261022 section 15)")
     d_clock_raw_ms: float = Field(..., description="Raw D_clock estimate (unweighted mean)")
     
     # Uncertainty

@@ -19,6 +19,10 @@ Schema v1:
         "available": true,
         "d_clock_fused_ms": 0.812,
         "uncertainty_ms": 0.94,
+        "d_clock_fused_calibrated": true,
+        "d_clock_fused_note": "calibrated: ...",
+        "d_clock_uncalibrated_ms": 4.2,
+        "uncalibrated_uncertainty_ms": 1.3,
         "n_broadcasts": 24,
         "n_stations": 2,
         "stations_used": ["WWV", "WWVH"],
@@ -38,6 +42,16 @@ Schema v1:
         "anchor_age_s": 2.1
       }
     }
+
+`d_clock_fused_ms` is CALIBRATED.  `_update_calibration` pulls each
+broadcast's mean D_clock to zero every cycle, so the value reads near zero
+whatever the host clock does, and it is not evidence about the clock
+(Michael's ruling, 2026-10-22; review-fusion-kalman-20261022.md section
+15).  `d_clock_fused_calibrated` and `d_clock_fused_note` say so in the
+file itself.  `d_clock_uncalibrated_ms` is the same WLS weighted mean
+taken before the calibration offsets, with its own sigma in
+`uncalibrated_uncertainty_ms`; null when fusion did not compute it.  Both
+d_clock values mean host minus UTC.
 
 When `fusion.available` is false, the `fusion` object carries only
 `available` and `reason`. The authority manager treats this as "T3
@@ -60,6 +74,16 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = "v1"
+
+# Published beside d_clock_fused_ms, so no reader can mistake it for a
+# measurement of the host clock (review section 15, step 2).
+D_CLOCK_FUSED_NOTE = (
+    "calibrated: the calibration pulls each broadcast's mean D_clock to "
+    "zero, so this value reads near zero whatever the host clock does; "
+    "not evidence about the clock (ruling 2026-10-22). "
+    "d_clock_uncalibrated_ms holds the value before the calibration "
+    "offsets. Both mean host minus UTC."
+)
 
 
 ANCHOR_REGIME = "anchor"
@@ -162,6 +186,12 @@ class FusionStatusWriter:
                 "quality_grade": result.quality_grade,
                 "consistency_flag": result.consistency_flag,
                 "calibration_applied": bool(result.calibration_applied),
+                "d_clock_fused_calibrated": True,
+                "d_clock_fused_note": D_CLOCK_FUSED_NOTE,
+                "d_clock_uncalibrated_ms": _float_or_none(
+                    getattr(result, "d_clock_uncalibrated_ms", None)),
+                "uncalibrated_uncertainty_ms": _float_or_none(
+                    getattr(result, "uncalibrated_uncertainty_ms", None)),
             }
 
         payload["chrony_gate"] = {
@@ -213,6 +243,17 @@ class FusionStatusWriter:
             os.replace(tmp_path, self.path)
         except OSError as e:
             log.warning("FusionStatusWriter: failed to write %s: %s", self.path, e)
+
+
+def _float_or_none(value) -> Optional[float]:
+    """A finite float, or None; never a NaN in the JSON."""
+    if value is None:
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f if f == f and f not in (float("inf"), float("-inf")) else None
 
 
 def _iso_z(dt: datetime) -> str:

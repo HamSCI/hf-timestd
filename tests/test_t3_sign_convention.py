@@ -193,6 +193,32 @@ def test_the_calibration_hides_the_sign():
     assert abs(result.d_clock_fused_ms) < 0.1
 
 
+def test_the_status_file_publishes_raw_beside_calibrated(tmp_path):
+    """Step 2 (review section 15): with the calibration ON, as on every
+    station, fusion_status.json labels the near-zero fused value as
+    calibrated and carries the +5 ms the calibration zeroed beside it,
+    with a sigma of its own."""
+    result = _run_fusion(auto_calibrate=True)
+    path = tmp_path / "fusion_status.json"
+    FusionStatusWriter(path, cycle_interval_sec=60.0).update(
+        result, chrony_fed=False, skip_reasons=[])
+    fusion = json.loads(path.read_text())["fusion"]
+    assert fusion["d_clock_fused_calibrated"] is True
+    assert abs(fusion["d_clock_fused_ms"]) < 0.1
+    assert fusion["d_clock_uncalibrated_ms"] == pytest.approx(HOST_AHEAD_MS,
+                                                              abs=TOL_MS)
+    sigma = fusion["uncalibrated_uncertainty_ms"]
+    assert sigma is not None and 0.0 < sigma < 10.0
+
+
+def test_the_cycle_summary_says_calibrated(fused):
+    """The journal's per-cycle line names the fused value as calibrated
+    and prints the uncalibrated one beside it."""
+    line = mbf.cycle_summary_line(fused)
+    assert line.startswith("Fused D_clock (calibrated): ")
+    assert f"uncalibrated {HOST_AHEAD_MS:+.3f} ± " in line
+
+
 def test_the_status_file_carries_d_clock_unchanged(fused, status_file):
     """The seam every reader below shares (fusion_status_writer.py:155)."""
     fusion = json.loads(status_file.read_text())["fusion"]
@@ -431,4 +457,5 @@ def test_anchor_sign_line_prints_one_convention(fused):
         d_clock_fused_ms=fused.d_clock_fused_ms,
     )
     assert line.endswith(
-        "anchor -5.0 ms | NTP pool -5.0 ms | ring−registration +0.0 ms"), line
+        "anchor -5.0 ms | NTP pool -5.0 ms | ring−registration +0.0 ms "
+        "(d_clock calibrated)"), line
