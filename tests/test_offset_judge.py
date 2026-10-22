@@ -462,7 +462,9 @@ class TestFusionBench:
         bench = FusionBench(status_path=p, time_fn=clock.time, mono_fn=clock.mono)
         r = bench.poll()
         assert r is not None and r.tier == "T3"
-        assert r.utc == pytest.approx(clock.wall + 0.812e-3, abs=1e-9)
+        # d_clock is host - UTC, so true UTC = wall - d_clock (sign fixed
+        # 2026-10-22, review section 15 step 5).
+        assert r.utc == pytest.approx(clock.wall - 0.812e-3, abs=1e-9)
         assert r.sigma_ns == pytest.approx(0.94e6, rel=1e-9)
 
     def test_stale_or_unavailable_rejected(self, tmp_path):

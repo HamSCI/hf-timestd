@@ -16,11 +16,15 @@ those arrivals to fusion as L1 rows, and then follows the fused D_clock
 through every consumer named in the consumer map
 (~mjh/hamsci/proofs/d-clock-fused-consumers-20261022.md).
 
-Each assertion states the value the ruled convention expects.  Where the
-code disagrees, the test carries a strict xfail whose reason names the
-file and line.  The suite stays green, and the disagreement stays loud: a
-strict xfail that starts passing fails the suite, so whoever fixes a
-consumer must also lift its marker.  This module fixes nothing.
+Each assertion states the value the ruled convention expects.  At 66fe5bf
+five consumers disagreed, each marked by a strict xfail naming its file
+and line.  Steps 3-5 of the ruled order (review section 15) resolved all
+five: the T6 disambiguation branch was deleted (step 3); FusionBench, the
+T3 probe and the authority rung now read rtp_to_utc = -d_clock, and the
+client anchor lands on true UTC (step 5).  Their tests now pass outright.
+Step 5 also takes T3 dark by ruling: the fusion probe reports T3
+unavailable, so a T3 source that has earned the rung is modelled here by
+``_T3Source``.
 
 The calibration stays OFF.  ``_update_calibration`` pulls each broadcast's
 mean D_clock to zero (multi_broadcast_fusion.py, ``_update_calibration``),
@@ -53,8 +57,15 @@ import pytest
 
 from hf_timestd.core import core_recorder_v2
 from hf_timestd.core import multi_broadcast_fusion as mbf
-from hf_timestd.core.authority_manager import AuthorityManager
-from hf_timestd.core.fusion_status_probe import FusionStatusProbe
+from hf_timestd.core.authority_manager import (
+    AuthorityManager,
+    ProbeResult,
+    rtp_to_utc_offset_ms_from_d_clock,
+)
+from hf_timestd.core.fusion_status_probe import (
+    T3_CALIBRATED_REASON,
+    FusionStatusProbe,
+)
 from hf_timestd.core.fusion_status_writer import FusionStatusWriter
 from hf_timestd.core.multi_broadcast_fusion import (
     MultiBroadcastFusion,
@@ -262,12 +273,10 @@ def test_chrony_bench_control_reads_true_utc():
     assert (reading.utc - TRUE_UTC_NOW) * 1e3 == pytest.approx(0.0, abs=TOL_MS)
 
 
-@pytest.mark.xfail(
-    strict=True, raises=AssertionError,
-    reason="INVERTED: offset_judge.py:623 FusionBench writes "
-           "utc = wall + d_clock; d_clock is host - UTC, so true UTC is "
-           "wall - d_clock.  It reads wall + 5 ms, 10 ms from ChronyBench.")
 def test_fusion_bench_reads_true_utc(status_file):
+    """Step 5 fixed the sign (offset_judge.py FusionBench, utc = wall -
+    d_clock) and took the bench out of the judge's defaults.  It was a
+    strict xfail until then."""
     pub = json.loads(status_file.read_text())["utc_published"]
     pub_s = datetime.fromisoformat(pub.replace("Z", "+00:00")).timestamp()
     # The bench's own freshness gate reads the wall clock against
@@ -288,20 +297,37 @@ def _probe(status_file):
     return FusionStatusProbe(status_path=status_file, freshness_sec=3600.0)
 
 
-@pytest.mark.xfail(
-    strict=True, raises=AssertionError,
-    reason="INVERTED: fusion_status_probe.py:110 hands d_clock_fused_ms "
-           "(host - UTC) to the manager as offset_ms unchanged; the rung "
-           "publishes it as rtp_to_utc_offset (UTC - host).  Reads +5 ms.")
 def test_t3_probe_offset_follows_the_convention(status_file):
+    """Step 5: the probe reports T3 UNAVAILABLE by ruling, and the offset
+    it carries beside that verdict reads in the ruled convention,
+    rtp_to_utc = -d_clock = -5 ms.  It was a strict xfail (+5 ms)."""
     result = _probe(status_file).poll()
-    assert result.available, result.reason
+    assert not result.available
+    assert result.reason == T3_CALIBRATED_REASON
     assert result.offset_ms == pytest.approx(EXPECTED_OFFSET_MS, abs=TOL_MS)
+
+
+class _T3Source:
+    """A future T3 source that HAS earned the rung (ruling 4: the tick
+    registration, after its shadow run).  It reads d_clock, host - UTC,
+    and converts it with the shared helper, as any T3 source must."""
+
+    t_level = "T3"
+
+    def __init__(self, status_file):
+        self._fusion = json.loads(status_file.read_text())["fusion"]
+
+    def poll(self):
+        return ProbeResult(
+            "T3", available=True,
+            offset_ms=rtp_to_utc_offset_ms_from_d_clock(
+                self._fusion["d_clock_fused_ms"]),
+            sigma_ms=self._fusion["uncertainty_ms"], frame="rtp")
 
 
 def _publish_authority(status_file, tmp_path):
     out = tmp_path / "authority.json"
-    mgr = AuthorityManager(probes=[_probe(status_file)], output_path=out,
+    mgr = AuthorityManager(probes=[_T3Source(status_file)], output_path=out,
                            a_level_provider=lambda: "A1",
                            upgrade_hysteresis=1)
     state = mgr.tick()
@@ -309,16 +335,77 @@ def _publish_authority(status_file, tmp_path):
     return out, state
 
 
-@pytest.mark.xfail(
-    strict=True, raises=AssertionError,
-    reason="INVERTED: authority_manager.py:827 publishes T3's offset_ms "
-           "as rtp_to_utc_offset_ns unchanged, so +d_clock reaches every "
-           "client (row 11 of the consumer map).  Reads +5000000 ns.")
 def test_authority_publishes_the_ruled_offset_on_t3(status_file, tmp_path):
+    """The T3 rung publishes its source's offset as rtp_to_utc_offset_ns,
+    -5 ms on this station.  It was a strict xfail (+5 ms) while the probe
+    handed over +d_clock."""
     out, state = _publish_authority(status_file, tmp_path)
     assert state.rtp_to_utc_offset_ns == EXPECTED_OFFSET_NS
     assert json.loads(out.read_text())["rtp_to_utc_offset_ns"] \
         == EXPECTED_OFFSET_NS
+
+
+class _T2:
+    t_level = "T2"
+
+    def poll(self):
+        return ProbeResult("T2", available=True, offset_ms=-4.0,
+                           sigma_ms=20.0)
+
+
+def _manager(probes, out):
+    return AuthorityManager(probes=probes, output_path=out,
+                            a_level_provider=lambda: "A1",
+                            upgrade_hysteresis=1)
+
+
+def test_t3_falls_through_exactly_as_if_absent(status_file, tmp_path):
+    """Ruling 3: a T3-only station falls back to T2.  With the fusion
+    probe present, authority decides exactly what it decides with no T3
+    probe at all; only the published reason differs."""
+    with_t3 = _manager([_probe(status_file), _T2()], tmp_path / "a.json")
+    without = _manager([_T2()], tmp_path / "b.json")
+    for _ in range(3):
+        a, b = with_t3.tick(), without.tick()
+    assert a.t_level_active == b.t_level_active == "T2"
+    assert a.rtp_to_utc_offset_ns == b.rtp_to_utc_offset_ns
+    assert a.sigma_ns == b.sigma_ns
+    assert a.t_level_available == b.t_level_available
+    assert a.t_level_witnesses == b.t_level_witnesses
+    assert a.disagreement_flags == b.disagreement_flags
+    assert "T3" not in a.t_level_witnesses
+
+
+def test_authority_json_names_the_t3_demotion(status_file, tmp_path):
+    out = tmp_path / "authority.json"
+    _manager([_probe(status_file), _T2()], out).tick()
+    payload = json.loads(out.read_text())
+    assert payload["t3_unavailable_reason"] == T3_CALIBRATED_REASON
+    assert payload["t_level_active"] == "T2"
+
+
+def test_the_demotion_is_loud_once_not_every_cycle(status_file, tmp_path,
+                                                   caplog):
+    mgr = _manager([_probe(status_file), _T2()], tmp_path / "a.json")
+    caplog.set_level(logging.INFO)
+    for _ in range(5):
+        mgr.tick()
+    loud = [r for r in caplog.records
+            if "T3 UNAVAILABLE" in r.getMessage()]
+    assert len(loud) == 1
+    assert loud[0].levelno == logging.WARNING
+    assert T3_CALIBRATED_REASON in loud[0].getMessage()
+
+
+def test_the_judge_default_benches_hold_no_fusion_bench(tmp_path):
+    """Step 5: FusionBench can never be adopted, because the judge's
+    default bench list no longer holds it."""
+    from hf_timestd.core.offset_judge import OffsetJudge
+
+    judge = OffsetJudge(config={"enabled": True},
+                        publish_path=tmp_path / "offset_judge.json")
+    assert not any(isinstance(b, FusionBench) for b in judge.benches)
+    assert any(isinstance(b, ChronyBench) for b in judge.benches)
 
 
 # ── the client: hamsci_dsp.timing.acquire_anchor_utc ────────────────────
@@ -352,13 +439,9 @@ def test_client_anchor_control_follows_the_convention(tmp_path):
     assert (anchor.utc - TRUE_UTC_NOW) * 1e3 == pytest.approx(0.0, abs=TOL_MS)
 
 
-@pytest.mark.xfail(
-    strict=True, raises=AssertionError,
-    reason="INVERTED upstream: the client adds the offset correctly "
-           "(hamsci_dsp/timing.py:443), but authority_manager.py:827 and "
-           "fusion_status_probe.py:110 publish +d_clock, so the anchor "
-           "lands 10 ms off true UTC (+5 ms host error, doubled).")
 def test_client_anchor_from_fusion_lands_on_true_utc(status_file, tmp_path):
+    """A T3 source through the rung lands a client's anchor on true UTC.
+    It was a strict xfail: +d_clock landed it 10 ms off."""
     from hamsci_dsp.timing import AuthorityReader, acquire_anchor_utc
 
     out, _ = _publish_authority(status_file, tmp_path)

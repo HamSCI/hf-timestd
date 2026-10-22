@@ -24,9 +24,10 @@ Benches (P1 set, spec §2/§10):
     measured system-time offset; its sigma comes from chrony's root
     dispersion / root delay / RMS offset statistics (empirical, §13.1).
     T4 when the selected source is a LAN refclock/peer, T2 for WAN.
-  * T3 — FUSE (/run/hf-timestd/fusion_status.json): judge UTC =
-    wallclock + fused clock offset, sigma from the file's own
-    uncertainty budget.
+  * T3 — HfAcquiredBench (the tick registration), registered by the
+    recorder.  FusionBench (the fused D_clock) left the defaults on
+    2026-10-22 (review section 15, step 5): it is calibrated against the
+    host and the judge must never adopt it.
   * T1 holdover — when no bench answers, the last good offset is held
     and sigma grows with age (trivial tier per spec §2).
 
@@ -560,11 +561,23 @@ class ChronyBench:
 
 
 class FusionBench:
-    """T3 bench: FUSE multi-broadcast UTC reconstruction.
+    """T3 bench: the fused multi-broadcast D_clock.  NOT A DEFAULT BENCH.
+
+    ⛔ Since 2026-10-22 (review-fusion-kalman-20261022.md section 15,
+    step 5) the judge's default bench list leaves this bench out, so it
+    can never be adopted.  The fused D_clock is calibrated: the
+    calibration pulls each broadcast's mean to zero, so this bench read
+    "the host is right" whatever the host did, and as the adopted bench
+    it corrected ring and archive labels by that.  The judge has no
+    witness-only bench, so the bench left the defaults outright.  The
+    class stays for tests and for anyone who must read the file as a
+    bench; do not register it with add_bench.
 
     Reads /run/hf-timestd/fusion_status.json (schema v1, written by
-    FusionStatusWriter).  judge UTC = wallclock + fused clock offset
-    (d_clock_fused_ms); sigma from the file's own uncertainty budget.
+    FusionStatusWriter).  judge UTC = wallclock - d_clock_fused_ms:
+    d_clock is host minus UTC, so true UTC is the wall clock less it
+    (sign fixed in the same step; it read wall + d_clock before).
+    Sigma from the file's own uncertainty budget.
     Validity gating mirrors FusionStatusProbe (schema/freshness/
     availability/kalman-state/min-stations) without importing it —
     this module stays dependency-light (no authority_manager import).
@@ -620,7 +633,7 @@ class FusionBench:
         mono = self._mono()
         return BenchReading(
             tier="T3",
-            utc=wall + d_clock_s,
+            utc=wall - d_clock_s,
             sigma_ns=max(sigma_ns, 1.0),
             mono=mono,
             detail={
@@ -1181,16 +1194,13 @@ class OffsetJudge:
         if benches is not None:
             self.benches = list(benches)
         else:
-            fusion_path = Path(cfg.get(
-                "fusion_status_path", "/run/hf-timestd/fusion_status.json"))
+            # FusionBench left the defaults on 2026-10-22 (review section
+            # 15, step 5): the fused D_clock is calibrated against the
+            # host, so the judge must never adopt it.  T3 in the judge is
+            # HfAcquiredBench, registered by the recorder through
+            # add_bench.
             self.benches = [
                 ChronyBench(time_fn=time_fn, mono_fn=mono_fn),
-                FusionBench(
-                    status_path=fusion_path,
-                    freshness_sec=float(cfg.get("fusion_freshness_s", 60.0)),
-                    min_stations=int(cfg.get("min_fusion_stations", 2)),
-                    time_fn=time_fn, mono_fn=mono_fn,
-                ),
             ]
 
         self._lock = threading.Lock()

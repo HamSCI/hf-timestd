@@ -1,6 +1,10 @@
 """
 FusionStatusProbe — T3 authority probe.
 
+⛔ Since 2026-10-22 it reports T3 UNAVAILABLE on every poll (class
+docstring; review-fusion-kalman-20261022.md section 15, step 5).  The
+gating below still runs and is reported in ``detail["fusion_status"]``.
+
 Reads /run/hf-timestd/fusion_status.json (written by timestd-fusion via
 FusionStatusWriter) and translates it into a ProbeResult for the
 AuthorityManager. Structurally this is the authority manager's primary
@@ -33,14 +37,45 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Optional, Tuple
 
-from hf_timestd.core.authority_manager import ProbeResult
+from hf_timestd.core.authority_manager import (
+    ProbeResult,
+    rtp_to_utc_offset_ms_from_d_clock,
+)
 
 log = logging.getLogger(__name__)
 
 
+
+T3_CALIBRATED_REASON = (
+    "fused D_clock is calibrated (zeroed against the host); not evidence "
+    "about the clock (ruling 2026-10-22)"
+)
+
+
 class FusionStatusProbe:
+    """T3 probe over fusion_status.json.  Reports T3 UNAVAILABLE, always.
+
+    Michael ruled on 2026-10-22 (review-fusion-kalman-20261022.md section
+    15) that the fused D_clock may not stand as evidence about the clock:
+    the calibration pulls each broadcast's mean to zero, so the value
+    reads near zero whatever the host clock does.  T3 goes dark, loudly,
+    until a replacement proves itself (ruling 2; ruling 4 names the tick
+    registration as the candidate).  So ``poll`` returns
+    ``available=False`` with ``T3_CALIBRATED_REASON``, and never
+    ``witness_only``: the authority manager then falls through to the next
+    tier exactly as it does when no T3 probe exists.
+
+    The probe still reads and validates the file.  ``detail
+    ["fusion_status"]`` says what it found ("ok", or the refusal that used
+    to be the reason), and ``offset_ms``/``sigma_ms`` carry the offset the
+    file implies, in the ruled convention (rtp_to_utc = -d_clock, via
+    ``rtp_to_utc_offset_ms_from_d_clock``).  The reason stays constant so
+    the manager's demotion line goes out once, not on every change of
+    fusion's state.
+    """
+
     t_level = "T3"
 
     def __init__(
@@ -56,78 +91,78 @@ class FusionStatusProbe:
         self.now_fn = now_fn
 
     def poll(self) -> ProbeResult:
+        status, offset_ms, sigma_ms, detail = self._read()
+        detail = dict(detail)
+        detail["fusion_status"] = status
+        return ProbeResult(
+            self.t_level,
+            available=False,
+            reason=T3_CALIBRATED_REASON,
+            offset_ms=offset_ms,
+            sigma_ms=sigma_ms,
+            detail=detail,
+            frame="rtp",  # HF tick arrival vs expected, measured in RTP domain
+        )
+
+    def _read(self) -> Tuple[str, Optional[float], Optional[float], dict]:
+        """(status, offset_ms, sigma_ms, detail) from the status file.
+
+        ``status`` is "ok" for a file that once made T3 available, else
+        the refusal that used to be the probe's reason.
+        """
         try:
             with self.status_path.open("r", encoding="utf-8") as f:
                 data = json.load(f)
         except FileNotFoundError:
-            return ProbeResult(self.t_level, available=False, reason="fusion_status.json missing")
+            return "fusion_status.json missing", None, None, {}
         except (OSError, json.JSONDecodeError) as e:
-            return ProbeResult(self.t_level, available=False, reason=f"read error: {e}")
+            return f"read error: {e}", None, None, {}
 
         if data.get("schema") != "v1":
-            return ProbeResult(
-                self.t_level, available=False,
-                reason=f"unsupported schema: {data.get('schema')}",
-            )
+            return f"unsupported schema: {data.get('schema')}", None, None, {}
 
         pub_str = data.get("utc_published")
         if not isinstance(pub_str, str):
-            return ProbeResult(self.t_level, available=False, reason="utc_published missing")
+            return "utc_published missing", None, None, {}
         try:
             pub = _parse_iso_z(pub_str)
         except ValueError as e:
-            return ProbeResult(self.t_level, available=False, reason=f"utc_published parse: {e}")
+            return f"utc_published parse: {e}", None, None, {}
 
         age_sec = (self.now_fn() - pub).total_seconds()
         if age_sec > self.freshness_sec:
-            return ProbeResult(
-                self.t_level, available=False,
-                reason=f"stale {age_sec:.0f}s > {self.freshness_sec:.0f}s",
-            )
+            return (f"stale {age_sec:.0f}s > {self.freshness_sec:.0f}s",
+                    None, None, {})
 
         fusion = data.get("fusion") or {}
         if not fusion.get("available"):
-            return ProbeResult(
-                self.t_level, available=False,
-                reason=str(fusion.get("reason", "fusion unavailable")),
-            )
+            return (str(fusion.get("reason", "fusion unavailable")),
+                    None, None, {})
+
+        kalman_state = str(fusion.get("kalman_state", "UNKNOWN"))
+        try:
+            d_clock_ms = float(fusion["d_clock_fused_ms"])
+            sigma_ms = float(fusion["uncertainty_ms"])
+        except (KeyError, TypeError, ValueError) as e:
+            return f"missing/invalid offset fields: {e}", None, None, {}
+        detail = {
+            "stations_used": list(fusion.get("stations_used") or []),
+            "quality_grade": fusion.get("quality_grade"),
+            "kalman_state": kalman_state,
+            "age_sec": round(age_sec, 3),
+            # host minus UTC, and calibrated: shown, never published.
+            "d_clock_fused_ms": d_clock_ms,
+        }
+        offset_ms = rtp_to_utc_offset_ms_from_d_clock(d_clock_ms)
 
         n_stations = int(fusion.get("n_stations", 0))
         if n_stations < self.min_stations:
-            return ProbeResult(
-                self.t_level, available=False,
-                reason=f"n_stations={n_stations} < {self.min_stations}",
-            )
-
-        kalman_state = str(fusion.get("kalman_state", "UNKNOWN"))
+            return (f"n_stations={n_stations} < {self.min_stations}",
+                    offset_ms, sigma_ms, detail)
         if kalman_state not in ("ACQUIRING", "LOCKED"):
-            return ProbeResult(
-                self.t_level, available=False,
-                reason=f"kalman_state={kalman_state}",
-            )
-
-        try:
-            offset_ms = float(fusion["d_clock_fused_ms"])
-            sigma_ms = float(fusion["uncertainty_ms"])
-        except (KeyError, TypeError, ValueError) as e:
-            return ProbeResult(
-                self.t_level, available=False,
-                reason=f"missing/invalid offset fields: {e}",
-            )
-
-        return ProbeResult(
-            self.t_level,
-            available=True,
-            offset_ms=offset_ms,
-            sigma_ms=sigma_ms,
-            detail={
-                "stations_used": list(fusion.get("stations_used") or []),
-                "quality_grade": fusion.get("quality_grade"),
-                "kalman_state": kalman_state,
-                "age_sec": round(age_sec, 3),
-            },
-            frame="rtp",  # HF tick arrival vs expected, measured in RTP domain
-        )
+            return (f"kalman_state={kalman_state}",
+                    offset_ms, sigma_ms, detail)
+        return "ok", offset_ms, sigma_ms, detail
 
 
 def _parse_iso_z(s: str) -> datetime:

@@ -178,6 +178,25 @@ TRUST_SIGMA_MS: Dict[str, float] = {
 GPS_DISCIPLINED_RTP_TIERS = frozenset({"T6", "T5"})
 
 
+def rtp_to_utc_offset_ms_from_d_clock(d_clock_ms: float) -> float:
+    """The T3 rung's offset from a D_clock, in the ruled convention.
+
+    d_clock means HOST minus UTC: the metrology engine writes
+    ``timing_error = arrival_on_ring - expected_delay``, and the ring is
+    stamped from the host clock.  ``rtp_to_utc_offset_ns`` means UTC
+    minus host: ``label_utc = rtp_time + rtp_to_utc_offset_ns``
+    (MEASUREMENT_MODEL.md; Michael's ruling of 2026-10-22, review-fusion-
+    kalman-20261022.md section 15).  So the offset is MINUS d_clock.  A
+    host 5 ms fast reads d_clock +5 ms and needs an offset of -5 ms.
+
+    Every T3 source converts through here, so a future one (ruling 4:
+    the tick registration) inherits the right sign.  Until 2026-10-22
+    the fusion probe handed +d_clock to the rung, and the calibration
+    that zeroes d_clock hid the inversion.
+    """
+    return -float(d_clock_ms)
+
+
 @dataclass
 class ProbeResult:
     """One tick of probe output. Fields other than `t_level`/`available`
@@ -241,6 +260,11 @@ class AuthorityState:
     #: the CLOCK drifted, and until 2026-09-04 that sentence ended at
     #: ":advisory".  None when no probe ran this tick.
     host_clock: Optional[Dict[str, Any]] = None
+    #: Why T3 is unavailable this tick, or None while it is available.
+    #: Since 2026-10-22 the fusion probe reports T3 unavailable by ruling
+    #: (review section 15, step 5), and a T3-only station falls to T2;
+    #: this field is where authority.json says so.
+    t3_unavailable_reason: Optional[str] = None
 
 
 class AuthorityManager:
@@ -341,6 +365,37 @@ class AuthorityManager:
         self._t6_hpps_publishing: Optional[bool] = None
         self._t6_hpps_publish_mode: Optional[str] = None
         self._t6_authority_violations: Optional[List[str]] = None
+        # The T3 unavailability reason last announced, so the demotion
+        # line goes out at start and on change, never once per tick.
+        # The sentinel differs from every real value, None included.
+        self._t3_reason_announced: object = _UNANNOUNCED
+
+    def _note_t3(self, results: Dict[str, ProbeResult]) -> Optional[str]:
+        """Announce T3's state once, at start and on any change.
+
+        Returns the reason T3 is unavailable this tick (None while it is
+        available, or when no T3 probe is registered at all).  The fusion probe's reason is constant by design
+        (fusion_status_probe.T3_CALIBRATED_REASON), so on a running
+        station this logs one WARNING at start and nothing after.
+        """
+        if not any(getattr(p, "t_level", None) == "T3" for p in self.probes):
+            # No T3 probe registered (a test rig, or a manager built for
+            # one tier): nothing was demoted, so nothing to announce.
+            return None
+        r = results.get("T3")
+        reason = None if (r is not None and r.available) else (
+            (r.reason if r is not None else None) or "no T3 result")
+        if reason != self._t3_reason_announced:
+            self._t3_reason_announced = reason
+            if reason is None:
+                log.warning("T3 available again: the T3 rung may hold "
+                            "authority")
+            else:
+                log.warning(
+                    "T3 UNAVAILABLE: %s.  Authority falls through to the "
+                    "next tier (T2 on a T3-only station).  This line "
+                    "repeats only when the reason changes.", reason)
+        return reason
 
     def tick(self) -> AuthorityState:
         """Run one authority-decision cycle: poll probes, update
@@ -389,6 +444,7 @@ class AuthorityManager:
         host_clock = self._assess_host_clock(results)
         state = self._build_state(results, active, witnesses, flags, inflate_ns,
                                   host_clock=host_clock)
+        state.t3_unavailable_reason = self._note_t3(results)
         self._write_state(state)
         self._write_snapshot(state, results)
         self._apply_mdns_advertiser(state)
@@ -807,6 +863,9 @@ class AuthorityManager:
         stations: List[str] = []
 
         if active in ("T3", "T6"):
+            # Contract: a T3 probe's offset_ms is ALREADY rtp_to_utc
+            # (UTC minus host), converted from d_clock with
+            # rtp_to_utc_offset_ms_from_d_clock.  Published as it stands.
             a_res = results[active]
             # T6 with a captured native anchor publishes the anchor-
             # derived ``rtp_to_utc_offset_ns`` directly — that's the
@@ -1029,6 +1088,13 @@ class AuthorityManager:
         if state.host_clock is not None:
             payload["host_clock"] = state.host_clock
 
+        # Additive v1 extension: why T3 is unavailable (review section 15,
+        # step 5).  Since 2026-10-22 the fused D_clock may not hold the T3
+        # rung, so a T3-only station runs on T2 and this field says why.
+        # Omitted while T3 is available.
+        if getattr(state, "t3_unavailable_reason", None) is not None:
+            payload["t3_unavailable_reason"] = state.t3_unavailable_reason
+
         # Additive v1 extension: governor_radiod names which radiod's
         # RTP timebase this Fusion offset is computed against (§4.5.1
         # multi-radiod clarification). Omitted when no provider is
@@ -1247,6 +1313,9 @@ def _flatten_t3(snapshot: Dict[str, Any], r: Optional[ProbeResult]) -> None:
     snapshot["t3_sigma_ms"] = r.sigma_ms
     d = r.detail or {}
     snapshot["t3_kalman_state"] = d.get("kalman_state")
+
+
+_UNANNOUNCED = object()
 
 
 def _iso_z(dt: datetime) -> str:
