@@ -69,8 +69,9 @@ ExecStartPre=+-/opt/git/sigmond/hf-timestd/venv/bin/hf-timestd shm-init
 # NEVER stop/restart chrony or ipcrm the shared SHM segments.  chrony and gpsd
 # both depend on them; doing so destroyed the GPS reference and triggered a
 # restart storm.  Stable SHM ownership is provided by sigmond-shm-precreate.service
-# (NTP0-3 created root:0666 before any producer/consumer starts), so fusion just
-# attaches to its unit (refid FUSE) and writes — it never touches chrony's lifecycle.
+# (NTP0-3 created root:0666 before any producer/consumer starts).  Fusion writes
+# no SHM segment since the FUSE refclock retired (2026-10-22); it never touches
+# chrony's lifecycle.
 
 # Resource limits - yield to radiod which handles real-time USB/FFT
 Nice=-10

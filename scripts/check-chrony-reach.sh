@@ -1,15 +1,15 @@
 #!/bin/bash
 # =============================================================================
-# Chrony FUSE/HPPS Reach Monitor
+# Chrony HPPS Reach Monitor
 # =============================================================================
-# Monitors the Chrony FUSE and HPPS refclock SHM source reach values and
-# alerts if low.  FUSE and HPPS are the two timing inputs hf-timestd
-# publishes via chrony's SHM driver (see /etc/chrony/chrony.conf):
+# Monitors the reach of the HPPS refclock, the one timing input hf-timestd
+# publishes via chrony's SHM driver (see config/chrony-timestd-refclocks.conf):
 #
-#   FUSE = fused authority output from timestd-fusion (SHM 1)
 #   HPPS = high-precision T6 BPSK direct measurement (SHM 2)
 #
-# (HFPS exists on SHM 3 but is a slower-cadence backup not gated here.)
+# FUSE (SHM 1) RETIRED on 2026-10-22 (review-fusion-kalman-20261022.md
+# section 15, ruling 5).  Fusion no longer feeds it, so a FUSE row that
+# lingers in chronyd counts for nothing here: it once masked a dead HPPS.
 #
 # Reach is an octal value (0-377) representing the last 8 poll attempts:
 #   377 (octal) = 11111111 (binary) = 8/8 successful polls (optimal)
@@ -20,9 +20,9 @@
 #   ./check-chrony-reach.sh [--threshold DECIMAL] [--alert-command "COMMAND"]
 #
 # Exit codes:
-#   0 = OK (at least one source reach >= threshold)
-#   1 = WARNING (all sources reach < threshold)
-#   2 = CRITICAL (neither FUSE nor HPPS source found, or chronyd not running)
+#   0 = OK (HPPS reach >= threshold)
+#   1 = WARNING (HPPS reach < threshold)
+#   2 = CRITICAL (no HPPS source in chronyc sources, or chronyd not running)
 # =============================================================================
 
 set -euo pipefail
@@ -49,7 +49,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --help|-h)
-            echo "Chrony FUSE/HPPS Reach Monitor"
+            echo "Chrony HPPS Reach Monitor"
             echo ""
             echo "Usage: $0 [OPTIONS]"
             echo ""
@@ -129,79 +129,29 @@ if systemctl is-active --quiet timestd-fusion 2>/dev/null; then
     fi
 fi
 
-# Get FUSE and HPPS source info
-FUSE_LINE=$(chronyc sources 2>/dev/null | grep "FUSE" || true)
+# Get the HPPS source info.  FUSE retired 2026-10-22 and is not read.
 HPPS_LINE=$(chronyc sources 2>/dev/null | grep "HPPS" || true)
 
-if [[ -z "$FUSE_LINE" ]] && [[ -z "$HPPS_LINE" ]]; then
-    echo "CRITICAL: Neither FUSE nor HPPS source found in chronyc sources"
-    echo "  Fusion service may not be writing to Chrony SHM"
+if [[ -z "$HPPS_LINE" ]]; then
+    echo "CRITICAL: no HPPS source found in chronyc sources"
+    echo "  Check /etc/chrony/conf.d/timestd-refclocks.conf (hf-timestd install.sh)"
     exit 2
 fi
 
-# Function to extract and check reach for a source
-check_source_reach() {
-    local SOURCE_NAME="$1"
-    local SOURCE_LINE="$2"
-    
-    if [[ -z "$SOURCE_LINE" ]]; then
-        echo "  $SOURCE_NAME: not present"
-        return 1
-    fi
-    
-    # Extract reach value (5th column in chronyc sources output)
-    local REACH_OCT=$(echo "$SOURCE_LINE" | awk '{print $5}')
-    
-    # Convert octal to decimal
-    local REACH_DEC=$((8#$REACH_OCT))
-    
-    # Calculate success percentage
-    local SUCCESS_PCT=$((REACH_DEC * 100 / 255))
-    
-    if [[ "$VERBOSE" == "true" ]]; then
-        echo "  $SOURCE_NAME: reach = $REACH_OCT (octal) = $REACH_DEC (decimal) = $SUCCESS_PCT%"
-    fi
-    
-    # Return success if reach >= threshold
-    if [[ $REACH_DEC -ge $THRESHOLD_DEC ]]; then
-        return 0
-    else
-        return 1
-    fi
-}
-
-# Check both sources - OK if at least one meets threshold
-FUSE_OK=false
 HPPS_OK=false
 BEST_REACH=0
-
-if [[ -n "$FUSE_LINE" ]]; then
-    FUSE_REACH_OCT=$(echo "$FUSE_LINE" | awk '{print $5}')
-    FUSE_REACH_DEC=$((8#$FUSE_REACH_OCT))
-    if [[ $FUSE_REACH_DEC -ge $THRESHOLD_DEC ]]; then
-        FUSE_OK=true
-    fi
-    if [[ $FUSE_REACH_DEC -gt $BEST_REACH ]]; then
-        BEST_REACH=$FUSE_REACH_DEC
-    fi
+HPPS_REACH_OCT=$(echo "$HPPS_LINE" | awk '{print $5}')
+HPPS_REACH_DEC=$((8#$HPPS_REACH_OCT))
+if [[ $HPPS_REACH_DEC -ge $THRESHOLD_DEC ]]; then
+    HPPS_OK=true
 fi
-
-if [[ -n "$HPPS_LINE" ]]; then
-    HPPS_REACH_OCT=$(echo "$HPPS_LINE" | awk '{print $5}')
-    HPPS_REACH_DEC=$((8#$HPPS_REACH_OCT))
-    if [[ $HPPS_REACH_DEC -ge $THRESHOLD_DEC ]]; then
-        HPPS_OK=true
-    fi
-    if [[ $HPPS_REACH_DEC -gt $BEST_REACH ]]; then
-        BEST_REACH=$HPPS_REACH_DEC
-    fi
-fi
+BEST_REACH=$HPPS_REACH_DEC
 
 # Calculate success percentage for best reach
 SUCCESS_PCT=$((BEST_REACH * 100 / 255))
 
-# Determine status - OK if at least one source is good
-if [[ "$FUSE_OK" == "true" ]] || [[ "$HPPS_OK" == "true" ]]; then
+# Determine status
+if [[ "$HPPS_OK" == "true" ]]; then
     STATUS="OK"
     EXIT_CODE=0
 else
@@ -211,10 +161,9 @@ fi
 
 # Output
 if [[ "$VERBOSE" == "true" ]] || [[ $EXIT_CODE -ne 0 ]]; then
-    echo "$STATUS: Chrony FUSE/HPPS reach (best) = $BEST_REACH (decimal) = $SUCCESS_PCT%"
+    echo "$STATUS: Chrony HPPS reach = $BEST_REACH (decimal) = $SUCCESS_PCT%"
     echo "  Threshold: $THRESHOLD_DEC (decimal)"
-    [[ -n "$FUSE_LINE" ]] && echo "  FUSE: $FUSE_LINE"
-    [[ -n "$HPPS_LINE" ]] && echo "  HPPS: $HPPS_LINE"
+    echo "  HPPS: $HPPS_LINE"
 fi
 
 # Run alert command if provided and status is not OK
@@ -225,10 +174,10 @@ fi
 # Own-only recovery (sigmond docs/timing-chain-architecture.md): this monitor
 # MUST NOT restart chrony.  chrony is shared with gpsd; restarting it broke the
 # GPS reference and caused a restart storm.  Report only — remediation of a stale
-# FUSE/HPPS feed is restarting the *writers* (fusion/core-recorder) or the
+# HPPS feed is restarting the *writer* (core-recorder) or the
 # smd-timing reconciler, never chrony.  (RESTART_ON_FAILURE kept for compat.)
 if [[ "$RESTART_ON_FAILURE" == "true" ]] && [[ "$BEST_REACH" -eq 0 ]]; then
-    echo "CRITICAL: Both FUSE and HPPS chrony sources have reach 0."
+    echo "CRITICAL: the HPPS chrony source has reach 0."
     echo "  (not restarting chrony — shared with gpsd; restart the writers instead)"
 fi
 

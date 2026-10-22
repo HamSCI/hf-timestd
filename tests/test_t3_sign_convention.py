@@ -370,37 +370,14 @@ def test_client_anchor_from_fusion_lands_on_true_utc(status_file, tmp_path):
     assert (anchor.utc - TRUE_UTC_NOW) * 1e3 == pytest.approx(0.0, abs=TOL_MS)
 
 
-# ── chrony's FUSE feed ──────────────────────────────────────────────────
+# ── chrony's FUSE feed: retired ─────────────────────────────────────
 
-
-def _fuse_reference_expression():
-    """The right-hand side of ``reference_time_l2 = ...`` in
-    run_fusion_service, compiled from the shipped source.
-
-    The FUSE write sits inline in the service loop, behind config files,
-    SHM and the authority runner; no seam reaches it.  Evaluating the
-    shipped expression itself tests the line that runs, and a sign flip
-    in it fails this test."""
-    tree = ast.parse(textwrap.dedent(inspect.getsource(mbf.run_fusion_service)))
-    found = [node.value for node in ast.walk(tree)
-             if isinstance(node, ast.Assign)
-             and any(isinstance(t, ast.Name) and t.id == "reference_time_l2"
-                     for t in node.targets)]
-    assert len(found) == 1, "expected exactly one FUSE reference assignment"
-    return compile(ast.Expression(found[0]), "<fuse-feed>", "eval")
-
-
-def test_fuse_feed_hands_chrony_true_utc(fused):
-    """multi_broadcast_fusion.py:5328: reference = system - d_clock.  With
-    d_clock = host - UTC, that is true UTC, and chrony's reference - system
-    reads -5 ms: the host runs fast.  AGREES with the convention."""
-    # eval runs one expression parsed from this repo's own source, in a
-    # namespace of two test values; it reads no outside input.
-    reference = eval(_fuse_reference_expression(),
-                     {}, {"system_time": HOST_NOW, "result_l2": fused})
-    assert (reference - TRUE_UTC_NOW) * 1e3 == pytest.approx(0.0, abs=TOL_MS)
-    assert (reference - HOST_NOW) * 1e3 == pytest.approx(EXPECTED_OFFSET_MS,
-                                                         abs=TOL_MS)
+# Step 4 of the ruled order (review section 15) retired the FUSE refclock:
+# fusion writes no chrony SHM segment.  The feed wrote
+# ``reference = system - d_clock``, which AGREED with the convention: true
+# UTC, with chrony's reference - system reading -5 ms on this station.
+# Its sign was never the problem; the calibration that zeroes d_clock was.
+# tests/test_fuse_retired.py holds the retirement.
 
 
 # ── T6 disambiguation, the T3 branch: deleted ───────────────────────

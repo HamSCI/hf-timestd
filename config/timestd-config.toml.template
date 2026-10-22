@@ -304,6 +304,10 @@ enabled = true
 # the Offset Judge's correction, §18 states that same judged pair, and the FUSE
 # feed carries fusion's d_clock.
 #
+# The FUSE refclock RETIRED on 2026-10-22 (review-fusion-kalman-20261022.md
+# section 15): fusion feeds chrony nothing, whatever this key says.  The
+# closure now governs three surfaces: the ring, §18 and the sidecar.
+#
 # ⛔ AC0G-ND, 2026-09-07.  The closure was deployed and the anchor-direct FUSE
 # feed engaged twice -- 20:41Z and 21:21Z.  Both times it reported the host
 # clock SLOW (+23..28 ms, then +60.5 ms) while four NTP witnesses put the host
@@ -334,9 +338,9 @@ anchor_closure = false
 # method = "12.3 m LMR-400 at 0.85 VF + preamp datasheet, 2026-09-10"
 
 # The chrony refclock gate retired on 2026-09-11.  MEASUREMENT_MODEL.md §7.1.1
-# keeps FUSE and HPPS out of the host clock's electorate with a permanent
-# `noselect` in chrony-timestd-refclocks.conf; a source that never votes needs
-# no gate.  A leftover `[timing.authority_manager.chrony_gate]` table draws a
+# keeps HPPS out of the host clock's electorate with a permanent `noselect` in
+# chrony-timestd-refclocks.conf (FUSE retired outright on 2026-10-22); a
+# source that never votes needs no gate.  A leftover `[timing.authority_manager.chrony_gate]` table draws a
 # warning from `hf-timestd validate`; delete it, and delete
 # /etc/sudoers.d/timestd-chrony-gate (install.sh removes it on the next run).
 

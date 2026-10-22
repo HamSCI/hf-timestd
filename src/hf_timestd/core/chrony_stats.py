@@ -2,8 +2,11 @@
 Chrony Statistics Collector
 
 Parses chronyc output to collect source comparison data for metrology validation.
-Runs periodically from the fusion service to track how FUSE and HPPS compare
-against NTP and GPS sources over time.
+Runs periodically from the fusion service to track how HPPS compares
+against NTP and GPS sources over time.  FUSE retired on 2026-10-22
+(review-fusion-kalman-20261022.md section 15, ruling 5): fusion no longer
+feeds it.  The collector says so once, and warns once while chronyd still
+runs a FUSE source (a config not yet converged, or chrony not restarted).
 
 Snapshots are written to the ``DIAG_chrony_stats`` SQLite table (one row per
 source per snapshot) via :func:`make_data_product_writer` and exposed via the
@@ -484,6 +487,9 @@ class ChronyStatsCollector:
         self._writer = None  # Lazy — see _ensure_writer().
         self._writer_init_attempted = False
         self._available = None  # None = not checked yet
+        # Whether chronyd ran a FUSE source at the last snapshot, so the
+        # retirement note goes out once and on change, never per cycle.
+        self._fuse_present: Optional[bool] = None
 
     def collect(self, force: bool = False) -> Optional[ChronySnapshot]:
         """Collect chrony stats if enough time has elapsed.
@@ -518,6 +524,7 @@ class ChronyStatsCollector:
 
         # Log summary
         self._log_snapshot(snapshot)
+        self._note_fuse(snapshot)
 
         # Persist (SQLite via make_data_product_writer; backend choice
         # comes from [storage] in timestd-config.toml — see __init__).
@@ -525,6 +532,22 @@ class ChronyStatsCollector:
             self._write_snapshot(snapshot)
 
         return snapshot
+
+    def _note_fuse(self, snap: ChronySnapshot) -> None:
+        """One line when FUSE's presence changes, never one per cycle."""
+        present = any(src.name == "FUSE" for src in snap.sources)
+        if present == self._fuse_present:
+            return
+        self._fuse_present = present
+        if present:
+            logger.warning(
+                "chronyd still runs a FUSE refclock, which retired on "
+                "2026-10-22: fusion no longer feeds it.  Remove its line "
+                "from /etc/chrony (hf-timestd's install.sh does) and "
+                "restart chrony when convenient.")
+        else:
+            logger.info("FUSE refclock absent from chrony, as expected: "
+                        "retired 2026-10-22.")
 
     def _log_snapshot(self, snap: ChronySnapshot):
         """Log a concise summary of the chrony state."""

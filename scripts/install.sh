@@ -888,40 +888,23 @@ CHRONY_CONF=""
 [[ -z "$CHRONY_CONF" && -f "/etc/chrony.conf" ]] && CHRONY_CONF="/etc/chrony.conf"
 
 if [[ -n "$CHRONY_CONF" ]]; then
-    # FUSE (SHM 1) + HPPS (SHM 2) refclocks -- matches the code: timestd-fusion
-    # writes ChronySHM(unit=1)=FUSE, core-recorder writes ChronySHM(unit=2)=HPPS.
+    # HPPS (SHM 2) refclock -- core-recorder writes ChronySHM(unit=2)=HPPS.
+    # FUSE (SHM 1) RETIRED 2026-10-22 (review-fusion-kalman-20261022.md
+    # section 15, ruling 5): fusion writes no SHM segment, and the helper
+    # removes any FUSE refclock line from chrony.conf and conf.d, on every
+    # branch.  Before then a host without conf.d skipped a chrony.conf that
+    # already named FUSE, so an old line without `noselect` survived every
+    # reinstall.
     # SHM 0 is RESERVED for the host's GPS (gpsd / refid LG29) -- hf-timestd must
     # NOT use it (the old "refclock SHM 0 refid TSL1" collided with gpsd and put
     # the GPS reference on internet NTP).  Installed as a conf.d drop-in
     # (idempotent), never appended to chrony.conf.  Stable SHM ownership is owned
     # by sigmond-shm-precreate.service (NTP0-3 root:0666) on a sigmond/DASI2 host;
     # see sigmond docs/timing-chain-architecture.md.
-    if [[ -d /etc/chrony/conf.d ]]; then
-        install -m 0644 "$PROJECT_DIR/config/chrony-timestd-refclocks.conf" \
-            /etc/chrony/conf.d/timestd-refclocks.conf
-        # The drop-in is installed under a name that DIFFERS from the source
-        # file.  Older installs placed it under the SOURCE name, and chrony
-        # includes conf.d/*.conf -- so leaving that copy behind defines every
-        # refclock TWICE.  The duplicates contend for the same SHM unit (chrony
-        # clears `valid` on read, so whichever instance polls first consumes the
-        # sample) and sit at reach 0 forever.  Invisible until chronyd next
-        # restarts, which can be months after the install.  hf-timestd#17.
-        if [[ -e /etc/chrony/conf.d/chrony-timestd-refclocks.conf ]]; then
-            mv -f /etc/chrony/conf.d/chrony-timestd-refclocks.conf \
-                  /etc/chrony/conf.d/chrony-timestd-refclocks.conf.legacy-disabled
-            log_warn "Disabled legacy duplicate refclock drop-in (chrony-timestd-refclocks.conf)"
-        fi
-        # Converge to exactly one definition, or say so.  A silent duplicate is
-        # what made this cost a session to find.
-        _n_fuse_files=$(grep -l 'refid FUSE' /etc/chrony/conf.d/*.conf 2>/dev/null | wc -l)
-        if [[ "$_n_fuse_files" -ne 1 ]]; then
-            log_warn "chrony conf.d defines refid FUSE in $_n_fuse_files files (expected 1) — chrony will create duplicate, permanently unreachable sources"
-        fi
-        log_info "Chrony FUSE/HPPS refclocks installed (conf.d)"
-    elif ! grep -q 'refid FUSE' "$CHRONY_CONF" 2>/dev/null; then
-        echo "include $PROJECT_DIR/config/chrony-timestd-refclocks.conf" >> "$CHRONY_CONF"
-        log_info "Chrony FUSE/HPPS refclocks included in $CHRONY_CONF"
-    fi
+    # shellcheck source=scripts/lib-chrony-refclocks.sh
+    source "$PROJECT_DIR/scripts/lib-chrony-refclocks.sh"
+    timestd_install_chrony_refclocks "$CHRONY_CONF" /etc/chrony/conf.d \
+        "$PROJECT_DIR/config/chrony-timestd-refclocks.conf"
 
     # The chrony refclock gate retired on 2026-09-11 (MEASUREMENT_MODEL.md
     # §7.1.1: FUSE and HPPS carry a permanent noselect and nothing may
@@ -987,7 +970,7 @@ fi
 # 9.5 h while the station ran on a defective HPPS alone.  hf-timestd#16.
 #
 # The key list also explains why only FUSE died: units 0 and 1 were listed,
-# units 2 (HPPS) and 3 were not.
+# units 2 (HPPS) and 3 were not.  (FUSE itself retired on 2026-10-22.)
 #
 # Segment lifecycle belongs to sigmond-shm-precreate.service (NTP0-3 root:0666,
 # created before any producer or consumer), as the Phase 6 comment above states.

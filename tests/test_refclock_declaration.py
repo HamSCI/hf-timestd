@@ -34,7 +34,6 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 CONF = REPO / "config" / "chrony-timestd-refclocks.conf"
-FUSION = REPO / "src" / "hf_timestd" / "core" / "multi_broadcast_fusion.py"
 
 
 def _refclock_lines() -> dict:
@@ -49,32 +48,16 @@ def _refclock_lines() -> dict:
     return lines
 
 
-class FuseDeclarationTest(unittest.TestCase):
+class RefclockDeclarationTest(unittest.TestCase):
+    """FUSE RETIRED on 2026-10-22 (review-fusion-kalman-20261022.md
+    section 15, ruling 5).  The `trust` history above stays as the reason
+    FUSE never earned a vote; tests/test_fuse_retired.py now holds FUSE
+    out of the file altogether, and the fusion self-gate that justified it
+    left with the write."""
 
-    def test_fuse_is_NOT_trusted_so_the_witnesses_can_outvote_a_walked_fuse(self):
-        # 2026-09-04: with `trust`, FUSE walked AC0G-B4 11.6 s and AC0G-ND 1.0 s
-        # while reporting itself within 0.1 ms; the tick detector cannot see a
-        # clock error past its +-20 ms window.  Four pool servers that agree are
-        # the backstop, and `trust` is what silenced them.
-        line = _refclock_lines()["FUSE"]
-        self.assertNotIn(" trust", line,
-                         "`trust` on FUSE let a blind fusion walk two stations' "
-                         "clocks by seconds (2026-09-04); the pool must be able "
-                         "to outvote it")
-
-    def test_fuse_precision_matches_its_own_uncertainty_budget(self):
-        # The comment above the line promises +/-0.3-1.0 ms and the writer
-        # stamps log2(measured uncertainty) per sample.  The line used to
-        # assert 1e-4 — ten times better than both.
-        line = _refclock_lines()["FUSE"]
-        m = re.search(r"precision\s+(\S+)", line)
-        self.assertIsNotNone(m, line)
-        self.assertLessEqual(
-            float(m.group(1)), 1e-3 + 1e-12,
-            "precision must not claim better than the uncertainty budget")
-        self.assertGreaterEqual(
-            float(m.group(1)), 1e-4,
-            "and must not swing so wide it stops being a refclock")
+    def test_fuse_is_not_declared(self):
+        self.assertNotIn("FUSE", _refclock_lines(),
+                         "FUSE retired 2026-10-22; fusion no longer feeds it")
 
     def test_hpps_is_NOT_trusted(self):
         # ⛔ Guards the guard.  T6 took authority on B4 2026-08-15 and the
@@ -84,37 +67,9 @@ class FuseDeclarationTest(unittest.TestCase):
         self.assertNotIn(" trust", line,
                          "HPPS (T6) must keep earning selection, vote included")
 
-    def test_both_feeds_are_still_declared(self):
+    def test_only_hpps_is_declared(self):
         got = set(_refclock_lines())
-        self.assertEqual(got, {"FUSE", "HPPS"}, f"unexpected feeds: {got}")
-
-
-class SelfGateStillJustifiesTrustTest(unittest.TestCase):
-    """`trust` is only defensible while fusion refuses to publish junk.
-
-    If the gate is ever removed, `trust` becomes "believe the station no
-    matter what", which is precisely the failure the falseticker test exists
-    to prevent.  So the gate and the trust flag are tested together, and
-    deleting the gate must fail this file rather than quietly widen trust.
-    """
-
-    def test_publication_is_gated_on_quality_and_consistency(self):
-        src = FUSION.read_text()
-        self.assertIn(
-            "if quality_ok and multi_station and consistent and discontinuity_ok:",
-            src,
-            "fusion must publish to chrony only when it believes itself")
-
-    def test_the_gate_reports_why_it_refused(self):
-        src = FUSION.read_text()
-        self.assertIn("Chrony feed GATED", src,
-                      "a gate that refuses silently cannot be diagnosed")
-
-    def test_precision_is_derived_from_measured_uncertainty(self):
-        src = FUSION.read_text()
-        self.assertIn("np.log2(uncertainty_sec_l2)", src,
-                      "the per-sample precision must come from the measured "
-                      "uncertainty, not a constant")
+        self.assertEqual(got, {"HPPS"}, f"unexpected feeds: {got}")
 
 
 if __name__ == "__main__":

@@ -59,12 +59,12 @@ T_LEVELS_RANKED: tuple = ("T6", "T5", "T4", "T3", "T2", "T1", "T0")
 # refid as #x (falseticker) or #? (unselectable), we want to know about
 # it loudly rather than silently keep publishing a stale T-level.
 #
-# TSL1 (SHM unit 0) — LEGACY; raw L1 metrology, normally disabled
-# FUSE (SHM unit 1) — fused calibrated L2 timing, written by fusion service
-# HPPS (SHM unit 2) — direct BPSK PPS, written by core_recorder T6 path
+# HPPS (SHM unit 2) — direct BPSK PPS, written by core_recorder T6 path.
+# T3 feeds no refclock: FUSE (SHM unit 1) carried fusion's calibrated
+# D_clock and RETIRED on 2026-10-22 (review-fusion-kalman-20261022.md
+# section 15, ruling 5), so a chrony without FUSE is the expected state.
 TIER_SHM_REFID: Dict[str, str] = {
     "T6": "HPPS",
-    "T3": "FUSE",
 }
 
 # Chrony source-state characters indicating chrony accepts the source as
@@ -610,7 +610,8 @@ class AuthorityManager:
         falseticker, ``#?`` unselectable, etc.) while authority is
         claiming the tier as active, return a disagreement flag.
 
-        §7.1.1 ships every refclock (FUSE, HPPS) `noselect`, so chrony
+        §7.1.1 ships every refclock (HPPS; FUSE until it retired on
+        2026-10-22) `noselect`, so chrony
         never selects them and reports their state as `?` permanently;
         that is a configuration fact, not chrony's verdict on our
         source, so a `noselect` refid is exempt from this check except

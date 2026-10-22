@@ -88,6 +88,9 @@ D_CLOCK_FUSED_NOTE = (
 
 ANCHOR_REGIME = "anchor"
 LEGACY_REGIME = "fusion_d_clock"
+# The FUSE refclock retired on 2026-10-22 (review section 15, ruling 5):
+# fusion feeds chrony nothing, and says so here.
+RETIRED_REGIME = "retired"
 DEFAULT_STATUS_PATH = Path("/run/hf-timestd/fusion_status.json")
 
 
@@ -99,6 +102,8 @@ def read_feed_regime(
     ``"anchor"`` — the sample chrony holds came from the label-plane
     anchor and carries no host frame at all (spec §11.2).
     ``"fusion_d_clock"`` — the legacy host-relative sample.
+    ``"retired"`` — fusion feeds chrony nothing; the FUSE refclock
+    retired on 2026-10-22 (review section 15, ruling 5).
     ``None`` — no file, unreadable, or a writer too old to say; every
     caller must then behave exactly as it did before the regime existed.
 
@@ -135,6 +140,7 @@ class FusionStatusWriter:
         chrony_fed: bool,
         skip_reasons: List[str],
         anchor_sample: Optional["LabelPlaneAnchorSample"] = None,
+        fuse_retired: bool = False,
     ) -> None:
         """Write the current cycle's fusion status.
 
@@ -151,6 +157,10 @@ class FusionStatusWriter:
         their DIFFERENCE is the ring plane's residual against the
         registration.  Never their sum (see `offset_judge`'s §11.2
         section on double counting).
+
+        `fuse_retired` names the regime since 2026-10-22: the FUSE
+        refclock retired, so fusion fed chrony nothing.  The fusion
+        service always passes True.
         """
         utc_now = datetime.now(timezone.utc)
 
@@ -200,7 +210,8 @@ class FusionStatusWriter:
             # "anchor": the sample handed to chrony came from the
             # label-plane anchor (T3 registration or T6 native anchor).
             # "fusion_d_clock": the legacy host-relative sample.
-            "feed_regime": (ANCHOR_REGIME if anchor_sample is not None
+            "feed_regime": (RETIRED_REGIME if fuse_retired
+                            else ANCHOR_REGIME if anchor_sample is not None
                             else LEGACY_REGIME),
             "anchor_bench": (
                 anchor_sample.bench if anchor_sample is not None else None

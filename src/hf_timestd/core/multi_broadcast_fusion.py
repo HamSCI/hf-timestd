@@ -4552,6 +4552,12 @@ def _ms_or_na(value: Optional[float]) -> str:
     return f"{round(float(value), 1) + 0.0:+.1f} ms"
 
 
+FUSE_RETIRED_MESSAGE = (
+    "Chrony FUSE refclock RETIRED (2026-10-22, review section 15): fusion "
+    "writes no chrony SHM segment.  HPPS (T6) is unchanged."
+)
+
+
 def cycle_summary_line(result: "FusedResult") -> str:
     """The per-cycle summary, with the fused value labelled calibrated.
 
@@ -4695,17 +4701,14 @@ def run_fusion_service(
         storage_config=_storage_config
     )
     
-    # Initialize Chrony SHM output if enabled.  Single feed at SHM unit 1
-    # (refid FUSE) — the legacy L1 raw-metrology feed at unit 0 was
-    # dropped 2026-05-23 along with the TSL1/TSL2/TSL3 → FUSE/HPPS
-    # rename; the L1 and L2 fusion paths had produced byte-identical
-    # d_clock_fused_ms in single-station-mode for weeks before that,
-    # making the second feed redundant.  result_l1 is still computed
-    # for the L1-vs-L2 diagnostic comparison logged later in this
-    # function, but never published to chrony.
-    # Spec §11.2: which regime last fed chrony, so the regime change is
-    # logged once rather than every cycle.
-    _last_feed_regime = None
+    # The FUSE chrony refclock (SHM unit 1) RETIRED on 2026-10-22
+    # (review-fusion-kalman-20261022.md section 15, ruling 5).  It carried
+    # the calibrated fused D_clock, which the calibration pulls to zero, so
+    # it told chrony "the host is right" whatever the host did.  Fusion
+    # writes no chrony SHM segment at all now; HPPS (SHM 2, T6) belongs to
+    # the core recorder and is untouched.  The chrony stats collector
+    # below still reads chrony, and says once if a FUSE source lingers.
+    logger.info(FUSE_RETIRED_MESSAGE)
     # Task 17c: when the sign-contradiction line was last written
     # (monotonic), so it comes out once a minute rather than once a cycle.
     _last_anchor_sign_log = 0.0
@@ -4713,31 +4716,6 @@ def run_fusion_service(
     _last_cycle_summary_log = None
     _last_summary_grade = None
     _last_grade_change_log = None
-    # The arrival last handed to chrony, so one measurement is offered
-    # once however many fusion cycles see it.
-    _last_anchor_mono = None
-    chrony_shm_l2 = None  # SHM 1: refid FUSE
-    _chrony_shm_available = False  # True if sysv_ipc is importable
-
-    if enable_chrony:
-        try:
-            from hf_timestd.core.chrony_shm import ChronySHM
-            _chrony_shm_available = True
-
-            chrony_shm_l2 = ChronySHM(unit=1)
-            if chrony_shm_l2.connect():
-                logger.info("Chrony SHM FUSE feed enabled (unit=1, refid=FUSE)")
-            else:
-                logger.warning(
-                    "Failed to connect to Chrony SHM unit 1 - FUSE feed "
-                    "disabled (will retry periodically)"
-                )
-                chrony_shm_l2.connected = False  # Keep object for reconnect
-
-        except Exception as e:
-            logger.warning(f"Chrony SHM not available: {e}")
-            chrony_shm_l2 = None
-    
     # Initialize chrony stats collector (runs alongside fusion, logs source comparison)
     chrony_stats_collector = None
     if enable_chrony:
@@ -4755,7 +4733,6 @@ def run_fusion_service(
     logger.info("Starting Multi-Broadcast Fusion Service")
     logger.info(f"  Interval: {interval_sec} seconds")
     logger.info(f"  Output: {fusion.fusion_dir / 'fusion_fusion_timing_YYYYMMDD.h5'}")
-    logger.info(f"  Chrony SHM FUSE: {'enabled' if chrony_shm_l2 and chrony_shm_l2.connected else 'disabled (will retry)' if chrony_shm_l2 else 'disabled'}")
     # Initialize calibration file writer (wsprdaemon integration)
     calib_writer = None
     if calib_file:
@@ -4813,8 +4790,15 @@ def run_fusion_service(
             _anchor_closure = anchor_closure_enabled(_auth_config)
         except Exception as _ac_exc:  # noqa: BLE001 — unknown regime is off
             logger.warning(
-                f"anchor closure regime unresolved ({_ac_exc}) — the FUSE "
-                f"feed stays on fusion d_clock"
+                f"anchor closure regime unresolved ({_ac_exc}) — treated "
+                f"as off"
+            )
+        if _anchor_closure:
+            logger.warning(
+                "registration anchor closure is ON, but the FUSE refclock "
+                "is retired (2026-10-22): the closure no longer reaches "
+                "chrony.  It still places UTC on the ring, §18 and the "
+                "sidecar."
             )
         authority_runner = build_authority_runner_from_config(config=_auth_config)
         # TIMING_PROVENANCE_MODEL §3.2: the station's chain records, for the
@@ -4900,15 +4884,6 @@ def run_fusion_service(
     EMPTY_CYCLE_ERROR_THRESHOLD = 15   # Error after 15 consecutive empty cycles (~2 min at 8s interval)
     last_successful_fusion_time = time.time()
     
-    # Track chrony updates for discontinuity filtering. last_chrony_d_clock is
-    # advanced every cycle (see the "always advance" block in the feed loop),
-    # so the discontinuity reference can never go stale.
-    last_chrony_d_clock = None
-
-    # SHM reconnection state — retry every 30s if initial connect failed
-    _shm_reconnect_interval = 30.0
-    _shm_last_reconnect_attempt = 0.0
-
     while running:
         try:
             # BREADCRUMB: Loop start
@@ -4920,39 +4895,9 @@ def run_fusion_service(
             if loop_metrics is not None:
                 loop_metrics.start_cycle()
 
-            # Per-cycle authority/status bookkeeping (consumed by
-            # FusionStatusWriter before the watchdog notify at end of loop).
-            chrony_fed_this_cycle = False
-            chrony_skip_reasons: List[str] = []
-            # Spec §11.2 (2026-09-07): the label-plane anchor sample that
-            # fed chrony this cycle, or None for the legacy d_clock feed.
-            anchor_sample = None
-            # True while the anchor regime holds, even on a cycle that
-            # writes nothing because the arrival has not advanced -- the
-            # legacy d_clock write must stay stood down either way.
-            anchor_regime = False
-
             # Notify watchdog we are alive
             if SYSTEMD_AVAILABLE:
                 systemd_daemon.notify('WATCHDOG=1')
-
-            # Periodic SHM reconnection: if either feed is disconnected,
-            # retry connect every 30s.  This recovers from the race where
-            # chrony recreates SHM as root:0600 between ExecStartPre and
-            # fusion's connect().
-            if enable_chrony and _chrony_shm_available:
-                _need_reconnect = (
-                    chrony_shm_l2 and not chrony_shm_l2.connected
-                )
-                if _need_reconnect and (loop_start_time - _shm_last_reconnect_attempt) >= _shm_reconnect_interval:
-                    with (loop_metrics.phase("shm_reconnect") if loop_metrics else nullcontext()):
-                        _shm_last_reconnect_attempt = loop_start_time
-                        if chrony_shm_l2 and not chrony_shm_l2.connected:
-                            logger.info("Attempting Chrony SHM FUSE reconnect...")
-                            if chrony_shm_l2.connect():
-                                logger.info("Chrony SHM FUSE reconnected (unit=1, refid=FUSE)")
-                                if loop_metrics:
-                                    loop_metrics.mark_event("shm_reconnect_l2")
 
             # BREADCRUMB: Calling fuse
             logger.debug("Calling fusion.fuse()...")
@@ -5083,99 +5028,20 @@ def run_fusion_service(
                 # The initial write in fuse() happened before L1/L2 were set
                 fusion._write_fused_result(result)
             
-            # ── the FUSE feed carries the anchor (spec §11.2) ─────────
-            # Ahead of the fusion-quality gates below, and outside
-            # `if result:`, deliberately: the anchor is INDEPENDENT
-            # evidence.  On AC0G-ND 2026-09-07 the host walked 150 ms
-            # while every tick agreed with the registration; a chrony
-            # feed that can only speak when fusion's own quality gates
-            # pass is exactly the feed that went quiet.  The anchor's
-            # own freshness bound (LABEL_ANCHOR_MAX_AGE_S) is its gate.
-            # Task 17a: only a station that opted into the closure
-            # ([timing.registration] anchor_closure) lets the anchor
-            # reach chrony.  Off, this whole block is skipped and the
-            # legacy d_clock write below runs exactly as it did at
-            # c7b2106 -- and `anchor_regime` stays False, so
-            # fusion_status.json reports the legacy regime and the
-            # refclock gate keeps its legacy rule.
-            if _anchor_closure and chrony_shm_l2 and chrony_shm_l2.connected:
-                try:
-                    from hf_timestd.core.offset_judge import (
-                        label_plane_chrony_sample,
-                    )
-                    anchor_sample = label_plane_chrony_sample()
-                except Exception as _anchor_exc:  # noqa: BLE001
-                    anchor_sample = None
-                    logger.debug(
-                        f"label-plane anchor unavailable: {_anchor_exc}"
-                    )
-            if anchor_sample is not None:
-                anchor_regime = True
-            if (anchor_sample is not None
-                    and anchor_sample.anchor_mono != _last_anchor_mono):
-                _shm_anchor_t0 = time.monotonic()
-                try:
-                    if chrony_shm_l2.update(
-                        anchor_sample.reference_time,
-                        anchor_sample.system_time,
-                        anchor_sample.shm_precision,
-                    ):
-                        chrony_fed_this_cycle = True
-                        _last_anchor_mono = anchor_sample.anchor_mono
-                        if _last_feed_regime != "anchor":
-                            logger.info(
-                                "FUSE feed: ANCHOR-DIRECT (bench "
-                                f"{anchor_sample.bench}, tier "
-                                f"{anchor_sample.tier}, host error "
-                                f"{anchor_sample.offset_s * 1e3:+.1f} ms, "
-                                f"sigma {anchor_sample.sigma_ns / 1e6:.3f} ms"
-                                ") -- the registration states the host's "
-                                "error; d_clock is now a diagnostic"
-                            )
-                            _last_feed_regime = "anchor"
-                    else:
-                        logger.warning("Chrony SHM FUSE anchor write failed")
-                        anchor_sample = None
-                        anchor_regime = False
-                except Exception as e:  # noqa: BLE001
-                    logger.error(f"Chrony SHM anchor update exception: {e}")
-                    anchor_sample = None
-                    anchor_regime = False
-                if loop_metrics is not None:
-                    loop_metrics.record_phase(
-                        "shm_write", time.monotonic() - _shm_anchor_t0)
-            if not anchor_regime and _last_feed_regime != "fusion_d_clock":
-                if _anchor_closure:
-                    logger.warning(
-                        "FUSE feed: falling back to fusion d_clock -- no "
-                        "fresh label-plane anchor.  d_clock is measured "
-                        "against the ring plane, which radiod stamps from "
-                        "the host clock, so it cannot see a host-wide "
-                        "error (spec §11.2)."
-                    )
-                else:
-                    logger.info(
-                        "FUSE feed: fusion d_clock (the registration "
-                        "anchor closure is off -- see the "
-                        "`anchor-direct WOULD feed:` line for what it "
-                        "would have said)"
-                    )
-                _last_feed_regime = "fusion_d_clock"
-
             # ── Task 17c: the sign contradiction, watched ────────────
             # Written whatever the regime, so the closure can be judged
             # on evidence from a station that is not being steered by
             # it.  Reads the block the judge actually published: the
-            # anchor block when the closure is on (the very sample fed
-            # above), the witness block when it is off -- and the
-            # witness block reaches no chrony path at all.
+            # anchor block when the closure is on, the witness block when
+            # it is off.  Neither reaches chrony (FUSE retired
+            # 2026-10-22).
             try:
                 from hf_timestd.core.offset_judge import (
                     LABEL_PLANE_ANCHOR_KEY,
                     LABEL_PLANE_WITNESS_KEY,
                     label_plane_chrony_sample,
                 )
-                _sign_sample = anchor_sample or label_plane_chrony_sample(
+                _sign_sample = label_plane_chrony_sample(
                     key=(LABEL_PLANE_ANCHOR_KEY if _anchor_closure
                          else LABEL_PLANE_WITNESS_KEY),
                 )
@@ -5222,212 +5088,6 @@ def run_fusion_service(
                 if result.consistency_flag != 'OK':
                     logger.warning(f"  ⚠️ Consistency: {result.consistency_flag}")
                 
-                # Write directly to Chrony SHM (fusion runs at chrony poll rate).
-                # Single FUSE feed using calibrated L2 timing fusion.
-                # (L1 dual-feed dropped 2026-05-23 — see TSL→FUSE/HPPS rename.)
-                if chrony_shm_l2 and chrony_shm_l2.connected:
-                    # Check quality criteria
-                    # CRITICAL FIX (2026-01-10): Bootstrap-aware quality gating
-                    # During bootstrap (calibration not converged), accept grade D
-                    # The 2-3ms uncertainty is expected during calibration learning
-                    # After convergence, enforce stricter A/B/C requirement
-                    if hasattr(fusion, 'recent_validations') and len(fusion.recent_validations) >= 10:
-                        calibration_converged = sum(fusion.recent_validations) / len(fusion.recent_validations) > 0.8
-                    else:
-                        calibration_converged = False
-                    
-                    if calibration_converged:
-                        # Operational: prefer A/B/C but accept D with reasonable uncertainty.
-                        # Raised from 10ms to 25ms (2026-03-04): single-station mode
-                        # structurally inflates uncertainty to 17-20ms even when D_clock
-                        # is accurate to <2ms. Chrony has its own outlier rejection.
-                        quality_ok = result.quality_grade in ('A', 'B', 'C') or \
-                                    (result.quality_grade == 'D' and result.uncertainty_ms < 25.0)
-                    else:
-                        # Bootstrap: accept grade D (uncertainty <50ms is acceptable during learning/single-station)
-                        # High uncertainty during bootstrap is normal due to calibration convergence
-                        quality_ok = result.quality_grade in ('A', 'B', 'C', 'D') and result.uncertainty_ms < 50.0
-                    
-                    # CRITICAL FIX (2026-01-10): Require multi-station for validation
-                    # Single-station mode has no cross-validation, cannot detect systematic errors
-                    # RELAXED (2026-01-12): Allow single station to maintain feed during outages
-                    multi_station = result.n_stations >= 1  # Require at least 1 station
-                    
-                    # CRITICAL FIX (2026-01-10): Bootstrap-aware consistency criteria
-                    # During bootstrap, CROSS_STATION_DISAGREE is expected (calibration learning)
-                    # After convergence, enforce stricter consistency requirements
-                    if result.consistency_flag == 'OK':
-                        consistent = True
-                    elif calibration_converged:
-                        # Operational: accept disagreement with reasonable uncertainty.
-                        # Raised from 2.0ms to 5.0ms (2026-03-04): stale calibration +
-                        # ionospheric variability routinely produces 3ms uncertainty with
-                        # CROSS_STATION_DISAGREE, which is still far better than no feed.
-                        # 5ms still rejects truly degraded data.
-                        if result.consistency_flag in ('INTER_ANOMALY', 'CROSS_STATION_DISAGREE') and result.uncertainty_ms < 5.0:
-                            consistent = True
-                            logger.debug(
-                                f"Chrony feed: Accepting {result.consistency_flag} with low uncertainty "
-                                f"({result.uncertainty_ms:.3f}ms < 5.0ms threshold)"
-                            )
-                        else:
-                            consistent = False
-                    else:
-                        # Bootstrap: accept CROSS_STATION_DISAGREE (expected during calibration)
-                        # The fused result is still valid due to weighted averaging and Kalman filtering
-                        if result.consistency_flag in ('OK', 'CROSS_STATION_DISAGREE'):
-                            consistent = True
-                            if result.consistency_flag == 'CROSS_STATION_DISAGREE':
-                                logger.debug(
-                                    f"Chrony feed: Accepting CROSS_STATION_DISAGREE during bootstrap "
-                                    f"(calibration learning, uncertainty={result.uncertainty_ms:.3f}ms)"
-                                )
-                        else:
-                            consistent = False
-                    
-                    # Discontinuity filter: reject large jumps (>10ms)
-                    # Increased from 3ms to 10ms to allow for legitimate calibration convergence
-                    # and ionospheric variations while still protecting against major errors
-                    discontinuity_ok = True
-                    
-                    # No time-based recovery reset is needed: last_chrony_d_clock
-                    # is advanced unconditionally every cycle by the "always
-                    # advance" block below, so the discontinuity reference can
-                    # never latch on a stale value (M-C2 fix, 2026-05-17). The
-                    # prior reset keyed off last_chrony_update_time, which only
-                    # advanced on a *successful* write — desynchronising the two
-                    # references and causing both spurious resets and missed
-                    # recovery.
-                    
-                    if last_chrony_d_clock is not None:
-                        delta = abs(result.d_clock_fused_ms - last_chrony_d_clock)
-                        # Scale discontinuity threshold with measurement uncertainty.
-                        # HF timing has 5-30ms uncertainty; cycle-to-cycle variation of
-                        # 2-3σ is normal ionospheric behavior, not a discontinuity.
-                        # Fixed 10ms threshold latches permanently when uncertainty > ~5ms
-                        # because rejected updates never advance last_chrony_d_clock.
-                        if fusion.kalman_converged:
-                            discontinuity_threshold = max(10.0, 3.0 * result.uncertainty_ms)
-                        else:
-                            discontinuity_threshold = 100.0
-                        if delta > discontinuity_threshold:
-                            logger.warning(
-                                f"Chrony feed: Discontinuity detected ({delta:.1f}ms jump > {discontinuity_threshold:.0f}ms), "
-                                f"skipping update to prevent clock instability"
-                            )
-                            discontinuity_ok = False
-                    # else: First measurement after restart, allow it
-                    
-                    # DIAGNOSTIC: Log gating status for debugging chrony feed issues
-                    if not (quality_ok and multi_station and consistent and discontinuity_ok):
-                        gate_reasons = []
-                        if not quality_ok:
-                            gate_reasons.append(f"quality(grade={result.quality_grade},unc={result.uncertainty_ms:.1f}ms)")
-                        if not multi_station:
-                            gate_reasons.append(f"multi_station(n={result.n_stations})")
-                        if not consistent:
-                            gate_reasons.append(f"consistent(flag={result.consistency_flag},unc={result.uncertainty_ms:.1f}ms,thresh=5.0ms)")
-                        if not discontinuity_ok:
-                            gate_reasons.append("discontinuity")
-                        logger.info(
-                            f"Chrony feed GATED: {' + '.join(gate_reasons)} "
-                            f"[grade={result.quality_grade}, n_sta={result.n_stations}, "
-                            f"flag={result.consistency_flag}, unc={result.uncertainty_ms:.1f}ms, "
-                            f"cal_converged={calibration_converged}]"
-                        )
-                        # Expose the same reasons to the status writer --
-                        # but only when the d_clock feed was the one that
-                        # mattered.  §11.2: in the anchor regime these
-                        # gates describe a feed that stood down on
-                        # purpose, and reporting them beside last_fed=true
-                        # would read as "fed despite being gated".
-                        if not anchor_regime:
-                            chrony_skip_reasons = list(gate_reasons)
-                    
-                    if quality_ok and multi_station and consistent and discontinuity_ok:
-                        now = time.time()
-                        system_time = now
-
-                        _shm_write_t0 = time.monotonic()
-                        try:
-                            # Host-clock plane (MEASUREMENT_MODEL.md §7.1):
-                            # d_clock_fused_ms is the host clock's offset from
-                            # the registration — a derived quantity, not the
-                            # measurand.  chrony consumes it; no label does.
-                            # Update FUSE feed (SHM 1) - calibrated L2 timing fusion.
-                            # The L1 (raw-metrology) feed at SHM 0 was dropped
-                            # 2026-05-23 with the TSL→FUSE/HPPS rename; the L1
-                            # and L2 fusion paths produced byte-identical
-                            # d_clock_fused_ms in single-station mode for weeks,
-                            # making the second feed redundant.  result_l1 is
-                            # still computed for the L1-vs-L2 diagnostic
-                            # comparison logged earlier in the cycle.
-                            # §11.2: the anchor regime has already fed
-                            # chrony this cycle with the registration's own
-                            # statement.  Writing d_clock on top would
-                            # overwrite a host-clock-free sample with a
-                            # host-relative one -- and summing the two
-                            # would double-count (see offset_judge §11.2).
-                            if (chrony_shm_l2 and chrony_shm_l2.connected
-                                    and result_l2 and not anchor_regime):
-                                reference_time_l2 = system_time - (result_l2.d_clock_fused_ms / 1000.0)
-                                uncertainty_sec_l2 = max(0.1, result_l2.uncertainty_ms) / 1000.0
-                                # Precision = log2(seconds), more negative = better
-                                # Clamp to [-20, -4] range (1us to 62ms)
-                                raw_precision_l2 = int(np.log2(uncertainty_sec_l2))
-                                precision_l2 = max(-20, min(-4, raw_precision_l2))
-                                
-                                update_success_l2 = chrony_shm_l2.update(reference_time_l2, system_time, precision_l2)
-                                if update_success_l2:
-                                    chrony_fed_this_cycle = True
-                                    logger.debug(
-                                        f"Chrony SHM FUSE (unit=1) updated: D_clock={result_l2.d_clock_fused_ms:+.3f}ms, "
-                                        f"uncertainty={result_l2.uncertainty_ms:.1f}ms, precision={precision_l2} "
-                                        f"[{result_l2.n_stations}sta, {result_l2.quality_grade}]"
-                                    )
-                                else:
-                                    logger.warning("Chrony SHM FUSE write failed")
-                            
-                            # (the discontinuity reference last_chrony_d_clock is
-                            # advanced unconditionally by the "always advance"
-                            # block below — no per-success update is needed here)
-                                
-                        except Exception as e:
-                            logger.error(f"Chrony SHM update exception: {e}")
-                        if loop_metrics is not None:
-                            loop_metrics.record_phase("shm_write", time.monotonic() - _shm_write_t0)
-                    # Always advance the discontinuity reference to track the
-                    # current signal.  Without this, a rejected update freezes
-                    # last_chrony_d_clock at a stale value and every subsequent
-                    # delta grows larger, permanently latching the filter.
-                    if result_l2:
-                        last_chrony_d_clock = result_l2.d_clock_fused_ms
-                    elif result_l1:
-                        last_chrony_d_clock = result_l1.d_clock_fused_ms
-                    
-                    if not (quality_ok and multi_station and consistent and discontinuity_ok):
-                        # Log why we're not feeding chrony
-                        reasons = []
-                        if not quality_ok:
-                            reasons.append(f"grade={result.quality_grade}")
-                        if not multi_station:
-                            reasons.append(f"n_stations={result.n_stations} (need >=2)")
-                        if not consistent:
-                            if result.consistency_flag == 'INTER_ANOMALY':
-                                reasons.append(f"consistency={result.consistency_flag} with uncertainty={result.uncertainty_ms:.3f}ms (>0.5ms)")
-                            else:
-                                reasons.append(f"consistency={result.consistency_flag}")
-                        if not discontinuity_ok:
-                            reasons.append("discontinuity")
-                        
-                        if result.single_station_mode:
-                            logger.info(
-                                f"Chrony feed DISABLED in single-station mode: "
-                                f"No cross-validation possible, systematic errors undetectable. "
-                                f"Using NTP for clock discipline."
-                            )
-                        else:
-                            logger.debug(f"Chrony feed skipped: {', '.join(reasons)}")
 
             # Write calibration file (wsprdaemon integration)
             if calib_writer:
@@ -5448,9 +5108,9 @@ def run_fusion_service(
                 try:
                     fusion_status_writer.update(
                         result=result,
-                        chrony_fed=chrony_fed_this_cycle,
-                        skip_reasons=chrony_skip_reasons,
-                        anchor_sample=anchor_sample,
+                        chrony_fed=False,
+                        skip_reasons=[],
+                        fuse_retired=True,
                     )
                 except Exception as e:
                     logger.warning(f"Fusion status write failed: {e}")
