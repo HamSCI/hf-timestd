@@ -325,7 +325,17 @@ HPPS_DEAD = HDR + "#? HPPS  0 0   0 - +0ns[+0ns] +/- 0ns\n"
 HPPS_LIVE = HDR + "#? HPPS  0 0 377 1 +1ms[+1ms] +/- 1ms\n"
 
 
-def _reach_at(tmp_path, sources, now, state):
+def _state_dir(tmp_path, mode=0o700):
+    d = tmp_path / "state"
+    d.mkdir(exist_ok=True)
+    d.chmod(mode)
+    return d
+
+
+def _reach_at(tmp_path, sources, now, state, owner_uid=None):
+    """Run the monitor.  It runs as root in production and trusts only a
+    root-owned state directory; the test runs as the invoking user, so it
+    names that user as the expected owner unless told otherwise."""
     bin_dir = tmp_path / "bin"
     if bin_dir.exists():
         (bin_dir / "chronyc").write_text(
@@ -335,7 +345,9 @@ def _reach_at(tmp_path, sources, now, state):
     env = dict(os.environ,
                PATH=f"{bin_dir}:{os.environ['PATH']}",
                CHRONY_REACH_STATE_FILE=str(state),
-               CHRONY_REACH_NOW=str(now))
+               CHRONY_REACH_NOW=str(now),
+               CHRONY_REACH_STATE_OWNER_UID=str(
+                   os.getuid() if owner_uid is None else owner_uid))
     r = subprocess.run(
         ["bash", str(REACH_SH), "--threshold", "64", "--verbose",
          "--restart-on-failure"],
@@ -344,7 +356,7 @@ def _reach_at(tmp_path, sources, now, state):
 
 
 def test_reach_monitor_reports_a_persistent_fault_once_then_reminds(tmp_path):
-    state = tmp_path / "reach.state"
+    state = _state_dir(tmp_path) / "chrony-reach.state"
     t0 = 1_800_000_000
     code, out = _reach_at(tmp_path, HPPS_DEAD, t0, state)
     assert code == 1 and "WARNING" in out and "HPPS" in out
@@ -363,10 +375,82 @@ def test_reach_monitor_reports_a_persistent_fault_once_then_reminds(tmp_path):
 
 
 def test_reach_monitor_reports_recovery_once(tmp_path):
-    state = tmp_path / "reach.state"
+    state = _state_dir(tmp_path) / "chrony-reach.state"
     t0 = 1_800_000_000
     _reach_at(tmp_path, HPPS_DEAD, t0, state)
     code, out = _reach_at(tmp_path, HPPS_LIVE, t0 + 300, state)
     assert code == 0 and "OK" in out and "recovered" in out
     code, out = _reach_at(tmp_path, HPPS_LIVE, t0 + 600, state)
     assert code == 0 and out.strip() == ""
+
+
+
+# ── the reach monitor's state file is root's, and safe ──────────────────
+#
+# Security review of 7019b8c (HIGH): the monitor runs as root, and its
+# state file sat in /run/hf-timestd, which the timestd user owns.  A
+# symlink planted there would have let root's write clobber any file.
+# The state now lives in the unit's own RuntimeDirectory (0700), the
+# write is mktemp + rename (a planted symlink is replaced, never
+# followed), and a directory that root does not own alone is refused.
+
+
+def test_reach_monitor_replaces_a_planted_symlink(tmp_path):
+    d = _state_dir(tmp_path)
+    victim = tmp_path / "victim"
+    victim.write_text("precious\n")
+    state = d / "chrony-reach.state"
+    state.symlink_to(victim)
+    _reach_at(tmp_path, HPPS_DEAD, 1_800_000_000, state)
+    assert victim.read_text() == "precious\n"
+    assert not state.is_symlink() and state.is_file()
+    assert state.read_text().split()[0] == "WARNING"
+    assert [p.name for p in d.iterdir()] == ["chrony-reach.state"]
+
+
+def test_reach_monitor_refuses_a_directory_root_does_not_own(tmp_path):
+    """Owner uid 0 expected, the directory is the test user's: refused,
+    nothing written, and every run reports (the pre-latch behaviour)."""
+    if os.getuid() == 0:
+        import pytest
+        pytest.skip("needs a non-root test user")
+    state = _state_dir(tmp_path) / "chrony-reach.state"
+    for k in range(3):
+        code, out = _reach_at(tmp_path, HPPS_DEAD, 1_800_000_000 + 300 * k,
+                              state, owner_uid=0)
+        assert code == 1
+        assert out.count("not latching") == 1
+        assert "Chrony HPPS reach = " in out
+    assert not state.exists()
+
+
+def test_reach_monitor_refuses_a_group_writable_directory(tmp_path):
+    state = _state_dir(tmp_path, mode=0o770) / "chrony-reach.state"
+    for k in range(2):
+        code, out = _reach_at(tmp_path, HPPS_DEAD, 1_800_000_000 + 300 * k,
+                              state)
+        assert "not latching" in out and "Chrony HPPS reach = " in out
+    assert not state.exists()
+
+
+def test_reach_monitor_ignores_a_garbage_prior_status(tmp_path):
+    """Anything but OK or WARNING reads as no prior state: a live HPPS
+    then reports a plain OK, not a recovery from a state that never was."""
+    state = _state_dir(tmp_path) / "chrony-reach.state"
+    state.write_text("PWNED;reboot 1 2\n")
+    code, out = _reach_at(tmp_path, HPPS_LIVE, 1_800_000_000, state)
+    assert code == 0
+    assert "OK: Chrony HPPS reach = " in out and "recovered" not in out
+    assert state.read_text().split()[:2] == ["OK", "1800000000"]
+
+
+def test_monitor_unit_owns_a_private_preserved_state_directory():
+    unit = (REPO / "systemd" / "timestd-chrony-monitor.service").read_text()
+    lines = {l.split("=", 1)[0]: l.split("=", 1)[1]
+             for l in unit.splitlines() if "=" in l and not l.startswith("#")}
+    assert lines["User"] == "root"
+    assert lines["RuntimeDirectory"] == "hf-timestd-monitor"
+    assert lines["RuntimeDirectoryMode"] == "0700"
+    assert lines["RuntimeDirectoryPreserve"] == "yes"
+    assert ("/run/hf-timestd-monitor/chrony-reach.state"
+            in REACH_SH.read_text())

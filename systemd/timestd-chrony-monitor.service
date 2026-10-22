@@ -13,6 +13,14 @@ Type=oneshot
 SuccessExitStatus=1
 User=root
 Group=root
+# The reach latch's state (scripts/check-chrony-reach.sh).  Root's own
+# directory, never /run/hf-timestd, which the timestd user owns: a symlink
+# planted there would let this root unit clobber any file.  Preserved
+# across runs, because a oneshot's RuntimeDirectory is otherwise removed
+# when each run ends, and the latch would forget every time.
+RuntimeDirectory=hf-timestd-monitor
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
 
 # Run the reach monitoring script
 # Alert if reach < 64 (decimal) = 25% success rate

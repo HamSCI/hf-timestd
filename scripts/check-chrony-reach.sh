@@ -16,8 +16,17 @@
 # the status is reported when it CHANGES, and a fault that persists is
 # reminded once every --remind-hours (default 6), never once per run.  The
 # latch lives in $CHRONY_REACH_STATE_FILE (default
-# /run/hf-timestd/chrony-reach.state).  The exit code still reports every
-# run's status.
+# /run/hf-timestd-monitor/chrony-reach.state).  The exit code still reports
+# every run's status.
+#
+# ⛔ This script runs as ROOT (timestd-chrony-monitor.service).  Its state
+# directory is the unit's own RuntimeDirectory, mode 0700, never
+# /run/hf-timestd, which the timestd user owns: a symlink planted there
+# would let root's write clobber any file.  Belt and braces: the script
+# refuses a state directory not owned by $CHRONY_REACH_STATE_OWNER_UID
+# (default 0) or writable by group or others, and then reports every run
+# as before; and it writes by mktemp + rename in that directory, so a
+# planted symlink is replaced, never followed.
 #
 # Reach is an octal value (0-377) representing the last 8 poll attempts:
 #   377 (octal) = 11111111 (binary) = 8/8 successful polls (optimal)
@@ -41,7 +50,8 @@ ALERT_COMMAND=""
 VERBOSE=false
 RESTART_ON_FAILURE=false
 REMIND_HOURS=6
-STATE_FILE="${CHRONY_REACH_STATE_FILE:-/run/hf-timestd/chrony-reach.state}"
+STATE_FILE="${CHRONY_REACH_STATE_FILE:-/run/hf-timestd-monitor/chrony-reach.state}"
+STATE_OWNER_UID="${CHRONY_REACH_STATE_OWNER_UID:-0}"
 NOW="${CHRONY_REACH_NOW:-$(date +%s)}"
 
 # Parse arguments
@@ -166,12 +176,33 @@ else
 fi
 
 # Latch: report on change, remind a persisting fault, else stay quiet.
+# The state directory must be a real directory owned by STATE_OWNER_UID
+# and writable by nobody else; otherwise the latch stands down.
+STATE_DIR="$(dirname "$STATE_FILE")"
+STATE_OK=false
+if [[ -d "$STATE_DIR" && ! -L "$STATE_DIR" ]]; then
+    read -r _dir_uid _dir_mode < <(stat -c '%u %a' "$STATE_DIR") || true
+    if [[ "$_dir_uid" == "$STATE_OWNER_UID" ]] \
+       && [[ "$_dir_mode" =~ ^[0-7]+$ ]] \
+       && (( (8#$_dir_mode & 8#022) == 0 )); then
+        STATE_OK=true
+    fi
+fi
+if [[ "$STATE_OK" != "true" ]]; then
+    echo "WARNING: state directory $STATE_DIR is missing, not owned by uid $STATE_OWNER_UID, or writable by group/others; not latching (reporting every run)"
+fi
+
 PREV_STATUS=""
 SINCE="$NOW"
 LAST_REPORT=0
-if [[ -r "$STATE_FILE" ]]; then
+if [[ "$STATE_OK" == "true" && -f "$STATE_FILE" && ! -L "$STATE_FILE" ]]; then
     read -r PREV_STATUS SINCE LAST_REPORT < "$STATE_FILE" || true
 fi
+# Only the statuses this script writes count as prior state.
+case "$PREV_STATUS" in
+    OK|WARNING) ;;
+    *) PREV_STATUS=""; SINCE="$NOW"; LAST_REPORT=0 ;;
+esac
 [[ "$SINCE" =~ ^[0-9]+$ ]] || SINCE="$NOW"
 [[ "$LAST_REPORT" =~ ^[0-9]+$ ]] || LAST_REPORT=0
 
@@ -210,9 +241,20 @@ if [[ -n "$REPORT" ]]; then
     LAST_REPORT="$NOW"
 fi
 
-# Persist the latch.  A failed write (no /run/hf-timestd) only costs the
+# Persist the latch: a temp file in the state directory, renamed over the
+# state path.  rename() replaces whatever sits at the path, a planted
+# symlink included, and never follows it.  A failed write only costs the
 # latch: the next run reports again.
-mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
-echo "$STATUS $SINCE $LAST_REPORT" > "$STATE_FILE" 2>/dev/null || true
+if [[ "$STATE_OK" == "true" ]]; then
+    _tmp=$(mktemp "$STATE_DIR/.chrony-reach.XXXXXX" 2>/dev/null) || _tmp=""
+    if [[ -n "$_tmp" ]]; then
+        if echo "$STATUS $SINCE $LAST_REPORT" > "$_tmp" \
+           && mv -fT "$_tmp" "$STATE_FILE" 2>/dev/null; then
+            :
+        else
+            rm -f "$_tmp"
+        fi
+    fi
+fi
 
 exit $EXIT_CODE
