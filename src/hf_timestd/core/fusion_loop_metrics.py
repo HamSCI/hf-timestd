@@ -54,7 +54,10 @@ Schema v1:
 ``counts`` holds per-cycle tallies.  The per-broadcast Kalman banks add
 the rows they consumed, the rows they served again from an earlier
 cycle, and the rows they refused (older than the filter's last row and
-never consumed); the refused count should read zero.
+never consumed, a duplicate, or non-finite); the refused count should
+read zero.  ``totals`` holds cumulative tallies since the process
+started (``kalman_rows_refused``), and the journal line carries them,
+so one refusal outlives the cycle that saw it.
 """
 from __future__ import annotations
 
@@ -109,6 +112,7 @@ class FusionLoopMetrics:
         self._phases: Dict[str, float] = {}
         self._events: List[str] = []
         self._counts: Dict[str, int] = {}
+        self._totals: Dict[str, int] = {}   # cumulative; never reset
         self._cycle_start = time.monotonic()
 
     def start_cycle(self) -> None:
@@ -146,6 +150,10 @@ class FusionLoopMetrics:
         """Add n to a per-cycle tally (e.g. 'kalman_rows_refused')."""
         self._counts[name] = self._counts.get(name, 0) + int(n)
 
+    def set_total(self, name: str, value: int) -> None:
+        """Record a cumulative tally (e.g. rows refused since start)."""
+        self._totals[name] = int(value)
+
     def finalize_and_emit(self) -> Dict[str, object]:
         """Compute loop duration, sample RSS, emit to disk + journald.
         Returns the payload dict for inspection/testing."""
@@ -168,6 +176,7 @@ class FusionLoopMetrics:
             "phases": {k: round(v, 6) for k, v in self._phases.items()},
             "events": list(self._events),
             "counts": dict(self._counts),
+            "totals": dict(self._totals),
         }
 
         self._log_structured(payload)
@@ -179,6 +188,9 @@ class FusionLoopMetrics:
         phases = payload["phases"]
         phase_str = " ".join(f"{k}={v:.3f}" for k, v in sorted(phases.items()))
         events_str = ",".join(payload["events"]) if payload["events"] else "-"
+        totals = payload.get("totals") or {}
+        totals_str = (" totals=" + ",".join(
+            f"{k}:{v}" for k, v in sorted(totals.items()))) if totals else ""
         now = self._clock()
         notable = (
             bool(payload["events"])
@@ -192,13 +204,14 @@ class FusionLoopMetrics:
             level = logging.DEBUG
         log.log(
             level,
-            "fusion_metrics cycle=%d loop=%.3fs wd_pct=%.1f rss_kb=%d %s events=%s",
+            "fusion_metrics cycle=%d loop=%.3fs wd_pct=%.1f rss_kb=%d %s events=%s%s",
             payload["cycle_index"],
             payload["loop_duration_sec"],
             payload["watchdog_consumed_pct"],
             payload["rss_kb"],
             phase_str,
             events_str,
+            totals_str,
         )
 
     def _atomic_write(self, payload: dict) -> None:

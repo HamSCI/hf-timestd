@@ -1325,21 +1325,21 @@ class MultiBroadcastFusion:
             )
             kalmans[broadcast_id] = kalman
             t_obs = float(m.timestamp)
-            oldest[broadcast_id] = min(t_obs, oldest.get(broadcast_id, t_obs))
 
             cached = kalman.output_for(t_obs)
             if cached is not None:
                 outputs[i] = cached
+                oldest[broadcast_id] = min(t_obs, oldest.get(broadcast_id, t_obs))
                 n_reused += 1
             elif kalman.last_obs_time is not None and t_obs <= kalman.last_obs_time:
                 n_refused += 1
-                logger.debug(
-                    f"{feed.upper()} {broadcast_id}: row refused, older than the "
-                    f"filter's last row and never consumed "
-                    f"(t={t_obs:.3f}, last={kalman.last_obs_time:.3f})"
-                )
+                self._note_refused_row(
+                    feed, broadcast_id,
+                    f"older than the filter's last row and never consumed "
+                    f"(t={t_obs:.3f}, last={kalman.last_obs_time:.3f})")
             else:
                 fresh[broadcast_id].append((t_obs, i))
+                oldest[broadcast_id] = min(t_obs, oldest.get(broadcast_id, t_obs))
 
         for broadcast_id, rows in fresh.items():
             kalman = kalmans[broadcast_id]
@@ -1355,14 +1355,20 @@ class MultiBroadcastFusion:
                 else:
                     out = kalman.update(m.d_clock_ms, snr_db, t_obs=t_obs)
                 if kalman.n_refused != refused_before:
-                    # Two rows with one time in one read: the second is a
-                    # duplicate.  The filter logged it at DEBUG.
+                    # Two rows with one time in one read (the second is a
+                    # duplicate), or a non-finite row, which the filter
+                    # refuses once and then serves as NaN.
                     n_refused += 1
+                    self._note_refused_row(
+                        feed, broadcast_id,
+                        f"{kalman.last_refusal} row (t={t_obs:.3f})")
                     continue
                 outputs[i] = out
                 n_fed += 1
 
         # A row that has left the lookback never returns; forget its output.
+        # A late row refused above does not set the bound: it must not
+        # wipe the outputs of the window it arrived behind.
         for broadcast_id, t_oldest in oldest.items():
             kalmans[broadcast_id].forget_outputs_before(t_oldest)
 
@@ -1373,6 +1379,11 @@ class MultiBroadcastFusion:
             self.loop_metrics.add_count('kalman_rows_fed', n_fed)
             self.loop_metrics.add_count('kalman_rows_reused', n_reused)
             self.loop_metrics.add_count('kalman_rows_refused', n_refused)
+            # The cumulative total, both feeds, since the process started:
+            # one refusal must not vanish with the next cycle's snapshot.
+            self.loop_metrics.set_total(
+                'kalman_rows_refused',
+                sum(c['refused'] for c in self.kalman_row_counts.values()))
 
         filtered_measurements = []
         for m, out in zip(measurements, outputs):
@@ -1402,6 +1413,19 @@ class MultiBroadcastFusion:
             filtered_measurements.append(filtered_m)
         
         return filtered_measurements
+
+    def _note_refused_row(self, feed: str, broadcast_id: str, why: str) -> None:
+        """A refused row means a row reached fusion late, twice, or broken:
+        an upstream fault.  Say so at WARNING the first time per (feed,
+        broadcast), then as a periodic count, then a clear line."""
+        label = f"{feed.upper()} {broadcast_id}"
+        self._kalman_conditions.note(
+            f"{label} rows refused",
+            f"{label}: Kalman bank refused a row: {why}. The row stays out "
+            f"of fusion; a refused row means L1 delivered it late, twice, "
+            f"or non-finite.",
+            level=logging.WARNING,
+        )
 
     @staticmethod
     def _row_source(m: 'BroadcastMeasurement') -> str:
@@ -2864,6 +2888,12 @@ class MultiBroadcastFusion:
         total_samples = estimate['n_samples']
         if total_samples % 75 != 0:  # ~10 min at 8s cadence
             return
+        # Each row enters once, so the L2 pass and any cycle without a
+        # new row see the same n as the pass that logged it.  Log each n
+        # once, or one warning reads like two.
+        if total_samples == getattr(self, '_drift_status_logged_n', None):
+            return
+        self._drift_status_logged_n = total_samples
         
         logger.info(
             f"LONG-TERM DRIFT ESTIMATE: "

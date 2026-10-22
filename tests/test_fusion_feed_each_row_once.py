@@ -30,6 +30,7 @@ import numpy as np
 import pytest
 
 from hf_timestd.core.broadcast_kalman_filter import BroadcastKalmanFilter
+from hf_timestd.core.condition_log import ConditionLog
 from hf_timestd.core.fusion_loop_metrics import FusionLoopMetrics
 from hf_timestd.core.multi_broadcast_fusion import (
     BroadcastMeasurement,
@@ -117,6 +118,39 @@ class SlidingWindowRun:
             self.cycle()
 
 
+class FakeClock:
+    def __init__(self):
+        self.t = 5000.0
+
+    def __call__(self):
+        return self.t
+
+
+class caplog_at:
+    """Collect one logger's records at a level, without pytest's caplog."""
+
+    def __init__(self, level, name):
+        self.level, self.logger = level, logging.getLogger(name)
+
+    def __enter__(self):
+        self.records = []
+        outer = self
+
+        class _H(logging.Handler):
+            def emit(self, record):
+                outer.records.append(record)
+
+        self.handler = _H(level=self.level)
+        self.old_level = self.logger.level
+        self.logger.setLevel(self.level)
+        self.logger.addHandler(self.handler)
+        return self.records
+
+    def __exit__(self, *exc):
+        self.logger.removeHandler(self.handler)
+        self.logger.setLevel(self.old_level)
+
+
 def _count_mode_changes(monkeypatch):
     """Count every MODE_CHANGE verdict any filter reaches."""
     counter = {"n": 0}
@@ -183,13 +217,15 @@ class TestFilterKeepsRowTime:
         t0 = 1.8e9
         kf.update(17.0, snr_db=20.0, t_obs=t0)
         kf.update(17.4, snr_db=20.0, t_obs=t0 + 60.0)
+        kf.update(17.4, snr_db=20.0, t_obs=t0 + 60.0)     # refused before save
         kf.save_state(tmp_path)
 
         kf2 = BroadcastKalmanFilter("WWV_10000", "WWV", 10.0)
         assert kf2.load_state(tmp_path)
         assert kf2.last_obs_time == t0 + 60.0
+        assert kf2.n_refused == 1                          # the count survives
         kf2.update(90.0, snr_db=20.0, t_obs=t0 + 60.0)
-        assert kf2.n_refused == 1
+        assert kf2.n_refused == 2
         kf2.update(17.5, snr_db=20.0, t_obs=t0 + 300.0)
         assert kf2.last_dt_min == pytest.approx(4.0)
 
@@ -198,7 +234,10 @@ class TestFilterKeepsRowTime:
         starts again from the row, with a wide P, and says so once."""
         kf = BroadcastKalmanFilter("WWV_10000", "WWV", 10.0)
         t0 = 1.8e9
-        kf.update(17.0, snr_db=20.0, t_obs=t0)
+        for k in range(10):                         # P shrinks far below 100
+            kf.update(17.0, snr_db=20.0, t_obs=t0 + 60.0 * k)
+        assert np.sqrt(kf.P[0, 0]) < 1.0
+        t0 += 60.0 * 9
         kf.state = np.array([17.0, 0.5])            # a wild rate
         caplog.set_level(logging.INFO, logger=KALMAN_LOGGER)
         tof, sigma = kf.update(4.0, snr_db=20.0,
@@ -208,6 +247,52 @@ class TestFilterKeepsRowTime:
         assert sigma == pytest.approx(10.0)
         lines = [r for r in caplog.records if "re-initialised" in r.getMessage()]
         assert len(lines) == 1
+
+    @pytest.mark.parametrize("gap_min, restarts", [(179.0, False), (181.0, True)])
+    def test_the_restart_threshold_sits_at_180_minutes(self, gap_min, restarts):
+        kf = BroadcastKalmanFilter("WWV_10000", "WWV", 10.0)
+        t0 = 1.8e9
+        for k in range(10):
+            kf.update(17.0, snr_db=20.0, t_obs=t0 + 60.0 * k)
+        t_last = t0 + 60.0 * 9
+        kf.state = np.array([17.0, 0.0])
+        kf.update(17.0, snr_db=20.0, t_obs=t_last + 60.0 * gap_min)
+        # A restart leaves sigma at the initial 10 ms; a predict across
+        # the gap (P grows by ~q_tof·gap) and an update leaves it far less.
+        sigma = np.sqrt(kf.P[0, 0])
+        if restarts:
+            assert sigma == pytest.approx(10.0)
+            assert kf.last_dt_min != pytest.approx(gap_min)
+        else:
+            assert sigma < 1.0
+            assert kf.last_dt_min == pytest.approx(gap_min)
+
+    def test_a_coast_adds_process_noise_for_the_real_gap(self):
+        kf = BroadcastKalmanFilter("WWV_10000", "WWV", 10.0)
+        t0 = 1.8e9
+        kf.update(17.0, snr_db=20.0, t_obs=t0)
+        kf.state = np.array([17.0, 0.02])
+        kf.P = np.array([[0.5, 0.0], [0.0, 0.0]])
+        kf.predict(t_obs=t0 + 600.0)
+        q = kf.characteristics.q_tof
+        assert kf.last_dt_min == pytest.approx(10.0)
+        assert kf.P[0, 0] == pytest.approx(0.5 + 10.0 * q)
+        assert kf.P[1, 1] == pytest.approx(10.0 * kf.characteristics.q_doppler)
+        assert kf.state[0] == pytest.approx(17.0 + 0.02 * 10.0)
+
+    def test_a_non_finite_row_is_refused_once_and_remembered(self):
+        kf = BroadcastKalmanFilter("WWV_10000", "WWV", 10.0)
+        t0 = 1.8e9
+        kf.update(17.0, snr_db=20.0, t_obs=t0)
+        state = kf.state.copy()
+        out = kf.update(float("nan"), snr_db=20.0, t_obs=t0 + 60.0)
+        assert np.isnan(out[0]) and np.isnan(out[1])
+        assert kf.n_refused == 1
+        assert kf.last_refusal == "non-finite"
+        assert np.isnan(kf.output_for(t0 + 60.0)[0])
+        kf.update(float("nan"), snr_db=20.0, t_obs=t0 + 60.0)
+        assert kf.n_refused == 1                      # once, not per read
+        np.testing.assert_array_equal(kf.state, state)
 
 
 # ---------------------------------------------------------------------------
@@ -270,14 +355,17 @@ class TestFusionFeedsEachRowOnce:
             kf = fu.broadcast_kalmans["l2:WWV_10000"]
             n_before = kf.n_updates
             late = _row(kf.last_obs_time - 30.0, "WWV", 10.0, 40.0)
-            caplog.set_level(logging.DEBUG, logger=FUSION_LOGGER)
+            caplog.set_level(logging.DEBUG, logger=KALMAN_LOGGER)
             out = fu._apply_broadcast_kalmans([late], feed="l2")
             assert out == []
             assert kf.n_updates == n_before
             assert fu.kalman_row_counts["l2"]["refused"] == 1
-            assert any("refused" in r.getMessage() for r in caplog.records
-                       if r.name == FUSION_LOGGER
-                       and r.levelno == logging.DEBUG)
+            warnings = [r for r in caplog.records
+                        if r.name == KALMAN_LOGGER
+                        and r.levelno == logging.WARNING
+                        and "refused a row" in r.getMessage()]
+            assert len(warnings) == 1
+            assert "L2 WWV_10000" in warnings[0].getMessage()
 
     def test_refusals_reach_fusion_metrics(self, tmp_path):
         with tempfile.TemporaryDirectory() as td:
@@ -295,6 +383,94 @@ class TestFusionFeedsEachRowOnce:
             assert counts["kalman_rows_refused"] == 1
             assert counts["kalman_rows_fed"] == 2 * len(BCASTS) * run.distinct_rows_seen()
             assert counts["kalman_rows_reused"] > counts["kalman_rows_fed"]
+            assert payload["totals"]["kalman_rows_refused"] == 1
+
+            # The next cycle refuses nothing; the total still shows the
+            # one refusal, in the file and in the journal line.
+            metrics.start_cycle()
+            run.cycle()
+            with caplog_at(logging.DEBUG, "hf_timestd.core.fusion_loop_metrics") as recs:
+                payload = metrics.finalize_and_emit()
+            assert payload["counts"]["kalman_rows_refused"] == 0
+            assert payload["totals"]["kalman_rows_refused"] == 1
+            assert "kalman_rows_refused:1" in recs[-1].getMessage()
+
+    def test_a_refusal_logs_warning_then_count_then_clear(self, caplog):
+        """Faults stay loud: the first refusal per (feed, broadcast) logs at
+        WARNING, repeats come as a periodic count, and a clear line follows
+        when the refusals stop."""
+        clock = FakeClock()
+        with tempfile.TemporaryDirectory() as td:
+            run = SlidingWindowRun(td, minutes=20)
+            run.run_minutes(5)
+            fu = run.fusion
+            fu._kalman_conditions = ConditionLog(
+                logging.getLogger(KALMAN_LOGGER), clock=clock)
+            kf = fu.broadcast_kalmans["l2:WWV_10000"]
+            caplog.set_level(logging.WARNING, logger=KALMAN_LOGGER)
+
+            def refuse_one(dt):
+                late = _row(kf.last_obs_time - dt, "WWV", 10.0, 40.0)
+                fu._apply_broadcast_kalmans([late], feed="l2")
+
+            refuse_one(30.0)
+            clock.t += 10.0
+            refuse_one(31.0)                      # silent repeat
+            clock.t += 595.0
+            refuse_one(32.0)                      # periodic count (605 s on)
+            clock.t += 601.0
+            fu._kalman_conditions.sweep()         # fuse() sweeps every cycle
+            msgs = [r.getMessage() for r in caplog.records
+                    if r.name == KALMAN_LOGGER and "refused" in r.getMessage()]
+            assert all(r.levelno == logging.WARNING for r in caplog.records
+                       if r.name == KALMAN_LOGGER and "refused" in r.getMessage())
+            assert len(msgs) == 3, msgs
+            assert "refused a row" in msgs[0]
+            assert "still present" in msgs[1]
+            assert "cleared" in msgs[2]
+            assert fu.kalman_row_counts["l2"]["refused"] == 3
+
+    def test_a_non_finite_row_is_refused_once_through_fusion(self, caplog):
+        with tempfile.TemporaryDirectory() as td:
+            run = SlidingWindowRun(td, minutes=20)
+            run.run_minutes(5)
+            fu = run.fusion
+            kf = fu.broadcast_kalmans["l2:WWV_10000"]
+            bad = _row(kf.last_obs_time + 60.0, "WWV", 10.0, float("nan"))
+            good = _row(kf.last_obs_time + 120.0, "WWV", 10.0, -2.0)
+            caplog.set_level(logging.WARNING, logger=KALMAN_LOGGER)
+            for _ in range(5):                    # read again every cycle
+                out = fu._apply_broadcast_kalmans([bad, good], feed="l2")
+                finite = [m for m in out if np.isfinite(m.d_clock_ms)]
+                assert [m.timestamp for m in finite] == [good.timestamp]
+            assert fu.kalman_row_counts["l2"]["refused"] == 1
+            assert kf.n_refused == 1
+            warnings = [r for r in caplog.records if "non-finite" in r.getMessage()]
+            assert len(warnings) == 1
+
+    def test_two_rows_with_one_time_in_one_read(self):
+        """The second is a duplicate: refused, counted, left out."""
+        with tempfile.TemporaryDirectory() as td:
+            run = SlidingWindowRun(td, minutes=20)
+            run.run_minutes(5)
+            fu = run.fusion
+            kf = fu.broadcast_kalmans["l2:WWV_10000"]
+            t = kf.last_obs_time + 60.0
+            out = fu._apply_broadcast_kalmans(
+                [_row(t, "WWV", 10.0, -2.0), _row(t, "WWV", 10.0, 9.0)],
+                feed="l2")
+            assert len(out) == 1
+            assert fu.kalman_row_counts["l2"]["refused"] == 1
+
+    def test_outputs_drop_out_with_their_rows(self):
+        """Each filter keeps outputs only for rows still in the lookback."""
+        with tempfile.TemporaryDirectory() as td:
+            run = SlidingWindowRun(td, minutes=70)
+            run.run_minutes(70)
+            oldest = run.row_time(run.distinct_rows_seen() - LOOKBACK_MIN)
+            for key, kf in run.fusion.broadcast_kalmans.items():
+                assert len(kf.row_outputs) <= LOOKBACK_MIN, key
+                assert min(kf.row_outputs) >= oldest, key
 
     def test_mode_transitions_fall_with_the_replay(self, monkeypatch):
         """A filter can flag a mode change only on an update, and it now
@@ -401,6 +577,74 @@ class TestLongTermStatsTakeEachRowOnce:
             for key, stats in run.fusion.long_term_stats.items():
                 assert rows - 3 <= stats["n"] <= rows, key
                 assert stats["last_time"] <= run.row_time(rows - 1), key
+
+    def test_statistics_survive_a_restart_and_take_no_row_twice(self):
+        """Saved stats carry the rows_once mark, load back whole, and the
+        window read after the restart adds nothing already counted."""
+        minutes = 40
+        t_base = 1.8e9
+        with tempfile.TemporaryDirectory() as td:
+            fu = MultiBroadcastFusion(data_root=Path(td))
+            windows = list(_windows(t_base, minutes))
+            for window in windows:
+                fu._update_long_term_stats(window)
+            fu._save_long_term_stats()
+            saved = {k: dict(v) for k, v in fu.long_term_stats.items()}
+
+            fu2 = MultiBroadcastFusion(data_root=Path(td))
+            assert fu2.long_term_stats == saved
+            fu2._update_long_term_stats(windows[-1])      # same lookback again
+            for key, stats in fu2.long_term_stats.items():
+                assert stats["n"] == minutes, key
+
+    def test_statistics_from_the_replaying_code_start_fresh(self, caplog):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "state" / "long_term_drift_stats.json"
+            path.parent.mkdir(parents=True)
+            old = {"WWV_10.00": {"n": 40000, "sum_t": 1.0, "sum_y": 1.0,
+                                 "sum_tt": 1.0, "sum_ty": 1.0, "sum_yy": 1.0,
+                                 "first_time": 1.8e9, "last_time": 1.8e9},
+                   "_metadata": {"saved_at": time.time(), "n_broadcasts": 1,
+                                 "total_samples": 40000}}
+            path.write_text(__import__("json").dumps(old))
+            caplog.set_level(logging.INFO, logger=FUSION_LOGGER)
+            fu = MultiBroadcastFusion(data_root=Path(td))
+            assert fu.long_term_stats == {}
+            assert any("predate feeding each row once" in r.getMessage()
+                       for r in caplog.records)
+
+    def test_tick_rows_and_l1_rows_count_separately(self):
+        """A tick average and an L1 row of one broadcast may share a minute;
+        each enters the statistics once."""
+        t_base = 1.8e9
+        with tempfile.TemporaryDirectory() as td:
+            fu = MultiBroadcastFusion(data_root=Path(td))
+            for k in range(10):
+                t = t_base + 60.0 * k
+                tick = _row(t, "WWV", 10.0, -2.0)
+                tick.propagation_mode = "TICK"
+                window = [_row(t, "WWV", 10.0, -2.1), tick]
+                fu._update_long_term_stats(window)
+                fu._update_long_term_stats(window)
+            assert fu.long_term_stats["WWV_10.00"]["n"] == 20
+
+    def test_drift_status_logs_once_per_n(self, caplog):
+        """The L2 pass, and cycles with no new row, see the n the L1 pass
+        logged; the estimate (and any warning) goes out once."""
+        rng = np.random.default_rng(5)
+        rows = [_row(1.8e9 + 60.0 * k, "WWV", 10.0, rng.normal(0.0, 1.5))
+                for k in range(75)]
+        with tempfile.TemporaryDirectory() as td:
+            fu = MultiBroadcastFusion(data_root=Path(td))
+            fu._update_long_term_stats(rows)
+            assert fu.get_long_term_drift_estimate()["n_samples"] == 75
+            caplog.set_level(logging.INFO, logger=FUSION_LOGGER)
+            for _ in range(4):                 # L1 pass, L2 pass, two quiet cycles
+                fu._update_long_term_stats(rows)
+                fu.log_long_term_drift_status()
+            lines = [r for r in caplog.records
+                     if "LONG-TERM DRIFT ESTIMATE" in r.getMessage()]
+            assert len(lines) == 1
 
     def test_no_drift_alarm_on_a_four_hour_null(self, caplog):
         caplog.set_level(logging.WARNING, logger=FUSION_LOGGER)

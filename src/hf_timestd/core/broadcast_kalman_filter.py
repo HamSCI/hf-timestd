@@ -199,6 +199,7 @@ class BroadcastKalmanFilter:
         # persist with the state, so a restart does not replay the window.
         self.last_obs_time: Optional[float] = None   # unix s of the last row
         self.n_refused = 0
+        self.last_refusal: Optional[str] = None   # why the last row was refused
         self.last_dt_min: Optional[float] = None
         self.last_prior_P: Optional[np.ndarray] = None
         self.row_outputs: Dict[float, Tuple[float, float]] = {}
@@ -326,6 +327,7 @@ class BroadcastKalmanFilter:
         if self.last_obs_time is not None and t_obs <= self.last_obs_time:
             self.n_refused += 1
             kind = 'duplicate' if t_obs == self.last_obs_time else 'older'
+            self.last_refusal = kind
             logger.debug(
                 f"{self._log_label}: {what} refused, {kind} row "
                 f"(t={t_obs:.3f}, last={self.last_obs_time:.3f}, "
@@ -415,6 +417,22 @@ class BroadcastKalmanFilter:
         # well-defined "no-op" answer rather than NaN.  ~10⁶ updates/week
         # means we cannot rely on upstream cleanliness for safety.
         if not (np.isfinite(measurement_ms) and np.isfinite(snr_db)):
+            if t_obs is not None:
+                # Refuse the row once and remember it as seen, with a NaN
+                # output, so a caller that reads it again on later cycles
+                # gets NaN back (and drops it) without a second refusal.
+                # Fusion logs the refusal; here it goes to DEBUG.
+                t_obs = float(t_obs)
+                if self.output_for(t_obs) is None:
+                    self.n_refused += 1
+                    self.last_refusal = 'non-finite'
+                    self.row_outputs[t_obs] = (float('nan'), float('nan'))
+                    logger.debug(
+                        f"{self._log_label}: update refused, non-finite row "
+                        f"(t={t_obs:.3f}, measurement_ms={measurement_ms!r}, "
+                        f"snr_db={snr_db!r}, refused so far {self.n_refused})"
+                    )
+                return float('nan'), float('nan')
             logger.warning(
                 f"{self.broadcast_id}: non-finite Kalman input rejected "
                 f"(measurement_ms={measurement_ms!r}, snr_db={snr_db!r})"
