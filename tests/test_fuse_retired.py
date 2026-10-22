@@ -147,6 +147,32 @@ def test_install_removes_an_old_fuse_line_without_conf_d(tmp_path):
     assert "Removed the retired FUSE refclock" in out.stdout + out.stderr
 
 
+def test_install_removes_exactly_the_live_fuse_lines(tmp_path):
+    """The regex's edges (review of T3 steps 2-5, c): a loosened pattern
+    must fail here.  It removes a live FUSE line however indented, and
+    leaves a commented one, refid FUSEX, and gpsd's SHM lines alone."""
+    keep = [
+        "refclock SHM 0 refid LG29 poll 2 precision 1e-1 offset 0.0 delay 0.2",
+        "refclock SHM 1 refid PPS prefer",
+        "refclock SOCK /run/chrony.ttyS0.sock refid PPS2",
+        f"# {OLD_FUSE_LINE}",
+        "#refclock SHM 1 refid FUSE noselect",
+        "refclock SHM 4 refid FUSEX poll 4",
+        "server time.example.org iburst  # refid FUSE in a comment",
+        HPPS_LINE,
+    ]
+    drop = [
+        OLD_FUSE_LINE,
+        f"\t{OLD_FUSE_LINE} noselect",
+        "   refclock SHM 1 refid FUSE",
+        "refclock SHM 1 poll 4 refid  FUSE\tnoselect",
+    ]
+    conf = tmp_path / "chrony.conf"
+    conf.write_text("\n".join(keep[:4] + drop[:2] + keep[4:] + drop[2:]) + "\n")
+    _run_helper(conf, tmp_path / "no-conf.d")
+    assert conf.read_text().splitlines() == keep
+
+
 def test_install_includes_the_shipped_file_once_without_conf_d(tmp_path):
     conf = tmp_path / "chrony.conf"
     conf.write_text("pool 2.debian.pool.ntp.org iburst\n")
@@ -286,3 +312,61 @@ def test_reach_monitor_no_longer_counts_fuse(tmp_path):
 def test_reach_monitor_is_content_with_hpps_alone(tmp_path):
     r = _reach(tmp_path, HDR + "#? HPPS  0 0 377 1 +1ms[+1ms] +/- 1ms\n")
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+# ── the reach monitor latches a persistent condition ────────────────────
+#
+# Review of T3 steps 2-5, finding I2: with FUSE gone, a station without T6
+# fails the HPPS check on every 5-minute timer run, for good.  A
+# persistent condition must be reported on change, then reminded
+# periodically (feedback_persistent_condition_log_spam): never once per run.
+
+HPPS_DEAD = HDR + "#? HPPS  0 0   0 - +0ns[+0ns] +/- 0ns\n"
+HPPS_LIVE = HDR + "#? HPPS  0 0 377 1 +1ms[+1ms] +/- 1ms\n"
+
+
+def _reach_at(tmp_path, sources, now, state):
+    bin_dir = tmp_path / "bin"
+    if bin_dir.exists():
+        (bin_dir / "chronyc").write_text(
+            f"#!/bin/bash\ncat <<'EOF'\n{sources}EOF\n")
+    else:
+        _fake_bin(tmp_path, sources)
+    env = dict(os.environ,
+               PATH=f"{bin_dir}:{os.environ['PATH']}",
+               CHRONY_REACH_STATE_FILE=str(state),
+               CHRONY_REACH_NOW=str(now))
+    r = subprocess.run(
+        ["bash", str(REACH_SH), "--threshold", "64", "--verbose",
+         "--restart-on-failure"],
+        capture_output=True, text=True, env=env)
+    return r.returncode, r.stdout + r.stderr
+
+
+def test_reach_monitor_reports_a_persistent_fault_once_then_reminds(tmp_path):
+    state = tmp_path / "reach.state"
+    t0 = 1_800_000_000
+    code, out = _reach_at(tmp_path, HPPS_DEAD, t0, state)
+    assert code == 1 and "WARNING" in out and "HPPS" in out
+
+    # The next runs, five minutes apart for most of a day: silent.
+    for k in range(1, 60):
+        code, out = _reach_at(tmp_path, HPPS_DEAD, t0 + 300 * k, state)
+        assert code == 1
+        assert out.strip() == "", (k, out)
+
+    # Six hours on: one reminder that names how long it has lasted.
+    code, out = _reach_at(tmp_path, HPPS_DEAD, t0 + 6 * 3600, state)
+    assert code == 1 and "still" in out and "6h" in out
+    code, out = _reach_at(tmp_path, HPPS_DEAD, t0 + 6 * 3600 + 300, state)
+    assert out.strip() == ""
+
+
+def test_reach_monitor_reports_recovery_once(tmp_path):
+    state = tmp_path / "reach.state"
+    t0 = 1_800_000_000
+    _reach_at(tmp_path, HPPS_DEAD, t0, state)
+    code, out = _reach_at(tmp_path, HPPS_LIVE, t0 + 300, state)
+    assert code == 0 and "OK" in out and "recovered" in out
+    code, out = _reach_at(tmp_path, HPPS_LIVE, t0 + 600, state)
+    assert code == 0 and out.strip() == ""
