@@ -43,8 +43,18 @@ Schema v1:
         "fusion_status_write": 0.004,
         "chrony_stats": 0.001
       },
-      "events": ["shm_reconnect_l1", "kalman_lock"]
+      "events": ["shm_reconnect_l1", "kalman_lock"],
+      "counts": {
+        "kalman_rows_fed": 2,
+        "kalman_rows_reused": 286,
+        "kalman_rows_refused": 0
+      }
     }
+
+``counts`` holds per-cycle tallies.  The per-broadcast Kalman banks add
+the rows they consumed, the rows they served again from an earlier
+cycle, and the rows they refused (older than the filter's last row and
+never consumed); the refused count should read zero.
 """
 from __future__ import annotations
 
@@ -98,6 +108,7 @@ class FusionLoopMetrics:
         self._cycle_index = 0
         self._phases: Dict[str, float] = {}
         self._events: List[str] = []
+        self._counts: Dict[str, int] = {}
         self._cycle_start = time.monotonic()
 
     def start_cycle(self) -> None:
@@ -106,6 +117,7 @@ class FusionLoopMetrics:
         self._cycle_start = time.monotonic()
         self._phases = {}
         self._events = []
+        self._counts = {}
 
     @contextmanager
     def phase(self, name: str) -> Iterator[None]:
@@ -130,6 +142,10 @@ class FusionLoopMetrics:
         """Record a discrete event (e.g. 'shm_reconnect_l1')."""
         self._events.append(name)
 
+    def add_count(self, name: str, n: int = 1) -> None:
+        """Add n to a per-cycle tally (e.g. 'kalman_rows_refused')."""
+        self._counts[name] = self._counts.get(name, 0) + int(n)
+
     def finalize_and_emit(self) -> Dict[str, object]:
         """Compute loop duration, sample RSS, emit to disk + journald.
         Returns the payload dict for inspection/testing."""
@@ -151,6 +167,7 @@ class FusionLoopMetrics:
             "rss_kb": int(rss_kb),
             "phases": {k: round(v, 6) for k, v in self._phases.items()},
             "events": list(self._events),
+            "counts": dict(self._counts),
         }
 
         self._log_structured(payload)

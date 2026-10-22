@@ -688,6 +688,9 @@ class MultiBroadcastFusion:
         # two SHM feeds carry genuinely uncorrelated estimates — the dual-feed
         # cross-check is meaningless if they share filter state.
         self.broadcast_kalmans: Dict[str, BroadcastKalmanFilter] = {}
+        # Rows each feed's bank consumed, served again, and refused
+        # (cumulative; fusion_metrics carries the per-cycle numbers).
+        self.kalman_row_counts: Dict[str, Dict[str, int]] = {}
         self.broadcast_kalman_state_dir = self.data_root / 'state' / 'broadcast_kalmans'
         for _feed in ('l1', 'l2'):
             (self.broadcast_kalman_state_dir / _feed).mkdir(parents=True, exist_ok=True)
@@ -848,6 +851,10 @@ class MultiBroadcastFusion:
         self.long_term_stats_file = self.data_root / 'state' / 'long_term_drift_stats.json'
         self.long_term_last_values: Dict[str, float] = {}  # For discontinuity detection
         self.long_term_discontinuity_threshold = 10.0  # ms - step change detection threshold
+        # Each row enters the statistics once, at its own time (stage 0):
+        # the last row time taken per (broadcast, source), shared by both
+        # feeds.  Seeded from the persisted last_time on load.
+        self._long_term_watermarks: Dict[Tuple[str, str], float] = {}
         self._load_long_term_stats()
         
         # Channels to aggregate
@@ -1283,15 +1290,32 @@ class MultiBroadcastFusion:
         Returns:
             Measurements with Kalman-filtered d_clock values and uncertainties
         """
-        filtered_measurements = []
+        # Stage 0 of the fusion Kalman review (2026-10-22, "feed each row
+        # once").  fuse() reads the whole 30-min lookback on every ~8 s
+        # cycle, so the same rows arrive here about 200 times.  Each row
+        # now reaches its (feed, broadcast) filter once, in time order, at
+        # its own observation time; a row the filter already consumed
+        # carries the output the filter gave it then, so the WLS sees the
+        # same rows as before.  A row at or before the filter's last row
+        # that the filter never consumed (it arrived late) is refused,
+        # counted, and left out of this cycle.
+        counts = self.kalman_row_counts.setdefault(
+            feed, {'fed': 0, 'reused': 0, 'refused': 0})
+        n_fed = n_reused = n_refused = 0
 
         # S3 + M-M11: coast every per-broadcast Kalman through a
         # leap-second hold rather than updating it with the 1-second-
         # stepped measurement.  The hold lasts a fixed timestamp window
-        # (10 min by default) — see `_leap_second_hold_active`.
+        # (10 min by default) — see `_leap_second_hold_active`.  Each new
+        # row coasts the filter once, by the real gap since the last row.
         leap_second_hold = self._leap_second_hold_active()
 
-        for m in measurements:
+        outputs: List[Optional[Tuple[float, float]]] = [None] * len(measurements)
+        fresh: Dict[str, List[Tuple[float, int]]] = defaultdict(list)
+        oldest: Dict[str, float] = {}
+        kalmans: Dict[str, 'BroadcastKalmanFilter'] = {}
+
+        for i, m in enumerate(measurements):
             # Construct broadcast ID
             broadcast_id = f"{m.station}_{int(m.frequency_mhz * 1000)}"
 
@@ -1299,19 +1323,62 @@ class MultiBroadcastFusion:
             kalman = self._get_or_create_broadcast_kalman(
                 broadcast_id, m.station, m.frequency_mhz, feed
             )
+            kalmans[broadcast_id] = kalman
+            t_obs = float(m.timestamp)
+            oldest[broadcast_id] = min(t_obs, oldest.get(broadcast_id, t_obs))
 
-            # Note: We're filtering d_clock directly, which includes both
-            # ionospheric path and clock offset. The TEC estimator will
-            # later separate these.
-            snr_db = getattr(m, 'snr_db', 10.0)  # Default SNR if not available
-
-            if leap_second_hold:
-                # Coast: advance the filter's model, ignore the stepped value.
-                filtered_d_clock, kalman_uncertainty = kalman.predict()
-            else:
-                filtered_d_clock, kalman_uncertainty = kalman.update(
-                    m.d_clock_ms, snr_db
+            cached = kalman.output_for(t_obs)
+            if cached is not None:
+                outputs[i] = cached
+                n_reused += 1
+            elif kalman.last_obs_time is not None and t_obs <= kalman.last_obs_time:
+                n_refused += 1
+                logger.debug(
+                    f"{feed.upper()} {broadcast_id}: row refused, older than the "
+                    f"filter's last row and never consumed "
+                    f"(t={t_obs:.3f}, last={kalman.last_obs_time:.3f})"
                 )
+            else:
+                fresh[broadcast_id].append((t_obs, i))
+
+        for broadcast_id, rows in fresh.items():
+            kalman = kalmans[broadcast_id]
+            for t_obs, i in sorted(rows):
+                m = measurements[i]
+                # Note: We're filtering d_clock directly, which includes both
+                # ionospheric path and clock offset.
+                snr_db = getattr(m, 'snr_db', 10.0)  # Default SNR if not available
+                refused_before = kalman.n_refused
+                if leap_second_hold:
+                    # Coast: advance the filter's model, ignore the stepped value.
+                    out = kalman.predict(t_obs=t_obs)
+                else:
+                    out = kalman.update(m.d_clock_ms, snr_db, t_obs=t_obs)
+                if kalman.n_refused != refused_before:
+                    # Two rows with one time in one read: the second is a
+                    # duplicate.  The filter logged it at DEBUG.
+                    n_refused += 1
+                    continue
+                outputs[i] = out
+                n_fed += 1
+
+        # A row that has left the lookback never returns; forget its output.
+        for broadcast_id, t_oldest in oldest.items():
+            kalmans[broadcast_id].forget_outputs_before(t_oldest)
+
+        counts['fed'] += n_fed
+        counts['reused'] += n_reused
+        counts['refused'] += n_refused
+        if self.loop_metrics is not None:
+            self.loop_metrics.add_count('kalman_rows_fed', n_fed)
+            self.loop_metrics.add_count('kalman_rows_reused', n_reused)
+            self.loop_metrics.add_count('kalman_rows_refused', n_refused)
+
+        filtered_measurements = []
+        for m, out in zip(measurements, outputs):
+            if out is None:
+                continue
+            filtered_d_clock, kalman_uncertainty = out
             
             # Create new measurement with filtered values
             # We preserve the original measurement but update d_clock and uncertainty
@@ -1335,6 +1402,36 @@ class MultiBroadcastFusion:
             filtered_measurements.append(filtered_m)
         
         return filtered_measurements
+
+    @staticmethod
+    def _row_source(m: 'BroadcastMeasurement') -> str:
+        """Tick averages and L1 rows of one broadcast are separate streams."""
+        return 'tick' if m.propagation_mode == 'TICK' else 'row'
+
+    def _take_new_rows(self, measurements: List['BroadcastMeasurement'],
+                       watermarks: Dict[Tuple[str, str], float]
+                       ) -> List['BroadcastMeasurement']:
+        """The rows this consumer has not yet taken, in time order.
+
+        fuse() hands its consumers the whole lookback twice a cycle (L1
+        pass, then L2 pass).  A consumer shared by both passes (the
+        long-term statistics) keeps one watermark per (broadcast, source)
+        across feeds, and takes a row only when it is newer than that
+        broadcast's last row taken.  The watermarks advance here.
+        """
+        new_rows = []
+        for m in sorted(measurements, key=lambda m: m.timestamp):
+            if m.station == 'GLOBAL_DIFF':
+                continue
+            key = (self._get_broadcast_key(m.station, m.frequency_mhz),
+                   self._row_source(m))
+            t_obs = float(m.timestamp)
+            last = watermarks.get(key)
+            if last is not None and t_obs <= last:
+                continue
+            watermarks[key] = t_obs
+            new_rows.append(m)
+        return new_rows
     
     def _load_long_term_stats(self):
         """
@@ -1354,8 +1451,18 @@ class MultiBroadcastFusion:
                 data = json.load(f)
             
             # Validate and load
-            if '_metadata' in data:
-                metadata = data.pop('_metadata')
+            metadata = data.pop('_metadata', {}) or {}
+            if not metadata.get('rows_once'):
+                # Statistics written before stage 0 (2026-10-22) took
+                # every lookback row about 400 times, stamped with the
+                # cycle's time.  Their n and Σt would dominate the
+                # honest ones for weeks, so they are not carried over.
+                logger.info(
+                    "Long-term drift stats predate feeding each row once "
+                    "(n inflated ~400x, stamped with cycle time) - starting fresh"
+                )
+                return
+            if metadata:
                 saved_at = metadata.get('saved_at', 0)
                 age_hours = (time.time() - saved_at) / 3600.0
                 
@@ -1375,6 +1482,11 @@ class MultiBroadcastFusion:
                 required = ['n', 'sum_t', 'sum_y', 'sum_tt', 'sum_ty', 'sum_yy']
                 if all(k in stats for k in required):
                     self.long_term_stats[broadcast_key] = stats
+                    # Rows up to the last one taken are already in.
+                    last_time = stats.get('last_time')
+                    if last_time is not None:
+                        for source in ('row', 'tick'):
+                            self._long_term_watermarks[(broadcast_key, source)] = float(last_time)
                     # Initialize last value for discontinuity detection
                     if stats['n'] > 0:
                         # Estimate last value from mean
@@ -1404,6 +1516,8 @@ class MultiBroadcastFusion:
             'saved_at': time.time(),
             'n_broadcasts': len(self.long_term_stats),
             'total_samples': sum(s['n'] for s in self.long_term_stats.values()),
+            # Each row once, at its own time (stage 0, 2026-10-22).
+            'rows_once': True,
         }
         
         # Atomic write
@@ -2579,15 +2693,18 @@ class MultiBroadcastFusion:
                 self._last_long_term_save = current_time
                 logger.debug(f"Saved long-term drift stats ({sum(s.get('n', 0) for s in self.long_term_stats.values())} samples)")
         
-        for m in measurements:
-            if m.station == 'GLOBAL_DIFF':
-                continue
-            
+        # Each row enters once, stamped with its own time (stage 0,
+        # 2026-10-22).  Fed the whole lookback twice a cycle and stamped
+        # "now", n ran about 400 times the row count, the slope's σ shrank
+        # about 20-fold, and a 4-hour run with no drift raised 26
+        # "SIGNIFICANT GPSDO DRIFT" warnings.
+        for m in self._take_new_rows(measurements, self._long_term_watermarks):
             broadcast_key = self._get_broadcast_key(m.station, m.frequency_mhz)
+            row_time = float(m.timestamp)
             
             # Time in hours since Unix epoch (absolute reference)
             # Using hours since epoch keeps numbers manageable while maintaining precision
-            t_hours = current_time / 3600.0
+            t_hours = row_time / 3600.0
             y = m.d_clock_ms
             
             # ================================================================
@@ -2639,8 +2756,8 @@ class MultiBroadcastFusion:
                     'sum_tt': 0.0,
                     'sum_ty': 0.0,
                     'sum_yy': 0.0,  # For residual variance
-                    'first_time': current_time,
-                    'last_time': current_time,
+                    'first_time': row_time,
+                    'last_time': row_time,
                 }
             
             stats = self.long_term_stats[broadcast_key]
@@ -2650,7 +2767,7 @@ class MultiBroadcastFusion:
             stats['sum_tt'] += t_hours * t_hours
             stats['sum_ty'] += t_hours * y
             stats['sum_yy'] += y * y
-            stats['last_time'] = current_time
+            stats['last_time'] = row_time
     
     def get_long_term_drift_estimate(self, broadcast_key: str = None) -> Dict:
         """

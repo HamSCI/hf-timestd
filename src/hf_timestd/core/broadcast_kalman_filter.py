@@ -83,6 +83,11 @@ logger = logging.getLogger(__name__)
 
 from hf_timestd.core.condition_log import ConditionLog
 
+# A gap between two rows longer than this (minutes) leaves the motion
+# model meaningless: the rate state would carry the delay for hours.
+# The filter then starts again from the new row with a wide P.
+MAX_GAP_MIN = 180.0
+
 
 @dataclass
 class BroadcastCharacteristics:
@@ -166,7 +171,8 @@ class BroadcastKalmanFilter:
             [0.0, self.characteristics.q_doppler]
         ])
         
-        # State transition matrix (dt = 1 minute)
+        # State transition matrix for dt = 1 minute.  update() and
+        # predict() build F from the real gap when given the row's time.
         self.F = np.array([
             [1.0, 1.0],  # tof_new = tof_old + doppler * dt
             [0.0, 1.0]   # doppler_new = doppler_old (constant velocity model)
@@ -183,6 +189,19 @@ class BroadcastKalmanFilter:
         # History for GPSDO temporal continuity
         self.previous_tof = None
         self.previous_time = None
+
+        # Row time (stage 0 of the fusion Kalman review, 2026-10-22).
+        # Each row reaches the filter once, at its own observation time:
+        # the predict spans the real gap since the previous row, and a row
+        # at or before the last one is refused and counted.  The outputs
+        # given for each row stay here, keyed by row time, so fusion can
+        # serve a row it reads again without feeding it again.  They
+        # persist with the state, so a restart does not replay the window.
+        self.last_obs_time: Optional[float] = None   # unix s of the last row
+        self.n_refused = 0
+        self.last_dt_min: Optional[float] = None
+        self.last_prior_P: Optional[np.ndarray] = None
+        self.row_outputs: Dict[float, Tuple[float, float]] = {}
         
         # ADAPTIVE KALMAN ENHANCEMENTS (2026-01-08)
         # Mode-transition timing — a single wall-clock base (M-H20). "Time
@@ -291,18 +310,65 @@ class BroadcastKalmanFilter:
             is_anchor=is_anchor
         )
     
-    def predict(self, dt: float = 1.0) -> Tuple[float, float]:
+    def output_for(self, t_obs: float) -> Optional[Tuple[float, float]]:
+        """The (tof_ms, uncertainty_ms) this filter gave the row at t_obs,
+        or None if it never consumed that row."""
+        return self.row_outputs.get(float(t_obs))
+
+    def forget_outputs_before(self, t_obs: float) -> None:
+        """Drop the outputs of rows older than t_obs (they left the window)."""
+        t_obs = float(t_obs)
+        for t in [t for t in self.row_outputs if t < t_obs]:
+            del self.row_outputs[t]
+
+    def _refuse(self, t_obs: float, what: str) -> bool:
+        """Refuse a row at or before the last row, count it, return True."""
+        if self.last_obs_time is not None and t_obs <= self.last_obs_time:
+            self.n_refused += 1
+            kind = 'duplicate' if t_obs == self.last_obs_time else 'older'
+            logger.debug(
+                f"{self._log_label}: {what} refused, {kind} row "
+                f"(t={t_obs:.3f}, last={self.last_obs_time:.3f}, "
+                f"refused so far {self.n_refused})"
+            )
+            return True
+        return False
+
+    def _dt_since_last(self, t_obs: Optional[float]) -> float:
+        """Minutes since the last row; 1 when either time is unknown."""
+        if t_obs is None or self.last_obs_time is None:
+            return 1.0
+        return (t_obs - self.last_obs_time) / 60.0
+
+    def _current_output(self) -> Tuple[float, float]:
+        if not self.initialized:
+            return float('nan'), float('nan')
+        return float(self.state[0]), float(np.sqrt(self.P[0, 0]))
+
+    def predict(self, dt: float = 1.0,
+                t_obs: Optional[float] = None) -> Tuple[float, float]:
         """
         Predict next state (coast during fading).
         
         Args:
-            dt: Time step in minutes (default 1.0)
+            dt: Time step in minutes (default 1.0); ignored when t_obs is
+                given, which sets dt to the real gap since the last row.
+            t_obs: Observation time (unix s) of the row being coasted
+                through.  A row at or before the last one is refused.
             
         Returns:
             (tof_ms, uncertainty_ms)
         """
+        if t_obs is not None:
+            t_obs = float(t_obs)
+            if self._refuse(t_obs, 'coast'):
+                return self._current_output()
+            dt = self._dt_since_last(t_obs)
+            self.last_obs_time = t_obs
         if not self.initialized:
             # Can't predict without initialization
+            if t_obs is not None:
+                self.row_outputs[t_obs] = (0.0, 100.0)
             return 0.0, 100.0
         
         # Update transition matrix for this dt
@@ -319,16 +385,24 @@ class BroadcastKalmanFilter:
         
         # Extract uncertainty
         uncertainty = np.sqrt(self.P[0, 0])
-        
+        if t_obs is not None:
+            self.last_dt_min = dt
+            self.row_outputs[t_obs] = (float(self.state[0]), float(uncertainty))
+
         return self.state[0], uncertainty
     
-    def update(self, measurement_ms: float, snr_db: float) -> Tuple[float, float]:
+    def update(self, measurement_ms: float, snr_db: float,
+               t_obs: Optional[float] = None) -> Tuple[float, float]:
         """
         Update filter with new measurement.
 
         Args:
             measurement_ms: Measured ToF in milliseconds
             snr_db: Signal-to-noise ratio in dB
+            t_obs: The row's own observation time (unix s).  Given, the
+                predict spans the real gap since the previous row, and a
+                row at or before the previous one is refused and counted
+                (n_refused).  None keeps the old fixed one-minute step.
 
         Returns:
             (tof_ms, uncertainty_ms)
@@ -345,16 +419,28 @@ class BroadcastKalmanFilter:
                 f"{self.broadcast_id}: non-finite Kalman input rejected "
                 f"(measurement_ms={measurement_ms!r}, snr_db={snr_db!r})"
             )
-            if not self.initialized:
-                return float('nan'), float('nan')
-            return float(self.state[0]), float(np.sqrt(self.P[0, 0]))
+            return self._current_output()
+
+        if t_obs is not None:
+            t_obs = float(t_obs)
+            if self._refuse(t_obs, 'update'):
+                return self._current_output()
+        dt = self._dt_since_last(t_obs)
+
+        if self.initialized and dt > MAX_GAP_MIN:
+            logger.info(
+                f"{self._log_label}: re-initialised after a gap of "
+                f"{dt:.0f} min (> {MAX_GAP_MIN:.0f} min) since the last row"
+            )
+            self.initialized = False
+            self.P = np.eye(2) * 100.0
 
         # Initialize on first measurement
         if not self.initialized:
             self.state[0] = measurement_ms
             self.state[1] = 0.0  # Unknown doppler initially
             self.initialized = True
-            self.n_updates = 1
+            self.n_updates += 1
             self.last_update_time = datetime.now(timezone.utc)
 
             uncertainty = np.sqrt(self.P[0, 0])
@@ -362,11 +448,16 @@ class BroadcastKalmanFilter:
                 f"{self.broadcast_id} initialized: "
                 f"tof={measurement_ms:.3f}ms, uncertainty={uncertainty:.3f}ms"
             )
+            if t_obs is not None:
+                self.last_obs_time = t_obs
+                self.row_outputs[t_obs] = (float(measurement_ms), float(uncertainty))
             return measurement_ms, uncertainty
 
-        # PREDICT (state) — F advances tof by doppler·dt. The covariance
-        # predict is deferred until the adaptive Q is known (below).
-        self.state = self.F @ self.state
+        # PREDICT (state) — F advances tof by doppler·dt, dt the real gap
+        # since the previous row in minutes. The covariance predict is
+        # deferred until the adaptive Q is known (below).
+        F = np.array([[1.0, dt], [0.0, 1.0]])
+        self.state = F @ self.state
 
         # ONE innovation, derived AFTER the predict — the true residual
         # (M-H19). The filter's defences (mode-transition detection, adaptive
@@ -392,13 +483,16 @@ class BroadcastKalmanFilter:
             self._conditions.sweep()
         # POSSIBLE_CHANGE / STABLE: no transition — leave the timestamp as is.
 
-        # Adaptive process noise, then the covariance predict (dt=1.0 minute)
+        # Adaptive process noise, then the covariance predict.  Q holds
+        # ms² per minute, so it scales with the real gap.
         Q_adaptive = self._adaptive_process_noise(
             innovation_ms=innovation,
             snr_db=snr_db,
             time_since_mode_change=self._minutes_since_mode_change(),
         )
-        self.P = self.F @ self.P @ self.F.T + Q_adaptive
+        self.P = F @ self.P @ F.T + Q_adaptive * dt
+        self.last_dt_min = dt
+        self.last_prior_P = self.P.copy()
 
         # Measurement noise (dynamic, based on SNR)
         R = self._get_measurement_noise(snr_db)
@@ -436,6 +530,9 @@ class BroadcastKalmanFilter:
 
         # Extract uncertainty
         uncertainty = np.sqrt(self.P[0, 0])
+        if t_obs is not None:
+            self.last_obs_time = t_obs
+            self.row_outputs[t_obs] = (float(self.state[0]), float(uncertainty))
 
         return self.state[0], uncertainty
     
@@ -679,6 +776,9 @@ class BroadcastKalmanFilter:
             'initialized': self.initialized,
             'last_update': self.last_update_time.isoformat() if self.last_update_time else None,
             'last_mode_transition_time': self.last_mode_transition_time,
+            'last_obs_time': self.last_obs_time,
+            'n_refused': self.n_refused,
+            'row_outputs': [[t, d, s] for t, (d, s) in sorted(self.row_outputs.items())],
             'saved_at': datetime.now(timezone.utc).isoformat()
         }
         
@@ -720,6 +820,16 @@ class BroadcastKalmanFilter:
             # lack this key — keep the constructor default (stable) for those.
             if 'last_mode_transition_time' in state_data:
                 self.last_mode_transition_time = state_data['last_mode_transition_time']
+
+            # Row time (stage 0).  Older state files lack these keys; the
+            # first row after such a load predicts one minute, as before.
+            if state_data.get('last_obs_time') is not None:
+                self.last_obs_time = float(state_data['last_obs_time'])
+            self.n_refused = int(state_data.get('n_refused', 0))
+            self.row_outputs = {
+                float(t): (float(d), float(s))
+                for t, d, s in state_data.get('row_outputs', [])
+            }
 
             logger.info(
                 f"Loaded {self.broadcast_id} state: "
