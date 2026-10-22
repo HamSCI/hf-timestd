@@ -83,7 +83,9 @@ class TestTheSpammingSitesAreGated:
                 / "core_recorder_v2.py").read_text()
 
     @pytest.mark.parametrize("key", [
-        "disambig_t4_gate",          # "T4 sigma exceeds gate"
+        # "disambig_t4_gate" ("T4 sigma exceeds gate") was RETIRED with
+        # _get_disambiguation_reference, deleted as dead code in step 3
+        # of the fusion review's ruled order (section 15).
         "disambig_dump:",            # the per-value DISAMBIG dump
         # The third of the original trio, "disambig_no_authority", was
         # RETIRED with the reference gate it announced: acquisition no

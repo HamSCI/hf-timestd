@@ -403,37 +403,27 @@ def test_fuse_feed_hands_chrony_true_utc(fused):
                                                          abs=TOL_MS)
 
 
-# ── T6 disambiguation, the T3 branch ────────────────────────────────────
+# ── T6 disambiguation, the T3 branch: deleted ───────────────────────
+
+# Step 3 of the ruled order (review section 15) deleted
+# CoreRecorderV2._get_disambiguation_reference.  It had no caller since
+# e003e68 (2026-09-19).  Its T3 branch returned d_clock_fused_ms (host -
+# UTC, and calibrated to zero) as a reference offset: +5 ms on this
+# station where the ruled convention reads -5 ms.  A strict xfail marked
+# that here until the deletion.  The test below keeps its intent: the
+# core recorder must not read the calibrated fused value at all, so no
+# T6 path can take it for a reference again.
 
 
-@pytest.mark.xfail(
-    strict=True, raises=AssertionError,
-    reason="OPPOSITE CONVENTION: core_recorder_v2.py:2443 returns "
-           "d_clock_fused_ms (host - UTC) as the reference offset.  The "
-           "function's own contract is host - UTC (its T4 branch, :2458), "
-           "so it agrees with itself, but it reads +5 ms against the "
-           "ruled -5 ms.  The function has had no caller since e003e68 "
-           "(2026-09-19); step 3 deletes the branch.")
-def test_t6_disambiguation_t3_branch_follows_the_convention(
-        fused, status_file, monkeypatch):
-    # The branch refuses any sigma above 10 us, which fusion never meets.
-    # Open the gate by hand so the sign shows; the offset stays fusion's.
-    data = json.loads(status_file.read_text())
-    data["fusion"]["uncertainty_ms"] = 0.005
-    status_file.write_text(json.dumps(data))
-
-    real_path = core_recorder_v2.Path
-
-    def redirect(p, *a):
-        if str(p) == "/run/hf-timestd/fusion_status.json":
-            return real_path(status_file)
-        return real_path(p, *a)
-
-    monkeypatch.setattr(core_recorder_v2, "Path", redirect)
-    recorder = object.__new__(core_recorder_v2.CoreRecorderV2)
-    ref = recorder._get_disambiguation_reference()
-    assert ref is not None and ref[2] == "T3"
-    assert ref[0] == pytest.approx(EXPECTED_OFFSET_MS, abs=TOL_MS)
+def test_core_recorder_reads_no_fused_d_clock():
+    """No T6 path in the core recorder reads fusion's calibrated value."""
+    assert not hasattr(core_recorder_v2.CoreRecorderV2,
+                       "_get_disambiguation_reference")
+    tree = ast.parse(inspect.getsource(core_recorder_v2))
+    reads = [node for node in ast.walk(tree)
+             if isinstance(node, ast.Constant)
+             and node.value == "d_clock_fused_ms"]
+    assert reads == [], "core_recorder_v2 reads d_clock_fused_ms again"
 
 
 # ── the anchor-direct sign line ─────────────────────────────────────────
