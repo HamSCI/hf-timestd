@@ -773,3 +773,22 @@ the numbers; section 11 lists what to collect.
    receptions alone.  No calibration may give a higher tier (T6, T5) authority over T3 locally, and
    no calibration may zero T3 against the host clock.  Option A is rejected.  (The rest of this
    ruling, and ruling 4, are still to come.)
+
+### Rulings on the five ruling-1 questions (Michael, 2026-10-22)
+
+Source of the questions: `~mjh/hamsci/proofs/d-clock-fused-consumers-20261022.md`.
+
+1. **Sign convention (Q5):** MEASUREMENT_MODEL.md's own, `label_utc = rtp_time + rtp_to_utc_offset_ns`.
+   One synthetic test with a known host offset checks every consumer before anything else moves.
+2. **T3 goes dark (Q2)**, loudly: unavailable, with its reason, until a replacement proves itself.
+3. **T3-only stations fall back to T2 (Q4)**, with the demotion shown on the panel and in the
+   heartbeat.  List the T3-only stations before the change lands.
+4. **The tick registration may win the T3 slot (Q1)** after the sign test, with its real sigma (not
+   the 1.0 ms floor), and after a shadow run on B4 against T6.
+5. **Stop the legacy FUSE write (Q3)**, and close its two install gaps.
+
+**Order of work**, each step B4 first and announced on the claude-bus: (1) the sign test; (2) label
+the fused value as calibrated and publish the raw value beside it; (3) delete the T6 disambiguation
+branch; (4) stop the FUSE write and close its gaps; (5) take FusionBench out of the judge's
+adoption and make the T3 rung report unavailable with its reason; (6) shadow the tick registration
+on B4; (7) let it win T3 once the shadow run proves it.
