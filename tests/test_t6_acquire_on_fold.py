@@ -223,15 +223,11 @@ class TestAcquisitionUsesTheFold(unittest.TestCase):
         self.assertEqual(r._t6_native_anchor.captured_at_utc_ns,
                          LAST_NAMED * 1_000_000_000)
 
-    def test_the_old_sigma_gate_is_no_longer_consulted(self):
-        """_get_disambiguation_reference must not be called: its 10 us bar
-        is the blocker this task removes."""
-        r = _recorder()
-        r._get_disambiguation_reference = mock.Mock(
-            side_effect=AssertionError("old gate consulted"))
-        _feed_blocks(r)
-        _acquire(r)
-        r._get_disambiguation_reference.assert_not_called()
+    # test_the_old_sigma_gate_is_no_longer_consulted stood here.  It mocked
+    # _get_disambiguation_reference, which step 3 of the fusion review
+    # deleted (2026-10-22), so it could no longer fail.  The method's
+    # absence is asserted in tests/test_t3_sign_convention.py
+    # (test_core_recorder_reads_no_fused_d_clock).
 
     def test_the_anchor_registers_the_folds_edge_not_the_matched_filters(self):
         """The fold locates the edge; the MF is only the trigger."""

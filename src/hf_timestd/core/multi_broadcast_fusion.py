@@ -421,7 +421,7 @@ class FusedResult:
     wwvh_intra_std_ms: Optional[float] = None  # Std dev within WWVH frequencies
     bpm_intra_std_ms: Optional[float] = None   # Std dev within BPM frequencies
     inter_station_spread_ms: Optional[float] = None  # Spread between station means
-    consistency_flag: str = 'OK'  # OK, INTRA_ANOMALY, INTER_ANOMALY, DISCRIMINATION_SUSPECT
+    consistency_flag: str = 'OK'  # fuse() sets OK or CROSS_STATION_DISAGREE
     
     # Uncertainty budget breakdown (for metrology display)
     statistical_uncertainty_ms: float = 0.0      # Measurement scatter (weighted std)
@@ -4001,64 +4001,12 @@ class MultiBroadcastFusion:
         else:
             consistency_flag = 'OK'
         
-        INTRA_THRESHOLD_MS = 5.0  # Same-station should agree within 5ms (ionospheric limit)
-        
-        # Check for intra-station anomalies (same station, different frequencies disagree)
-        intra_stds = [s for s in [wwv_intra_std, wwvh_intra_std, bpm_intra_std] if s is not None]
-        suspect_count = 0
-        
-        # Consistency flag already calculated above (before Kalman update)
-        # This section kept for logging details
-        if consistency_flag == 'DISCRIMINATION_SUSPECT':
-            
-            # Identify which measurements are outliers within their station group
-            # and EXCLUDE them from the Kalman update by zeroing their contribution
-            suspect_indices = []
-            for i, (m, raw_val) in enumerate(zip(measurements, raw_d_clocks)):
-                is_suspect = False
-                if m.station == 'WWV' and wwv_intra_std and wwv_intra_std > INTRA_THRESHOLD_MS:
-                    wwv_mean = station_means.get('WWV', 0)
-                    if abs(raw_val - wwv_mean) > 2 * wwv_intra_std:
-                        is_suspect = True
-                if m.station == 'WWVH' and wwvh_intra_std and wwvh_intra_std > INTRA_THRESHOLD_MS:
-                    wwvh_mean = station_means.get('WWVH', 0)
-                    if abs(raw_val - wwvh_mean) > 2 * wwvh_intra_std:
-                        is_suspect = True
-                if m.station == 'BPM' and bpm_intra_std and bpm_intra_std > INTRA_THRESHOLD_MS:
-                    bpm_mean = station_means.get('BPM', 0)
-                    if abs(raw_val - bpm_mean) > 2 * bpm_intra_std:
-                        is_suspect = True
-                
-                if is_suspect:
-                    suspect_indices.append(i)
-            
-            # If we have suspects, recalculate fused_d_clock excluding them
-            if suspect_indices and len(measurements) - len(suspect_indices) >= 3:
-                clean_weights = [w for i, w in enumerate(weights) if i not in suspect_indices]
-                clean_raw = [d for i, d in enumerate(raw_d_clocks) if i not in suspect_indices]
-                
-                w_clean = np.array(clean_weights)
-                d_clean = np.array(clean_raw)
-                fused_d_clock = np.sum(w_clean * d_clean) / np.sum(w_clean)
-                
-                # Recalculate uncertainty with clean data
-                weighted_var = np.sum(w_clean * (d_clean - fused_d_clock)**2) / np.sum(w_clean)
-                measurement_uncertainty = np.sqrt(weighted_var)
-                
-                logger.info(
-                    f"Excluded {suspect_count} suspect measurements (discrimination errors), "
-                    f"recalculated D_clock: {fused_d_clock:+.3f}ms ± {measurement_uncertainty:.3f}ms"
-                )
-            
-            wwv_str = f"{wwv_intra_std:.1f}" if wwv_intra_std is not None else "N/A"
-            wwvh_str = f"{wwvh_intra_std:.1f}" if wwvh_intra_std is not None else "N/A"
-            bpm_str = f"{bpm_intra_std:.1f}" if bpm_intra_std is not None else "N/A"
-            logger.warning(
-                f"High intra-station spread: WWV σ={wwv_str}ms, "
-                f"WWVH σ={wwvh_str}ms, BPM σ={bpm_str}ms | "
-                f"{suspect_count} suspect measurements"
-            )
-        
+        # A DISCRIMINATION_SUSPECT branch stood here until 2026-10-22.  The
+        # flag above only ever takes 'OK' or 'CROSS_STATION_DISAGREE', so
+        # the branch never ran; had it run, it would have replaced the
+        # calibrated fused value with a mean of RAW values under the
+        # calibrated label (review of T3 steps 2-5, M1).  Deleted.
+
         # ====================================================================
         # FINAL UNCERTAINTY BUDGET (M-H15)
         # ====================================================================

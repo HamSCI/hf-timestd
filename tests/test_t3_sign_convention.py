@@ -96,7 +96,7 @@ MINUTES = 30
 TOL_MS = 1e-3
 
 
-def _l1_row(t_minute, station, freq, prop_delay_ms):
+def _l1_row(t_minute, station, freq, prop_delay_ms, bias_ms=0.0):
     """One L1 metrology row as the metrology engine writes it.
 
     The tick leaves the transmitter on the UTC second and arrives
@@ -108,7 +108,7 @@ def _l1_row(t_minute, station, freq, prop_delay_ms):
     # second resolves only about 0.2 us.
     true_arrival_ms = prop_delay_ms
     ring_label_ms = true_arrival_ms + HOST_AHEAD_MS
-    raw_toa_ms = ring_label_ms - prop_delay_ms
+    raw_toa_ms = ring_label_ms - prop_delay_ms + bias_ms
     return {
         "timestamp_utc": datetime.fromtimestamp(t_minute, timezone.utc)
         .strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
@@ -122,7 +122,7 @@ def _l1_row(t_minute, station, freq, prop_delay_ms):
     }
 
 
-def _run_fusion(auto_calibrate):
+def _run_fusion(auto_calibrate, bias_ms=None):
     """Drive the real fuse() over 30 minutes of synthetic L1 rows.
 
     Only the readers are stubbed; ``_read_latest_measurements`` runs as
@@ -150,7 +150,9 @@ def _run_fusion(auto_calibrate):
                 for k in range(state["n"]):
                     for s, f, delay in BROADCASTS:
                         t = t0 + 60.0 * k
-                        rows[(t, s, f)] = _l1_row(t, s, f, delay)
+                        rows[(t, s, f)] = _l1_row(
+                            t, s, f, delay,
+                            (bias_ms or {}).get((s, f), 0.0))
                 return rows
 
             fu._read_l1_metrology = read_l1
@@ -220,6 +222,30 @@ def test_the_status_file_publishes_raw_beside_calibrated(tmp_path):
                                                               abs=TOL_MS)
     sigma = fusion["uncalibrated_uncertainty_ms"]
     assert sigma is not None and 0.0 < sigma < 10.0
+
+
+# Per-broadcast offsets of the kind the calibration removes: a spread of
+# +-3 ms between broadcasts, mean zero.
+SPREAD = {("WWV", 5.0): -3.0, ("WWV", 10.0): -1.0,
+          ("WWV", 15.0): +1.0, ("WWVH", 10.0): +3.0}
+
+
+def test_the_uncalibrated_sigma_is_the_wls_spread(fused):
+    """Review of T3 steps 2-5 (d): a constant sigma used to pass.  The
+    uncalibrated sigma is the WLS uncertainty of the raw values, which
+    their spread dominates.  So with no spread it is small, and it scales
+    with the spread: doubling every per-broadcast offset doubles it."""
+    calm = fused.uncalibrated_uncertainty_ms
+    one = _run_fusion(auto_calibrate=False, bias_ms=SPREAD)
+    two = _run_fusion(auto_calibrate=False,
+                      bias_ms={k: 2 * v for k, v in SPREAD.items()})
+    s1 = one.uncalibrated_uncertainty_ms
+    s2 = two.uncalibrated_uncertainty_ms
+    assert calm < 0.1
+    # Equal weights would give the population std of (-3, -1, 1, 3),
+    # sqrt(5) = 2.236 ms; unequal weights move it, not by a factor.
+    assert 1.0 < s1 < 3.0
+    assert s2 / s1 == pytest.approx(2.0, rel=0.02)
 
 
 def test_the_cycle_summary_says_calibrated(fused):
