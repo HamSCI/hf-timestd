@@ -148,6 +148,9 @@ class StreamRecorderConfig:
     ring_seconds: int = 0
 
     def __post_init__(self):
+        # Policy (2026-10-23): no AGC, 0 dB gain on any channel request.
+        self.agc_enable = 0
+        self.gain = 0.0
         self.output_dir = Path(self.output_dir)
         if self.station_config is None:
             self.station_config = {}

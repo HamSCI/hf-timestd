@@ -132,8 +132,8 @@ class ChannelManager:
                 frequency_hz=frequency_hz,
                 preset=preset,
                 sample_rate=sample_rate,
-                agc_enable=agc,
-                gain=gain,
+                agc_enable=0,   # policy 2026-10-23: no AGC, 0 dB
+                gain=0.0,
                 destination=resolved_dest,  # Use resolved IP
                 ssrc=ssrc
             )
@@ -260,8 +260,8 @@ class ChannelManager:
                     frequency_hz=channel_spec['frequency_hz'],
                     preset=channel_spec.get('preset', 'iq'),
                     sample_rate=channel_spec.get('sample_rate', 16000),
-                    agc_enable=channel_spec.get('agc', 0),
-                    gain=channel_spec.get('gain', 0.0)
+                    agc_enable=0,   # policy 2026-10-23: no AGC, 0 dB
+                    gain=0.0
                 )
                 time.sleep(0.5)
                 

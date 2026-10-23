@@ -305,6 +305,11 @@ def label_plane_measure_for(timing_section: dict) -> bool:
     return convention != 'legacy'
 
 
+# Channel gain policy (Michael, 2026-10-23): no AGC, 0 dB, F32 carries range.
+AGC_POLICY_ENABLE = 0
+AGC_POLICY_GAIN_DB = 0.0
+
+
 class CoreRecorderV2:
     """
     Core recorder V2: Uses ka9q-python RadiodStream and RadiodControl.
@@ -1404,6 +1409,37 @@ class CoreRecorderV2:
             }.get(encoding_val.upper(), Encoding.NO_ENCODING)
         return encoding_val
 
+    def _warn_agc_policy_once(self) -> None:
+        """Warn once if config sets agc or a non-zero gain.
+
+        Policy (Michael, 2026-10-23): every channel request sends
+        agc_enable=0 and gain 0 dB.  The config keys stay readable so old
+        files load, but they have no effect.  One warning per start.
+        """
+        offenders = []
+        sources = [('channel_defaults', self.channel_defaults or {})]
+        sources += [(f"channel {c.get('frequency_hz', '?')}", c)
+                    for c in (self.channel_specs or [])]
+        for name, d in sources:
+            try:
+                if int(d.get('agc', 0) or 0):
+                    offenders.append(f"{name}: agc={d.get('agc')}")
+                if float(d.get('gain', 0.0) or 0.0) != 0.0:
+                    offenders.append(f"{name}: gain={d.get('gain')}")
+            except (TypeError, ValueError):
+                offenders.append(f"{name}: unparseable agc/gain")
+        t6 = getattr(self, '_t6_config', None) or {}
+        try:
+            if float(t6.get('gain_db', 0.0) or 0.0) != 0.0:
+                offenders.append(f"t6: gain_db={t6.get('gain_db')}")
+        except (TypeError, ValueError):
+            offenders.append("t6: unparseable gain_db")
+        if offenders:
+            logger.warning(
+                "Config sets AGC or gain, which policy ignores: every channel "
+                "request sends agc_enable=0, gain=0.0 dB (%d key(s): %s)",
+                len(offenders), "; ".join(offenders[:6]))
+
     def _initialize_channels(self) -> bool:
         """
         Initialize all channels via a single unified path.
@@ -1416,6 +1452,8 @@ class CoreRecorderV2:
             if not self.channel_specs:
                 logger.warning("No channels configured")
                 return False
+
+            self._warn_agc_policy_once()
 
             expanded_specs = []
             if self.engine_type == 'phase-engine':
@@ -1481,8 +1519,10 @@ class CoreRecorderV2:
                 encoding = self._resolve_encoding(
                     ch_spec.get('encoding', self.channel_defaults.get('encoding', Encoding.F32))
                 )
-                agc_val  = int(ch_spec.get('agc',  self.channel_defaults.get('agc',  0)))
-                gain_val = float(ch_spec.get('gain', self.channel_defaults.get('gain', 0.0)))
+                # Policy (Michael, 2026-10-23): no per-channel AGC, 0 dB gain.
+                # Config values are ignored; see _warn_agc_policy_once().
+                agc_val  = AGC_POLICY_ENABLE
+                gain_val = AGC_POLICY_GAIN_DB
                 low_edge  = ch_spec.get('low_edge',  self.channel_defaults.get('low_edge'))
                 high_edge = ch_spec.get('high_edge', self.channel_defaults.get('high_edge'))
                 description = ch_spec.get('description', f"{freq/1e6:.3f} MHz")
@@ -1657,28 +1697,12 @@ class CoreRecorderV2:
         # add_channel / ensure_channel.
         low_edge_hz = t6.get('low_edge_hz')
         high_edge_hz = t6.get('high_edge_hz')
-        # Channel gain (dB).  AGC stays OFF on every metrology channel by
-        # design: signal and noise vary substantially over 24 hours and
-        # AGC's unpredictable scaling is unacceptable in a scientific
-        # measurement.  For the *broadcast* channels that leaves the level
-        # wherever the front end puts it, which is why they are F32.
-        #
-        # T6 is the exception that can be set: HF-PPS is injected LOCALLY,
-        # so its level is known, constant, and under our control — a fixed
-        # gain is exact here, with none of the 24-hour variation that rules
-        # AGC out.  Worth setting because radiod's output encoding is in
-        # practice S16BE (F32 grants are lost to the lifetime keepalive —
-        # HamSCI/ka9q-python#3), so this channel really does live in 16-bit
-        # fixed point: measured on B4 at ~34 counts RMS of +-32767, about 5
-        # of 16 bits, i.e. ~38-41 dB quantisation SNR against a 51 dB
-        # channel — quantisation, not the RF, was the noise floor.
-        #
-        # Irrelevant to the 0.5 s coarse correlation (48 000 samples average
-        # quantisation away) but directly limiting for a short-integration
-        # fine stage over the ~52 us transition (~5 samples) — see
-        # HamSCI/hf-timestd#7.  Default 0.0 preserves prior behaviour;
-        # raise it only after checking headroom against observed peaks.
-        gain_db = float(t6.get('gain_db', 0.0))
+        # AGC off and 0 dB gain on every channel, T6 included (policy,
+        # Michael 2026-10-23).  F32 carries the dynamic range, and the T6
+        # detector judges normalised measures (apex/sigma, a relative peak
+        # threshold), so the absolute level does not matter.  The config
+        # key `gain_db` is ignored; see _warn_agc_policy_once().
+        gain_db = AGC_POLICY_GAIN_DB
 
         # Dedicated RadiodStream + per-channel UDP socket.
         try:
@@ -1687,7 +1711,7 @@ class CoreRecorderV2:
                 preset='iq',
                 sample_rate=sr,
                 encoding=Encoding.F32,
-                agc_enable=False,
+                agc_enable=AGC_POLICY_ENABLE,
                 gain=gain_db,
                 low_edge=low_edge_hz,
                 high_edge=high_edge_hz,
@@ -1765,8 +1789,8 @@ class CoreRecorderV2:
                 preset='iq',
                 sample_rate=sr,
                 encoding=Encoding.F32,
-                agc_enable=False,
-                gain=0.0,
+                agc_enable=AGC_POLICY_ENABLE,
+                gain=AGC_POLICY_GAIN_DB,
                 timeout=30.0,
                 lifetime=RADIOD_LIFETIME_FRAMES,
             )
