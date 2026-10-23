@@ -809,4 +809,12 @@ returns as T3 through steps 6 and 7.
    sigma never sits at a floor.
 4. It never names the wrong second, and it never jumps by more than 0.5 s.
 5. Its state transitions (WITNESS ↔ AUTHORITATIVE) log loudly, once each, and count.
-Passing all five admits it to the T3 slot (step 7) on B4 first.
+6. It beats T2: against T4 as truth, its error stays smaller than the WAN-NTP (T2) error at the same
+   station, by median and by 95th percentile.  This tests T3's founding promise.
+Passing all six admits it to the T3 slot (step 7) on B4 first.
+
+**T3's origin (Michael, 2026-10-23).**  T3 predates T6, T5 and T4.  It began when a station had only
+a GPSDO: the GPSDO disciplines the sample clock (the ruler, a rate), and the received WWV/WWVH ticks,
+less the modelled propagation delay, supply the epoch — UTC recovered from the broadcasts, better than
+T2 (WAN NTP).  A calibration that zeroes T3 against the host clock defeats that purpose: on a
+GPSDO-only station the host follows T2, so such a T3 only reflects T2 back.
