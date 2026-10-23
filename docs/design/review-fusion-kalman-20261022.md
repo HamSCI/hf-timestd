@@ -792,3 +792,21 @@ the fused value as calibrated and publish the raw value beside it; (3) delete th
 branch; (4) stop the FUSE write and close its gaps; (5) take FusionBench out of the judge's
 adoption and make the T3 rung report unavailable with its reason; (6) shadow the tick registration
 on B4; (7) let it win T3 once the shadow run proves it.
+
+### T3's purpose, restated by Michael (2026-10-23)
+
+"The entire aim of T3 from the beginning lay in reconstructing UTC from the received time standard
+broadcasts to the best possible precision and accuracy."  T3 dark is a pause, not a removal: the
+fused value cannot serve (ruling 1), and the tick registration — built from the broadcasts alone —
+returns as T3 through steps 6 and 7.
+
+**Step 6 shadow-run pass criteria (B4, 48 h from the registration's first AUTHORITATIVE minute):**
+1. Its residual against T4 and T5 (extant clocks) stays within 2 sigma of its own published sigma
+   at least 95 % of the time, and its median magnitude stays under 1 ms.
+2. Its residual against T6 equals the measured chain delay (≈ 15.5-16.5 ms on B4) within its own
+   sigma, and that difference holds steady — no step larger than 2 sigma.
+3. Its sigma stays honest: the rms of (residual / sigma) lies between 0.5 and 2, and the published
+   sigma never sits at a floor.
+4. It never names the wrong second, and it never jumps by more than 0.5 s.
+5. Its state transitions (WITNESS ↔ AUTHORITATIVE) log loudly, once each, and count.
+Passing all five admits it to the T3 slot (step 7) on B4 first.
