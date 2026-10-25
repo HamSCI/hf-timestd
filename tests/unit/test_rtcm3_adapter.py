@@ -14,7 +14,9 @@ field shows up as kilometres.
 import gzip
 import io
 import math
+import random
 import statistics
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -275,3 +277,50 @@ def test_an_ephemeris_filled_after_the_adapter_starts_is_used():
     out = list(ad.process_data(RTCM.read_bytes()))
     nav = [p for c, m, p in out if (c, m) == (1, 0x35)]
     assert nav and len(nav[-1]['sats']) >= 6
+
+
+# --- a stray 0xD3 preamble in non-RTCM data must not stall a probe -----------
+# Rob's 2026-10-24 report: a probe fed noise with one stray \xd3\x00\x10 never
+# returned.  Neither shipped reader loops (both resync at preamble+1 on a CRC
+# failure), so these pin that.  A regression would hang; each call runs in a
+# daemon thread with a deadline so it fails instead.
+
+def _noise_with_one_stray_preamble():
+    r = random.Random(500)
+    b = bytearray(x for x in (r.randrange(256) for _ in range(4000)) if x != 0xD3)[:1500]
+    b[500:503] = b'\xd3\x00\x10'
+    return bytes(b)
+
+
+NMEA = (b'$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47\r\n' * 30)
+NMEA_STRAY = NMEA[:500] + b'\xd3\x00\x10' + NMEA[500:]
+
+
+def _returns_within(fn, seconds=2.0):
+    """Run ``fn`` in a daemon thread; return its value, or fail if it outlasts ``seconds``."""
+    box = []
+    t = threading.Thread(target=lambda: box.append(fn()), daemon=True)
+    t.start()
+    t.join(seconds)
+    assert not t.is_alive(), f'still running after {seconds} s: the resync loops'
+    return box[0]
+
+
+def test_stray_preamble_in_noise_returns_promptly():
+    assert _returns_within(lambda: looks_like_rtcm3(_noise_with_one_stray_preamble())) is False
+
+
+def test_stray_preamble_in_nmea_returns_promptly():
+    assert _returns_within(lambda: looks_like_rtcm3(NMEA_STRAY)) is False
+
+
+def test_adapter_drops_a_stray_preamble_in_noise():
+    ad = RTCM3Adapter(BroadcastEphemeris())
+    assert _returns_within(lambda: list(ad.process_data(_noise_with_one_stray_preamble()))) == []
+    assert ad.buffer == b''
+
+
+def test_adapter_drops_a_stray_preamble_in_nmea():
+    ad = RTCM3Adapter(BroadcastEphemeris())
+    assert _returns_within(lambda: list(ad.process_data(NMEA_STRAY))) == []
+    assert ad.buffer == b''
