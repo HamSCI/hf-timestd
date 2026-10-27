@@ -305,6 +305,34 @@ def label_plane_measure_for(timing_section: dict) -> bool:
     return convention != 'legacy'
 
 
+def chain_delay_identity_for(timing_section: dict) -> dict:
+    """The parts of the T6 chain that config can change, for the judge's
+    stored chain delay (spec 2026-10-27 §2).
+
+    A stored record whose identity differs from this one is set aside and
+    learned again.  Read from ``[timing.t6_pps]``, falling back to the
+    legacy ``[timing.l6_pps]``; a missing key reads as 0.0.
+    """
+    section = timing_section or {}
+    t6 = section.get('t6_pps')
+    if t6 is None:
+        t6 = section.get('l6_pps')
+    t6 = t6 or {}
+
+    def _f(key: str) -> float:
+        try:
+            return float(t6.get(key) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    return {
+        't6_frequency_hz': _f('frequency_hz'),
+        't6_sample_rate': _f('sample_rate'),
+        'low_edge_hz': _f('low_edge_hz'),
+        'high_edge_hz': _f('high_edge_hz'),
+    }
+
+
 # Channel gain policy (Michael, 2026-10-23): no AGC, 0 dB, F32 carries range.
 AGC_POLICY_ENABLE = 0
 AGC_POLICY_GAIN_DB = 0.0
@@ -695,6 +723,13 @@ class CoreRecorderV2:
         # drift apart.
         if 'label_plane_measure' not in _oj_cfg:
             _oj_cfg['label_plane_measure'] = label_plane_measure_for(
+                _timing_section)
+        # The T6 chain-delay record names the chain it was learned on;
+        # a record from a different chain is set aside (spec 2026-10-27
+        # §2).  Read straight from [timing.t6_pps] here because
+        # self._t6_config is assigned only after the judge exists.
+        if 'chain_delay_identity' not in _oj_cfg:
+            _oj_cfg['chain_delay_identity'] = chain_delay_identity_for(
                 _timing_section)
         if _oj_cfg.get('enabled', True):
             try:

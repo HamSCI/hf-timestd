@@ -66,6 +66,7 @@ from typing import Callable, Deque, Dict, List, Optional, Tuple
 import numpy as np
 
 # stdlib-only sibling imports (verified: no heavy science deps)
+from .chain_delay_store import ChainDelayRecord, ChainDelayStore
 from .chrony_stats import parse_tracking
 from .leap_second import gps_leap_seconds_at_gps_time
 # The delay-model accuracy bound HfAcquiredBench floors its published
@@ -95,6 +96,16 @@ LABEL_PLANE_WITNESS_KEY = "label_plane_witness"
 # the monotonic clock long enough for the host's own frequency error to
 # matter, and a fresh sample is due anyway.
 LABEL_ANCHOR_MAX_AGE_S = 30.0
+
+# The station's stored T6 chain delay (spec
+# docs/superpowers/specs/2026-10-27-t6-chain-delay-learning-design.md §2).
+# The judge reads this name at construction time, not as a default
+# argument, so the test suite can point it at a temporary directory.
+DEFAULT_CHAIN_DELAY_PATH = "/var/lib/timestd/state/t6_chain_delay.json"
+# Gross-error bound on |T6 − lower tier| before any plane term (spec §6).
+# B4 and ND sit at 16 ms; 40 ms leaves room for a slower host without
+# admitting a wrong second or a 100 ms sidelobe.
+DEFAULT_CHAIN_DELAY_MAX_NS = 40_000_000.0
 
 GPS_EPOCH_UNIX = 315964800
 BILLION = 1_000_000_000
@@ -1187,6 +1198,28 @@ class OffsetJudge:
                 "label_plane_max_host_sigma_ns",
                 LabelPlaneTracker.DEFAULT_MAX_HOST_SIGMA_NS)),
         )
+        # The station's T6 chain delay (spec 2026-10-27 §2, §4, §6): a
+        # stored record of how far T6's label plane sits from the host
+        # plane.  With a record, a T6-versus-host comparison subtracts
+        # the stored offset and widens the band by the record's own sigma
+        # and spread; the gross bound refuses an implausible T6 first.
+        # A DIAGNOSTIC: it enters only the cross-bench delta and the band,
+        # never a timestamp, the chrony feed or the T6 anchor.  Off
+        # (chain_delay_learn = false) keeps today's gate exactly, and no
+        # store exists.
+        self.chain_delay_learn = bool(cfg.get("chain_delay_learn", True))
+        self.chain_delay_max_ns = float(
+            cfg.get("chain_delay_max_ns", DEFAULT_CHAIN_DELAY_MAX_NS))
+        self.chain_delay_path = Path(
+            cfg.get("chain_delay_path") or DEFAULT_CHAIN_DELAY_PATH)
+        self.chain_delay_store: Optional[ChainDelayStore] = None
+        if self.chain_delay_learn:
+            self.chain_delay_store = ChainDelayStore(
+                self.chain_delay_path,
+                identity=dict(cfg.get("chain_delay_identity") or {}),
+                time_fn=time_fn,
+            )
+            self.chain_delay_store.load()     # never raises
         # Precision non-regression clause (gate amendment, cont'd): a
         # VOLUNTARY upgrade is additionally refused when the candidate
         # bench's reported sigma is materially worse than the
@@ -1882,18 +1915,114 @@ class OffsetJudge:
         disagreement remains; same-plane pairs are never touched.
         This is the single choke point the adoption gate and the
         shadow residuals share.
+
+        For a T6-versus-host pair with a stored chain delay in force, the
+        plane term is the record's ``offset_ns`` (spec 2026-10-27 §4);
+        every other pair keeps today's term.
         """
         raw_ns = (cand.utc_at(mono_now) - ref.utc_at(mono_now)) * 1e9
-        expected_ns = self.effective_label_plane_offset_ns() * (
-            (1 if getattr(cand, "plane", "host") == "label" else 0)
-            - (1 if getattr(ref, "plane", "host") == "label" else 0)
+        sign = ((1 if getattr(cand, "plane", "host") == "label" else 0)
+                - (1 if getattr(ref, "plane", "host") == "label" else 0))
+        if sign == 0:
+            return raw_ns
+        record = self._chain_record_for(cand, ref)
+        plane_ns = (float(record.offset_ns) if record is not None
+                    else self.effective_label_plane_offset_ns())
+        return raw_ns - plane_ns * sign
+
+    # ── stored T6 chain delay (spec 2026-10-27 §4, §6) ────────────────
+
+    @staticmethod
+    def _is_t6_host_pair(a: BenchReading, b: BenchReading) -> bool:
+        """One side T6 on the label plane, the other on the host plane."""
+        def t6_label(r: BenchReading) -> bool:
+            return r.tier == "T6" and getattr(r, "plane", "host") == "label"
+
+        def host(r: BenchReading) -> bool:
+            return getattr(r, "plane", "host") == "host"
+
+        return (t6_label(a) and host(b)) or (t6_label(b) and host(a))
+
+    def _chain_record_for(
+        self, cand: BenchReading, ref: BenchReading
+    ) -> Optional[ChainDelayRecord]:
+        """The stored record that governs this pair, or None.
+
+        None when learning is off, when no record exists, or when the
+        pair is not T6 against a host-plane bench.
+        """
+        if self.chain_delay_store is None:
+            return None
+        if not self._is_t6_host_pair(cand, ref):
+            return None
+        return self.chain_delay_store.record
+
+    def _capped_sigmas_ns(
+        self, cand: BenchReading, ref: BenchReading
+    ) -> Tuple[float, float]:
+        """Each bench's sigma, capped at what ITS OWN tier can deliver.
+
+        See CROSS_BENCH_SIGMA_CEILING_MS_BY_TIER -- the published sigmas
+        themselves are never touched, only their weight in a bound.  A
+        flat ceiling across all tiers would trim a legitimately wide WAN
+        bench as hard as a broken T6; the per-tier form trims only a
+        bench claiming an uncertainty its tier cannot produce.
+        """
+        return (
+            min(cand.sigma_ns, cross_bench_sigma_ceiling_ms(cand.tier) * 1e6),
+            min(ref.sigma_ns, cross_bench_sigma_ceiling_ms(ref.tier) * 1e6),
         )
-        return raw_ns - expected_ns
+
+    def _chain_band_ns(self, cand: BenchReading, ref: BenchReading) -> float:
+        """k_x * sqrt(s_c^2 + s_l^2 + s_stored^2 + spread^2), ns.
+
+        s_c and s_l carry today's per-tier caps.  The stored sigma and
+        spread come from the record in force for this pair; without one
+        they contribute nothing and the band equals today's bound.  The
+        spread term admits the wander the station really has.  The change
+        alarm and the held-T6 check use this same band (spec §5: one
+        bound, not two).
+        """
+        sigma_c_ns, sigma_l_ns = self._capped_sigmas_ns(cand, ref)
+        record = self._chain_record_for(cand, ref)
+        sigma_s_ns = float(record.sigma_ns) if record is not None else 0.0
+        spread_ns = float(record.spread_ns) if record is not None else 0.0
+        return self.cross_bench_k * math.sqrt(
+            sigma_c_ns ** 2 + sigma_l_ns ** 2 + sigma_s_ns ** 2 + spread_ns ** 2
+        )
+
+    def _t6_gross_ok(
+        self, cand: BenchReading, ref: BenchReading, delta_raw_ns: float
+    ) -> bool:
+        """|delta_raw| <= chain_delay_max_ns + k_x * s_l (spec §6).
+
+        ``delta_raw_ns`` is T6 minus the lower tier with NO plane term;
+        s_l is the lower (non-T6) bench's capped sigma.  Holds with or
+        without a record, so a wrong second or a sidelobe never reaches
+        the band arithmetic.
+        """
+        return abs(delta_raw_ns) <= self._t6_gross_bound_ns(cand, ref)
+
+    def _t6_gross_bound_ns(
+        self, cand: BenchReading, ref: BenchReading
+    ) -> float:
+        """chain_delay_max_ns + k_x * s_l, s_l the non-T6 bench's capped
+        sigma."""
+        lower = ref if cand.tier == "T6" else cand
+        sigma_l_ns = min(
+            lower.sigma_ns, cross_bench_sigma_ceiling_ms(lower.tier) * 1e6)
+        return self.chain_delay_max_ns + self.cross_bench_k * sigma_l_ns
 
     def _cross_gate_ok_locked(
         self, cand: BenchReading, ref: BenchReading, mono_now: float
     ) -> bool:
         """One gate evaluation: |delta| <= k_x * sqrt(s_c^2 + s_l^2).
+
+        A T6-versus-host pair, while chain-delay learning is on, first
+        meets the gross bound on the raw delta (spec §6); then, with a
+        stored record, the band of :meth:`_chain_band_ns` around the
+        stored offset (spec §4).  Without a record it meets today's
+        bound.  Every other pair is unchanged.
 
         On failure the conflict flag is recorded/refreshed and a
         rate-limited CRITICAL names both tiers and the delta; on
@@ -1901,28 +2030,29 @@ class OffsetJudge:
         advance window then restarts cleanly at the caller).
         """
         delta_ns = self._cross_bench_delta_ns(cand, ref, mono_now)
-        # Cap each bench's sigma contribution to the bound at what ITS
-        # OWN tier can physically deliver (see
-        # CROSS_BENCH_SIGMA_CEILING_MS_BY_TIER) -- the published sigmas
-        # themselves are never touched, only their weight here.  A flat
-        # ceiling across all tiers would trim a legitimately wide WAN
-        # bench as hard as a broken T6; the per-tier form trims only a
-        # bench claiming an uncertainty its tier cannot produce.
-        sigma_c_ns = min(
-            cand.sigma_ns, cross_bench_sigma_ceiling_ms(cand.tier) * 1e6)
-        sigma_l_ns = min(
-            ref.sigma_ns, cross_bench_sigma_ceiling_ms(ref.tier) * 1e6)
+        sigma_c_ns, sigma_l_ns = self._capped_sigmas_ns(cand, ref)
+        # Today's bound; kept for the CRITICAL text even when a record
+        # supplies the operative band.
         bound_ns = self.cross_bench_k * math.sqrt(
             sigma_c_ns ** 2 + sigma_l_ns ** 2
         )
-        if abs(delta_ns) <= bound_ns:
+        record = self._chain_record_for(cand, ref)
+        limit_ns = (self._chain_band_ns(cand, ref) if record is not None
+                    else bound_ns)
+        gross_ok = True
+        raw_ns = 0.0
+        if (self.chain_delay_store is not None
+                and self._is_t6_host_pair(cand, ref)):
+            raw_ns = (cand.utc_at(mono_now) - ref.utc_at(mono_now)) * 1e9
+            gross_ok = self._t6_gross_ok(cand, ref, raw_ns)
+        if gross_ok and abs(delta_ns) <= limit_ns:
             if (self._cross_conflict is not None
                     and self._cross_conflict.get("upper") == cand.tier):
                 logger.warning(
                     f"OffsetJudge cross-bench gate: candidate {cand.tier} "
                     f"agrees with {ref.tier} again "
                     f"(delta={delta_ns/1e6:+.3f}ms within "
-                    f"{bound_ns/1e6:.3f}ms) — advance window restarts"
+                    f"{limit_ns/1e6:.3f}ms) — advance window restarts"
                 )
                 self._cross_conflict = None
             return True
@@ -1957,8 +2087,40 @@ class OffsetJudge:
                 f"= {bound_ns/1e6:.3f} ms — advancement BLOCKED, judging "
                 f"stays on {ref.tier}; the rejected bench stays under "
                 f"shadow measurement (shadow_residuals in offset_judge.json)."
+                + self._chain_conflict_suffix(
+                    record, limit_ns, gross_ok, raw_ns, cand, ref)
             )
         return False
+
+    def _chain_conflict_suffix(
+        self,
+        record: Optional[ChainDelayRecord],
+        limit_ns: float,
+        gross_ok: bool,
+        raw_ns: float,
+        cand: BenchReading,
+        ref: BenchReading,
+    ) -> str:
+        """What the CRITICAL conflict line adds for a T6 chain-delay pair.
+
+        Empty for every other pair, so their line reads as before.
+        """
+        parts = []
+        if not gross_ok:
+            parts.append(
+                f" T6 GROSS BOUND: raw delta {raw_ns/1e6:+.3f} ms exceeds "
+                f"chain_delay_max + k_x*sigma_l = "
+                f"{self._t6_gross_bound_ns(cand, ref)/1e6:.3f} ms."
+            )
+        if record is not None:
+            parts.append(
+                f" Stored T6 chain delay ({record.state}) "
+                f"{float(record.offset_ns)/1e6:+.3f} ms in force; delta is "
+                f"measured from it, band "
+                f"k_x*sqrt(sigma_c^2+sigma_l^2+sigma_stored^2+spread^2) = "
+                f"{limit_ns/1e6:.3f} ms."
+            )
+        return "".join(parts)
 
     def _sigma_gate_ok_locked(
         self, cand: BenchReading, ref: BenchReading, mono_now: float
@@ -2744,6 +2906,25 @@ class OffsetJudge:
         stream, ssrc = source_key
         return f"{stream}/{int(ssrc):08x}"
 
+    def _chain_delay_status_locked(self) -> Dict:
+        """The published ``chain_delay`` block.
+
+        ``state`` reads "none" until a record exists (always, with
+        learning off).  ``changed`` and ``learning`` stay None until the
+        change alarm and the learner exist to fill them.
+        """
+        store = self.chain_delay_store
+        record = store.record if store is not None else None
+        candidate = store.candidate if store is not None else None
+        return {
+            "state": record.state if record is not None else "none",
+            "record": record.to_dict() if record is not None else None,
+            "candidate": (candidate.to_dict()
+                          if candidate is not None else None),
+            "changed": None,
+            "learning": None,
+        }
+
     def _snapshot_locked(self, mono_now: float) -> Dict:
         best = self._best
         judge_block: Dict = {"tier": None, "sigma_ns": None, "age_s": None}
@@ -2889,6 +3070,10 @@ class OffsetJudge:
             # the correction applied to every cross-plane comparison is
             # auditable rather than implicit.
             "label_plane": self.label_plane_status(),
+            # The station's stored T6 chain delay (spec 2026-10-27 §2,
+            # §4): the record the gate measures T6 from, any candidate
+            # beside it, the change alarm and the learner's progress.
+            "chain_delay": self._chain_delay_status_locked(),
             # Spec §11.2 (2026-09-07): the label plane's own (UTC,
             # monotonic) statement, for the FUSE chrony feed in the
             # fusion process.  Published independently of tier
