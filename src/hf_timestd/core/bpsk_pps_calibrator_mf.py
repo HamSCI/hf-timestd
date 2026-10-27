@@ -316,6 +316,11 @@ class BpskPpsCalibratorMF:
         # consecutive off-position edges have agreed on that position.
         self._step_candidate_rtp: Optional[int] = None
         self._step_candidate_count: int = 0
+        # Confirmed re-homes since construction, and when the latest
+        # happened (time.monotonic()).  The offset judge reads them as
+        # a T6 health signal; a re-home moves the chain delay.
+        self.rehome_count: int = 0
+        self.last_rehome_mono: Optional[float] = None
         # One continuous counter domain (see rtp_domain).  Deliberately
         # NOT cleared by reset(): a re-lock after reset must land in
         # the same domain as the lock it replaces, and the fine stage
@@ -1106,6 +1111,8 @@ class BpskPpsCalibratorMF:
                         ))
                     if not stepped:
                         continue
+                    self.rehome_count += 1
+                    self.last_rehome_mono = time.monotonic()
                     logger.warning(
                         f"T6 BPSK chain-delay step adopted: lock re-homed "
                         f"{d_dbg:+d} samples "

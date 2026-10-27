@@ -782,7 +782,9 @@ class CoreRecorderV2:
                     NativeAnchorBench, LbeT5Bench, HfAcquiredBench,
                 )
                 self._offset_judge.add_bench(
-                    NativeAnchorBench(provider=self._t6_bench_state))
+                    NativeAnchorBench(
+                        provider=self._t6_bench_state,
+                        health_provider=self._t6_health_state))
                 self._offset_judge.add_bench(
                     LbeT5Bench(provider=self._t5_bench_state))
                 self._offset_judge.add_bench(
@@ -2726,6 +2728,32 @@ class CoreRecorderV2:
             tracker.note(utc_s - mono, mono)
         except Exception as e:  # noqa: BLE001 — diagnostics never fatal
             logger.debug(f"T6 arrival floor note failed: {e}")
+
+    def _t6_health_state(self) -> Optional[Dict]:
+        """T6 health for the judge: authority state, how long it has held
+        that state, and the age of the calibrator's last re-home.
+        None when no authority exists."""
+        authority = getattr(self, '_t6_authority', None)
+        if authority is None:
+            return None
+        try:
+            now = time.monotonic()
+            name = authority.state.name
+            last = getattr(self, '_t6_health_last', None)
+            if last is None or last[0] != name:
+                last = (name, now)
+                self._t6_health_last = last
+            cal = getattr(self, '_t6_calibrator', None)
+            rehome_mono = getattr(cal, 'last_rehome_mono', None)
+            return {
+                "authority_state": name,
+                "state_for_s": round(now - last[1], 1),
+                "rehome_age_s": (None if rehome_mono is None
+                                 else round(now - rehome_mono, 1)),
+            }
+        except Exception as e:  # noqa: BLE001 — diagnostics never fatal
+            logger.debug(f"T6 health state failed: {e}")
+            return None
 
     def _t6_bench_state(self):
         """NativeAnchorBench provider: (anchor, arrival_rtp, arrival_mono,

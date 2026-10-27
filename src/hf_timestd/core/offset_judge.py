@@ -676,9 +676,14 @@ class NativeAnchorBench:
         self,
         provider: Callable[[], Optional[Tuple]],
         mono_fn: Callable[[], float] = time.monotonic,
+        health_provider: Optional[Callable[[], Optional[Dict]]] = None,
     ):
         self._provider = provider
         self._mono = mono_fn
+        # T6 health (authority state, re-home age) rides in the reading
+        # detail under "t6_health".  Never the key "authoritative":
+        # _adoptable reads that one.
+        self._health_provider = health_provider
 
     def poll(self) -> Optional[BenchReading]:
         try:
@@ -709,6 +714,13 @@ class NativeAnchorBench:
             "chain_delay_ns": int(anchor.chain_delay_ns),
             "arrival_age_s": round(age, 3),
         }
+        if self._health_provider is not None:
+            try:
+                health = self._health_provider()
+            except Exception:  # noqa: BLE001 — health trouble ≠ judge trouble
+                health = None
+            if health is not None:
+                detail["t6_health"] = dict(health)
         if floor is None:
             # No floor yet: the latest arrival, carrying the transport
             # latency as an honest (wide) bound.
