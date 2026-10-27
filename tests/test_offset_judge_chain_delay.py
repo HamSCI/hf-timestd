@@ -411,3 +411,319 @@ def test_anchor_recapture_reading_never_reaches_a_tracker(tmp_path):
     assert est.dropped == 0
     assert est.n == n_before
     assert len(j._t6_learner._obs) == n_before
+
+
+# ── Task 6: the change alarm, the latch, the held-T6 check, requests ──
+#
+# Spec §5.  These run whole judge ticks against two stub benches, so the
+# request intake, selection, the trackers and the alarm all take part.
+
+import pytest  # noqa: E402
+
+from hf_timestd.core.chain_delay_store import ChainDelayStore  # noqa: E402
+
+# A confirmed record tight enough that a 6 ms shift clears the band the
+# alarm draws around it (spec §5: "a sustained 6 ms shift alarms").
+CONFIRMED = {**SEED, "sigma_ns": 140_000.0, "spread_ns": 500_000.0,
+             "state": "confirmed", "span_s": 7200.0}
+SHIFTED_NS = -22_500_000.0
+
+
+class StubBench:
+    """Returns whatever reading ``make()`` builds at the current clock."""
+
+    def __init__(self, make):
+        self.make = make
+
+    def poll(self):
+        return self.make()
+
+
+class Station:
+    """A T6 bench and a T4 bench on one FakeClock; ``offset_ns`` moves T6.
+
+    T6 reports 300 us, inside the precision gate's 2 x T4 margin, so a T6
+    the judge dropped can come back through the ordinary upgrade gate.
+    """
+
+    def __init__(self, j, offset_ns=-16_350_000.0, wander_ns=300_000.0):
+        self.j = j
+        self.clock = j._test_clock
+        self.offset_ns = offset_ns
+        self.wander_ns = wander_ns
+        self.i = 0
+        j.add_bench(StubBench(self._t6))
+        j.add_bench(StubBench(lambda: t4_reading(self.clock)))
+
+    def _t6(self):
+        off = self.offset_ns + (self.i % 3 - 1) * self.wander_ns
+        return t6_reading(self.clock, off, sigma_ns=300_000.0)
+
+    def run(self, minutes, offset_ns=None):
+        """One judge tick per 10 s; returns the tiers held, one per tick."""
+        if offset_ns is not None:
+            self.offset_ns = offset_ns
+        tiers = []
+        for _ in range(int(round(minutes * 6))):
+            self.clock.wall += 10.0
+            self.clock.mono_v += 10.0
+            self.i += 1
+            self.j.tick()
+            tiers.append(self.j._best.tier if self.j._best else None)
+        return tiers
+
+
+def confirmed_station(tmp_path, record=CONFIRMED, **cfg):
+    j = learning_judge(tmp_path, **cfg)
+    j.chain_delay_store.set_record(ChainDelayRecord(**record))
+    st = Station(j)
+    st.run(2)
+    assert j._best.tier == "T6"
+    return j, st
+
+
+def _changed_lines(caplog):
+    return [r for r in caplog.records if r.levelno == logging.CRITICAL
+            and "T6 CHAIN DELAY CHANGED" in r.getMessage()]
+
+
+def test_sustained_shift_alarms_and_drops_t6(tmp_path, caplog):
+    j, st = confirmed_station(tmp_path)
+    # The witness median crosses the band about 6 min after the shift
+    # (half its 600 s window), then the departure must last
+    # chain_delay_change_sustain_s: the alarm fires at 16 min.
+    with caplog.at_level(logging.WARNING, logger=offset_judge.logger.name):
+        tiers = st.run(17, SHIFTED_NS)
+    changed = j._chain_changed
+    assert changed is not None
+    assert changed["stored_ns"] == CONFIRMED["offset_ns"]
+    assert abs(changed["live_ns"] - SHIFTED_NS) < 1_000_000.0
+    assert changed["since_utc"]
+    assert tiers[-1] != "T6"
+    lines = _changed_lines(caplog)
+    assert len(lines) == 1
+    msg = lines[0].getMessage()
+    assert "stored -16.350 ms" in msg and "now -22." in msg and "±" in msg
+    # Published for the station web and the fleet checks.
+    snap = j._snapshot_locked(st.clock.mono_v)["chain_delay"]
+    assert snap["changed"] == changed
+    # The record stands: the judge never absorbs a change.
+    assert j.chain_delay_store.record.offset_ns == CONFIRMED["offset_ns"]
+
+
+def test_change_alarm_repeats_hourly_while_it_stands(tmp_path, caplog):
+    j, st = confirmed_station(tmp_path)
+    with caplog.at_level(logging.CRITICAL, logger=offset_judge.logger.name):
+        st.run(17 + 61, SHIFTED_NS)
+    assert len(_changed_lines(caplog)) == 2
+
+
+def test_one_bad_minute_does_not_alarm(tmp_path, caplog):
+    j, st = confirmed_station(tmp_path)
+    with caplog.at_level(logging.CRITICAL, logger=offset_judge.logger.name):
+        st.run(30)
+        tiers = st.run(1, SHIFTED_NS)
+        tiers += st.run(30, -16_350_000.0)
+    assert j._chain_changed is None
+    assert not _changed_lines(caplog)
+    # Six ticks (50 s) of departure stay inside sustain_window_s too.
+    assert set(tiers) == {"T6"}
+
+
+def test_return_to_band_clears_the_latch(tmp_path, caplog):
+    j, st = confirmed_station(tmp_path)
+    st.run(17, SHIFTED_NS)
+    assert j._chain_changed is not None
+    with caplog.at_level(logging.WARNING, logger=offset_judge.logger.name):
+        early = st.run(8, -16_350_000.0)
+        # Back inside the band, but not yet for the sustain time: the
+        # latch still keeps T6 out, though the held-T6 band would admit it.
+        assert j._chain_changed is not None
+        assert "T6" not in early
+        later = st.run(15)
+    assert j._chain_changed is None
+    cleared = [r for r in caplog.records if r.levelno == logging.WARNING
+               and "CHAIN DELAY CHANGE CLEARED" in r.getMessage()]
+    assert len(cleared) == 1
+    assert later[-1] == "T6"          # back through the ordinary upgrade gate
+    assert j._t6_candidate_learner is None
+
+
+def test_shift_writes_a_candidate_after_a_full_learn_and_keeps_the_record(
+        tmp_path):
+    j, st = confirmed_station(tmp_path)
+    st.run(17, SHIFTED_NS)
+    assert j.chain_delay_store.candidate is None
+    st.run(125)
+    cand = j.chain_delay_store.candidate
+    assert cand is not None
+    assert abs(cand.offset_ns - SHIFTED_NS) < 200_000.0
+    assert cand.span_s >= LEARN_S
+    assert cand.state == "confirmed"
+    assert j.chain_delay_store.record.offset_ns == CONFIRMED["offset_ns"]
+    assert j._chain_changed is not None          # never promoted by itself
+    # On disk, beside the record.
+    j2 = learning_judge(tmp_path)
+    assert abs(j2.chain_delay_store.candidate.offset_ns - SHIFTED_NS) < 200_000.0
+
+
+def test_no_change_alarm_against_a_seed(tmp_path):
+    """While a seed stands, Task 5's learner owns the record."""
+    # As tight as CONFIRMED, so only the state keeps the alarm quiet.
+    j, st = confirmed_station(tmp_path, record={**CONFIRMED, "state": "seeded"})
+    st.run(17, SHIFTED_NS)
+    assert j._chain_changed is None
+
+
+# ── requests the CLI leaves beside the record ──────────────────────────
+
+
+def request(j, req):
+    ChainDelayStore.write_request(j.chain_delay_store.request_path, req)
+
+
+def tick_once(j):
+    j._test_clock.wall += 10.0
+    j._test_clock.mono_v += 10.0
+    j.tick()
+
+
+def _warnings(caplog):
+    return [r for r in caplog.records if r.levelno == logging.WARNING]
+
+
+GOOD_CANDIDATE = {**CONFIRMED, "offset_ns": SHIFTED_NS, "sigma_ns": 150_000.0}
+
+
+def test_accept_promotes_the_candidate(tmp_path):
+    j = learning_judge(tmp_path)
+    store = j.chain_delay_store
+    store.set_record(ChainDelayRecord(**CONFIRMED))
+    store.set_candidate(ChainDelayRecord(**GOOD_CANDIDATE))
+    j._chain_changed = {"stored_ns": CONFIRMED["offset_ns"],
+                        "live_ns": SHIFTED_NS, "since_utc": "x"}
+    request(j, {"action": "accept"})
+    tick_once(j)
+    assert store.record.offset_ns == SHIFTED_NS
+    assert store.record.state == "confirmed"
+    assert store.candidate is None
+    assert j._chain_changed is None
+    assert store._history[-1]["offset_ns"] == CONFIRMED["offset_ns"]
+    assert not store.request_path.exists()
+
+
+@pytest.mark.parametrize("candidate, reason", [
+    (None, "no candidate"),
+    ({**GOOD_CANDIDATE, "span_s": 3600.0}, "span"),
+    ({**GOOD_CANDIDATE, "sigma_ns": 6_000_000.0}, "sigma"),
+])
+def test_accept_refuses_a_short_candidate(tmp_path, caplog, candidate, reason):
+    j = learning_judge(tmp_path)
+    store = j.chain_delay_store
+    store.set_record(ChainDelayRecord(**CONFIRMED))
+    if candidate is not None:
+        store.set_candidate(ChainDelayRecord(**candidate))
+    request(j, {"action": "accept"})
+    with caplog.at_level(logging.WARNING, logger=offset_judge.logger.name):
+        tick_once(j)
+    assert store.record.offset_ns == CONFIRMED["offset_ns"]
+    if candidate is not None:
+        assert store.candidate.offset_ns == SHIFTED_NS
+    warns = _warnings(caplog)
+    assert len(warns) == 1
+    assert "refused" in warns[0].getMessage() and reason in warns[0].getMessage()
+    assert not store.request_path.exists()
+
+
+def test_relearn_discards_both(tmp_path):
+    j, st = confirmed_station(tmp_path)
+    store = j.chain_delay_store
+    store.set_candidate(ChainDelayRecord(**GOOD_CANDIDATE))
+    j._chain_changed = {"stored_ns": 0.0, "live_ns": 0.0, "since_utc": "x"}
+    request(j, {"action": "relearn"})
+    tick_once(j)
+    assert store.record is None and store.candidate is None
+    assert j._chain_changed is None
+    # The learners start again: only what arrived after the request.
+    assert len(j._t6_learner._obs) <= 1
+    assert len(j._t6_witness._obs) <= 1
+    assert not store.request_path.exists()
+    # Learning runs again.
+    assert j._snapshot_locked(st.clock.mono_v)["chain_delay"]["learning"]
+
+
+def test_seed_request_writes_a_seed_over_a_confirmed_record(tmp_path):
+    j, st = confirmed_station(tmp_path)
+    store = j.chain_delay_store
+    j._chain_changed = {"stored_ns": 0.0, "live_ns": 0.0, "since_utc": "x"}
+    request(j, {"action": "seed", "offset_ns": -17_000_000.0,
+                "sigma_ns": 1_100_000.0, "spread_ns": 1_000_000.0})
+    tick_once(j)
+    rec = store.record
+    assert rec.state == "seeded" and rec.lower_tier == "T4" and rec.n == 0
+    assert rec.offset_ns == -17_000_000.0
+    assert rec.sigma_ns == 1_100_000.0 and rec.spread_ns == 1_000_000.0
+    assert store._history[-1]["state"] == "confirmed"
+    assert j._chain_changed is None
+    assert len(j._t6_learner._obs) <= 1
+    assert not store.request_path.exists()
+
+
+@pytest.mark.parametrize("req, reason", [
+    ({"action": "seed", "offset_ns": -300_000_000.0, "sigma_ns": 1e6,
+      "spread_ns": 1e6}, "chain_delay_max_ns"),
+    ({"action": "seed", "offset_ns": -16_000_000.0, "sigma_ns": 0.0,
+      "spread_ns": 1e6}, "sigma"),
+    ({"action": "seed", "offset_ns": -16_000_000.0, "sigma_ns": 1e6,
+      "spread_ns": -1.0}, "spread"),
+    ({"action": "seed", "offset_ns": "soon", "sigma_ns": 1e6,
+      "spread_ns": 1e6}, "number"),
+    ({"action": "frobnicate"}, "frobnicate"),
+])
+def test_seed_request_with_absurd_values_is_refused(tmp_path, caplog, req,
+                                                    reason):
+    j = learning_judge(tmp_path)
+    store = j.chain_delay_store
+    store.set_record(ChainDelayRecord(**CONFIRMED))
+    request(j, req)
+    with caplog.at_level(logging.WARNING, logger=offset_judge.logger.name):
+        tick_once(j)
+    assert store.record == ChainDelayRecord(**CONFIRMED)
+    warns = _warnings(caplog)
+    assert len(warns) == 1
+    assert reason in warns[0].getMessage()
+    assert not store.request_path.exists()
+
+
+# ── the held-T6 check ──────────────────────────────────────────────────
+
+
+def test_held_t6_is_rechecked_and_dropped(tmp_path):
+    # A seed: the held check runs against any record in force.
+    j, st = confirmed_station(tmp_path, record=SEED)
+    tiers = st.run(70 / 60, -16_350_000.0 - 15_000_000.0)
+    assert tiers[:6] == ["T6"] * 6          # inside sustain_window_s
+    assert tiers[-1] == "T4"
+    assert j._chain_changed is None         # the held check, not the alarm
+    # The departed T6 cannot come straight back through the upgrade gate.
+    assert set(st.run(2)) == {"T4"}
+
+
+def test_held_t6_survives_a_single_gross_outlier(tmp_path):
+    j, st = confirmed_station(tmp_path, record=SEED)
+    good = j._best
+    tiers = st.run(1 / 6, -298_000_000.0)
+    assert tiers == ["T6"]
+    # The refused reading was not adopted; the judge kept the last good one.
+    assert j._best is good
+    assert set(st.run(3, -16_350_000.0)) == {"T6"}
+    assert j._best is not good
+
+
+def test_held_t6_drops_when_gross_refusals_persist(tmp_path):
+    """A T6 the gross bound refuses tick after tick is absent; an absent
+    tier degrades once that lasts sustain_window_s."""
+    j, st = confirmed_station(tmp_path, record=SEED)
+    tiers = st.run(2, -298_000_000.0)
+    assert tiers[0] == "T6"
+    assert tiers[-1] == "T4"

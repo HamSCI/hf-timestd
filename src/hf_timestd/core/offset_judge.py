@@ -121,6 +121,12 @@ T6_HEALTHY_SETTLE_S = 600.0
 # While no record exists, a refused T6 is the expected state of a station
 # still learning, so its CRITICAL conflict line repeats only this often.
 CHAIN_LEARNING_CONFLICT_LOG_INTERVAL_S = 3600.0
+# How long the live T6 witness must sit outside the stored record's band
+# before the change alarm fires, and inside it again before the alarm
+# clears (spec §5).
+DEFAULT_CHAIN_DELAY_CHANGE_SUSTAIN_S = 600.0
+# A standing change alarm repeats its CRITICAL line this often.
+CHAIN_CHANGE_LOG_INTERVAL_S = 3600.0
 
 GPS_EPOCH_UNIX = 315964800
 BILLION = 1_000_000_000
@@ -1254,24 +1260,42 @@ class OffsetJudge:
         )
         self._t6_learner: Optional[LabelPlaneTracker] = None
         self._t6_witness: Optional[LabelPlaneTracker] = None
+        # Every T6 tracker shares these settings; a relearn or a seed
+        # request builds fresh ones from them.
+        self._t6_tracker_kw: Dict = dict(
+            min_n=label_plane_min_n,
+            max_host_sigma_ns=label_plane_max_host_sigma_ns,
+            **outlier_kw,
+        )
         if self.chain_delay_learn:
-            # 5 % past the target span, so the window still holds a full
-            # chain_delay_learn_s of observations when the learn completes.
-            self._t6_learner = LabelPlaneTracker(
-                window_s=1.05 * self.chain_delay_learn_s,
-                min_n=label_plane_min_n,
-                max_host_sigma_ns=label_plane_max_host_sigma_ns,
-                **outlier_kw,
-            )
+            self._t6_learner = self._new_t6_learner()
             self._t6_witness = LabelPlaneTracker(
-                window_s=T6_WITNESS_WINDOW_S,
-                min_n=label_plane_min_n,
-                max_host_sigma_ns=label_plane_max_host_sigma_ns,
-                **outlier_kw,
-            )
+                window_s=T6_WITNESS_WINDOW_S, **self._t6_tracker_kw)
         # The host-plane tier the learner was last paired with; the
         # learned record names it as ``lower_tier``.
         self._t6_learner_host_tier: Optional[str] = None
+        # The change alarm (spec §5).  Against a confirmed record the
+        # judge compares the 600 s witness with the stored value every
+        # tick; a departure that lasts chain_delay_change_sustain_s sets
+        # ``_chain_changed`` ({stored_ns, live_ns, since_utc}), which
+        # latches T6 out of adoption until the witness has sat inside
+        # the band for the same time again, or an operator answers it.
+        # The judge never absorbs a change: a fresh candidate learner
+        # writes the new value beside the record, and only an ``accept``
+        # request promotes it.
+        self.chain_delay_change_sustain_s = float(cfg.get(
+            "chain_delay_change_sustain_s",
+            DEFAULT_CHAIN_DELAY_CHANGE_SUSTAIN_S))
+        self._chain_changed: Optional[Dict] = None
+        self._chain_departed_since: Optional[float] = None
+        self._chain_returned_since: Optional[float] = None
+        self._last_chain_change_log: Optional[float] = None
+        self._t6_candidate_learner: Optional[LabelPlaneTracker] = None
+        # The held-T6 check (spec §5, "Holding T6"): when the held T6
+        # first left the band, and when the gross bound first refused it
+        # in an unbroken run.  None while it agrees.
+        self._held_t6_departed_since: Optional[float] = None
+        self._held_t6_gross_since: Optional[float] = None
         # Precision non-regression clause (gate amendment, cont'd): a
         # VOLUNTARY upgrade is additionally refused when the candidate
         # bench's reported sigma is materially worse than the
@@ -1663,12 +1687,20 @@ class OffsetJudge:
             except Exception as e:  # noqa: BLE001 — observable trouble ≠ judge trouble
                 logger.debug(f"OffsetJudge t6 rate provider failed: {e}")
         gpsdo_state, gpsdo_detail = self._poll_gpsdo()
+        # An operator request the CLI left beside the chain-delay record
+        # (seed / accept / relearn).  Read and deleted here, outside the
+        # lock; applied under it, before selection, so this tick already
+        # selects against the answer.
+        chain_request = (self.chain_delay_store.take_request()
+                         if self.chain_delay_store is not None else None)
 
         mono_now = self._mono()
         with self._lock:
             self._t6_rate = t6_rate
             self._gpsdo_discipline = gpsdo_state
             self._gpsdo_detail = gpsdo_detail
+            if chain_request is not None:
+                self._apply_chain_request_locked(chain_request)
             best = self._select_bench_locked(readings)
             if best is not None:
                 self._best = best
@@ -1714,6 +1746,10 @@ class OffsetJudge:
         and not if it says it is not authoritative."""
         detail = r.detail or {}
         if detail.get("bench") in self.SHADOW_ONLY_BENCHES:
+            return False
+        # The change-alarm latch (spec §5): while a T6 chain-delay change
+        # stands, T6 is not adoptable at all.
+        if r.tier == "T6" and self._chain_changed is not None:
             return False
         return detail.get("authoritative", True) is not False
 
@@ -1761,6 +1797,24 @@ class OffsetJudge:
         )
         best = by_rank[0]
         active_tier = self._best.tier if self._best is not None else None
+        if active_tier == "T6":
+            held = self._held_t6_check_locked(by_rank, mono_now)
+            if held == "drop":
+                # A held T6 that left the band for sustain_window_s
+                # drops like a tier gone silent, but the re-selection
+                # stays chain-gated over what is left.
+                self._candidate_tier = None
+                self._candidate_count = 0
+                rest = [r for r in by_rank if r.tier != "T6"]
+                adopted = self._chain_consistent_locked(rest, mono_now)
+                self._release_holds_for_locked(adopted.tier)
+                return adopted
+            if held == "absent":
+                # The gross bound refused the held T6 this tick: adopt
+                # nothing new.  The judge keeps its last good T6 reading
+                # rather than either adopting a wild one or degrading
+                # on one tick.
+                return None
         active_rank = self._tier_rank(active_tier)
         best_rank = self._tier_rank(best.tier)
 
@@ -1935,7 +1989,10 @@ class OffsetJudge:
         raw_ns = (label_utc - float(host.utc)) * 1e9
         if not self._t6_gross_ok(label, host, raw_ns):
             return
-        for tracker in (self._t6_learner, self._t6_witness):
+        trackers = [self._t6_learner, self._t6_witness]
+        if self._t6_candidate_learner is not None:
+            trackers.append(self._t6_candidate_learner)
+        for tracker in trackers:
             tracker.observe(
                 label_utc=label_utc,
                 host_utc=float(host.utc),
@@ -2021,6 +2078,359 @@ class OffsetJudge:
                 f"{seed_band_ns/1e6:.3f} ms) -- check how this station was "
                 f"seeded"
             )
+
+    def _new_t6_learner(self):
+        """A learner whose window spans a whole learn.
+
+        5 % past the target span, so the window still holds a full
+        chain_delay_learn_s of observations when the learn completes.
+        """
+        from .label_plane import LabelPlaneTracker
+        return LabelPlaneTracker(
+            window_s=1.05 * self.chain_delay_learn_s, **self._t6_tracker_kw)
+
+    def _reset_t6_learning_locked(self) -> None:
+        """Start every T6 tracker afresh and clear the change alarm.
+
+        A seed or a relearn request changes what the trackers compare
+        against, so nothing they hold still answers the new question.
+        """
+        from .label_plane import LabelPlaneTracker
+        self._t6_learner = self._new_t6_learner()
+        self._t6_witness = LabelPlaneTracker(
+            window_s=T6_WITNESS_WINDOW_S, **self._t6_tracker_kw)
+        self._t6_candidate_learner = None
+        self._clear_chain_change_locked()
+
+    def _clear_chain_change_locked(self) -> None:
+        """Drop the change latch and every timer that leads to it."""
+        self._chain_changed = None
+        self._chain_departed_since = None
+        self._chain_returned_since = None
+        self._last_chain_change_log = None
+
+    # ── the change alarm (spec 2026-10-27 §5) ─────────────────────────
+
+    def _chain_change_band_ns(
+        self, live_sigma_ns: float, record: ChainDelayRecord
+    ) -> float:
+        """k_x * sqrt(s_live^2 + s_stored^2 + spread^2), ns.
+
+        The adoption band with the live witness's sigma in place of the
+        candidate bench's and no lower-tier term: the witness already
+        measured T6 against the host plane (spec §5).
+        """
+        return self.cross_bench_k * math.sqrt(
+            float(live_sigma_ns) ** 2 + float(record.sigma_ns) ** 2
+            + float(record.spread_ns) ** 2)
+
+    def _evaluate_chain_change_locked(self, mono_now: float) -> None:
+        """Compare the live witness with the confirmed record; alarm on a
+        sustained departure, clear on a sustained return.
+
+        Only against a confirmed record: while a seed stands, the learner
+        owns the record and its first full learn replaces the seed.  A
+        tick with no witness estimate restarts whichever timer is running,
+        since it offers no evidence either way.
+        """
+        store = self.chain_delay_store
+        record = store.record if store is not None else None
+        if record is None or record.state != "confirmed":
+            self._clear_chain_change_locked()
+            return
+        est = self._t6_witness.estimate()
+        if est is None:
+            self._chain_departed_since = None
+            self._chain_returned_since = None
+            return
+        stored_ns = float(record.offset_ns)
+        live_ns = float(est.offset_ns)
+        band_ns = self._chain_change_band_ns(est.sigma_ns, record)
+        outside = abs(live_ns - stored_ns) > band_ns
+        if self._chain_changed is None:
+            if not outside:
+                self._chain_departed_since = None
+                return
+            if self._chain_departed_since is None:
+                self._chain_departed_since = mono_now
+            if (mono_now - self._chain_departed_since
+                    < self.chain_delay_change_sustain_s):
+                return
+            self._chain_changed = {
+                "stored_ns": stored_ns,
+                "live_ns": round(live_ns, 1),
+                "since_utc": self._iso_utc(
+                    self._time() - (mono_now - self._chain_departed_since)),
+            }
+            self._chain_departed_since = None
+            self._chain_returned_since = None
+            # A fresh learner under the §3 rules measures the new value.
+            self._t6_candidate_learner = self._new_t6_learner()
+            self._log_chain_change_locked(est, band_ns, mono_now)
+            return
+        # The alarm stands.  Keep the published live value current.
+        self._chain_changed["live_ns"] = round(live_ns, 1)
+        if outside:
+            self._chain_returned_since = None
+            last = self._last_chain_change_log
+            if (last is None
+                    or mono_now - last >= CHAIN_CHANGE_LOG_INTERVAL_S):
+                self._log_chain_change_locked(est, band_ns, mono_now)
+            return
+        if self._chain_returned_since is None:
+            self._chain_returned_since = mono_now
+        if (mono_now - self._chain_returned_since
+                < self.chain_delay_change_sustain_s):
+            return
+        # Back inside the band for the sustain time: nothing changed,
+        # so nothing needs confirming.  T6 may return through the
+        # ordinary upgrade gate.  A candidate already on disk stays.
+        since_utc = self._chain_changed.get("since_utc")
+        self._clear_chain_change_locked()
+        self._t6_candidate_learner = None
+        logger.warning(
+            f"OffsetJudge T6 CHAIN DELAY CHANGE CLEARED: the live T6 "
+            f"chain delay {live_ns/1e6:+.3f} ms has sat within "
+            f"{band_ns/1e6:.3f} ms of the stored {stored_ns/1e6:+.3f} ms "
+            f"for {self.chain_delay_change_sustain_s:.0f} s "
+            f"(chain_delay_change_sustain_s); the alarm raised at "
+            f"{since_utc} is withdrawn and T6 may be adopted again "
+            f"through the upgrade gate."
+        )
+
+    def _log_chain_change_locked(
+        self, est, band_ns: float, mono_now: float
+    ) -> None:
+        """The change alarm's CRITICAL line: once, then hourly."""
+        self._last_chain_change_log = mono_now
+        changed = self._chain_changed
+        logger.critical(
+            f"T6 CHAIN DELAY CHANGED: stored "
+            f"{changed['stored_ns']/1e6:+.3f} ms, now "
+            f"{float(est.offset_ns)/1e6:+.3f} ms ± "
+            f"{float(est.sigma_ns)/1e6:.3f} ms (spread "
+            f"{float(est.spread_ns)/1e6:.3f} ms, n={int(est.n)} over the "
+            f"last {T6_WITNESS_WINDOW_S:.0f} s; band "
+            f"k_x*sqrt(sigma_live^2+sigma_stored^2+spread^2) = "
+            f"{band_ns/1e6:.3f} ms; outside it since "
+            f"{changed['since_utc']}).  T6 stays dropped; the stored value "
+            f"stands.  A fresh learn will write a candidate beside it after "
+            f"{self.chain_delay_learn_s:.0f} s: `hf-timestd chain-delay "
+            f"show`, then `accept` it or `relearn`.  This line repeats "
+            f"hourly while the change stands."
+        )
+
+    def _maybe_write_candidate_locked(self) -> None:
+        """Write the candidate learner's value once its learn completes.
+
+        Same completion rule as the first learn (span and sigma).  The
+        candidate goes beside the record, never over it; the learner then
+        stops, so a standing change writes one candidate, not one per
+        tick.
+        """
+        learner = self._t6_candidate_learner
+        if learner is None:
+            return
+        est = learner.estimate()
+        if est is None:
+            return
+        if float(est.span_s) < self.chain_delay_learn_s:
+            return
+        if float(est.sigma_ns) > self.MAX_PLANE_SIGMA_NS:
+            return
+        now = self._time()
+        candidate = ChainDelayRecord(
+            offset_ns=float(est.offset_ns),
+            sigma_ns=float(est.sigma_ns),
+            spread_ns=float(est.spread_ns),
+            n=int(est.n),
+            n_eff=float(est.n_eff),
+            span_s=float(est.span_s),
+            learned_from_utc=self._iso_utc(now - float(est.span_s)),
+            learned_to_utc=self._iso_utc(now),
+            lower_tier=self._t6_learner_host_tier or "T4",
+            state="confirmed",
+        )
+        self.chain_delay_store.set_candidate(candidate)
+        self._t6_candidate_learner = None
+        record = self.chain_delay_store.record
+        logger.warning(
+            f"OffsetJudge T6 chain delay CANDIDATE written: "
+            f"{candidate.offset_ns/1e6:+.3f} ms, sigma "
+            f"{candidate.sigma_ns/1e6:.3f} ms, spread "
+            f"{candidate.spread_ns/1e6:.3f} ms (n={candidate.n} over "
+            f"{candidate.span_s:.0f} s), beside the stored "
+            + (f"{float(record.offset_ns)/1e6:+.3f} ms"
+               if record is not None else "(none)")
+            + ".  The judge never promotes it: `hf-timestd chain-delay "
+            "accept` adopts it, `relearn` discards both."
+        )
+
+    # ── operator requests (spec §5; the CLI writes, the judge applies) ─
+
+    def _apply_chain_request_locked(self, req: Dict) -> None:
+        """Act on one request the CLI left beside the record.
+
+        ``seed`` writes a seeded record (over a confirmed one too, which
+        goes to history), ``accept`` promotes a full-length candidate,
+        ``relearn`` discards both.  Each refusal logs one WARNING naming
+        the reason; take_request has already deleted the file either way.
+        """
+        store = self.chain_delay_store
+        action = req.get("action")
+        if action == "seed":
+            self._apply_seed_request_locked(req)
+        elif action == "accept":
+            cand = store.candidate
+            if cand is None:
+                logger.warning(
+                    "OffsetJudge chain-delay accept refused: no candidate "
+                    "exists to accept")
+                return
+            if float(cand.span_s) < self.chain_delay_learn_s:
+                logger.warning(
+                    f"OffsetJudge chain-delay accept refused: the "
+                    f"candidate's span {float(cand.span_s):.0f} s falls "
+                    f"short of chain_delay_learn_s "
+                    f"{self.chain_delay_learn_s:.0f} s")
+                return
+            if float(cand.sigma_ns) > self.MAX_PLANE_SIGMA_NS:
+                logger.warning(
+                    f"OffsetJudge chain-delay accept refused: the "
+                    f"candidate's sigma {float(cand.sigma_ns)/1e6:.3f} ms "
+                    f"exceeds the {self.MAX_PLANE_SIGMA_NS/1e6:.1f} ms "
+                    f"bound")
+                return
+            old = store.record
+            store.promote_candidate()
+            self._clear_chain_change_locked()
+            self._t6_candidate_learner = None
+            logger.warning(
+                f"OffsetJudge chain-delay accept: the candidate "
+                f"{float(cand.offset_ns)/1e6:+.3f} ms is now the record"
+                + (f", replacing {float(old.offset_ns)/1e6:+.3f} ms"
+                   if old is not None else ""))
+        elif action == "relearn":
+            store.discard()
+            self._reset_t6_learning_locked()
+            logger.warning(
+                "OffsetJudge chain-delay relearn: record and candidate "
+                "discarded; learning starts again")
+        else:
+            logger.warning(
+                f"OffsetJudge chain-delay request ignored: unknown action "
+                f"{action!r}")
+
+    def _apply_seed_request_locked(self, req: Dict) -> None:
+        """``{"action": "seed", "offset_ns", "sigma_ns", "spread_ns"}``."""
+        try:
+            offset_ns = float(req["offset_ns"])
+            sigma_ns = float(req["sigma_ns"])
+            spread_ns = float(req["spread_ns"])
+        except (KeyError, TypeError, ValueError):
+            logger.warning(
+                f"OffsetJudge chain-delay seed refused: offset_ns, sigma_ns "
+                f"and spread_ns must each be a number (got {req!r})")
+            return
+        if not all(math.isfinite(v) for v in (offset_ns, sigma_ns, spread_ns)):
+            logger.warning(
+                f"OffsetJudge chain-delay seed refused: offset_ns, sigma_ns "
+                f"and spread_ns must each be a finite number (got {req!r})")
+            return
+        if abs(offset_ns) > self.chain_delay_max_ns:
+            logger.warning(
+                f"OffsetJudge chain-delay seed refused: |offset| "
+                f"{abs(offset_ns)/1e6:.3f} ms exceeds chain_delay_max_ns "
+                f"{self.chain_delay_max_ns/1e6:.3f} ms")
+            return
+        if sigma_ns <= 0.0:
+            logger.warning(
+                f"OffsetJudge chain-delay seed refused: sigma_ns "
+                f"{sigma_ns:.0f} must be positive")
+            return
+        if spread_ns <= 0.0:
+            logger.warning(
+                f"OffsetJudge chain-delay seed refused: spread_ns "
+                f"{spread_ns:.0f} must be positive")
+            return
+        now_utc = self._iso_utc(self._time())
+        self.chain_delay_store.set_record(ChainDelayRecord(
+            offset_ns=offset_ns, sigma_ns=sigma_ns, spread_ns=spread_ns,
+            n=0, n_eff=0.0, span_s=0.0,
+            learned_from_utc=now_utc, learned_to_utc=now_utc,
+            lower_tier="T4", state="seeded",
+        ))
+        # Learning runs again from the seed; its first full learn
+        # replaces it (spec §3).
+        self._reset_t6_learning_locked()
+        logger.warning(
+            f"OffsetJudge chain-delay seed: {offset_ns/1e6:+.3f} ms, sigma "
+            f"{sigma_ns/1e6:.3f} ms, spread {spread_ns/1e6:.3f} ms; learning "
+            f"starts again from it")
+
+    # ── the held-T6 check (spec §5, "Holding T6") ────────────────────
+
+    def _held_t6_check_locked(
+        self, by_rank: List[BenchReading], mono_now: float
+    ) -> str:
+        """Re-test a held T6 against the record in force, every tick.
+
+        Returns "ok" (keep selecting as usual), "drop" (the T6 has sat
+        outside the band for sustain_window_s) or "absent" (the gross
+        bound refused it this tick).  Any record in force, seeded or
+        confirmed, arms it.  The T6 meets the tightest host-plane reading.
+        A gross refusal counts as absent, not as a departure; an unbroken
+        run of them lasting sustain_window_s drops T6 as a tier gone
+        silent would.
+        """
+        store = self.chain_delay_store
+        t6 = next((r for r in by_rank if r.tier == "T6"
+                   and getattr(r, "plane", "host") == "label"), None)
+        hosts = [r for r in by_rank
+                 if getattr(r, "plane", "host") == "host"]
+        if (store is None or store.record is None
+                or t6 is None or not hosts):
+            self._held_t6_departed_since = None
+            self._held_t6_gross_since = None
+            return "ok"
+        host = min(hosts, key=lambda r: float(r.sigma_ns))
+        raw_ns = (t6.utc_at(mono_now) - host.utc_at(mono_now)) * 1e9
+        if not self._t6_gross_ok(t6, host, raw_ns):
+            if self._held_t6_gross_since is None:
+                self._held_t6_gross_since = mono_now
+            if (mono_now - self._held_t6_gross_since
+                    < self.sustain_window_s):
+                return "absent"
+            self._log_held_t6_drop(
+                host, f"the gross bound has refused it (raw "
+                f"{raw_ns/1e6:+.3f} ms, bound "
+                f"{self._t6_gross_bound_ns(t6, host)/1e6:.3f} ms)")
+            return "drop"
+        self._held_t6_gross_since = None
+        delta_ns = self._cross_bench_delta_ns(t6, host, mono_now)
+        band_ns = self._chain_band_ns(t6, host)
+        if abs(delta_ns) <= band_ns:
+            self._held_t6_departed_since = None
+            return "ok"
+        if self._held_t6_departed_since is None:
+            self._held_t6_departed_since = mono_now
+        if mono_now - self._held_t6_departed_since < self.sustain_window_s:
+            return "ok"
+        self._log_held_t6_drop(
+            host, f"it sits {delta_ns/1e6:+.3f} ms from the stored chain "
+            f"delay {float(store.record.offset_ns)/1e6:+.3f} ms, outside "
+            f"the band {band_ns/1e6:.3f} ms")
+        return "drop"
+
+    def _log_held_t6_drop(self, host: BenchReading, why: str) -> None:
+        self._held_t6_departed_since = None
+        self._held_t6_gross_since = None
+        logger.warning(
+            f"OffsetJudge held T6 DROPPED: for {self.sustain_window_s:.0f} s "
+            f"(sustain_window_s) {why}, judged against {host.tier}; "
+            f"re-selecting over the lower tiers.  T6 may return only "
+            f"through the upgrade gate."
+        )
 
     # A plane correction is subtracted at the single choke point the
     # adoption gate and the shadow residuals share, against bounds of
@@ -2434,13 +2844,17 @@ class OffsetJudge:
                   if getattr(r, "plane", "host") == "label"]
         hosts = [r for r in readings
                  if getattr(r, "plane", "host") == "host"]
-        if not labels or not hosts:
-            return
-        host = min(hosts, key=lambda r: float(r.sigma_ns))
-        for label in labels:
-            self.observe_label_plane(label, host)
+        if labels and hosts:
+            host = min(hosts, key=lambda r: float(r.sigma_ns))
+            for label in labels:
+                self.observe_label_plane(label, host)
         if self._t6_learner is not None:
+            # Every tick, paired or not: the change alarm's sustain and
+            # return timers must see a witness that has gone quiet.
             self._maybe_confirm_learn_locked()
+            mono_now = self._mono()
+            self._evaluate_chain_change_locked(mono_now)
+            self._maybe_write_candidate_locked()
 
 
     def _select_label_anchor_locked(
@@ -3149,8 +3563,8 @@ class OffsetJudge:
 
         ``state`` reads "none" until a record exists (always, with
         learning off).  ``learning`` reports the learn under way while no
-        confirmed record exists, and None otherwise.  ``changed`` stays
-        None until the change alarm exists to fill it.
+        confirmed record exists, and None otherwise.  ``changed`` carries
+        ``{stored_ns, live_ns, since_utc}`` while a change alarm stands.
         """
         store = self.chain_delay_store
         record = store.record if store is not None else None
@@ -3160,7 +3574,8 @@ class OffsetJudge:
             "record": record.to_dict() if record is not None else None,
             "candidate": (candidate.to_dict()
                           if candidate is not None else None),
-            "changed": None,
+            "changed": (dict(self._chain_changed)
+                        if self._chain_changed is not None else None),
             "learning": (self._learning_progress()
                          if self._chain_learning_active() else None),
         }
