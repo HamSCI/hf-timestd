@@ -270,7 +270,7 @@ class TestMeasuredPlaneMustEarnItsUse:
     sitting near a stable -16.6 ms.
     """
 
-    LIVE_BAD = (-25_846_958.0, 197_134_152.0, 27)     # the flip window
+    LIVE_BAD = (-25_846_958.0, 197_134_152.0, 28)     # the flip window
     GOOD = (-16_600_000.0, 500_000.0, 60)
 
     def _seed(self, j, offset_ns, sigma_ns, n, t0=1000.0):
@@ -402,3 +402,17 @@ class TestTheCorrectionIsOffUntilEarned:
         across planes and must keep its term."""
         j = make_judge(tmp_path, label_plane_offset_ns=-16_600_000.0)
         assert j.effective_label_plane_offset_ns() == -16_600_000.0
+
+
+def test_observe_brings_both_readings_to_one_instant(tmp_path):
+    # chain_delay_learn=False: this exercises the legacy single tracker,
+    # which Task 5 keeps only for that mode.  The key is ignored until Task 4.
+    j = make_judge(tmp_path, label_plane_min_n=1, chain_delay_learn=False)
+    T = 1_700_000_000.0
+    for i in range(10):
+        # label read 0.3 s before the host; both say plane offset -16.5 ms
+        label = reading("T6", T + i - 0.3 - 0.0165, 100.0 + i - 0.3, plane="label")
+        host = reading("T4", T + i, 100.0 + i, sigma_ns=20_000.0)
+        j.observe_label_plane(label, host)
+    est = j._label_plane.estimate()
+    assert est.offset_ns == pytest.approx(-16_500_000.0, abs=1_000.0)

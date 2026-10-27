@@ -1776,7 +1776,9 @@ class OffsetJudge:
         if getattr(host, "plane", "host") != "host":
             return
         self._label_plane.observe(
-            label_utc=float(label.utc),
+            # Both readings at ONE instant (the host's); otherwise the gap
+            # in their read times lands in the offset as a spurious term.
+            label_utc=float(label.utc_at(host.mono)),
             host_utc=float(host.utc),
             host_sigma_ns=float(host.sigma_ns),
             mono=float(host.mono),

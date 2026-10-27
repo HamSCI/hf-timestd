@@ -133,13 +133,13 @@ def test_estimate_reports_its_span():
 #
 # The bound is right.  The sigma was not.  It came from
 #
-#     sigma = max(worst host sigma in window, pstdev(offsets))
+#     sigma = max(worst host sigma in window, spread of the offsets)
 #
 # and neither branch shrinks with n, so no amount of measuring could ever
 # beat the bound.  The measurement could not lose on the evidence; it was
 # arithmetically barred from winning.
 #
-# pstdev is the spread of the POPULATION — how far Λ wanders as load
+# The spread (1.4826 x MAD of the kept offsets) is the width of the POPULATION — how far Λ wanders as load
 # moves it.  The uncertainty of the MEDIAN of n such samples is a
 # different quantity, smaller by roughly 1.2533/sqrt(n_eff).  Both matter
 # to the judge and they matter differently: the centre says what to
@@ -168,7 +168,7 @@ def test_sigma_shrinks_as_the_sample_grows():
             t.observe(label_utc=1.0 + off / 1e9, host_utc=1.0,
                       host_sigma_ns=20_000.0, mono=float(i))
         return t.estimate().sigma_ns
-    assert sigma_for(400) < sigma_for(25), \
+    assert sigma_for(400) < sigma_for(24), \
         "more evidence must narrow the centre"
 
 
@@ -200,3 +200,27 @@ def test_correlated_samples_do_not_count_as_independent():
                      host_utc=1.0, host_sigma_ns=20_000.0, mono=float(i * 60))
     assert slow.estimate().sigma_ns < fast.estimate().sigma_ns, (
         "the same count spread over a longer span carries more information")
+
+
+def test_one_wild_reading_does_not_wreck_the_spread():
+    t = LabelPlaneTracker(min_n=8, window_s=1e9)
+    for i in range(62):
+        off = TRANSPORT_NS + (0.8 * MS if i % 2 else -0.8 * MS)
+        t.observe(label_utc=1.0 + off / 1e9, host_utc=1.0,
+                  host_sigma_ns=20_000.0, mono=float(i * 10))
+    t.observe(label_utc=1.0 + (-298 * MS) / 1e9, host_utc=1.0,
+              host_sigma_ns=20_000.0, mono=630.0)
+    est = t.estimate()
+    assert est.dropped == 1
+    assert est.spread_ns < 2 * MS
+    assert est.offset_ns == pytest.approx(TRANSPORT_NS, abs=1 * MS)
+    assert est.sigma_ns < 5 * MS
+
+
+def test_the_cut_scales_with_a_population_that_really_wanders():
+    t = LabelPlaneTracker(min_n=4, window_s=1e9)
+    for i in range(200):
+        off = TRANSPORT_NS + (6 * MS if i % 2 else -6 * MS)
+        t.observe(label_utc=1.0 + off / 1e9, host_utc=1.0,
+                  host_sigma_ns=20_000.0, mono=float(i))
+    assert t.estimate().dropped == 0

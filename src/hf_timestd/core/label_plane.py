@@ -71,10 +71,17 @@ class LabelPlaneEstimate:
     spread_ns: float = 0.0
     #: Independent-sample count actually credited (span / correlation time).
     n_eff: float = 0.0
+    #: Observations cut as outliers before the median and spread were taken.
+    dropped: int = 0
 
 
 class LabelPlaneTracker:
-    """Rolling median of the (label − host) plane offset."""
+    """Rolling median of the (label − host) plane offset.
+
+    ``spread_ns`` is 1.4826 × the MAD of the kept observations; readings
+    beyond max(``outlier_ns``, 4 × raw spread) of the median are dropped
+    and counted in ``dropped``.
+    """
 
     #: Default observation window.  Long enough that the term is a
     #: property of the pipeline rather than of any one tick, short enough
@@ -105,6 +112,12 @@ class LabelPlaneTracker:
     #: the estimate says more about the host than about the pipeline.
     DEFAULT_MAX_HOST_SIGMA_NS = 1_000_000.0
 
+    #: A reading farther than this from the window median (or 4 x the raw
+    #: spread, whichever is larger) is a wild reading, not part of the term.
+    #: The spread scaling keeps a population that really wanders (+/-6 ms)
+    #: from losing half its members to a fixed cut.
+    DEFAULT_OUTLIER_NS = 5_000_000.0
+
     def __init__(
         self,
         window_s: float = DEFAULT_WINDOW_S,
@@ -112,6 +125,7 @@ class LabelPlaneTracker:
         max_host_sigma_ns: float = DEFAULT_MAX_HOST_SIGMA_NS,
         correlation_time_s: float = DEFAULT_CORRELATION_TIME_S,
         host_bias_floor_ns: Optional[float] = None,
+        outlier_ns: float = DEFAULT_OUTLIER_NS,
     ):
         self.window_s = float(window_s)
         self.min_n = int(min_n)
@@ -119,6 +133,7 @@ class LabelPlaneTracker:
         self.correlation_time_s = max(1e-9, float(correlation_time_s))
         self.host_bias_floor_ns = (None if host_bias_floor_ns is None
                                    else max(0.0, float(host_bias_floor_ns)))
+        self.outlier_ns = max(0.0, float(outlier_ns))
         # (mono, offset_ns, host_sigma_ns)
         self._obs: Deque[Tuple[float, float, float]] = deque()
 
@@ -161,18 +176,32 @@ class LabelPlaneTracker:
         if len(self._obs) < self.min_n:
             return None
 
-        offsets = [o for _, o, _ in self._obs]
+        # Cut wild readings first.  One reading 300 ms off would otherwise
+        # drag the spread (and through it the sigma) by an order of
+        # magnitude.  The cut is max(outlier_ns, 4 x raw spread), taken from
+        # the window before any cut, so a term that truly wanders keeps its
+        # members.
+        all_offsets = [o for _, o, _ in self._obs]
+        raw_median = statistics.median(all_offsets)
+        raw_spread = 1.4826 * statistics.median(
+            abs(o - raw_median) for o in all_offsets)
+        cut = max(self.outlier_ns, 4.0 * raw_spread)
+        kept = [(m, o, s) for m, o, s in self._obs
+                if abs(o - raw_median) <= cut]
+        if len(kept) < self.min_n:
+            return None
+        dropped = len(self._obs) - len(kept)
+
+        offsets = [o for _, o, _ in kept]
         median = statistics.median(offsets)
 
         # How far the term WANDERS.  Λ is a pipeline latency that moves
         # with load, so a large spread is a true statement about the
-        # quantity — not evidence that the measurement is poor.
-        try:
-            spread = statistics.pstdev(offsets)
-        except statistics.StatisticsError:  # pragma: no cover - len>=min_n
-            spread = 0.0
+        # quantity — not evidence that the measurement is poor.  Robust
+        # form: 1.4826 x MAD of the kept offsets.
+        spread = 1.4826 * statistics.median(abs(o - median) for o in offsets)
 
-        span = self._obs[-1][0] - self._obs[0][0]
+        span = kept[-1][0] - kept[0][0]
 
         # How well the CENTRE is known.  This is the standard error of the
         # median (1.2533 * s / sqrt(n_eff)), and the two quantities differ
@@ -193,7 +222,7 @@ class LabelPlaneTracker:
         # down, bias does not.  Take the worst host sigma offered as an
         # upper bound on that bias unless the caller declares a tighter
         # one it can defend.
-        host_sigma = max(s for _, _, s in self._obs)
+        host_sigma = max(s for _, _, s in kept)
         floor = (host_sigma if self.host_bias_floor_ns is None
                  else self.host_bias_floor_ns)
         sigma = math.sqrt(sem * sem + floor * floor)
@@ -201,8 +230,9 @@ class LabelPlaneTracker:
         return LabelPlaneEstimate(
             offset_ns=median,
             sigma_ns=float(sigma),
-            n=len(self._obs),
+            n=len(kept),
             span_s=float(span),
             spread_ns=float(spread),
             n_eff=float(n_eff),
+            dropped=int(dropped),
         )
