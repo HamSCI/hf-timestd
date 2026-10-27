@@ -187,3 +187,10 @@ def test_undeletable_request_is_not_returned(tmp_path, caplog):
         assert len([r for r in caplog.records if r.levelno == logging.ERROR]) == 1
     finally:
         d.chmod(0o700)
+
+
+def test_non_utf8_request_is_dropped(tmp_path):
+    store = ChainDelayStore(tmp_path / "c.json", IDENT)
+    store.request_path.write_bytes(b"\xff\xfe")
+    assert store.take_request() is None
+    assert not store.request_path.exists()

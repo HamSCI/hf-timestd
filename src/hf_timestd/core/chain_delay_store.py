@@ -192,7 +192,7 @@ class ChainDelayStore:
     def take_request(self) -> Optional[Dict]:
         """Read and delete the request file.  An unreadable one is deleted too."""
         try:
-            raw = self.request_path.read_text()
+            raw = self.request_path.read_bytes()
         except FileNotFoundError:
             return None
         except OSError as exc:
@@ -201,7 +201,7 @@ class ChainDelayStore:
         req: Optional[Dict] = None
         if raw is not None:
             try:
-                parsed = json.loads(raw)
+                parsed = json.loads(raw.decode("utf-8"))  # bad bytes raise ValueError
                 if isinstance(parsed, dict):
                     req = parsed
                 else:
