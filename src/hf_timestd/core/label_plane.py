@@ -50,7 +50,7 @@ import math
 import statistics
 from collections import deque
 from dataclasses import dataclass
-from typing import Deque, Optional, Tuple
+from typing import Deque, List, Optional, Tuple
 
 __all__ = ["LabelPlaneEstimate", "LabelPlaneTracker"]
 
@@ -78,7 +78,7 @@ class LabelPlaneEstimate:
 class LabelPlaneTracker:
     """Rolling median of the (label − host) plane offset.
 
-    ``spread_ns`` is 1.4826 × the MAD of the kept observations; readings
+    ``spread_ns`` is max(1.4826·MAD, IQR/1.349) of the kept observations; readings
     beyond max(``outlier_ns``, 4 × raw spread) of the median are dropped
     and counted in ``dropped``.
     """
@@ -171,6 +171,20 @@ class LabelPlaneTracker:
 
     # ── readout ─────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _robust_spread(values: List[float], median: float) -> float:
+        """max(1.4826 x MAD, IQR / 1.349).
+
+        The IQR term keeps a two-point or bimodal window with an odd count
+        from reading MAD = 0 (the median lands on one mode), which would
+        collapse the outlier cut and drop a real mode.
+        """
+        mad = 1.4826 * statistics.median(abs(v - median) for v in values)
+        if len(values) < 2:
+            return mad
+        q = statistics.quantiles(values, n=4, method="inclusive")
+        return max(mad, (q[2] - q[0]) / 1.349)
+
     def estimate(self) -> Optional[LabelPlaneEstimate]:
         """The current plane offset, or ``None`` when not yet knowable."""
         if len(self._obs) < self.min_n:
@@ -183,8 +197,7 @@ class LabelPlaneTracker:
         # members.
         all_offsets = [o for _, o, _ in self._obs]
         raw_median = statistics.median(all_offsets)
-        raw_spread = 1.4826 * statistics.median(
-            abs(o - raw_median) for o in all_offsets)
+        raw_spread = self._robust_spread(all_offsets, raw_median)
         cut = max(self.outlier_ns, 4.0 * raw_spread)
         kept = [(m, o, s) for m, o, s in self._obs
                 if abs(o - raw_median) <= cut]
@@ -198,8 +211,8 @@ class LabelPlaneTracker:
         # How far the term WANDERS.  Λ is a pipeline latency that moves
         # with load, so a large spread is a true statement about the
         # quantity — not evidence that the measurement is poor.  Robust
-        # form: 1.4826 x MAD of the kept offsets.
-        spread = 1.4826 * statistics.median(abs(o - median) for o in offsets)
+        # form: max(1.4826 x MAD, IQR / 1.349) of the kept offsets.
+        spread = self._robust_spread(offsets, median)
 
         span = kept[-1][0] - kept[0][0]
 

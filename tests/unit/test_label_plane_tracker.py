@@ -139,7 +139,8 @@ def test_estimate_reports_its_span():
 # beat the bound.  The measurement could not lose on the evidence; it was
 # arithmetically barred from winning.
 #
-# The spread (1.4826 x MAD of the kept offsets) is the width of the POPULATION — how far Λ wanders as load
+# The spread (max of 1.4826 x MAD and IQR / 1.349, over the kept offsets)
+# is the width of the POPULATION — how far Λ wanders as load
 # moves it.  The uncertainty of the MEDIAN of n such samples is a
 # different quantity, smaller by roughly 1.2533/sqrt(n_eff).  Both matter
 # to the judge and they matter differently: the centre says what to
@@ -168,7 +169,7 @@ def test_sigma_shrinks_as_the_sample_grows():
             t.observe(label_utc=1.0 + off / 1e9, host_utc=1.0,
                       host_sigma_ns=20_000.0, mono=float(i))
         return t.estimate().sigma_ns
-    assert sigma_for(400) < sigma_for(24), \
+    assert sigma_for(400) < sigma_for(25), \
         "more evidence must narrow the centre"
 
 
@@ -224,3 +225,14 @@ def test_the_cut_scales_with_a_population_that_really_wanders():
         t.observe(label_utc=1.0 + off / 1e9, host_utc=1.0,
                   host_sigma_ns=20_000.0, mono=float(i))
     assert t.estimate().dropped == 0
+
+
+def test_an_odd_count_bimodal_window_keeps_both_modes():
+    t = LabelPlaneTracker(min_n=4, window_s=1e9)
+    for i in range(63):          # 32 at -6 ms, 31 at +6 ms
+        off = TRANSPORT_NS + (6 * MS if i % 2 else -6 * MS)
+        t.observe(label_utc=1.0 + off / 1e9, host_utc=1.0,
+                  host_sigma_ns=20_000.0, mono=float(i))
+    est = t.estimate()
+    assert est.dropped == 0
+    assert est.n == 63

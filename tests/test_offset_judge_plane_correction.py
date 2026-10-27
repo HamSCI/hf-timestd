@@ -270,7 +270,7 @@ class TestMeasuredPlaneMustEarnItsUse:
     sitting near a stable -16.6 ms.
     """
 
-    LIVE_BAD = (-25_846_958.0, 197_134_152.0, 28)     # the flip window
+    LIVE_BAD = (-25_846_958.0, 197_134_152.0, 27)     # the flip window
     GOOD = (-16_600_000.0, 500_000.0, 60)
 
     def _seed(self, j, offset_ns, sigma_ns, n, t0=1000.0):
