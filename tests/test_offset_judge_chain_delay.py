@@ -567,12 +567,40 @@ def test_shift_writes_a_candidate_after_a_full_learn_and_keeps_the_record(
     assert abs(j2.chain_delay_store.candidate.offset_ns - SHIFTED_NS) < 200_000.0
 
 
-def test_no_change_alarm_against_a_seed(tmp_path):
-    """While a seed stands, Task 5's learner owns the record."""
-    # As tight as CONFIRMED, so only the state keeps the alarm quiet.
-    j, st = confirmed_station(tmp_path, record={**CONFIRMED, "state": "seeded"})
+TIGHT_SEED = {**CONFIRMED, "state": "seeded"}
+
+
+def test_shift_against_a_seed_alarms_and_drops_t6(tmp_path, caplog):
+    """Spec §3: the change alarm works against a seed as against a
+    confirmed record, but starts no candidate learner."""
+    j, st = confirmed_station(tmp_path, record=TIGHT_SEED)
+    with caplog.at_level(logging.CRITICAL, logger=offset_judge.logger.name):
+        tiers = st.run(17, SHIFTED_NS)
+    assert j._chain_changed is not None
+    assert j._chain_changed["stored_ns"] == TIGHT_SEED["offset_ns"]
+    assert tiers[-1] != "T6"
+    assert len(_changed_lines(caplog)) == 1
+    assert j._t6_candidate_learner is None
+    assert j.chain_delay_store.candidate is None
+    assert j.chain_delay_store.record.state == "seeded"
+
+
+def test_learn_completing_against_an_alarmed_seed_clears_the_latch(
+        tmp_path, caplog):
+    j, st = confirmed_station(tmp_path, record=TIGHT_SEED)
     st.run(17, SHIFTED_NS)
+    assert j._chain_changed is not None
+    with caplog.at_level(logging.WARNING, logger=offset_judge.logger.name):
+        st.run(125)
+    rec = j.chain_delay_store.record
+    assert rec.state == "confirmed"
+    assert abs(rec.offset_ns - SHIFTED_NS) < 200_000.0
     assert j._chain_changed is None
+    assert j.chain_delay_store.candidate is None
+    cleared = [r for r in caplog.records if r.levelno == logging.WARNING
+               and "seed replaced by the learn; change alarm cleared"
+               in r.getMessage()]
+    assert len(cleared) == 1
 
 
 # ── requests the CLI leaves beside the record ──────────────────────────

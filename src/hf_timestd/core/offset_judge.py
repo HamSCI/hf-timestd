@@ -2063,6 +2063,15 @@ class OffsetJudge:
         )
         if seed is None:
             return
+        if self._chain_changed is not None:
+            # The alarm stood against the seed; the learn now supplies
+            # the value it was measured against, so nothing remains to
+            # answer.
+            self._clear_chain_change_locked()
+            logger.warning(
+                f"OffsetJudge T6 chain delay: seed replaced by the learn; "
+                f"change alarm cleared (seed {float(seed.offset_ns)/1e6:+.3f} "
+                f"ms, learned {learned.offset_ns/1e6:+.3f} ms)")
         # A seed that far off says the seeding went wrong.
         seed_band_ns = self.cross_bench_k * math.sqrt(
             learned.sigma_ns ** 2 + float(seed.sigma_ns) ** 2
@@ -2125,17 +2134,19 @@ class OffsetJudge:
             + float(record.spread_ns) ** 2)
 
     def _evaluate_chain_change_locked(self, mono_now: float) -> None:
-        """Compare the live witness with the confirmed record; alarm on a
+        """Compare the live witness with the record in force; alarm on a
         sustained departure, clear on a sustained return.
 
-        Only against a confirmed record: while a seed stands, the learner
-        owns the record and its first full learn replaces the seed.  A
-        tick with no witness estimate restarts whichever timer is running,
-        since it offers no evidence either way.
+        A seed and a confirmed record alarm alike (spec §3).  Only a
+        confirmed record starts a candidate learner: against a seed, the
+        learner already running writes the replacement on its own, and
+        that replacement clears the alarm.  A tick with no witness
+        estimate restarts whichever timer is running, since it offers no
+        evidence either way.
         """
         store = self.chain_delay_store
         record = store.record if store is not None else None
-        if record is None or record.state != "confirmed":
+        if record is None:
             self._clear_chain_change_locked()
             return
         est = self._t6_witness.estimate()
@@ -2165,7 +2176,10 @@ class OffsetJudge:
             self._chain_departed_since = None
             self._chain_returned_since = None
             # A fresh learner under the §3 rules measures the new value.
-            self._t6_candidate_learner = self._new_t6_learner()
+            # Against a seed the first learn is still running and will
+            # replace the seed itself, so no candidate learner starts.
+            if record.state == "confirmed":
+                self._t6_candidate_learner = self._new_t6_learner()
             self._log_chain_change_locked(est, band_ns, mono_now)
             return
         # The alarm stands.  Keep the published live value current.
@@ -2214,10 +2228,14 @@ class OffsetJudge:
             f"k_x*sqrt(sigma_live^2+sigma_stored^2+spread^2) = "
             f"{band_ns/1e6:.3f} ms; outside it since "
             f"{changed['since_utc']}).  T6 stays dropped; the stored value "
-            f"stands.  A fresh learn will write a candidate beside it after "
-            f"{self.chain_delay_learn_s:.0f} s: `hf-timestd chain-delay "
-            f"show`, then `accept` it or `relearn`.  This line repeats "
-            f"hourly while the change stands."
+            f"stands.  "
+            + ("A fresh learn will write a candidate beside it after "
+               f"{self.chain_delay_learn_s:.0f} s: `hf-timestd chain-delay "
+               "show`, then `accept` it or `relearn`."
+               if self._t6_candidate_learner is not None else
+               "The stored value is a seed: the first full learn will "
+               "replace it and clear this alarm.")
+            + "  This line repeats hourly while the change stands."
         )
 
     def _maybe_write_candidate_locked(self) -> None:
