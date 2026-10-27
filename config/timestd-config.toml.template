@@ -385,6 +385,7 @@ sustain_window_s = 60.0  # violation must persist this long before the CRITICAL 
 # chain_delay_outlier_ns = 5.0e6   # outlier cut around the window median (floor; widens with the spread)
 # chain_delay_change_sustain_s = 600  # a departure from the stored value must hold this long before it alarms
 # chain_delay_max_ns = 4.0e7       # gross-error bound: T6 beyond this plus k*sigma_l is refused
+# chain_delay_max_spread_ns = 2.5e6  # a learn (or candidate) wider than this is not written; a step mid-learn would widen the band
 # chain_delay_path = "/var/lib/timestd/state/t6_chain_delay.json"  # the record; tier_transitions.jsonl lands beside it
 
 # --- Escalation ladder (spec §9 steps 2-3) ---

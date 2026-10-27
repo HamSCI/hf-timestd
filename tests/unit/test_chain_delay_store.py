@@ -194,3 +194,38 @@ def test_non_utf8_request_is_dropped(tmp_path):
     store.request_path.write_bytes(b"\xff\xfe")
     assert store.take_request() is None
     assert not store.request_path.exists()
+
+
+@pytest.mark.parametrize("field, value", [
+    ("offset_ns", "abc"),
+    ("offset_ns", True),
+    ("sigma_ns", 0.0),
+    ("spread_ns", -1.0),
+    ("n_eff", -1.0),
+    ("span_s", None),
+    ("state", "maybe"),
+])
+def test_a_field_of_the_wrong_type_or_range_is_corrupt(tmp_path, caplog,
+                                                       field, value):
+    path = tmp_path / "t6_chain_delay.json"
+    ChainDelayStore(path, IDENT).set_record(make_record())
+    data = read_file(path)
+    data[field] = value
+    path.write_text(json.dumps(data))
+    store = ChainDelayStore(path, IDENT)
+    with caplog.at_level(logging.ERROR):
+        store.load()
+    assert store.record is None
+    assert list(tmp_path.glob("t6_chain_delay.json.corrupt-*"))
+    assert not path.exists()
+    assert len([r for r in caplog.records if r.levelno == logging.ERROR]) == 1
+
+
+def test_a_nan_offset_is_corrupt(tmp_path):
+    path = tmp_path / "t6_chain_delay.json"
+    ChainDelayStore(path, IDENT).set_record(make_record())
+    path.write_text(path.read_text().replace("-16350000.0", "NaN"))
+    store = ChainDelayStore(path, IDENT)
+    store.load()
+    assert store.record is None
+    assert list(tmp_path.glob("t6_chain_delay.json.corrupt-*"))

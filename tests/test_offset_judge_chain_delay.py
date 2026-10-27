@@ -233,7 +233,8 @@ def feed(j, clock, minutes, offset_ns, health=HEALTHY, wander_ns=800_000.0,
         clock.mono_v += 10.0
         off = offset_ns + (i % 3 - 1) * wander_ns
         j._observe_label_plane_locked(
-            [t6_reading(clock, off, health, anchor_tier), t4_reading(clock)])
+            [t6_reading(clock, off, health, anchor_tier), t4_reading(clock)],
+            clock.mono_v)
 
 
 def learning_judge(tmp_path, **cfg):
@@ -337,7 +338,7 @@ def test_t3_readings_stay_out_of_the_t6_learner(tmp_path):
                           mono=clock.mono_v, plane="label",
                           detail={"t6_health": dict(HEALTHY),
                                   "anchor_tier": "T6"})
-        j._observe_label_plane_locked([t3, t4_reading(clock)])
+        j._observe_label_plane_locked([t3, t4_reading(clock)], clock.mono_v)
     assert len(j._t6_learner._obs) == 0
     assert len(j._t6_witness._obs) == 0
     assert len(j._label_plane._obs) == 60
@@ -359,7 +360,7 @@ def test_without_a_record_t6_uses_the_config_term_not_t3s(tmp_path):
         clock.mono_v += 10.0
         t3 = BenchReading(tier="T3", utc=clock.wall - 0.005, sigma_ns=2e6,
                           mono=clock.mono_v, plane="label")
-        j._observe_label_plane_locked([t3, t4_reading(clock)])
+        j._observe_label_plane_locked([t3, t4_reading(clock)], clock.mono_v)
     assert j.label_plane_status()["source"] == "measured"
     t6 = t6_reading(clock, -16_500_000.0)
     assert abs(j._cross_bench_delta_ns(t6, t4_reading(clock), clock.mono_v)) < 1_000.0
@@ -380,21 +381,38 @@ def test_learning_conflict_logs_once_then_hourly(tmp_path, caplog):
             clock.mono_v += 10.0
             t6 = t6_reading(clock, -16_350_000.0, health=degraded)
             t4 = t4_reading(clock)
-            j._observe_label_plane_locked([t6, t4])
+            j._observe_label_plane_locked([t6, t4], clock.mono_v)
             assert not j._cross_gate_ok_locked(t6, t4, clock.mono_v)
     lines = _conflict_lines(caplog)
     assert len(lines) == 2
     assert all("of 7200" in r.getMessage() for r in lines)
 
-    # With a record in force a refused T6 keeps today's 60 s cadence.
+    # With a record in force a standing refusal also logs once, then
+    # hourly, on its own clock: 2 h gives exactly 2 lines.
     caplog.clear()
     j.chain_delay_store.set_record(ChainDelayRecord(**SEED))
     with caplog.at_level(logging.CRITICAL, logger=offset_judge.logger.name):
-        for _ in range(18):             # 3 min
+        for _ in range(720):            # 2 h
             clock.wall += 10.0
             clock.mono_v += 10.0
             t6 = t6_reading(clock, -32_000_000.0)
             assert not j._cross_gate_ok_locked(t6, t4_reading(clock), clock.mono_v)
+    lines = _conflict_lines(caplog)
+    assert len(lines) == 2
+    assert all("Stored T6 chain delay" in r.getMessage() for r in lines)
+
+
+def test_a_non_t6_conflict_keeps_todays_cadence(tmp_path, caplog):
+    j = seeded_judge(tmp_path)
+    clock = j._test_clock
+    with caplog.at_level(logging.CRITICAL, logger=offset_judge.logger.name):
+        for _ in range(18):             # 3 min
+            clock.wall += 10.0
+            clock.mono_v += 10.0
+            t5 = BenchReading(tier="T5", utc=clock.wall - 0.050,
+                              sigma_ns=200_000.0, mono=clock.mono_v)
+            assert not j._cross_gate_ok_locked(t5, t4_reading(clock),
+                                               clock.mono_v)
     assert len(_conflict_lines(caplog)) == 3
 
 
@@ -406,7 +424,7 @@ def test_anchor_recapture_reading_never_reaches_a_tracker(tmp_path):
     clock.wall += 10.0
     clock.mono_v += 10.0
     j._observe_label_plane_locked([t6_reading(clock, -298_000_000.0),
-                                   t4_reading(clock)])
+                                   t4_reading(clock)], clock.mono_v)
     est = j._t6_witness.estimate()
     assert est.dropped == 0
     assert est.n == n_before
@@ -644,6 +662,7 @@ def test_accept_promotes_the_candidate(tmp_path):
     (None, "no candidate"),
     ({**GOOD_CANDIDATE, "span_s": 3600.0}, "span"),
     ({**GOOD_CANDIDATE, "sigma_ns": 6_000_000.0}, "sigma"),
+    ({**GOOD_CANDIDATE, "spread_ns": 3_000_000.0}, "spread"),
 ])
 def test_accept_refuses_a_short_candidate(tmp_path, caplog, candidate, reason):
     j = learning_judge(tmp_path)
@@ -705,6 +724,9 @@ def test_seed_request_writes_a_seed_over_a_confirmed_record(tmp_path):
     ({"action": "seed", "offset_ns": -16_000_000.0, "sigma_ns": 1e6,
       "spread_ns": -1.0}, "spread"),
     ({"action": "seed", "offset_ns": "soon", "sigma_ns": 1e6,
+      "spread_ns": 1e6}, "number"),
+    # float() of a 400-digit integer raises OverflowError, not ValueError.
+    ({"action": "seed", "offset_ns": int("9" * 400), "sigma_ns": 1e6,
       "spread_ns": 1e6}, "number"),
     ({"action": "frobnicate"}, "frobnicate"),
 ])
@@ -854,3 +876,119 @@ def test_delta_is_the_raw_step_and_residual_the_net(tmp_path):
     assert (step["from"], step["to"]) == ("T4", "T6")
     assert step["delta_ns"] == pytest.approx(-16.5e6, abs=0.1e6)
     assert step["residual_ns"] == pytest.approx(-0.15e6, abs=0.1e6)
+
+
+# ── final review: a learn never spans a step or a re-home ──────────────
+
+
+def _not_written(caplog, what):
+    return [r for r in caplog.records if r.levelno == logging.WARNING
+            and f"chain delay {what} NOT written" in r.getMessage()]
+
+
+def test_a_step_half_way_through_a_learn_writes_no_record(tmp_path, caplog):
+    j = learning_judge(tmp_path)
+    clock = j._test_clock
+    with caplog.at_level(logging.WARNING, logger=offset_judge.logger.name):
+        feed(j, clock, 60, -16_350_000.0)
+        feed(j, clock, 65, -22_350_000.0)       # a 6 ms step at 60 min
+    assert j.chain_delay_store.record is None
+    lines = _not_written(caplog, "learn")
+    assert len(lines) == 1
+    assert "chain_delay_max_spread_ns" in lines[0].getMessage()
+    # Learning continues: the learner still holds the window.
+    assert j._learning_progress()["n"] > 0
+
+
+def test_a_wide_candidate_is_not_written(tmp_path, caplog):
+    # A record wide enough that the 6 ms step raises no change alarm, so
+    # the candidate learner below runs undisturbed.
+    j = learning_judge(tmp_path)
+    j.chain_delay_store.set_record(ChainDelayRecord(
+        **{**CONFIRMED, "sigma_ns": 1_100_000.0, "spread_ns": 3_000_000.0}))
+    j._t6_candidate_learner = j._new_t6_learner()
+    clock = j._test_clock
+    with caplog.at_level(logging.WARNING, logger=offset_judge.logger.name):
+        feed(j, clock, 60, -16_350_000.0)
+        feed(j, clock, 65, -22_350_000.0)
+    assert j._chain_changed is None
+    assert j.chain_delay_store.candidate is None
+    assert len(_not_written(caplog, "candidate")) == 1
+
+
+def test_a_rehome_mid_learn_restarts_the_learner(tmp_path):
+    j = learning_judge(tmp_path)
+    clock = j._test_clock
+    feed(j, clock, 30, -16_350_000.0)
+    j._t6_candidate_learner = j._new_t6_learner()
+    feed(j, clock, 5, -16_350_000.0)
+    assert j._learning_progress()["n"] > 0
+    assert len(j._t6_candidate_learner._obs) > 0
+    feed(j, clock, 1 / 6, -16_350_000.0,
+         health={**HEALTHY, "rehome_age_s": 30.0})
+    assert j._learning_progress()["n"] == 0
+    assert len(j._t6_learner._obs) == 0
+    assert len(j._t6_candidate_learner._obs) == 0
+    # The short witness keeps what it saw (its window is full: 600 s of
+    # 10 s ticks); the change alarm reads it.
+    assert len(j._t6_witness._obs) == 60
+
+
+def test_a_quiet_witness_expires_and_never_alarms(tmp_path, caplog):
+    j = seeded_judge(tmp_path)
+    clock = j._test_clock
+    degraded = {"authority_state": "DEGRADED", "state_for_s": 5.0,
+                "rehome_age_s": None}
+    with caplog.at_level(logging.CRITICAL, logger=offset_judge.logger.name):
+        feed(j, clock, 30, -16_350_000.0)
+        feed(j, clock, 8, -36_350_000.0)        # 20 ms shift, healthy
+        assert j._chain_departed_since is not None
+        # T6 turns unhealthy: no fresh evidence reaches the witness.
+        feed(j, clock, 30, -16_350_000.0, health=degraded)
+    assert not _changed_lines(caplog)
+    assert j._chain_changed is None
+    assert len(j._t6_witness._obs) == 0
+    assert j._chain_departed_since is None
+    assert j._chain_returned_since is None
+
+
+def test_learn_off_keeps_the_legacy_statistics(tmp_path):
+    import statistics
+    j = make_judge(tmp_path, chain_delay_learn=False)
+    clock = j._test_clock
+    offsets = []
+    for i in range(30):
+        clock.wall += 10.0
+        clock.mono_v += 10.0
+        off = -16_350_000.0 + (i % 3 - 1) * 800_000.0
+        if i == 20:
+            off = -298_000_000.0
+        offsets.append(off)
+        t6 = BenchReading(tier="T6", utc=clock.wall + off / 1e9,
+                          sigma_ns=900_000.0, mono=clock.mono_v, plane="label")
+        j._observe_label_plane_locked([t6, t4_reading(clock)], clock.mono_v)
+    est = j._label_plane.estimate()
+    assert est.dropped == 0
+    assert est.n == 30
+    assert est.spread_ns == pytest.approx(statistics.pstdev(offsets), rel=1e-6)
+
+
+def test_transition_lines_name_startup_then_change(tmp_path):
+    j, clock = _t6_after_t4(tmp_path)
+    j.add_bench(StubBench(lambda: t6_reading(clock, -16_350_000.0,
+                                             sigma_ns=300_000.0)))
+    for _ in range(12):
+        tick_once(j)
+    assert [(t["from"], t["reason"]) for t in _transitions(tmp_path)] == [
+        (None, "startup"), ("T4", "change")]
+
+
+def test_an_unpersisted_learn_says_so(tmp_path, caplog, monkeypatch):
+    j = learning_judge(tmp_path)
+    monkeypatch.setattr(j.chain_delay_store, "_save", lambda: False)
+    with caplog.at_level(logging.WARNING, logger=offset_judge.logger.name):
+        feed(j, j._test_clock, 121, -16_350_000.0)
+    learned = [r for r in caplog.records
+               if "chain delay LEARNED" in r.getMessage()]
+    assert len(learned) == 1
+    assert "(not persisted; see the store error)" in learned[0].getMessage()

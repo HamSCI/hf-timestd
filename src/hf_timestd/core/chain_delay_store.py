@@ -23,6 +23,7 @@ Rules:
 
 import json
 import logging
+import math
 import os
 import tempfile
 import time
@@ -50,10 +51,43 @@ class ChainDelayRecord:
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
+    #: Numeric fields, and the least value each may take.  ``None`` = any
+    #: finite number; ``0.0`` = not negative; ``"positive"`` = above zero.
+    _NUMERIC = {
+        "offset_ns": None,
+        "sigma_ns": "positive",
+        "spread_ns": "positive",
+        "n": 0.0,
+        "n_eff": 0.0,
+        "span_s": 0.0,
+    }
+    STATES = ("seeded", "confirmed")
+
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "ChainDelayRecord":
-        """Build from a dict, ignoring unknown keys.  Raises on a missing field."""
-        return cls(**{f.name: d[f.name] for f in fields(cls)})
+        """Build from a dict, ignoring unknown keys.
+
+        Raises KeyError on a missing field, TypeError or ValueError on a
+        field of the wrong type or range: a number stored as a string, a
+        bool, a NaN, a non-positive sigma or spread, an unknown state.  The
+        store treats any of these as a corrupt file.
+        """
+        values = {f.name: d[f.name] for f in fields(cls)}
+        for name, least in cls._NUMERIC.items():
+            v = values[name]
+            # bool is an int subclass; a true/false here is a corrupt file.
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                raise TypeError("%s must be a number, got %r" % (name, v))
+            if not math.isfinite(v):
+                raise ValueError("%s must be finite, got %r" % (name, v))
+            if least == "positive" and not v > 0:
+                raise ValueError("%s must be positive, got %r" % (name, v))
+            if isinstance(least, float) and v < least:
+                raise ValueError("%s must not be negative, got %r" % (name, v))
+        if values["state"] not in cls.STATES:
+            raise ValueError("state must be one of %s, got %r"
+                             % (cls.STATES, values["state"]))
+        return cls(**values)
 
 
 class ChainDelayStore:

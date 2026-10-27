@@ -236,3 +236,28 @@ def test_an_odd_count_bimodal_window_keeps_both_modes():
     est = t.estimate()
     assert est.dropped == 0
     assert est.n == 63
+
+
+def test_legacy_mode_keeps_pstdev_and_cuts_nothing():
+    import statistics
+    t = LabelPlaneTracker(min_n=8, window_s=1e9, outlier_ns=None)
+    offsets = [TRANSPORT_NS + (0.8 * MS if i % 2 else -0.8 * MS)
+               for i in range(30)] + [-298 * MS]
+    for i, off in enumerate(offsets):
+        t.observe(label_utc=1.0 + off / 1e9, host_utc=1.0,
+                  host_sigma_ns=20_000.0, mono=float(i * 10))
+    est = t.estimate()
+    assert est.dropped == 0
+    assert est.n == 31
+    assert est.spread_ns == pytest.approx(statistics.pstdev(
+        [(1.0 + o / 1e9 - 1.0) * 1e9 for o in offsets]))
+
+
+def test_expire_empties_a_window_nothing_refreshes():
+    t = LabelPlaneTracker(min_n=8, window_s=600.0)
+    _feed(t, 30)                       # monos 1000 .. 1290
+    assert t.estimate() is not None
+    t.expire(1290.0 + 600.0 - 50.0)    # five readings still inside
+    assert t.estimate() is None
+    t.expire(1290.0 + 601.0)
+    assert len(t._obs) == 0

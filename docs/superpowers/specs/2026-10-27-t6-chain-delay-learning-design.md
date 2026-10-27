@@ -178,7 +178,12 @@ With no confirmed record, the judge learns:
   calibrator today only logs its re-homes.  Row 7 builds on the same counter
   (my call).
 - The learner keeps its own window of `chain_delay_learn_s`, separate from
-  the 600 s live witness.  Its spread sets the record's `spread_ns`.
+  the 600 s live witness.  Its spread sets the record's `spread_ns`.  A
+  re-home within the last 10 minutes restarts the learner (and any candidate
+  learner), so a learn never spans one.  The judge also refuses to write a
+  learn whose spread exceeds `chain_delay_max_spread_ns`: a step part-way
+  through a learn would otherwise widen the band until the gate and the
+  alarm barely act.
 - Once the observations span `chain_delay_learn_s` (default 7200 s, so
   load-driven wander over a couple of hours shows up in the spread) and the
   estimate's sigma passes the 5 ms bound, the judge writes the record as
@@ -312,8 +317,10 @@ where the step falls.  The design adds two things:
 - the judge appends one line per adopted-tier change to
   `tier_transitions.jsonl`, in the directory of `chain_delay_path`
   (`/var/lib/timestd/state/` by default), whether or not learning is on
-  (`{utc, from, to, delta_ns, chain_delay_ns}`; `from` is null on the first
-  adoption), a durable log a GRAPE reader
+  (`{utc, from, to, reason, delta_ns, residual_ns, chain_delay_ns}`; `from`
+  is null and `reason` reads `startup` on the first adoption after the judge
+  starts, and `reason` reads `change` on every later line), a durable log a
+  GRAPE reader
   can consult without walking the sidecars.
 
 Deploying this to B4 will produce the step.  We announce it on the bus and to
@@ -330,6 +337,7 @@ unrecorded moment.  Its sidecars show when.
 | `chain_delay_outlier_ns` | 5e6 | outlier cut around the window median |
 | `chain_delay_change_sustain_s` | 600 | how long a departure must hold before it alarms |
 | `chain_delay_max_ns` | 4e7 | the gross-error bound |
+| `chain_delay_max_spread_ns` | 2.5e6 | the widest spread a learn or candidate may write; a wider one most likely straddled a step, and the judge refuses it (one WARNING per refusal streak) and keeps learning. `accept` refuses a candidate this wide too |
 | `chain_delay_path` | `/var/lib/timestd/state/t6_chain_delay.json` | record |
 
 With `chain_delay_learn = false` the judge behaves as it does today.

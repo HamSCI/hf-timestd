@@ -81,6 +81,11 @@ class LabelPlaneTracker:
     ``spread_ns`` is max(1.4826·MAD, IQR/1.349) of the kept observations; readings
     beyond max(``outlier_ns``, 4 × raw spread) of the median are dropped
     and counted in ``dropped``.
+
+    ``outlier_ns=None`` selects the legacy statistics the judge used before
+    the robust form: population stdev for the spread, no cut, ``dropped``
+    always 0.  The judge asks for it only with chain-delay learning off,
+    which must behave as it did before (spec 2026-10-27 §8).
     """
 
     #: Default observation window.  Long enough that the term is a
@@ -125,7 +130,7 @@ class LabelPlaneTracker:
         max_host_sigma_ns: float = DEFAULT_MAX_HOST_SIGMA_NS,
         correlation_time_s: float = DEFAULT_CORRELATION_TIME_S,
         host_bias_floor_ns: Optional[float] = None,
-        outlier_ns: float = DEFAULT_OUTLIER_NS,
+        outlier_ns: Optional[float] = DEFAULT_OUTLIER_NS,
     ):
         self.window_s = float(window_s)
         self.min_n = int(min_n)
@@ -133,7 +138,9 @@ class LabelPlaneTracker:
         self.correlation_time_s = max(1e-9, float(correlation_time_s))
         self.host_bias_floor_ns = (None if host_bias_floor_ns is None
                                    else max(0.0, float(host_bias_floor_ns)))
-        self.outlier_ns = max(0.0, float(outlier_ns))
+        # None = legacy mode (pstdev spread, no cut); see the class doc.
+        self.outlier_ns: Optional[float] = (
+            None if outlier_ns is None else max(0.0, float(outlier_ns)))
         # (mono, offset_ns, host_sigma_ns)
         self._obs: Deque[Tuple[float, float, float]] = deque()
 
@@ -162,9 +169,16 @@ class LabelPlaneTracker:
 
         offset_ns = (float(label_utc) - float(host_utc)) * 1e9
         self._obs.append((float(mono), offset_ns, host_sigma_ns))
-        self._expire(float(mono))
+        self.expire(float(mono))
 
-    def _expire(self, now_mono: float) -> None:
+    def expire(self, now_mono: float) -> None:
+        """Drop observations older than the window at ``now_mono``.
+
+        ``observe`` calls this itself, but a caller that reads the
+        estimate while observations have stopped arriving must call it
+        too: otherwise the window freezes at the last reading and keeps
+        answering for a past that no longer describes the present.
+        """
         cutoff = now_mono - self.window_s
         while self._obs and self._obs[0][0] < cutoff:
             self._obs.popleft()
@@ -195,14 +209,18 @@ class LabelPlaneTracker:
         # magnitude.  The cut is max(outlier_ns, 4 x raw spread), taken from
         # the window before any cut, so a term that truly wanders keeps its
         # members.
-        all_offsets = [o for _, o, _ in self._obs]
-        raw_median = statistics.median(all_offsets)
-        raw_spread = self._robust_spread(all_offsets, raw_median)
-        cut = max(self.outlier_ns, 4.0 * raw_spread)
-        kept = [(m, o, s) for m, o, s in self._obs
-                if abs(o - raw_median) <= cut]
-        if len(kept) < self.min_n:
-            return None
+        # Legacy mode (outlier_ns None) keeps every reading.
+        if self.outlier_ns is None:
+            kept = list(self._obs)
+        else:
+            all_offsets = [o for _, o, _ in self._obs]
+            raw_median = statistics.median(all_offsets)
+            raw_spread = self._robust_spread(all_offsets, raw_median)
+            cut = max(self.outlier_ns, 4.0 * raw_spread)
+            kept = [(m, o, s) for m, o, s in self._obs
+                    if abs(o - raw_median) <= cut]
+            if len(kept) < self.min_n:
+                return None
         dropped = len(self._obs) - len(kept)
 
         offsets = [o for _, o, _ in kept]
@@ -211,8 +229,12 @@ class LabelPlaneTracker:
         # How far the term WANDERS.  Λ is a pipeline latency that moves
         # with load, so a large spread is a true statement about the
         # quantity — not evidence that the measurement is poor.  Robust
-        # form: max(1.4826 x MAD, IQR / 1.349) of the kept offsets.
-        spread = self._robust_spread(offsets, median)
+        # form: max(1.4826 x MAD, IQR / 1.349) of the kept offsets; the
+        # legacy mode keeps the population stdev it always used.
+        if self.outlier_ns is None:
+            spread = statistics.pstdev(offsets)
+        else:
+            spread = self._robust_spread(offsets, median)
 
         span = kept[-1][0] - kept[0][0]
 
