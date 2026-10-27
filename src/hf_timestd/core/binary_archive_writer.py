@@ -572,6 +572,10 @@ class BinaryArchiveWriter:
                                    else None),
             'judge_age_s': float(verdict.judge_age_s),
             'segment_id': int(verdict.segment_id),
+            # The stored T6 chain delay in force (diagnostic only; never
+            # applied to a label).  None without a record.
+            'chain_delay_ns': getattr(verdict, 'chain_delay_ns', None),
+            'chain_delay_state': getattr(verdict, 'chain_delay_state', None),
             # P3 (spec §10): the source's current segment rate estimate —
             # RECORDED metadata only, never resampled, never folded into
             # the labels (spec §11, audit G7).  None until the estimator

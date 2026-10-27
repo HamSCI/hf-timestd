@@ -755,3 +755,89 @@ def test_held_t6_drops_when_gross_refusals_persist(tmp_path):
     tiers = st.run(2, -298_000_000.0)
     assert tiers[0] == "T6"
     assert tiers[-1] == "T4"
+
+
+# ── Task 7: the tier-change log (spec §7) ──────────────────────────────
+
+import json  # noqa: E402
+
+
+def _transitions(tmp_path):
+    path = tmp_path / "tier_transitions.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(ln) for ln in path.read_text().splitlines()]
+
+
+def _t6_after_t4(tmp_path, **cfg):
+    """A seeded judge that holds T4 alone, then gains a T6 bench."""
+    j = seeded_judge(tmp_path, **cfg)
+    clock = j._test_clock
+    j.add_bench(StubBench(lambda: t4_reading(clock)))
+    for _ in range(3):
+        tick_once(j)
+    return j, clock
+
+
+def test_adopting_t6_over_t4_appends_one_line(tmp_path):
+    j, clock = _t6_after_t4(tmp_path)
+    assert [(t["from"], t["to"]) for t in _transitions(tmp_path)] == [(None, "T4")]
+    j.add_bench(StubBench(lambda: t6_reading(clock, -16_350_000.0,
+                                             sigma_ns=300_000.0)))
+    for _ in range(12):
+        tick_once(j)
+    assert j._best.tier == "T6"
+    lines = _transitions(tmp_path)
+    assert [(t["from"], t["to"]) for t in lines] == [(None, "T4"), ("T4", "T6")]
+    step = lines[-1]
+    assert step["chain_delay_ns"] == -16_350_000.0
+    assert step["delta_ns"] == pytest.approx(0.0, abs=1e6)
+    assert step["utc"].endswith("Z")
+
+
+def test_a_tick_with_no_change_appends_nothing(tmp_path):
+    j, clock = _t6_after_t4(tmp_path)
+    before = _transitions(tmp_path)
+    for _ in range(6):
+        tick_once(j)
+    assert _transitions(tmp_path) == before
+
+
+def test_the_log_is_written_with_learning_off_and_without_a_record(tmp_path):
+    j = make_judge(tmp_path, chain_delay_path=str(tmp_path / "cd.json"),
+                   chain_delay_learn=False)
+    clock = j._test_clock
+    j.add_bench(StubBench(lambda: t4_reading(clock)))
+    tick_once(j)
+    (line,) = _transitions(tmp_path)
+    assert (line["from"], line["to"], line["chain_delay_ns"]) == (None, "T4", None)
+
+
+def test_a_failing_log_logs_once_and_never_raises(tmp_path, caplog):
+    j = make_judge(tmp_path, chain_delay_path=str(tmp_path / "blocked" / "cd.json"))
+    (tmp_path / "blocked").write_text("a file where the directory belongs")
+    clock = j._test_clock
+    j.add_bench(StubBench(lambda: t4_reading(clock)))
+    with caplog.at_level(logging.ERROR):
+        j._append_tier_transition({"to": "T4"})
+        j._append_tier_transition({"to": "T6"})
+    errors = [r for r in caplog.records if "tier-change log" in r.getMessage()]
+    assert len(errors) == 1
+
+
+def test_the_verdict_carries_the_record_in_force(tmp_path):
+    j = seeded_judge(tmp_path)
+    clock = j._test_clock
+    j.add_bench(StubBench(lambda: t4_reading(clock)))
+    j.register_radiod_pair(("s", 1), 1, 0, 24000)
+    for _ in range(3):
+        tick_once(j)
+    v = j.offset_for(("s", 1), 0)
+    assert (v.chain_delay_ns, v.chain_delay_state) == (-16_350_000.0, "seeded")
+    off = make_judge(tmp_path, chain_delay_learn=False)
+    off.add_bench(StubBench(lambda: t4_reading(clock)))
+    off.register_radiod_pair(("s", 1), 1, 0, 24000)
+    for _ in range(3):
+        tick_once(off)
+    v = off.offset_for(("s", 1), 0)
+    assert (v.chain_delay_ns, v.chain_delay_state) == (None, None)

@@ -1009,6 +1009,11 @@ class OffsetVerdict:
     rate_ppm: Optional[float] = None
     rate_sigma_ppm: Optional[float] = None
     rate_source: Optional[str] = None   # "offset-slope"|"t6-residual"|"combined"
+    # The stored T6 chain delay in force (spec 2026-10-27 §7): a diagnostic
+    # the sidecar records so a GRAPE reader can see which value governed
+    # the gate.  None without a record, or with chain_delay_learn off.
+    chain_delay_ns: Optional[float] = None
+    chain_delay_state: Optional[str] = None     # "seeded" | "confirmed"
 
 
 @dataclass
@@ -1338,6 +1343,7 @@ class OffsetJudge:
         self._candidate_tier: Optional[str] = None      # upgrade hysteresis
         self._candidate_count: int = 0
         self._publish_error_logged = False
+        self._transition_log_failing = False
         # Cross-bench gate state (gate doc): the currently-blocking
         # conflict {upper, lower, delta_ns, since_utc} (None when no
         # candidate is being refused), the shadow-mode residuals of
@@ -1643,6 +1649,8 @@ class OffsetJudge:
             tier = "T1"
         anchor_fault = self._anchor_fault_active_locked(st, mono_now)
         rate = st.rate_est
+        store = self.chain_delay_store
+        record = store.record if store is not None else None
         return OffsetVerdict(
             offset_ns=float(st.ema_offset_ns),
             sigma_ns=float(sigma_ns),
@@ -1653,6 +1661,9 @@ class OffsetJudge:
             rate_ppm=(float(rate.ppm) if rate is not None else None),
             rate_sigma_ppm=(float(rate.sigma_ppm) if rate is not None else None),
             rate_source=(rate.source if rate is not None else None),
+            chain_delay_ns=(float(record.offset_ns)
+                            if record is not None else None),
+            chain_delay_state=(record.state if record is not None else None),
         )
 
     def _anchor_fault_active_locked(self, st: _SourceState, mono_now: float) -> bool:
@@ -1701,6 +1712,7 @@ class OffsetJudge:
             self._gpsdo_detail = gpsdo_detail
             if chain_request is not None:
                 self._apply_chain_request_locked(chain_request)
+            previous = self._best
             best = self._select_bench_locked(readings)
             if best is not None:
                 self._best = best
@@ -1711,6 +1723,8 @@ class OffsetJudge:
             self._observe_label_plane_locked(readings)
             self._select_label_anchor_locked(readings)
             self._update_shadow_locked(readings, self._best, mono_now)
+            transition = self._tier_transition_locked(
+                previous, best, readings, mono_now)
             # Violation + rate evaluation run every tick even in
             # holdover so sustained windows keep counting / clearing.
             for st in self._sources.values():
@@ -1723,6 +1737,69 @@ class OffsetJudge:
             snapshot = self._snapshot_locked(mono_now)
         self._publish(snapshot)
         self._run_escalation_actions(actions)
+        if transition is not None:
+            self._append_tier_transition(transition)
+
+    # ── the tier-change log (spec 2026-10-27 §7) ──────────────────────
+
+    def _tier_transition_locked(
+        self,
+        previous: Optional[BenchReading],
+        adopted: Optional[BenchReading],
+        readings: List[BenchReading],
+        mono_now: float,
+    ) -> Optional[Dict]:
+        """The log line for a change of the adopted tier this tick, or None.
+
+        ``from`` is null on the first adoption.  ``delta_ns`` is the new
+        tier's residual against the old one, through the same choke point
+        as the shadow residuals; None when the old tier did not answer
+        this tick.  ``chain_delay_ns`` is the record in force after the
+        change.  Never raises: a log line must not disturb the tick.
+        """
+        try:
+            if adopted is None:
+                return None
+            old_tier = previous.tier if previous is not None else None
+            if old_tier == adopted.tier:
+                return None
+            delta = None
+            old = next((r for r in readings if r.tier == old_tier), None)
+            if old is not None:
+                delta = round(
+                    self._cross_bench_delta_ns(adopted, old, mono_now), 1)
+            store = self.chain_delay_store
+            record = store.record if store is not None else None
+            return {
+                "utc": datetime.fromtimestamp(
+                    self._time(), tz=timezone.utc
+                ).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "from": old_tier,
+                "to": adopted.tier,
+                "delta_ns": delta,
+                "chain_delay_ns": (float(record.offset_ns)
+                                   if record is not None else None),
+            }
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"OffsetJudge tier transition not built: {e}")
+            return None
+
+    def _append_tier_transition(self, line: Dict) -> None:
+        """Append one JSON line beside the chain-delay record.  A failure
+        logs one ERROR per failure streak and never propagates."""
+        path = self.chain_delay_path.parent / "tier_transitions.jsonl"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(line) + "\n")
+        except Exception as e:  # noqa: BLE001
+            if not self._transition_log_failing:
+                logger.error(
+                    f"OffsetJudge cannot append to {path} ({e}); the "
+                    f"tier-change log is incomplete")
+            self._transition_log_failing = True
+            return
+        self._transition_log_failing = False
 
     def _poll_gpsdo(self) -> Tuple[str, List[Dict]]:
         """GPSDO discipline state — metadata only, never gating."""

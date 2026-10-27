@@ -246,3 +246,14 @@ reported σ exceeds the incumbent's × `sigma_regression_margin`
 WARNING, and incumbent loss adopts regardless of σ.  This section is
 a pointer, not a rewrite — see the gate document for rule, rationale and
 implementation notes.
+
+## 15. Addendum (2026-10-27): the stored T6 chain delay
+
+The judge now learns, stores and enforces each station's T6 chain delay, and
+gates T6 against that stored value.  The stored value never corrects a
+timestamp, the chrony feed or the T6 anchor.  Each chunk sidecar's `timing`
+block records `chain_delay_ns` and `chain_delay_state`, and every change of
+the adopted tier appends a line to `tier_transitions.jsonl`.  Operators use
+`hf-timestd chain-delay show|seed|accept|relearn`.  This section is a
+pointer; `docs/superpowers/specs/2026-10-27-t6-chain-delay-learning-design.md`
+holds the rule and its rationale.

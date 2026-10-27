@@ -376,6 +376,17 @@ sustain_window_s = 60.0  # violation must persist this long before the CRITICAL 
 # fusion_status_path = "/run/hf-timestd/fusion_status.json"  # T3 bench input
 # pair_step_threshold_s = 0.75  # radiod pair change beyond this fractures the segment (spec §5)
 
+# --- T6 chain-delay learning (docs/superpowers/specs/2026-10-27-t6-chain-delay-learning-design.md) ---
+# The judge learns, stores and enforces the station's T6 chain delay.  The
+# value is a diagnostic: it never corrects a timestamp or the chrony feed.
+# Seed a new station with `hf-timestd chain-delay seed ...`.
+# chain_delay_learn = true         # turn the whole mechanism on; false keeps the old gate
+# chain_delay_learn_s = 7200       # span of healthy T6 readings one learn needs
+# chain_delay_outlier_ns = 5.0e6   # outlier cut around the window median (floor; widens with the spread)
+# chain_delay_change_sustain_s = 600  # a departure from the stored value must hold this long before it alarms
+# chain_delay_max_ns = 4.0e7       # gross-error bound: T6 beyond this plus k*sigma_l is refused
+# chain_delay_path = "/var/lib/timestd/state/t6_chain_delay.json"  # the record; tier_transitions.jsonl lands beside it
+
 # --- Escalation ladder (spec §9 steps 2-3) ---
 # Step 2: a violation (k*sigma offset OR sustained rate alarm) that persists
 # alert_after_s emits an alert through the same channel as the freshness

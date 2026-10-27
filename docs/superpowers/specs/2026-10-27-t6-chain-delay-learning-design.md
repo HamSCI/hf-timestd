@@ -193,17 +193,17 @@ has, and nothing earlier exists to compare it with.
 **Seed to start, then learn (Michael, 2026-10-27).**  At deploy each station
 gets a seeded record, so the judge has a band from its first tick:
 
-    hf-timestd calibrate chain-delay --seed -16.35ms --sigma 1.1ms --spread 1.1ms
+    hf-timestd chain-delay seed --offset-ms -16.35 --sigma-ms 1.1 --spread-ms 1.1
 
 A seed carries `state: "seeded"`.  The judge adopts T6 against a seed exactly
 as against a confirmed record, and the change alarm and the held-T6 check
 work against it the same way.  The learner runs from the start regardless.
 When the first full learn completes, its value replaces the seed and the
-record becomes `confirmed`, with no `--accept` needed: a seed comes from a
+record becomes `confirmed`, with no `accept` needed: a seed comes from a
 rougher measurement than the learn.  If the learned value lies outside the
 seed's band, the judge logs a WARNING naming both values, since a seed that
 far off says the seeding went wrong.  From then on, every change needs
-`--accept`.
+`accept`.
 
 Seed values for the deploy: B4 at −16.35 ms, spread 1.11 ms (783 judge
 readings, 2026-10-26 12:00Z to 2026-10-27 01:40Z).  ND from its own judge's
@@ -211,7 +211,7 @@ shadow residual and conflict history, taken at deploy time.
 
 ### 4. Adoption against the stored value
 
-With a confirmed record, `_cross_bench_delta_ns` subtracts the stored
+With a stored record, seeded or confirmed, `_cross_bench_delta_ns` subtracts the stored
 `offset_ns` for a label-versus-host pair, instead of the tracker's live
 median or the config value.  The gate then reads:
 
@@ -250,11 +250,11 @@ When that holds for `chain_delay_change_sustain_s` (default 600 s), the judge:
 
 The judge never promotes a candidate on its own.  An operator confirms it:
 
-    hf-timestd calibrate chain-delay --show
-    hf-timestd calibrate chain-delay --accept     # candidate becomes confirmed
-    hf-timestd calibrate chain-delay --relearn    # discard both, learn afresh
+    hf-timestd chain-delay show
+    hf-timestd chain-delay accept     # candidate becomes confirmed
+    hf-timestd chain-delay relearn    # discard both, learn afresh
 
-`--accept` refuses a candidate whose span falls short of `chain_delay_learn_s`
+`accept` refuses a candidate whose span falls short of `chain_delay_learn_s`
 or whose sigma fails the bound.  Each confirmation moves the old record into
 `history`.
 
@@ -268,7 +268,7 @@ bounds would leave a band where the alarm fires and the gate still admits T6.
 **Holding T6.**  Today the judge runs the gate only on an upgrade, at
 bootstrap, or when the held tier goes silent.  A judge already holding T6
 never checks it again, which explains ND.  So this design adds one new path.
-While the judge holds T6 and a confirmed record exists, every tick checks the
+While the judge holds T6 and a stored record (seeded or confirmed) exists, every tick checks the
 held T6 against the band and the gross bound.  A departure that lasts
 `sustain_window_s` (60 s today) drops T6 to the best lower tier, and the
 drop counts as a degrade.  This narrows the rule that a degrade is never
@@ -279,7 +279,7 @@ residual sits outside the band.  If the residual returns inside the band and
 stays there for `chain_delay_change_sustain_s`, the alarm clears, a WARNING
 says so, and T6 may come back through the ordinary upgrade gate.  Nothing
 changed in that case, so nothing needs confirming.  A residual that settles
-somewhere new never comes back on its own: only `--accept` of the candidate
+somewhere new never comes back on its own: only `accept` of the candidate
 moves the band (my call, read from the ruling's "re-measure and confirm,
 never absorb").
 
@@ -310,8 +310,10 @@ where the step falls.  The design adds two things:
   `chain_delay_state` from the record in force, so a reader can see the size
   of the plane difference without the journal;
 - the judge appends one line per adopted-tier change to
-  `/var/lib/timestd/state/tier_transitions.jsonl`
-  (`{utc, from, to, delta_ns, chain_delay_ns}`), a durable log a GRAPE reader
+  `tier_transitions.jsonl`, in the directory of `chain_delay_path`
+  (`/var/lib/timestd/state/` by default), whether or not learning is on
+  (`{utc, from, to, delta_ns, chain_delay_ns}`; `from` is null on the first
+  adoption), a durable log a GRAPE reader
   can consult without walking the sidecars.
 
 Deploying this to B4 will produce the step.  We announce it on the bus and to
@@ -359,7 +361,7 @@ New file `tests/test_offset_judge_chain_delay.py`, built on the
 - persistence: a new judge on the same path adopts T6 at bootstrap with no
   learning;
 - seed: a seeded record adopts at once; the first full learn replaces it
-  without `--accept`; a learn outside the seed band logs a WARNING;
+  without `accept`; a learn outside the seed band logs a WARNING;
 - adoption: a residual at stored ± 3 ms adopts; at stored ± 15 ms refuses;
 - change: a sustained 6 ms shift alarms after the sustain time, degrades,
   writes a candidate, and leaves the confirmed value alone; a single-minute
@@ -371,12 +373,12 @@ New file `tests/test_offset_judge_chain_delay.py`, built on the
 - the existing `test_a_t6_step_is_not_absorbed_immediately` keeps passing;
 - sidecar: `chain_delay_ns` and `chain_delay_state` appear in the timing
   block; `tier_transitions.jsonl` gains one line per change;
-- CLI: `--accept` refuses a short or loose candidate.
+- CLI: `accept` refuses a short or loose candidate.
 
 ## Left to the builder
 
 Names of private methods, where the record I/O lives (a small
 `ChainDelayStore` class in its own file, by this repo's one-class-per-file
-convention), the exact log wording, and how `--accept` reaches a running
+convention), the exact log wording, and how `accept` reaches a running
 judge.  Writing the file and letting the judge re-read it on its next tick
 will do.

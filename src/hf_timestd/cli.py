@@ -959,6 +959,95 @@ def _load_config_for_profile(args):
         return toml.load(f), config_path
 
 
+def _chain_delay_paths(config_path: Path):
+    """(record path, judge publish path) from [timing.offset_judge].
+
+    A missing or unreadable config means the defaults: the CLI must still
+    answer on a station whose config is elsewhere.
+    """
+    from .core import offset_judge
+    cfg: dict = {}
+    try:
+        try:
+            import tomllib
+            with open(config_path, 'rb') as f:
+                full = tomllib.load(f)
+        except ModuleNotFoundError:
+            import toml
+            full = toml.load(str(config_path))
+        cfg = (full.get('timing', {}) or {}).get('offset_judge', {}) or {}
+    except (OSError, ValueError):
+        pass
+    record = Path(cfg.get('chain_delay_path') or offset_judge.DEFAULT_CHAIN_DELAY_PATH)
+    publish = Path(cfg.get('publish_path') or '/run/hf-timestd/offset_judge.json')
+    return record, publish
+
+
+def _read_json(path: Path):
+    """The parsed JSON file, or None when it is missing or unreadable."""
+    try:
+        return json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return None
+
+
+def _handle_chain_delay(args, parser):
+    """Handle 'hf-timestd chain-delay' subcommands.
+
+    The judge owns the record.  seed / accept / relearn only leave a
+    request file beside it; the judge acts on its next tick.
+    """
+    from .core.chain_delay_store import ChainDelayStore
+
+    if not args.chain_delay_command:
+        if parser:
+            parser.print_help()
+        return 1
+    record_path, publish_path = _chain_delay_paths(Path(args.config))
+
+    if args.chain_delay_command == 'show':
+        record = _read_json(record_path)
+        live = _read_json(publish_path)
+        block = live.get('chain_delay') if isinstance(live, dict) else None
+        if args.json:
+            print(json.dumps({'record_path': str(record_path), 'record': record,
+                              'judge': block}, indent=2))
+            return 0
+        if record is None:
+            print(f"no record: {record_path} is missing or unreadable")
+        else:
+            print(f"record file {record_path}:")
+            print(json.dumps(record, indent=2))
+        if block is not None:
+            print(f"judge chain_delay block ({publish_path}):")
+            print(json.dumps(block, indent=2))
+        return 0
+
+    if args.chain_delay_command == 'seed':
+        if args.sigma_ms <= 0 or args.spread_ms <= 0:
+            print("chain-delay seed: --sigma-ms and --spread-ms must be > 0",
+                  file=sys.stderr)
+            return 2
+        request = {'action': 'seed',
+                   'offset_ns': round(args.offset_ms * 1e6, 3),
+                   'sigma_ns': round(args.sigma_ms * 1e6, 3),
+                   'spread_ns': round(args.spread_ms * 1e6, 3)}
+        what = (f"seed offset {args.offset_ms} ms, sigma {args.sigma_ms} ms, "
+                f"spread {args.spread_ms} ms")
+    else:
+        request = {'action': args.chain_delay_command}
+        what = args.chain_delay_command
+    request_path = Path(str(record_path) + '.request.json')
+    try:
+        ChainDelayStore.write_request(request_path, request)
+    except OSError as exc:
+        print(f"chain-delay: cannot write {request_path}: {exc}", file=sys.stderr)
+        return 1
+    print(f"requested: {what} ({request_path})")
+    print("the judge acts on its next tick")
+    return 0
+
+
 def _handle_profile(args, parser):
     """Handle 'hf-timestd profile' subcommands."""
     from .service_profile import (
@@ -1521,7 +1610,7 @@ def cmd_shm_init(args) -> int:
     return 1 if failed else 0
 
 
-def main():
+def main(argv=None):
     """Main entry point for hf-timestd command"""
     # Quiet stderr for sigmond client-contract subcommands so they emit
     # exactly one JSON document on stdout and nothing on stderr unless
@@ -1909,7 +1998,32 @@ Per-service overrides in [services] take precedence over the profile.
     svc_disable.add_argument('--dry-run', action='store_true',
         help='Show what would change without applying')
 
-    args = parser.parse_args()
+    # ── chain-delay command group ─────────────────────────────────────
+    chain_parser = subparsers.add_parser('chain-delay',
+        help='Show or change the judge\'s stored T6 chain delay',
+        description='The offset judge learns and stores each station\'s T6 '
+                    'chain delay.  seed / accept / relearn leave a request '
+                    'the judge acts on at its next tick.')
+    chain_sub = chain_parser.add_subparsers(dest='chain_delay_command')
+    _cfg_default = '/etc/hf-timestd/timestd-config.toml'
+
+    chain_show = chain_sub.add_parser('show',
+        help='Print the stored record and the judge\'s chain_delay block')
+    chain_show.add_argument('--json', action='store_true', help='JSON output')
+    chain_seed = chain_sub.add_parser('seed',
+        help='Seed the record (state "seeded"); the first full learn replaces it')
+    chain_seed.add_argument('--offset-ms', type=float, required=True)
+    chain_seed.add_argument('--sigma-ms', type=float, required=True)
+    chain_seed.add_argument('--spread-ms', type=float, required=True)
+    chain_sub.add_parser('accept',
+        help='Promote the learned candidate to the confirmed record')
+    chain_sub.add_parser('relearn',
+        help='Discard the record and candidate and learn afresh')
+    for _p in chain_sub.choices.values():
+        _p.add_argument('--config', '-c', default=_cfg_default,
+            help='Configuration file path')
+
+    args = parser.parse_args(argv)
 
     # If no command specified, show help
     if not args.command:
@@ -2163,6 +2277,10 @@ Per-service overrides in [services] take precedence over the profile.
         _handle_profile(args, locals().get('profile_parser'))
     elif args.command == 'service':
         _handle_service(args, locals().get('service_parser'))
+    elif args.command == 'chain-delay':
+        rc = _handle_chain_delay(args, chain_parser)
+        if rc:
+            sys.exit(rc)
     elif args.command == 'calibrate':
         import toml
 

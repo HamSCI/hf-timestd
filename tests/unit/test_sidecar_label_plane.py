@@ -300,3 +300,33 @@ def test_without_an_anchor_the_sidecar_is_the_judged_pair(tmp_path):
         assert resolve(md, RTP_SNAP) == pytest.approx(WALL0, abs=1e-3)
     finally:
         w.close()
+
+
+def test_the_sidecar_records_the_chain_delay_in_force(tmp_path):
+    verdict = OffsetVerdict(0.0, 1e6, "T6", 1.0, 1, False,
+                            chain_delay_ns=-16.35e6,
+                            chain_delay_state="confirmed")
+    w = make_writer(tmp_path, judge=StubJudge(verdict), provider=lambda: None)
+    try:
+        w.add_timing_snapshot(
+            gps_time_ns=host_stamped_pair(WALL0), rtp_timesnap=RTP_SNAP
+        )
+        block = _sidecar(w, verdict)["timing"]
+        assert block["chain_delay_ns"] == pytest.approx(-16.35e6)
+        assert block["chain_delay_state"] == "confirmed"
+    finally:
+        w.close()
+
+
+def test_a_verdict_without_a_record_writes_none(tmp_path):
+    verdict = OffsetVerdict(0.0, 1e6, "T4", 1.0, 1, False)
+    w = make_writer(tmp_path, judge=StubJudge(verdict), provider=lambda: None)
+    try:
+        w.add_timing_snapshot(
+            gps_time_ns=host_stamped_pair(WALL0), rtp_timesnap=RTP_SNAP
+        )
+        block = _sidecar(w, verdict)["timing"]
+        assert block["chain_delay_ns"] is None
+        assert block["chain_delay_state"] is None
+    finally:
+        w.close()
