@@ -141,7 +141,8 @@ class TestMeasuredPlaneTerm:
         assert j.effective_label_plane_offset_ns() == -16_600_000.0
 
     def test_measurement_supersedes_the_configured_value(self, tmp_path):
-        j = make_judge(tmp_path, label_plane_offset_ns=-16_600_000.0)
+        j = make_judge(tmp_path, chain_delay_learn=False,
+                       label_plane_offset_ns=-16_600_000.0)
         for i in range(30):
             j.observe_label_plane(
                 label=reading("T6", 1_787_000_000.0 + i * 10 - 0.0155,
@@ -154,7 +155,8 @@ class TestMeasuredPlaneTerm:
 
     def test_an_undisciplined_host_never_feeds_the_term(self, tmp_path):
         """A 50 ms host says nothing useful about a 16 ms pipeline."""
-        j = make_judge(tmp_path, label_plane_offset_ns=-16_600_000.0)
+        j = make_judge(tmp_path, chain_delay_learn=False,
+                       label_plane_offset_ns=-16_600_000.0)
         for i in range(30):
             j.observe_label_plane(
                 label=reading("T6", 1_787_000_000.0 + i * 10 - 0.0155,
@@ -177,7 +179,8 @@ class TestMeasuredPlaneTerm:
         assert j.effective_label_plane_offset_ns() == -16_600_000.0
 
     def test_the_correction_uses_the_measured_term(self, tmp_path):
-        j = make_judge(tmp_path, label_plane_offset_ns=0.0)
+        j = make_judge(tmp_path, chain_delay_learn=False,
+                       label_plane_offset_ns=0.0)
         for i in range(30):
             j.observe_label_plane(
                 label=reading("T6", 1_787_000_000.0 + i * 10 - 0.0155,
@@ -194,7 +197,8 @@ class TestMeasuredPlaneTerm:
         assert abs(d) < 100_000.0
 
     def test_the_term_is_published_for_audit(self, tmp_path):
-        j = make_judge(tmp_path, label_plane_offset_ns=0.0)
+        j = make_judge(tmp_path, chain_delay_learn=False,
+                       label_plane_offset_ns=0.0)
         for i in range(30):
             j.observe_label_plane(
                 label=reading("T6", 1_787_000_000.0 + i * 10 - 0.0155,
@@ -231,12 +235,13 @@ class TestMeasurementIsGatedOnTheConvention:
                              mono=1_000.0 + i * 10, sigma_ns=20_000.0))
 
     def test_measuring_is_on_by_default(self, tmp_path):
-        j = make_judge(tmp_path)
+        j = make_judge(tmp_path, chain_delay_learn=False)
         self._feed(j)
         assert j.label_plane_status()["source"] == "measured"
 
     def test_disabled_never_measures(self, tmp_path):
-        j = make_judge(tmp_path, label_plane_measure=False,
+        j = make_judge(tmp_path, chain_delay_learn=False,
+                       label_plane_measure=False,
                        label_plane_offset_ns=0.0)
         self._feed(j)
         assert j.label_plane_status()["source"] == "config"
@@ -244,7 +249,8 @@ class TestMeasurementIsGatedOnTheConvention:
 
     def test_disabled_still_honours_an_explicit_config_term(self, tmp_path):
         """Turning the measurement off is not the same as forcing zero."""
-        j = make_judge(tmp_path, label_plane_measure=False,
+        j = make_judge(tmp_path, chain_delay_learn=False,
+                       label_plane_measure=False,
                        label_plane_offset_ns=-16_600_000.0)
         self._feed(j)
         assert j.effective_label_plane_offset_ns() == -16_600_000.0
@@ -285,7 +291,8 @@ class TestMeasuredPlaneMustEarnItsUse:
             )
 
     def test_a_useless_estimate_is_refused(self, tmp_path):
-        j = make_judge(tmp_path, label_plane_offset_ns=0.0,
+        j = make_judge(tmp_path, chain_delay_learn=False,
+                       label_plane_offset_ns=0.0,
                        label_plane_measure=True)
         self._seed(j, *self.LIVE_BAD)
         est = j._label_plane.estimate()
@@ -294,7 +301,8 @@ class TestMeasuredPlaneMustEarnItsUse:
         assert j.effective_label_plane_offset_ns() == 0.0
 
     def test_a_tight_estimate_is_used(self, tmp_path):
-        j = make_judge(tmp_path, label_plane_offset_ns=0.0,
+        j = make_judge(tmp_path, chain_delay_learn=False,
+                       label_plane_offset_ns=0.0,
                        label_plane_measure=True)
         self._seed(j, *self.GOOD)
         assert j.effective_label_plane_offset_ns() == pytest.approx(
@@ -303,7 +311,8 @@ class TestMeasuredPlaneMustEarnItsUse:
     def test_status_reports_what_was_actually_applied(self, tmp_path):
         """The JSON must not say 'measured' about a term that was refused
         — the whole point of publishing it is auditability."""
-        j = make_judge(tmp_path, label_plane_offset_ns=0.0,
+        j = make_judge(tmp_path, chain_delay_learn=False,
+                       label_plane_offset_ns=0.0,
                        label_plane_measure=True)
         self._seed(j, *self.LIVE_BAD)
         st = j.label_plane_status()
@@ -406,7 +415,7 @@ class TestTheCorrectionIsOffUntilEarned:
 
 def test_observe_brings_both_readings_to_one_instant(tmp_path):
     # chain_delay_learn=False: this exercises the legacy single tracker,
-    # which Task 5 keeps only for that mode.  The key is ignored until Task 4.
+    # which Task 5 keeps only for that mode.
     j = make_judge(tmp_path, label_plane_min_n=1, chain_delay_learn=False)
     T = 1_700_000_000.0
     for i in range(10):
