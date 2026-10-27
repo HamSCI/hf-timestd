@@ -1763,10 +1763,15 @@ class OffsetJudge:
             old_tier = previous.tier if previous is not None else None
             if old_tier == adopted.tier:
                 return None
-            delta = None
+            delta = residual = None
             old = next((r for r in readings if r.tier == old_tier), None)
             if old is not None:
-                delta = round(
+                # delta_ns: the raw label step (no plane term), both
+                # readings at one instant.  residual_ns: the same pair
+                # through the gate's choke point, net of the plane term.
+                delta = round((adopted.utc_at(mono_now)
+                               - old.utc_at(mono_now)) * 1e9, 1)
+                residual = round(
                     self._cross_bench_delta_ns(adopted, old, mono_now), 1)
             store = self.chain_delay_store
             record = store.record if store is not None else None
@@ -1777,6 +1782,7 @@ class OffsetJudge:
                 "from": old_tier,
                 "to": adopted.tier,
                 "delta_ns": delta,
+                "residual_ns": residual,
                 "chain_delay_ns": (float(record.offset_ns)
                                    if record is not None else None),
             }

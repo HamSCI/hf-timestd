@@ -791,7 +791,8 @@ def test_adopting_t6_over_t4_appends_one_line(tmp_path):
     assert [(t["from"], t["to"]) for t in lines] == [(None, "T4"), ("T4", "T6")]
     step = lines[-1]
     assert step["chain_delay_ns"] == -16_350_000.0
-    assert step["delta_ns"] == pytest.approx(0.0, abs=1e6)
+    assert step["delta_ns"] == pytest.approx(-16_350_000.0, abs=0.1e6)
+    assert step["residual_ns"] == pytest.approx(0.0, abs=0.1e6)
     assert step["utc"].endswith("Z")
 
 
@@ -841,3 +842,15 @@ def test_the_verdict_carries_the_record_in_force(tmp_path):
         tick_once(off)
     v = off.offset_for(("s", 1), 0)
     assert (v.chain_delay_ns, v.chain_delay_state) == (None, None)
+
+
+def test_delta_is_the_raw_step_and_residual_the_net(tmp_path):
+    j, clock = _t6_after_t4(tmp_path)
+    j.add_bench(StubBench(lambda: t6_reading(clock, -16_500_000.0,
+                                             sigma_ns=300_000.0)))
+    for _ in range(12):
+        tick_once(j)
+    step = _transitions(tmp_path)[-1]
+    assert (step["from"], step["to"]) == ("T4", "T6")
+    assert step["delta_ns"] == pytest.approx(-16.5e6, abs=0.1e6)
+    assert step["residual_ns"] == pytest.approx(-0.15e6, abs=0.1e6)
