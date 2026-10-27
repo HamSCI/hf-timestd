@@ -95,14 +95,14 @@ class ChainDelayStore:
     def load(self) -> None:
         """Read the file.  Never raises; problems leave the store empty."""
         try:
-            raw = self._path.read_text()
+            raw = self._path.read_bytes()
         except FileNotFoundError:
             return
         except OSError as exc:
             logger.error("chain delay: cannot read %s: %s", self._path, exc)
             return
         try:
-            data = json.loads(raw)
+            data = json.loads(raw.decode("utf-8"))
             if not isinstance(data, dict) or data.get("schema") != self.SCHEMA:
                 raise ValueError("not a schema-%d chain delay file" % self.SCHEMA)
             record = (
@@ -116,7 +116,7 @@ class ChainDelayStore:
             identity = data.get("identity")
             if not isinstance(identity, dict):
                 raise ValueError("identity is missing")
-        except (ValueError, KeyError, TypeError) as exc:
+        except (ValueError, KeyError, TypeError) as exc:  # includes UnicodeDecodeError
             self._move_aside(exc)
             return
 
@@ -211,7 +211,12 @@ class ChainDelayStore:
         try:
             self.request_path.unlink()
         except OSError as exc:
-            logger.warning("chain delay: cannot delete request file: %s", exc)
+            # An undeletable request would replay every tick; refuse it.
+            logger.error(
+                "chain delay: cannot delete request file %s (%s); ignoring it",
+                self.request_path, exc,
+            )
+            return None
         return req
 
     @staticmethod

@@ -161,3 +161,29 @@ def test_to_status(tmp_path):
     assert st["record"]["offset_ns"] == -16.35e6
     assert st["candidate"] is None
     json.dumps(st)
+
+
+def test_non_utf8_file_is_moved_aside(tmp_path, caplog):
+    path = tmp_path / "t6_chain_delay.json"
+    path.write_bytes(b"\xff\xfe\x00")
+    store = ChainDelayStore(path, IDENT)
+    with caplog.at_level(logging.ERROR):
+        store.load()
+    assert store.record is None
+    assert list(tmp_path.glob("t6_chain_delay.json.corrupt-*"))
+    assert len([r for r in caplog.records if r.levelno == logging.ERROR]) == 1
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory modes")
+def test_undeletable_request_is_not_returned(tmp_path, caplog):
+    d = tmp_path / "rq"
+    d.mkdir()
+    store = ChainDelayStore(d / "c.json", IDENT)
+    ChainDelayStore.write_request(store.request_path, {"action": "accept"})
+    d.chmod(0o500)
+    try:
+        with caplog.at_level(logging.ERROR):
+            assert store.take_request() is None
+        assert len([r for r in caplog.records if r.levelno == logging.ERROR]) == 1
+    finally:
+        d.chmod(0o700)
