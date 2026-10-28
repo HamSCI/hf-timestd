@@ -49,11 +49,15 @@ def list_units(awk: str, cwd: Path = REPO):
     (shim / "awk").write_text(f'#!/bin/sh\nexec {argv} "$@"\n')
     (shim / "awk").chmod(0o755)
     env = {"PATH": f"{shim}:/usr/bin:/bin", "HOME": "/tmp"}
-    r = subprocess.run(
-        ["bash", str(DEPLOY_SH), "--list-units"],
-        cwd=cwd, env=env, capture_output=True, text=True, timeout=60,
-    )
-    return r
+    try:
+        return subprocess.run(
+            ["bash", str(DEPLOY_SH), "--list-units"],
+            cwd=cwd, env=env, capture_output=True, text=True, timeout=60,
+        )
+    finally:
+        # Every run used to leave its shim behind: 2,944 of them in the
+        # devbox /tmp by 2026-10-28.
+        shutil.rmtree(shim, ignore_errors=True)
 
 
 @pytest.mark.parametrize("awk", AWKS)
