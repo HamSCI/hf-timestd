@@ -27,7 +27,9 @@ hf-timestd status
 }
 ```
 
-Look at `status` and `exit_code`. Zero means healthy; here the command returned 1 for WARN. The warning comes from the channel counts: only 4 of 6 metrology channels were active, and a healthy station shows 6 of 6. A fusion age of a few seconds with `stale` false means the fusion service still writes results. A large age or `stale` true means the pipeline has stopped.
+Look at `status` and `exit_code`. The command returns 0 for OK, 1 for WARN and 2 for CRIT. Run without `--calib-file`, it reports WARN with exit code 1 on a healthy station: it finds fusion data younger than 600 seconds and has no calibration file to judge. This capture shows that case, and `"calibration": null` marks it. With `--calib-file <path>`, the command reads that file instead. It reports OK with exit code 0 when the file says `usable` and holds an age under 300 seconds. It reports WARN when the file loads but does not qualify, and CRIT when the file is stale or missing.
+
+Read `data_freshness` for the real health signal. A fusion age of a few seconds with `stale` false means the fusion service still writes results. A large age or `stale` true means the pipeline has stopped. The channel counts stand apart from the verdict. `active_metrology_channels` counts channels with data younger than 300 seconds, out of the channels the table holds. Here that gives 4 of 6. The counts never change `status` or `exit_code`. At night the high WWV channels often carry no signal, so a lower count there needs no alarm.
 
 ## hf-timestd quality
 
