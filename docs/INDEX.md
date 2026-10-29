@@ -69,6 +69,7 @@ are marked ★ — when two docs disagree, the canonical one wins.
 | [DEBUGGING.md](DEBUGGING.md) ★ | Journald-only logging, triage recipes (incl. clock free-run / makestep), deploy footguns. |
 | [EXTERNAL_PREREQUISITES.md](EXTERNAL_PREREQUISITES.md) | The six external dependencies and how to stage them. |
 | [STATION_SETUP_GUIDE.md](STATION_SETUP_GUIDE.md) · PSWS_SETUP_GUIDE.md and NASA_EARTHDATA_SETUP.md → **[hamsci-physics](https://github.com/HamSCI/hamsci-physics/tree/main/docs)** | First-time site setup here; PSWS upload and NASA Earthdata setup moved with the science products. |
+| [commands/hf-timestd.md](commands/hf-timestd.md) | Real `hf-timestd` output from AC0G-B4, one section per read-only command, feeding the station Commands page. |
 | [PIPELINE_VERIFICATION.md](PIPELINE_VERIFICATION.md) | Pipeline verification procedure. |
 | [WWVB-INTEGRATION.md](WWVB-INTEGRATION.md) | WWVB 60 kHz fusion source (Layer 4 — currently gated off, awaiting validation). |
 | Web dashboard → **[station-web](https://github.com/mijahauan/station-web)** | The operator web UI left this repo in the 2026-09-06 split (Phase 5). It reads the same `/var/lib/timestd` products; run and document it there. |

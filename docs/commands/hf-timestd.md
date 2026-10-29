@@ -1,5 +1,7 @@
 # hf-timestd command examples
 
+> **Audience:** operator, contributor
+
 These examples come from AC0G-B4, the project's test station, on 2026-10-29 at about 22:36 UTC. Each command only reads. The program also prints a log line such as `Logging configured at INFO level` on its error stream. The examples leave that line out.
 
 ## hf-timestd status
