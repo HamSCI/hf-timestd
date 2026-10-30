@@ -132,3 +132,58 @@ def test_a_radiod_restart_costs_one_warning_now_and_none_an_hour_later(
     warns = _warnings(caplog)
     assert len(warns) == 1, warns
     assert "new radiod run" in warns[0]
+
+
+# ── Fix round 1, I-2: six writers out of step ────────────────────────
+
+SIX = (("WWV_20000", 50), ("SHARED_10000", 51), ("WWV_15000", 51),
+       ("WWV_5000", 51), ("WWV_25000", 50), ("SHARED_2500", 51))
+# How far behind each channel's process runs, in minutes of data.
+LAG = (0.0, 0.2, 0.5, 1.3, 2.4, 3.6)
+
+
+def test_six_channels_out_of_step_still_cost_one_warning(tmp_path, caplog):
+    """Review I-2.  Every metrology process writes the one summary, and the
+    station counter sees whichever wrote last.  Here the six channels run
+    out of step (up to 3.6 minutes apart) and the manager ticks after every
+    single write, so a lagging channel's BOOTSTRAP or CANDIDATE lands after
+    the leaders have put the station back in ACQUIRED."""
+    station = []
+    for name, k0 in SIX:
+        svc = _channel(tmp_path, name)
+        svc._shadow_transitions = StateTransitionCounter(name)
+        svc._shadow_record = _Rows()
+        _acquire(svc, k0)
+        station.append((svc, k0))
+    clock = _MinuteClock()
+    manager = _authority(tmp_path, clock)
+
+    def play(minutes, kw_for):
+        events = sorted((k + lag, i, k) for k in minutes
+                        for i, lag in enumerate(LAG))
+        for t, i, k in events:
+            svc, k0 = station[i]
+            _minute(svc, k0, k, **kw_for(i, k))
+            clock.minute = MIN + int(round(60 * t))
+            manager.tick()
+
+    play([1], lambda i, k: {})
+    assert all(svc.acquirer.state == svc.acquirer.STATE_ACQUIRED
+               for svc, _ in station)
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        # The laggards still write run A's ACQUIRED minutes after the
+        # leaders saw the restart, so the summary returns to ACQUIRED in
+        # the middle of the event, and the leaders' unflagged CANDIDATE
+        # minutes land after that return.
+        play(range(K - 4, K + 8), lambda i, k: dict(
+            restarted=k >= K, new_map=k > K, quiet_air=k == K))
+        for svc, _ in station:
+            assert svc.acquirer.state == svc.acquirer.STATE_ACQUIRED
+        play([K + 62, K + 63], lambda i, k: dict(restarted=True, new_map=True))
+    station_rows = [r for r in manager.t3_shadow_record.rows
+                    if r.get("kind") == "transition" and r.get("scope") == "station"
+                    and r.get("from") is not None]
+    warns = _warnings(caplog)
+    assert len(warns) == 1, (warns, [(r["from"], r["to"]) for r in station_rows])
+    assert "new radiod run" in warns[0]

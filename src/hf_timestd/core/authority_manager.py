@@ -560,7 +560,11 @@ class AuthorityManager:
                     str(reg.get("state")),
                     f"published registration, source {reg.get('source')}",
                     utc_minute,
-                    quiet=summary.get("run_change") is True)
+                    quiet=summary.get("run_change") is True,
+                    # Fix round 1, I-2: a newly seen run makes every change
+                    # within RECOVERY_S part of the announced event, however
+                    # the six writers interleave.
+                    run_id=summary.get("radiod_run_epoch_gps_s"))
                 if t_row is not None:
                     self.t3_shadow_record.append(t_row)
             if utc_minute == self._t3_shadow_last_minute:

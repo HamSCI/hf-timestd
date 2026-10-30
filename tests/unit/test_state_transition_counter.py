@@ -113,3 +113,61 @@ def test_a_fault_after_the_recovery_still_warns(caplog):
     assert len(warns) == 2, warns
     assert "ACQUIRED -> CONFLICT" in warns[0]
     assert "3 transitions" in warns[1]
+
+
+# ── Fix round 1, I-1: a recovery that never completes ends anyway ────
+
+
+def test_a_recovery_that_never_returns_ends_after_recovery_s(caplog):
+    """Review I-1: ACQUIRED -> BOOTSTRAP (quiet) -> CANDIDATE, and the scope
+    never returns to ACQUIRED.  Days of BOOTSTRAP <-> CANDIDATE flapping and
+    then a CONFLICT logged no WARNING at all.  The recovery now ends
+    RECOVERY_S after the quiet change; later changes warn as usual."""
+    c = StateTransitionCounter("station")
+    c.observe("ACQUIRED", "start", 0)
+    day = 86_400
+    with caplog.at_level(logging.INFO):
+        c.observe("BOOTSTRAP", "new run", 60, quiet=True)
+        c.observe("CANDIDATE", "acquirer", 120)
+        assert _warns(caplog) == []
+        for d in range(1, 6):                        # daily flaps
+            c.observe("BOOTSTRAP" if d % 2 else "CANDIDATE", "flap", d * day)
+        c.observe("CONFLICT", "siblings disagree", 7 * day)
+    warns = _warns(caplog)
+    assert len(warns) == 6, warns                   # each flap and the CONFLICT
+    assert "CONFLICT" in warns[-1]
+
+
+def test_the_recovery_bound_is_one_hour_from_the_quiet_change(caplog):
+    c = StateTransitionCounter("station")
+    c.observe("ACQUIRED", "start", 0)
+    with caplog.at_level(logging.INFO):
+        c.observe("BOOTSTRAP", "new run", 60, quiet=True)
+        c.observe("CANDIDATE", "acquirer", 60 + c.RECOVERY_S - 60)   # inside
+        assert _warns(caplog) == []
+        c.observe("BOOTSTRAP", "acquirer", 60 + c.RECOVERY_S)       # outside
+    assert len(_warns(caplog)) == 1
+
+
+# ── Fix round 1, I-2: latch on the run identity ──────────────────────
+
+
+def test_a_new_run_identity_covers_every_change_within_the_bound(caplog):
+    """Review I-2: six writers share one summary.  Once the station is back
+    in ACQUIRED, a lagging writer's unflagged CANDIDATE belongs to the same
+    restart.  A newly seen run identity makes every change within
+    RECOVERY_S part of that one event, return to the old state or not."""
+    c = StateTransitionCounter("station")
+    c.observe("ACQUIRED", "start", 0, run_id=1000.0)
+    with caplog.at_level(logging.INFO):
+        c.observe("BOOTSTRAP", "x", 60, quiet=True, run_id=1000.0)  # raw pair moved
+        c.observe("ACQUIRED", "x", 120, run_id=4600.0)              # new run seen
+        c.observe("CANDIDATE", "laggard", 180, run_id=1000.0)       # old id: not new
+        c.observe("ACQUIRED", "x", 240, run_id=4600.4)              # same run, jitter
+        c.observe("CANDIDATE", "laggard", 300)
+        c.observe("ACQUIRED", "x", 360, run_id=4600.0)
+        c.observe("ACQUIRED", "x", 4000, run_id=4600.0)             # past the hour
+    assert _warns(caplog) == []
+    with caplog.at_level(logging.INFO):
+        c.observe("CONFLICT", "later", 120 + c.RECOVERY_S + 600, run_id=4600.0)
+    assert len(_warns(caplog)) == 1

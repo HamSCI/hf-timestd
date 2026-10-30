@@ -1699,7 +1699,13 @@ class MetrologyService:
                  # whose one WARNING another line carries.  The authority
                  # manager's station counter logs the summary's change at
                  # INFO when it reads this.
-                 "run_change": bool(getattr(self, "_run_change_minute", False))}
+                 "run_change": bool(getattr(self, "_run_change_minute", False)),
+                 # Fix round 1, I-2: the radiod run this channel's map names
+                 # (input_epoch_gps_s; None before its first map).  Six
+                 # processes write this one summary out of step, so the
+                 # station counter latches on the run, not on one
+                 # minute's flag.
+                 "radiod_run_epoch_gps_s": getattr(self, "_run_epoch_s", None)}
         if extra_extra:
             extra.update(extra_extra)
         if not conflicts:
