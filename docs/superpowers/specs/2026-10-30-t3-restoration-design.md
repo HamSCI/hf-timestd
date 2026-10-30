@@ -155,6 +155,14 @@ the host clock may.  On a T3-only station the host follows T2 and so cannot miss
 Any broadcast namer that disagrees overrules the host and raises a loud alarm, once.  The fraction
 of a second, which carries T3's accuracy, comes from the broadcasts alone.
 
+**Coasting.**  Once T3 has named the second, the GPSDO-disciplined ruler carries that name by
+sample count; no broadcast needs to name it again.  The ruler's phase decays at about 1.44 µs per
+hour in holdover (measured for T6), so hours without WWVB, or without any HF tick, cost
+microseconds, not milliseconds.  Naming matters only at acquisition and after a counter break: a
+radiod restart, or a channel created afresh.  So the host-clock fallback for naming should fire
+rarely, and the record of §7.4 counts each time it does.  While the broadcasts fade, T3 holds its
+last registration and its sigma grows at the ruler's rate; it does not drop to T2.
+
 ### 7.4 The refinement loop on B4
 
 B4 holds two references, T6 and the LAN GPS server behind T4.  *(My call.)*  T6 serves as the
@@ -168,6 +176,40 @@ Those records score the propagation model against truth: mode choice, E against 
 failures, GIRO against IRI, and whether wiring PHaRLAP into the timing path pays.  Fixes land in
 the model, in hamsci-dsp, for every station.  No station learns a correction from its own
 references.
+
+### 7.5 What carries over from the earlier method, and what changes
+
+T3 does not start from nothing.  The earlier method already built most of the parts:
+
+- the tick detectors, the 1 s fold and the template fit of the tick registration;
+- the minute marker, the BCD decoder and the WWVB decoder;
+- the propagation model in hamsci-dsp, with GIRO and IRI-2020 inputs;
+- the WWV-against-WWVH differential solver and the multi-frequency consistency check in
+  `differential_time_solver.py`, which identify propagation modes from differences in which the
+  clock error cancels;
+- the TEC estimator, which can use the spread of delay across frequencies (group delay scales as
+  1/f²) to estimate the ionospheric term;
+- the station timing estimator, which already keeps time by sample count from the ruler.
+
+This design reuses them.  What it changes lies in how they connect and how the result gets judged:
+
+1. **The frame.**  The earlier method measured each broadcast against a host-stamped plane and
+   then calibrated each broadcast's mean toward zero, so its answer followed the host clock.
+   T3 measures in the sample plane, against the ruler, and calibrates nothing against the host.
+2. **The score.**  The earlier method never measured its answer against an independent reference.
+   T3 gets scored against T6 and T4 on B4, every minute.
+3. **The uncertainty.**  The earlier sigma came from an SNR formula and floors, and its weighted
+   mean treated ten frequencies and thirty minutes of rows as independent.  T3 treats one
+   transmitter site as one witness and carries the model's uncertainty as measured.
+4. **The counters.**  T3 respects each channel's own RTP counter.
+5. **The model.**  Measured errors, not assigned confidences, decide which model tiers and mode
+   choices earn their place.
+6. **Coasting** by sample count, where the old Kalman filter assumed one minute between updates.
+
+So the work consists mostly of rewiring and correcting, not reinventing.  One expectation follows:
+the honest T3 will at first look worse than the earlier figures, which read near zero by
+construction.  The comparison that counts sets T3 against T2, both measured against T4 at the
+same moments.
 
 ## 8 · The order of work
 
