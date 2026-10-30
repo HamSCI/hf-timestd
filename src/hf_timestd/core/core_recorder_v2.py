@@ -1426,7 +1426,7 @@ class CoreRecorderV2:
                 except Exception as exc:
                     if desc not in self._counter_pub_failing:
                         self._counter_pub_failing.add(desc)
-                        logger.error("counter map publish for %s failed: %s "
+                        logger.error("counter map refresh failed for %s: %s "
                                      "(silent until it recovers)", desc, exc)
             self._counter_rr = (start + done) % n
         except Exception:

@@ -100,7 +100,7 @@ def test_new_radiod_run_replaces_the_map_without_a_step(caplog):
     c = FakeControl()
     p = CounterMapProbe(c)
     first = p.refresh("X", 1, 24000)
-    c.make = lambda b: reply(b - 90, k0=K0 + 7, epoch_s=EPOCH_S + 3600)   # radiod restarted
+    c.make = lambda b: reply(b - 15000, k0=K0 + 7, epoch_s=EPOCH_S + 3600)   # radiod restarted
     with caplog.at_level(logging.INFO):
         for _ in range(3):
             cmap = p.refresh("X", 1, 24000)
@@ -147,7 +147,7 @@ def test_restart_never_publishes_the_old_map_on_the_new_counter():
     p = CounterMapProbe(c)
     old = p.refresh("X", 1, 24000)
     assert old is not None
-    c.make = lambda b: reply(b - 90, k0=K0 + 7, epoch_s=EPOCH_S + 3600)
+    c.make = lambda b: reply(b - 15000, k0=K0 + 7, epoch_s=EPOCH_S + 3600)
     for _ in range(4):
         cmap = p.refresh("X", 1, 24000)
         assert cmap is None or abs(cmap.input_epoch_gps_s - (EPOCH_S + 3600)) < 1
@@ -158,7 +158,7 @@ def test_new_run_starts_a_full_burst_at_once():
     c = FakeControl()
     p = CounterMapProbe(c)
     p.refresh("X", 1, 24000)
-    c.make = lambda b: reply(b - 90, k0=K0 + 7, epoch_s=EPOCH_S + 3600)
+    c.make = lambda b: reply(b - 15000, k0=K0 + 7, epoch_s=EPOCH_S + 3600)
     before = c.calls
     cmap = p.refresh("X", 1, 24000)
     assert c.calls - before == 5
@@ -353,3 +353,85 @@ def test_a_publish_error_does_not_starve_later_channels(caplog):
         core._refresh_counter_maps()
     assert seen == ["A", "B", "A", "B"]
     assert len([r for r in caplog.records if r.levelno == logging.ERROR]) == 1
+
+
+def run_step_test(caplog, shift, late_polls):
+    c = FakeControl()
+    p = CounterMapProbe(c)
+    p.refresh("S", 1, 24000)
+    n = {"i": 0}
+
+    def make(b):
+        n["i"] += 1
+        r = reply(b, shift_blocks=shift)
+        return late(r, 0.8) if n["i"] in late_polls else r
+    c.make = make
+    with caplog.at_level(logging.INFO):
+        for _ in range(3):
+            p.refresh("S", 1, 24000)
+    assert p.steps["S"] == 1
+    assert len([r for r in caplog.records if r.levelno == logging.ERROR
+                and "COUNTER MAP STEP S" in r.getMessage()]) == 1
+    assert not [r for r in caplog.records if "new radiod run" in r.getMessage()]
+
+
+def test_a_two_block_step_with_a_late_poll_counts(caplog):
+    run_step_test(caplog, 2, {2})
+
+
+def test_a_one_block_step_with_every_post_step_poll_late_counts(caplog):
+    run_step_test(caplog, 1, {1, 2, 3})
+
+
+def test_a_step_keeps_the_least_late_epoch():
+    c = FakeControl()
+    p = CounterMapProbe(c)
+    held = p.refresh("S", 1, 24000)
+    c.make = lambda b: late(reply(b, shift_blocks=1), 0.8)
+    for _ in range(3):
+        cmap = p.refresh("S", 1, 24000)
+    assert cmap.input_epoch_gps_s == held.input_epoch_gps_s
+
+
+def test_restart_with_no_map_held_is_detected_and_a_cut_burst_completes(caplog):
+    clk = Clock()
+
+    class SlowControl(FakeControl):
+        def poll_status(self, ssrc, timeout):
+            clk.t += 2.0
+            return super().poll_status(ssrc, timeout)
+
+    c = SlowControl()
+    p = CounterMapProbe(c, mono_fn=clk)
+    assert p.refresh("X", 1, 24000, time_left_s=3.0) is None      # 2 polls
+    assert c.calls == 2
+    c.make = lambda b: reply(b - 15000, k0=K0 + 7, epoch_s=EPOCH_S + 3600)
+    with caplog.at_level(logging.INFO):
+        cmap = p.refresh("X", 1, 24000)                           # restart seen
+    assert len([r for r in caplog.records if "new radiod run" in r.getMessage()]) == 1
+    assert cmap is not None and cmap.n_agree == 5
+    assert abs(cmap.input_epoch_gps_s - (EPOCH_S + 3600)) < 1
+    c2 = SlowControl()
+    q = CounterMapProbe(c2, mono_fn=clk)
+    q.refresh("Y", 1, 24000, time_left_s=3.0)
+    assert q.refresh("Y", 1, 24000) is not None                   # 2 + 1 = 3 polls
+
+
+def test_stale_limit_is_half_the_reach_at_96_khz():
+    olen = 1920
+    c = FakeControl()
+
+    def make(b):
+        r = reply(b, rate=96000)
+        r.rtp_timesnap = rtp_of(b, olen=olen)
+        return r
+    c.make = make
+    clk = Clock()
+    p = CounterMapProbe(c, mono_fn=clk)
+    assert p.refresh("T6", 1, 96000) is not None
+    assert abs(CounterMapProbe.stale_limit_s(96000) - 2**31 / 96000 / 2) < 1e-6
+    c.fail = True
+    clk.t += 3.0 * 3600
+    assert p.refresh("T6", 1, 96000) is not None      # inside half the reach (3.1 h)
+    clk.t += 0.3 * 3600
+    assert p.refresh("T6", 1, 96000) is None          # dropped long before 6.2 h

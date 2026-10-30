@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Deque, Dict, Optional
 
 from hamsci_dsp.counter_map import CounterMap, CounterPoll
@@ -61,6 +61,7 @@ class _Channel:
     last_rtp: Optional[int] = None
     last_fresh_mono: Optional[float] = None
     started: bool = False
+    stale_s: float = 0.0
     dropped_logged: bool = False
     failing: bool = False
 
@@ -69,9 +70,16 @@ class CounterMapProbe:
     POLLS_AT_START = 5
     HISTORY = 5              # three of five is a strict majority; never widen
     MIN_AGREE = 3
-    # Well inside the signed-32 reach (24 h 51 m at 24 kHz).
-    MAX_STALE_S = 12 * 3600.0
-    RUN_TOL_S = 0.5          # same tolerance as CounterMap.same_run
+    # A held map drops after half the signed-32 reach, 2**31 / rate seconds
+    # (24 h 51 m at 24 kHz, 6.2 h at 96 kHz), so it never aliases.
+    STALE_REACH_FRACTION = 0.5
+    # The run decision comes from the counters alone.  A restart resets
+    # INPUT_SAMPLES; no plausible step moves the grid this far.
+    RUN_MISS_BLOCKS = 1000
+
+    @classmethod
+    def stale_limit_s(cls, output_samprate: int) -> float:
+        return cls.STALE_REACH_FRACTION * (2**31 / output_samprate)
 
     def __init__(self, control, poll_timeout: float = 1.0, mono_fn=time.monotonic):
         self._control = control
@@ -101,6 +109,7 @@ class CounterMapProbe:
         now = self._mono()
         deadline = None if time_left_s is None else now + time_left_s
         remaining = self.POLLS_AT_START if not st.started else 1
+        st.stale_s = self.stale_limit_s(rate)
         st.started = True       # stays True after a drop: relearning costs one poll a tick
         burst_extended = False
         fresh = 0
@@ -124,7 +133,8 @@ class CounterMapProbe:
                 logger.info("counter map poll of %s recovered", channel)
                 st.failing = False
             if self._is_new_run(st, poll):
-                logger.info("counter map for %s: new radiod run, map replaced", channel)
+                logger.info("counter map for %s: new radiod run, map replaced "
+                            "(epoch %.3f s)", channel, _epoch(poll))
                 st.polls.clear()
                 st.held = None
                 st.last_rtp = None
@@ -140,11 +150,11 @@ class CounterMapProbe:
         elif st.last_fresh_mono is None:
             st.last_fresh_mono = now          # start the staleness clock
 
-        if now - st.last_fresh_mono > self.MAX_STALE_S:
+        if now - st.last_fresh_mono > st.stale_s:
             if st.held is not None or not st.dropped_logged:
                 logger.error("counter map for %s dropped: no fresh RTP for over "
-                             "%.0f h, a held map could alias", channel,
-                             self.MAX_STALE_S / 3600)
+                             "%.1f h, a held map could alias", channel,
+                             st.stale_s / 3600)
             st.held = None
             st.polls.clear()
             st.last_rtp = None
@@ -160,48 +170,57 @@ class CounterMapProbe:
         return st.held
 
     def _is_new_run(self, st: "_Channel", poll: CounterPoll) -> bool:
-        """A new radiod run moves the epoch AND breaks the counter grid.
+        """A new radiod run resets the counters.  The decision uses them alone.
 
         GPS_TIME is read live while INPUT_SAMPLES is cached, so a late status
-        packet moves the epoch alone (B4 logged up to 816 ms).  RTP and
-        INPUT_SAMPLES carry no lateness: a late poll stays on the held map's
-        grid, a restarted counter does not.
+        packet moves the epoch and nothing else (B4 logged up to 816 ms);
+        the epoch therefore never decides.  A poll starts a new run when
+        INPUT_SAMPLES went backward past the newest poll's (by more than one
+        block, so a torn pair is not a restart), or when it misses the held
+        map's grid (else the newest poll's) by more than RUN_MISS_BLOCKS.
+        Anything nearer is the same run, and `_adopt` counts it as a step.
         """
+        newest = st.polls[-1] if st.polls else None
+        if newest is not None and poll.input_samples < newest.input_samples - newest.filter_blocksize:
+            return True
         if st.held is not None:
-            if abs(_epoch(poll) - st.held.input_epoch_gps_s) <= self.RUN_TOL_S:
-                return False
             m = st.held
             if (poll.filter_blocksize, poll.input_samprate) != (m.ilen, m.input_samprate):
                 return True
-            return abs(m.input_index(poll.rtp_timesnap) - poll.input_samples) > m.ilen
-        if not st.polls:
+            return abs(m.input_index(poll.rtp_timesnap) - poll.input_samples) > \
+                self.RUN_MISS_BLOCKS * m.ilen
+        if newest is None:
             return False
-        ref = min(st.polls, key=_epoch)       # the least-late poll
-        if abs(_epoch(poll) - _epoch(ref)) <= self.RUN_TOL_S:
-            return False
-        ilen = ref.filter_blocksize
-        if (poll.filter_blocksize, poll.input_samprate) != (ilen, ref.input_samprate):
+        ilen = newest.filter_blocksize
+        if (poll.filter_blocksize, poll.input_samprate) != (ilen, newest.input_samprate):
             return True
-        olen = ref.output_samprate * ilen // ref.input_samprate
+        olen = newest.output_samprate * ilen // newest.input_samprate
         if olen <= 0:
             return True
-        d = (poll.rtp_timesnap - ref.rtp_timesnap + 2**31) % 2**32 - 2**31
-        expect = ref.input_samples + d * ilen / olen
-        return abs(expect - poll.input_samples) > ilen
+        d = (poll.rtp_timesnap - newest.rtp_timesnap + 2**31) % 2**32 - 2**31
+        expect = newest.input_samples + d * ilen / olen
+        return abs(expect - poll.input_samples) > self.RUN_MISS_BLOCKS * ilen
 
     def _adopt(self, channel: str, st: _Channel, new: CounterMap) -> None:
         held = st.held
         if held is None:
             st.held = new
             return
-        if not new.same_run(held):
-            st.held = new
+        rolled = held.rolled_forward(new.rtp_ref)
+        if ((new.ilen, new.olen, new.input_samprate)
+                != (held.ilen, held.olen, held.input_samprate)
+                or abs(new.input_ref - rolled.input_index(new.rtp_ref))
+                > self.RUN_MISS_BLOCKS * new.ilen):
+            st.held = new                     # another run; the poll path logged it
             return
-        blocks = new.intercept_blocks_from(held.rolled_forward(new.rtp_ref))
-        if blocks == 0:
+        # Same run: keep the least-late epoch, so lateness never creeps in.
+        epoch = min(held.input_epoch_gps_s, new.input_epoch_gps_s)
+        new = replace(new, input_epoch_gps_s=epoch)
+        blocks = (new.input_ref - rolled.input_index(new.rtp_ref)) / new.ilen
+        if abs(blocks) < 1e-6:
             st.held = new
             return
         self._steps[channel] = self._steps.get(channel, 0) + 1
-        logger.error("COUNTER MAP STEP %s: intercept moved %s block(s) within one "
+        logger.error("COUNTER MAP STEP %s: intercept moved %.3f block(s) within one "
                      "radiod run (step %d)", channel, blocks, self._steps[channel])
         st.held = new
