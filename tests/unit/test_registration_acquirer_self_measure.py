@@ -45,6 +45,13 @@ def _acquired(snr_db=20.0, stations=D):
     return acq, last
 
 
+def _plane(acq, rtp=1_000_000):
+    """The plane's UTC at one fixed RTP.  ``measure_minute`` re-anchors the
+    held plane every minute (final review I-6), so ``utc_ref`` alone names
+    a moving reference point, not the plane."""
+    return acq.registration.sample0_utc_for(rtp)
+
+
 def _measure(acq, k, snr_db=20.0, stations=D, marker=True):
     audio, _label, rtp, m = _minute(k, snr_db=snr_db, stations=stations, marker=marker)
     return acq.measure_minute(audio, rtp, m, stations)
@@ -79,12 +86,12 @@ def test_the_residual_moves_the_plane_toward_truth():
     """The sign end to end: ``corroborate`` subtracts the residual, as it
     subtracts ``TickEdgeDetector.timing_error_ms``."""
     acq, _ = _acquired()
-    truth = acq.registration.utc_ref
+    truth = _plane(acq)
     acq.registration.utc_ref += 0.002
     assert acq.verify(ra.residuals_for_verify(_measure(acq, 3))) == "verified"
-    before = abs(acq.registration.utc_ref - truth)
+    before = abs(_plane(acq) - truth)
     assert acq.corroborate(ra.residuals_for_verify(_measure(acq, 4))) == "tightened"
-    after = abs(acq.registration.utc_ref - truth)
+    after = abs(_plane(acq) - truth)
     assert after < before / 4, (before, after)
 
 
@@ -131,10 +138,10 @@ def test_a_one_second_plane_resets_corroboration():
 def test_the_marker_is_never_applied_as_a_correction():
     acq, _ = _acquired()
     acq.registration.utc_ref += 1.0
-    held = acq.registration.utc_ref
+    held = _plane(acq)
     for k in (3, 4, 5):
         _measure(acq, k)
-    assert acq.registration.utc_ref == held
+    assert _plane(acq) == held
 
 
 def test_weak_minutes_fold_together():
@@ -200,7 +207,7 @@ def test_a_whole_second_on_one_station_condemns_the_whole_plane():
     assert acq.state == acq.STATE_ACQUIRED
     assert set(acq.registration.stations) == {"WWV", "WWVH"}
     acq.registration.utc_ref += 1.0
-    held = acq.registration.utc_ref
+    held = _plane(acq)
     seen_whole_second = False
     for k in range(3, 9):
         audio, _label, rtp, m = _shared_minute(k)
@@ -213,8 +220,8 @@ def test_a_whole_second_on_one_station_condemns_the_whole_plane():
         acq.corroborate(ra.residuals_for_verify(got))
         if acq.registration is None:
             break
-        assert abs(acq.registration.utc_ref - held) < 0.005, (
-            f"minute {k}: plane moved {1000 * (acq.registration.utc_ref - held):+.1f} ms"
+        assert abs(_plane(acq) - held) < 0.005, (
+            f"minute {k}: plane moved {1000 * (_plane(acq) - held):+.1f} ms"
         )
     assert seen_whole_second
     assert acq.state == acq.STATE_BOOTSTRAP
@@ -239,7 +246,7 @@ def test_a_residual_past_half_a_second_resets_at_once(verified, caplog):
     acq, _ = _acquired()
     acq.registration.verified = verified
     acq.registration.stations = ("WWV", "WWVH")
-    held = acq.registration.utc_ref
+    held = _plane(acq)
     reg = acq.registration
     caplog.set_level(logging.WARNING)
     out = acq.corroborate({"WWV": (+1000.2, 1.0), "WWVH": (0.1, 1.0), "BPM": (0.0, 1.0)})
@@ -294,7 +301,7 @@ def test_half_a_second_is_not_a_whole_second():
     whole-second guard; a true whole second reads near 1000 ms."""
     acq, _ = _acquired()
     acq.registration.verified = True
-    held = acq.registration.utc_ref
+    held = _plane(acq)
     assert acq.corroborate({"WWV": (+500.0, 1.0)}) == "held"
     assert acq.state == acq.STATE_ACQUIRED
     assert acq.registration.utc_ref == held
@@ -307,7 +314,7 @@ def test_bpm_dut1_never_trips_the_whole_second_guard():
     verdict on the plane: it neither trips the guard nor enters the mean."""
     acq, _ = _acquired()
     acq.registration.verified = True
-    held = acq.registration.utc_ref
+    held = _plane(acq)
     assert acq.corroborate({"WWV": (0.0, 1.0), "BPM": (+950.0, 1.0)}) == "tightened"
     assert acq.state == acq.STATE_ACQUIRED
     assert acq.registration.utc_ref == pytest.approx(held, abs=1e-9)

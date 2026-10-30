@@ -49,6 +49,12 @@ def _rtp_gap(a: int, b: int) -> int:
     d = (int(a) - int(b)) & 0xFFFFFFFF
     return abs(d - 2**32 if d >= 2**31 else d)
 
+
+def _rtp_signed_delta(a: int, b: int) -> int:
+    """a - b in the 32-bit RTP counter, signed reading."""
+    d = (int(a) - int(b)) & 0xFFFFFFFF
+    return d - 2**32 if d >= 2**31 else d
+
 ACQ_MIN_FOLD_SNR_DB = 10.0
 FOLD_LENGTHS_S = (60, 120, 180)
 TONE_BANDS_HZ: Dict[str, Tuple[float, float]] = {
@@ -927,9 +933,10 @@ class Registration:
         has required of the T6 anchor since before this plane existed.
 
         The signed reading assumes the two counter values lie within 2**31
-        samples of each other -- 24.85 h at 24 kHz.  Every caller asks about
-        the minute in hand against a registration the staleness gate keeps
-        under 300 s, so that bound sits four orders of magnitude away.
+        samples of each other -- 24.85 h at 24 kHz.  A plane held that long
+        once aliased by 49.7 h; ``RegistrationAcquirer.reanchor`` now moves
+        a held plane's ``rtp_ref`` to each minute's start (final review I-6),
+        so the bound sits three orders of magnitude away.
         """
         delta = (int(start_rtp) - int(self.rtp_ref)) & 0xFFFFFFFF
         if delta > 0x7FFFFFFF:
@@ -1232,6 +1239,39 @@ class RegistrationAcquirer:
         ):
             reg.counter_map = self._cmap.rolled_forward(reg.rtp_ref)
         return reg
+
+    def reanchor(self, start_rtp: int) -> None:
+        """Move the held plane's reference point to ``start_rtp``, keeping
+        the plane where it is (final review I-6, 2026-10-30).
+
+        ``sample0_utc_for`` reads the RTP difference as signed 32 bits, so
+        a plane whose ``rtp_ref`` falls 2**31 samples behind (24.85 h at
+        24 kHz) reads the next minute 2**32 samples back, about 49.7 h.
+        Stand-alone T3 holds planes that long.  Re-anchored each minute,
+        ``rtp_ref`` never trails by more than a minute.
+
+        UTC carries forward exactly: the new ``utc_ref`` comes from the
+        last reference point anything else set (an acquisition, an adopt,
+        a ``corroborate`` move) plus the whole samples counted since, in
+        one rounding, so a day of minutes adds no float drift.  The
+        plane's own map rolls to the new ``rtp_ref``, so ``in_domain``
+        keeps reading it within reach."""
+        reg = self._reg
+        if reg is None:
+            return
+        start_rtp = int(start_rtp) & 0xFFFFFFFF
+        o = getattr(self, "_reanchor_origin", None)
+        if (o is None or o["reg"] is not reg
+                or (reg.rtp_ref, reg.utc_ref) != (o["rtp"], o["utc"])):
+            o = {"reg": reg, "utc0": reg.utc_ref, "n": 0}
+        n = o["n"] + _rtp_signed_delta(start_rtp, reg.rtp_ref)
+        reg.rtp_ref = start_rtp
+        reg.utc_ref = o["utc0"] + n / float(reg.sample_rate)
+        if reg.counter_map is not None:
+            reg.counter_map = reg.counter_map.rolled_forward(start_rtp)
+        self._stamped(reg)
+        o.update(n=n, rtp=reg.rtp_ref, utc=reg.utc_ref)
+        self._reanchor_origin = o
 
     def map_at(self, rtp: int) -> Optional[CounterMap]:
         """This channel's map rolled to ``rtp``, for fusion's ``at_map``.
@@ -1683,6 +1723,9 @@ class RegistrationAcquirer:
         sr = self.sample_rate
         audio = np.asarray(audio, dtype=np.float64)
         start_rtp = int(start_rtp) & 0xFFFFFFFF
+        # Final review I-6: same plane, this minute's reference point, so
+        # the held plane never ages past the signed-32 reach.
+        self.reanchor(start_rtp)
         runup = self._runup_for(start_rtp)
         # Keep this minute's tail even when the minute itself goes
         # unmeasured, so the first measured minute has its marker run-up.
