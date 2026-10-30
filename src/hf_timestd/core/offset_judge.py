@@ -1136,6 +1136,12 @@ class OffsetJudge:
     # label.  Nor do they vote in witness dissent (final review I-1,
     # 2026-10-30), which reaches chrony through the HPPS precision.
     # Step 7 removes it from this set.
+    #
+    # Paired with ``[timing.t3] admitted`` (``t3_admission.py``, Michael's
+    # ruling B, 2026-10-30).  Until that switch reads true the judge also
+    # keeps T3 out of the label-plane tracker, out of
+    # ``label_plane_anchor`` and out of §18.  Step 7 flips the switch and
+    # empties this set together; either alone leaves T3 half admitted.
     SHADOW_ONLY_BENCHES = frozenset({"hf_acquired"})
 
     def __init__(
@@ -1148,8 +1154,14 @@ class OffsetJudge:
         mono_fn: Callable[[], float] = time.monotonic,
         alert_runner: Optional[Callable[..., subprocess.CompletedProcess]] = None,
         anchor_closure: bool = False,
+        t3_admitted: bool = False,
     ):
         cfg = dict(config or {})
+        # Ruling B (2026-10-30): until ``[timing.t3] admitted`` reads true,
+        # a T3 reading reaches the shadow residuals and nothing else here
+        # (see ``_t3_closed``).  False by default, so a caller that forgets
+        # the flag gets the closed regime.
+        self.t3_admitted = bool(t3_admitted)
         # Task 17a: the registration anchor closure is opt-in
         # ([timing.registration] anchor_closure).  While it is off the
         # judge stays exactly where c7b2106 left it -- §18's
@@ -1571,6 +1583,9 @@ class OffsetJudge:
             return None
         if label is None or not label.matches_rate(st.sample_rate):
             return None
+        # Ruling B (2026-10-30): §18 states no unadmitted T3 anchor.
+        if self._t3_closed(getattr(label, "tier", None)):
+            return None
         return label
 
     def set_t6_rate_provider(
@@ -1928,6 +1943,17 @@ class OffsetJudge:
         if r.tier == "T6" and self._chain_changed is not None:
             return False
         return detail.get("authoritative", True) is not False
+
+    def _t3_closed(self, tier: Optional[str]) -> bool:
+        """Is this a T3 reading or anchor the station has not admitted?
+
+        Ruling B (Michael, 2026-10-30): until ``[timing.t3] admitted``
+        reads true, T3 reaches nothing beyond its own shadow record and
+        its published summary.  Here that closes the label-plane tracker
+        (N-1), ``label_plane_anchor`` and §18's label anchor.  The shadow
+        residuals and the ``t3_shadow`` block stay open: B4's shadow run
+        needs them."""
+        return tier == "T3" and not self.t3_admitted
 
     def _select_bench_locked(
         self, readings: List[BenchReading]
@@ -3122,8 +3148,15 @@ class OffsetJudge:
         can only be as good as the clock it is referenced to, and the
         tracker refuses anything looser than its host-sigma bound.
         """
+        # Ruling B, N-1 (2026-10-30): an unadmitted T3 reading never
+        # feeds the tracker.  With chain-delay learning off, that tracker
+        # sets the plane term behind every T6-versus-host residual, so T3
+        # could convict T6 and widen the HPPS precision sent to chrony.
+        # With learning on it would read T3's own offset from the host
+        # back as T3's plane term: a calibration against the host clock.
         labels = [r for r in readings
-                  if getattr(r, "plane", "host") == "label"]
+                  if getattr(r, "plane", "host") == "label"
+                  and not self._t3_closed(r.tier)]
         hosts = [r for r in readings
                  if getattr(r, "plane", "host") == "host"]
         if labels and hosts:
@@ -3172,9 +3205,12 @@ class OffsetJudge:
         Readings without the key (T6's ``NativeAnchorBench``) default to
         authoritative; T6's own authority gate governs those.
         """
+        # Ruling B (2026-10-30): an unadmitted T3 is never the anchor,
+        # authoritative or not.
         labels = [r for r in readings
                   if getattr(r, "plane", "host") == "label"
-                  and (r.detail or {}).get("authoritative", True)]
+                  and (r.detail or {}).get("authoritative", True)
+                  and not self._t3_closed(r.tier)]
         if not labels:
             self._label_anchor = None
             return

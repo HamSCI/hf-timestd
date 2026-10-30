@@ -128,7 +128,8 @@ def test_t3_anchor_stands_down_with_the_flag_off():
     """
     store = _Store(_summary(WALL0))
     off = T3RegistrationAnchor(store=store, time_fn=lambda: WALL0)
-    on = T3RegistrationAnchor(store=store, time_fn=lambda: WALL0, anchor_closure=True)
+    on = T3RegistrationAnchor(store=store, time_fn=lambda: WALL0, anchor_closure=True,
+                              admitted=True)
     # The flag is the ONLY difference; the summary is fully verified and
     # corroborated, so the closure would otherwise stand up.
     assert on.evaluate(t6_authoritative=False).in_force is True
@@ -183,7 +184,9 @@ def _judge(tmp_path, benches, wall, mono, **kw):
         publish_path=tmp_path / "offset_judge.json",
         time_fn=lambda: wall[0],
         mono_fn=lambda: mono[0],
-        **kw,
+        # These tests are about the closure; T3 is admitted throughout so
+        # the closure alone decides (Ruling B, 2026-10-30).
+        **{"t3_admitted": True, **kw},
     )
     judge.register_radiod_pair(KEY, _unix_to_gps_ns(wall[0]), 0, SR)
     return judge

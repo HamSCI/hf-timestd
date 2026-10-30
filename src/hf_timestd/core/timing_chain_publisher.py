@@ -95,8 +95,12 @@ def chains_from_config(cfg: dict) -> List[Chain]:
     return [payload, default_sysclock_chain()]
 
 
-def publish_chains(chains: List[Chain], path: Path = DEFAULT_PATH) -> None:
-    """Atomic, world-readable, never raises."""
+def publish_chains(chains: List[Chain], path: Path = DEFAULT_PATH, *,
+                   t3_admitted: bool = False) -> None:
+    """Atomic, world-readable, never raises.
+
+    ``t3_admitted``: ``[timing.t3] admitted`` (Ruling B, 2026-10-30); until
+    it reads true the registration block names no T3 source."""
     doc = {"schema": SCHEMA,
            "written_utc": datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z"),
            "chains": [c.to_record() for c in chains]}
@@ -104,7 +108,7 @@ def publish_chains(chains: List[Chain], path: Path = DEFAULT_PATH) -> None:
     # failure must not stop the chain record from publishing.
     try:
         from hf_timestd.core.authority_manager import registration_block
-        doc["registration"] = registration_block()
+        doc["registration"] = registration_block(admitted=t3_admitted)
     except Exception as exc:
         logger.debug("registration_block raised: %s", exc)
     try:

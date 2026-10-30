@@ -20,6 +20,7 @@ service entrypoint.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import math
@@ -296,8 +297,16 @@ class AuthorityManager:
         t3_shadow_record: Optional["T3ShadowRecord"] = None,
         judge_status_path: Path = Path("/run/hf-timestd/offset_judge.json"),
         registration_store: Optional["RegistrationStore"] = None,
+        t3_admitted: bool = False,
     ):
         self.probes = list(probes)
+        # Ruling B (Michael, 2026-10-30): ``[timing.t3] admitted``.  Until
+        # it reads true, T3 publishes no authority: its probe result reads
+        # unavailable with ``NOT_ADMITTED_REASON``, so a station without T6
+        # falls through to T2, and the registration block claims no
+        # source.  False by default: a caller that forgets it gets the
+        # closed regime.
+        self.t3_admitted = bool(t3_admitted)
         # Task 15: the per-minute T3 shadow row (stream ``minutes``).  None =
         # no rows and no station transition counter.  ``judge_status_path``
         # is the offset judge's publication, read once per minute row for its
@@ -404,6 +413,29 @@ class AuthorityManager:
         # The sentinel differs from every real value, None included.
         self._t3_reason_announced: object = _UNANNOUNCED
 
+    def _close_unadmitted_t3(self, results: Dict[str, ProbeResult]) -> None:
+        """Ruling B (2026-10-30): an unadmitted T3 holds no rung.
+
+        Rewrites the T3 result in place, before hysteresis and selection,
+        as unavailable with ``NOT_ADMITTED_REASON``.  The probe's own
+        reason, and any offset it measured, stay in the result for the
+        snapshot and the shadow row.  A no-op once admitted, and when no
+        T3 probe is registered."""
+        if self.t3_admitted:
+            return
+        if not any(getattr(p, "t_level", None) == "T3" for p in self.probes):
+            return
+        from hf_timestd.core.t3_admission import NOT_ADMITTED_REASON
+        r = results.get("T3")
+        if r is None:
+            return
+        detail = dict(r.detail or {})
+        detail.setdefault("probe_available", bool(r.available))
+        if r.reason is not None:
+            detail.setdefault("probe_reason", r.reason)
+        results["T3"] = dataclasses.replace(
+            r, available=False, reason=NOT_ADMITTED_REASON, detail=detail)
+
     def _note_t3(self, results: Dict[str, ProbeResult]) -> Optional[str]:
         """Announce T3's state once, at start and on any change.
 
@@ -438,6 +470,7 @@ class AuthorityManager:
         or directly from tests.
         """
         results = self._poll_all()
+        self._close_unadmitted_t3(results)
         self._note_t6_authority(results.get("T6"))
         self._update_hysteresis(results)
         active = self._pick_active(results)
@@ -1325,7 +1358,8 @@ class AuthorityManager:
         try:
             store = self._registration_store_or_default()
             summary = store.read_summary()
-            payload["registration"] = registration_block(store, summary=summary)
+            payload["registration"] = registration_block(
+                store, summary=summary, admitted=self.t3_admitted)
             self._published_registration = payload["registration"]
             self._published_summary = summary if isinstance(summary, dict) else None
         except Exception as e:
@@ -1552,6 +1586,8 @@ def _iso_z(dt: datetime) -> str:
 def registration_block(
     store: Optional["RegistrationStore"] = None,
     summary: Any = _UNREAD,
+    *,
+    admitted: bool = False,
 ) -> dict:
     """The T3 origin's provenance for authority.json (spec §7).
 
@@ -1577,6 +1613,11 @@ def registration_block(
     reader can see what died and when (review F1/F2, task 10).  Every
     returned block, in every state, carries ``age_s`` — ``None`` only when
     there is no summary at all.
+
+    ``admitted`` (Ruling B, 2026-10-30): ``[timing.t3] admitted``.  Until it
+    reads true, an ACQUIRED plane governs nothing, so the block keeps
+    ``source="label"`` and adds ``"admission": NOT_ADMITTED_REASON``.  The
+    state and the detail fields stay as published, for the record.
     """
     from .registration_store import RegistrationStore as _RegistrationStore
 
@@ -1599,8 +1640,9 @@ def registration_block(
     state = s.get("state", "UNKNOWN")
     stale = age_s > st.stale_s
     acquired = state == "ACQUIRED" and s.get("utc_ref") is not None and not stale
+    withheld = acquired and not admitted
     block = {
-        "source": "hf_acquired" if acquired else "label",
+        "source": "hf_acquired" if acquired and not withheld else "label",
         "state": "STALE" if stale else state,
         "sigma_ms": s.get("sigma_ms"),
         "counter_epoch_id": s.get("counter_epoch_id"),
@@ -1611,4 +1653,7 @@ def registration_block(
     }
     if state == "WITNESS" and not stale and "residual_vs_t6_ms" in s:
         block["residual_vs_t6_ms"] = s.get("residual_vs_t6_ms")
+    if withheld:
+        from hf_timestd.core.t3_admission import NOT_ADMITTED_REASON
+        block["admission"] = NOT_ADMITTED_REASON
     return block

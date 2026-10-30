@@ -260,6 +260,10 @@ class MetrologyService:
 
         # T3 self-registration (spec 2026-09-06): the ticks place the second.
         self.acquirer = RegistrationAcquirer(self.channel_name, self.engine.sample_rate)
+        # Ruling B (2026-10-30): until ``[timing.t3] admitted`` reads true,
+        # the registration runs and publishes, but labels nothing.
+        from .t3_admission import t3_admitted
+        self._t3_admitted = t3_admitted(config)
         self.reg_store = RegistrationStore()
         self.epoch_tracker = CounterEpochTracker()
         # Task 10: this minute's self-measurement of the held plane
@@ -1573,6 +1577,13 @@ class MetrologyService:
         contributing = list(kept)
         self._publish_registration(fused, contributing, label_s0, residual_ms, epoch,
                                    waiting=list(waiting))
+        if not getattr(self, "_t3_admitted", False):
+            # Ruling B (2026-10-30): T3 is not admitted.  The plane stays
+            # in the channel file, the summary and the shadow record, and
+            # the engine gets the label plane back: T3 labels nothing until
+            # the B4 shadow run admits it.
+            return dataclasses.replace(buffer_timing, origin_source="label",
+                                       counter_epoch_id=epoch)
         # I4: the label carried T6's (or whatever incumbent's) provenance;
         # once the origin is replaced the provenance must move with it --
         # one measurand, one ruler, one registration.

@@ -59,6 +59,7 @@ def _judge(tmp_path, benches, wall, mono):
         # Task 17a: these tests are ABOUT the anchor closure, which is now
         # opt-in and off by default, so they opt in explicitly.
         anchor_closure=True,
+        t3_admitted=True,
     )
     judge.register_radiod_pair(KEY, _unix_to_gps_ns(wall[0]), 0, SR)
     return judge

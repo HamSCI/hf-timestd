@@ -41,7 +41,7 @@ class TestAuthorityRunner(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _mgr(self, probe) -> AuthorityManager:
-        return AuthorityManager(
+        return AuthorityManager(t3_admitted=True,
             probes=[probe],
             output_path=self.out,
             a_level_provider=lambda: "A1",

@@ -326,6 +326,25 @@ enabled = true
 [timing.registration]
 anchor_closure = false
 
+# === T3 admission (Michael's ruling, 2026-10-30) ===
+# The stand-alone T3 claims nothing until a shadow run on AC0G-B4 proves it
+# beats T2 (spec 2026-10-30 §8 step 8, §9).  While `admitted` stays false, T3
+# acquires, verifies and publishes its registration, its shadow record and
+# the judge's shadow residuals, and reaches nothing else:
+#   - it labels no data: metrology keeps the label plane, and the ring, §18
+#     and the archive sidecar take no T3 anchor, whatever anchor_closure says;
+#   - it feeds neither the Offset Judge's label-plane tracker nor its
+#     label_plane_anchor;
+#   - it publishes no authority: authority.json's t3_unavailable_reason reads
+#     "not admitted (shadow run pending)", and a station without T6 falls
+#     through to T2.
+# Only a literal `true` admits T3.  Step 7 of the 10-22 order sets it, and in
+# the same change removes `hf_acquired` from OffsetJudge.SHADOW_ONLY_BENCHES,
+# which keeps T3 out of the judge's adoption and out of witness dissent.
+# Flip both together, or T3 stays half admitted.
+[timing.t3]
+admitted = false
+
 # === T3 shadow record ===
 # Small JSONL rows, one file per stream per UTC day, kept for retention_days:
 #   minutes-<day>.jsonl            one row a minute from the authority manager:

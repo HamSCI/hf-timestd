@@ -82,6 +82,8 @@ def _service(tmp_path):
     svc.reg_store = RegistrationStore(tmp_path / "reg", tmp_path / "registration.json")
     svc.epoch_tracker = CounterEpochTracker()
     svc._AUTHORITY_JSON_PATH = tmp_path / "no-authority.json"
+    # Admitted, so the T3-only path labels as at 8efe42c (Ruling B).
+    svc._t3_admitted = True
     return svc
 
 

@@ -353,7 +353,7 @@ class _T3Source:
 
 def _publish_authority(status_file, tmp_path):
     out = tmp_path / "authority.json"
-    mgr = AuthorityManager(probes=[_T3Source(status_file)], output_path=out,
+    mgr = AuthorityManager(t3_admitted=True, probes=[_T3Source(status_file)], output_path=out,
                            a_level_provider=lambda: "A1",
                            upgrade_hysteresis=1)
     state = mgr.tick()
@@ -380,7 +380,7 @@ class _T2:
 
 
 def _manager(probes, out):
-    return AuthorityManager(probes=probes, output_path=out,
+    return AuthorityManager(t3_admitted=True, probes=probes, output_path=out,
                             a_level_provider=lambda: "A1",
                             upgrade_hysteresis=1)
 

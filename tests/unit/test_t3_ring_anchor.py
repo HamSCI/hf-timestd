@@ -282,7 +282,7 @@ def _core(store, t6_auth=None):
     rec._t6_authority_last_decision = None
     rec._t6_authority_status = lambda: t6_auth
     rec._t3_native_anchor = None
-    rec._t3_anchor_holder = T3RegistrationAnchor(store=store, anchor_closure=True)
+    rec._t3_anchor_holder = T3RegistrationAnchor(store=store, anchor_closure=True, admitted=True)
     return rec
 
 

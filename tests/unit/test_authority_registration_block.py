@@ -13,7 +13,7 @@ def test_block_from_acquired_summary(tmp_path):
         "ACQUIRED",
         {"raw_pair_residual_ms": 16.7},
     )
-    b = registration_block(st)
+    b = registration_block(st, admitted=True)
     assert b == {
         "source": "hf_acquired",
         "state": "ACQUIRED",
@@ -24,6 +24,23 @@ def test_block_from_acquired_summary(tmp_path):
         "stations": [],
         "age_s": 0.0,
     }
+
+
+def test_block_from_acquired_summary_withholds_the_source_unadmitted(tmp_path):
+    """Ruling B (2026-10-30): until T3 is admitted the block keeps the
+    record but claims no source."""
+    st = RegistrationStore(
+        tmp_path / "reg", tmp_path / "registration.json", time_fn=lambda: 1000.0
+    )
+    st.write_summary(
+        Registration("ep-1", 1000, 100.0, 24000, 0.7, channel="fused"),
+        ["SHARED_10000", "WWV_20000"],
+        "ACQUIRED",
+        {"raw_pair_residual_ms": 16.7},
+    )
+    b = registration_block(st)
+    assert b["source"] == "label" and b["state"] == "ACQUIRED"
+    assert b["admission"] == "not admitted (shadow run pending)"
 
 
 def test_block_without_summary_is_label(tmp_path):

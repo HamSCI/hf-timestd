@@ -713,6 +713,10 @@ class CoreRecorderV2:
         # two components of one process disagree about the regime.
         from .anchor_closure import anchor_closure_enabled
         self._anchor_closure = anchor_closure_enabled(config)
+        # Ruling B (2026-10-30): ``[timing.t3] admitted``, read once here
+        # and handed to the judge and the T3 anchor holder.
+        from .t3_admission import t3_admitted
+        self._t3_admitted = t3_admitted(config)
 
         # ── Offset Judge (docs/OFFSET-JUDGE-SPEC-2026-08-05.md, P1) ──
         # One judge per core-recorder process (spec §11: no new daemon).
@@ -746,7 +750,8 @@ class CoreRecorderV2:
             try:
                 from .offset_judge import OffsetJudge
                 self._offset_judge = OffsetJudge(
-                    config=_oj_cfg, anchor_closure=self._anchor_closure)
+                    config=_oj_cfg, anchor_closure=self._anchor_closure,
+                    t3_admitted=self._t3_admitted)
                 self._offset_judge.start()
             except Exception as e:
                 logger.error(
@@ -3050,7 +3055,8 @@ class CoreRecorderV2:
             if holder is None:
                 from .t3_registration_anchor import T3RegistrationAnchor
                 holder = T3RegistrationAnchor(
-                    anchor_closure=getattr(self, '_anchor_closure', False))
+                    anchor_closure=getattr(self, '_anchor_closure', False),
+                    admitted=getattr(self, '_t3_admitted', False))
                 self._t3_anchor_holder = holder
             holder.refresh(
                 t6_authoritative=self._t6_anchor_is_authoritative()

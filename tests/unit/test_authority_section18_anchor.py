@@ -86,6 +86,7 @@ def _judge(
         # Task 17a: these tests are ABOUT the anchor closure, which is now
         # opt-in and off by default, so they opt in explicitly.
         anchor_closure=True,
+        t3_admitted=True,
     )
     if provider is not None:
         judge.set_label_anchor_provider(provider)
@@ -206,6 +207,7 @@ def test_the_anchor_publishes_even_before_the_judge_has_a_verdict(tmp_path):
         # Task 17a: these tests are ABOUT the anchor closure, which is now
         # opt-in and off by default, so they opt in explicitly.
         anchor_closure=True,
+        t3_admitted=True,
     )
     judge.set_label_anchor_provider(lambda: label)
     judge.register_radiod_pair(

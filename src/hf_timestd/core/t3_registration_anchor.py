@@ -100,6 +100,7 @@ class T3RegistrationAnchor:
         time_fn: Callable[[], float] = time.time,
         *,
         anchor_closure: bool = False,
+        admitted: bool = False,
     ):
         if store is None:
             from .registration_store import RegistrationStore
@@ -112,6 +113,10 @@ class T3RegistrationAnchor:
         # the flag gets the safe regime, not the one that steered
         # AC0G-ND's clock the wrong way on 2026-09-07.
         self._closure = bool(anchor_closure)
+        # Ruling B (2026-10-30): ``[timing.t3] admitted``.  Until it reads
+        # true the registration anchors nothing, closure or not.  False by
+        # default, for the same reason as the closure.
+        self._admitted = bool(admitted)
         self._decision = T3AnchorDecision(None, None, "not_evaluated")
 
     # ── the current answer ───────────────────────────────────────────
@@ -171,6 +176,9 @@ class T3RegistrationAnchor:
         # never consulted.
         if not self._closure:
             return T3AnchorDecision(None, None, "closure_disabled")
+        if not self._admitted:
+            from .t3_admission import NOT_ADMITTED_REASON
+            return T3AnchorDecision(None, None, NOT_ADMITTED_REASON)
         if t6_authoritative:
             return T3AnchorDecision(None, None, "t6_authoritative")
         try:

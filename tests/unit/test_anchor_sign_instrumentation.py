@@ -275,6 +275,8 @@ def test_the_witness_block_reaches_the_line_with_the_closure_off(tmp_path):
         publish_path=tmp_path / "offset_judge.json",
         time_fn=lambda: wall,
         mono_fn=lambda: mono,
+        # A T3 statement on the witness key needs T3 admitted (Ruling B).
+        t3_admitted=True,
     )
     judge.register_radiod_pair(
         ("h", 1), unix_ns_to_gps_time_ns(int(wall * 1e9)), 0, 24000

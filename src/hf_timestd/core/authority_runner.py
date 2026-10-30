@@ -20,6 +20,7 @@ from hf_timestd.core.authority_manager import (
     Probe,
 )
 from hf_timestd.core.anchor_closure import anchor_closure_enabled
+from hf_timestd.core.t3_admission import t3_admitted
 from hf_timestd.core.bpsk_pps_probe import BpskPpsProbe
 from hf_timestd.core.mdns_fusion_advertiser import MdnsFusionAdvertiser
 from hf_timestd.core.chrony_tracking_probe import (
@@ -502,5 +503,7 @@ def build_authority_runner_from_config(
         host_clock_alarm_repeat_sec=host_clock_alarm_repeat_sec,
         t3_shadow_record=t3_shadow_record,
         judge_status_path=judge_status_path,
+        # Ruling B (2026-10-30): an unadmitted T3 publishes no authority.
+        t3_admitted=t3_admitted(config),
     )
     return AuthorityRunner(manager=manager, interval_sec=interval_sec)

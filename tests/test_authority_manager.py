@@ -86,7 +86,7 @@ class TestAuthorityManager(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _mgr(self, probes, upgrade_hysteresis=3, a_level="A1") -> AuthorityManager:
-        return AuthorityManager(
+        return AuthorityManager(t3_admitted=True,
             probes=probes,
             output_path=self.out,
             a_level_provider=lambda: a_level,
@@ -441,7 +441,7 @@ class TestAuthorityManager(unittest.TestCase):
 
     def test_governor_radiod_surfaced_in_authority_json(self) -> None:
         probe = FakeProbe("T3", _measure("T3", 0.5, 0.3))
-        mgr = AuthorityManager(
+        mgr = AuthorityManager(t3_admitted=True,
             probes=[probe],
             output_path=self.out,
             a_level_provider=lambda: "A1",
@@ -463,7 +463,7 @@ class TestAuthorityManager(unittest.TestCase):
         def boom():
             raise RuntimeError("kaboom")
         probe = FakeProbe("T3", _measure("T3", 0.5, 0.3))
-        mgr = AuthorityManager(
+        mgr = AuthorityManager(t3_admitted=True,
             probes=[probe],
             output_path=self.out,
             a_level_provider=lambda: "A1",
@@ -489,7 +489,7 @@ class TestAuthorityManager(unittest.TestCase):
 
         adv = _RecordingAdv()
         probe = FakeProbe("T3", _measure("T3", 0.5, 0.3))
-        mgr = AuthorityManager(
+        mgr = AuthorityManager(t3_admitted=True,
             probes=[probe],
             output_path=self.out,
             a_level_provider=lambda: "A1",
@@ -515,7 +515,7 @@ class TestSnapshotStore(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _mgr_with_store(self, probes, store):
-        return AuthorityManager(
+        return AuthorityManager(t3_admitted=True,
             probes=probes,
             output_path=self.out,
             a_level_provider=lambda: "A1",
@@ -788,7 +788,7 @@ class TestSnapshotStore(unittest.TestCase):
         """When no snapshot_store is provided, tick still works and
         authority.json is written as before — no DB activity."""
         # No store at all; just construct the manager with default args.
-        mgr = AuthorityManager(
+        mgr = AuthorityManager(t3_admitted=True,
             probes=[FakeProbe("T3", _measure("T3", 0.5, 0.3))],
             output_path=self.out,
             a_level_provider=lambda: "A1",
@@ -805,7 +805,7 @@ class TestSnapshotStore(unittest.TestCase):
         class BrokenStore:
             def insert(self, snapshot):
                 raise RuntimeError("disk full")
-        mgr = AuthorityManager(
+        mgr = AuthorityManager(t3_admitted=True,
             probes=[FakeProbe("T3", _measure("T3", 0.5, 0.3))],
             output_path=self.out,
             a_level_provider=lambda: "A1",
@@ -858,7 +858,7 @@ class TestAuthorityManagerPhase2BDemoteOnBreach(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _mgr(self, *, demote, min_cycles=3, hyst=1, probes):
-        return AuthorityManager(
+        return AuthorityManager(t3_admitted=True,
             probes=probes, output_path=self.out,
             a_level_provider=lambda: "A1",
             upgrade_hysteresis=hyst,
@@ -1005,7 +1005,7 @@ class TestAuthorityManagerPhase2BTrustTierAnchorGrounded(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _mgr(self, probes, hyst=1):
-        return AuthorityManager(
+        return AuthorityManager(t3_admitted=True,
             probes=probes, output_path=self.out,
             a_level_provider=lambda: "A1",
             upgrade_hysteresis=hyst,
@@ -1088,7 +1088,7 @@ class TestFrontendOperatingPointInSnapshot(unittest.TestCase):
         db = self.tmp / "auth.db"
         store = AuthoritySnapshotStore(db)
         try:
-            mgr = AuthorityManager(
+            mgr = AuthorityManager(t3_admitted=True,
                 probes=[FakeProbe("T3", _measure("T3", 0.5, 0.3))],
                 output_path=self.out,
                 a_level_provider=lambda: "A1",

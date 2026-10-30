@@ -112,7 +112,8 @@ def test_b4_replay_publishes_a_fault_and_leaves_the_tier_logic_alone(tmp_path):
 def test_nd_replay_faults_even_though_the_tier_logic_demotes_to_none(tmp_path):
     t3 = FakeProbe("T3", _rtp("T3", 0.0, 3.1, detail={"stations_used": ["WWV", "CHU"]}))
     t2 = FakeProbe("T2", _sysclock("T2", -4179.35, witness_only=True))
-    m = _manager(tmp_path, [t3, t2])
+    # ND ran T3 as an authority then: replay it admitted (Ruling B).
+    m = _manager(tmp_path, [t3, t2], t3_admitted=True)
     state = m.tick()
     assert state.t_level_active is None                      # unchanged behaviour
     assert any(f.startswith("asymmetric-T3-T2:witness-only-T2:demoted-to:none")

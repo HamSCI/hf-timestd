@@ -61,6 +61,9 @@ def _service(tmp_path):
     svc.acquirer = RegistrationAcquirer("SHARED_10000", SR)
     svc.reg_store = RegistrationStore(tmp_path / "reg", tmp_path / "registration.json")
     svc.epoch_tracker = CounterEpochTracker()
+    # These tests describe how an ADMITTED T3 labels (8efe42c).  Ruling B
+    # (2026-10-30): unadmitted, it labels nothing (test_t3_admission.py).
+    svc._t3_admitted = True
     return svc
 
 

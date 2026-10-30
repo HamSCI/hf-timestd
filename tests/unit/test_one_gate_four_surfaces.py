@@ -166,7 +166,7 @@ def test_state_is_checked_before_the_fields(tmp_path):
 def _anchor_surface(store, clock):
     """Surfaces 1-3: ring, §18 and sidecar all label from this object."""
     holder = T3RegistrationAnchor(
-        store=store, time_fn=lambda: clock[0], anchor_closure=True
+        store=store, time_fn=lambda: clock[0], anchor_closure=True, admitted=True
     )
     decision = holder.refresh(t6_authoritative=False)
     return holder.state(), decision.reason
@@ -189,6 +189,7 @@ def _fuse_surface(store, clock, tmp_path):
         # Task 17a: these tests are ABOUT the anchor closure, which is now
         # opt-in and off by default, so they opt in explicitly.
         anchor_closure=True,
+        t3_admitted=True,
     )
     judge.register_radiod_pair(
         KEY,
@@ -312,6 +313,7 @@ def test_a_t6_native_reading_needs_no_authoritative_key(tmp_path):
         # Task 17a: these tests are ABOUT the anchor closure, which is now
         # opt-in and off by default, so they opt in explicitly.
         anchor_closure=True,
+        t3_admitted=True,
     )
     judge.register_radiod_pair(
         KEY, unix_ns_to_gps_time_ns(int(WALL0 * 1e9)), RTP_REF, SR

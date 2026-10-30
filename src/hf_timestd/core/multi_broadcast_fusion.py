@@ -4753,7 +4753,9 @@ def run_fusion_service(
         # GRAPE packager.  Best-effort; the timing chain outranks its provenance.
         try:
             from hf_timestd.core.timing_chain_publisher import chains_from_config, publish_chains
-            publish_chains(chains_from_config(_auth_config))
+            from hf_timestd.core.t3_admission import t3_admitted
+            publish_chains(chains_from_config(_auth_config),
+                           t3_admitted=t3_admitted(_auth_config))
         except Exception as exc:  # noqa: BLE001
             logger.warning("timing chain not published: %s", exc)
         authority_runner.start()
