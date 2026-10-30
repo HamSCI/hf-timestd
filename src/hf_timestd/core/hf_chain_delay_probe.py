@@ -5,6 +5,9 @@ step (claude-bus message first, owner's approval), never from a timer or a
 test against a live radiod.  Every clone carries a LIFETIME, so radiod removes
 a clone that a crash leaves behind, and `run` removes each clone in `finally`.
 
+Recommended operator run: `--duration-s 900`.  600 s is too thin to collect 15
+edges on every clone.
+
 Each clone tunes to the pilot, so every clone sees the same BPSK edges through
 its own filter.  The probe streams each clone's samples into a BpskEdgeFineStage,
 polls each clone's status to learn its counter map, and hands the captures to
@@ -30,6 +33,17 @@ REFERENCE_LABEL = "T6_REF"
 MAP_POLLS = 5            # each map comes from the most recent 5 accepted polls
 MAP_MIN_AGREE = 3        # 3 of 5 is a strict majority; a tie never picks a side
 POLL_TIMEOUT_S = 2.0
+GRANT_TRIES = 10         # polls a fresh clone gets to answer before the run aborts
+# Encodings ka9q-python decodes to samples.  Anything else cannot feed the fine stage.
+DECODABLE_ENCODINGS = (1, 2, 4, 8)   # S16LE, S16BE, F32LE, F32BE
+
+
+@dataclass(frozen=True)
+class ChannelGrant:
+    """What radiod granted a clone, read from its own status reply."""
+    encoding: int
+    address: str
+    port: int
 
 
 @dataclass(frozen=True)
@@ -54,18 +68,19 @@ def _opt(x) -> Optional[float]:
     return None if x is None else float(x)
 
 
-def ka9q_stream_factory(control) -> Callable:
-    """Real stream factory: one RadiodStream per clone, on the control's own
-    per-client multicast group (where `create_channel` put the clone)."""
+def ka9q_stream_factory() -> Callable:
+    """Real stream factory: one RadiodStream per clone, built from the encoding
+    and destination radiod granted (it can downgrade F32 to S16 on a wide,
+    high-rate channel).  Nothing opens until the stream's start()."""
     from ka9q import RadiodStream
     from ka9q.discovery import ChannelInfo
 
-    def factory(spec: ProbeChannelSpec, on_samples):
+    def factory(spec: ProbeChannelSpec, on_samples, grant: ChannelGrant):
         info = ChannelInfo(
             ssrc=spec.ssrc, preset=spec.preset, sample_rate=spec.sample_rate,
             frequency=spec.frequency_hz, snr=float("-inf"),
-            multicast_address=control._derive_client_destination(), port=5004,
-            encoding=HfChainDelayProbe.ENCODING_F32)
+            multicast_address=grant.address, port=grant.port,
+            encoding=grant.encoding)
         return RadiodStream(channel=info, on_samples=on_samples,
                             samples_per_packet=200, resequence_buffer_size=256)
 
@@ -74,6 +89,9 @@ def ka9q_stream_factory(control) -> Callable:
 
 class HfChainDelayProbe:
     SSRC_BASE = 0x7E5C_0000
+    # Unit: radiod main-loop FRAMES (about 20 ms each), so 1800 is about 36 s,
+    # not 30 minutes.  Every poll_status refreshes it, so a clone lives while the
+    # probe polls and vanishes about 36 s after a crash.
     LIFETIME_S = 1800
     ENCODING_F32 = 4
 
@@ -153,7 +171,27 @@ class HfChainDelayProbe:
         pair_epochs: List[float] = []
         streams: list = []
         created: List[int] = []
+
+        def take(spec, reply) -> Optional[CounterPoll]:
+            poll = self._accept(reply, spec)
+            if poll is None:
+                return None
+            recent[spec.ssrc].append(poll)
+            last_reply[spec.ssrc] = reply
+            if spec is ref:
+                pair_epochs.append(poll.gps_time_ns / 1e9
+                                   - poll.input_samples / poll.input_samprate)
+            return poll
+
         try:
+            for s in specs:                  # never retune someone's live channel
+                try:
+                    reply = self._control.poll_status(s.ssrc, POLL_TIMEOUT_S)
+                except Exception:  # noqa: BLE001 - no answer: the SSRC is free
+                    continue
+                if getattr(reply, "output_samprate", None) and getattr(reply, "frequency", None):
+                    raise ValueError(f"SSRC {s.ssrc:#x} ({s.label}) is already a live "
+                                     f"channel on radiod; refusing to take it over")
             for s in specs:
                 created.append(s.ssrc)       # remove even if this create half-landed
                 self._control.create_channel(
@@ -162,30 +200,28 @@ class HfChainDelayProbe:
                     lifetime=self.LIFETIME_S, low_edge=s.low_edge_hz,
                     high_edge=s.high_edge_hz, encoding=self.ENCODING_F32)
             for s in specs:
+                grant = self._await_grant(s, take)
                 stage = self._fine_factory(s.sample_rate, fold_seconds=self._fold_seconds)
-                stream = self._stream_factory(s, self._make_callback(s, stage, edges[s.ssrc]))
+                stream = self._stream_factory(
+                    s, self._make_callback(s, stage, edges[s.ssrc]), grant)
                 streams.append(stream)
                 stream.start()
 
             t0 = self._mono()
-            while True:
-                for s in specs:
-                    try:
-                        reply = self._control.poll_status(s.ssrc, POLL_TIMEOUT_S)
-                    except Exception as exc:  # noqa: BLE001 - a lost poll is not fatal
-                        logger.warning("poll of %s failed: %s", s.label, exc)
-                        continue
-                    poll = self._accept(reply, s)
-                    if poll is None:
-                        continue
-                    recent[s.ssrc].append(poll)
-                    last_reply[s.ssrc] = reply
-                    if s is ref:
-                        pair_epochs.append(poll.gps_time_ns / 1e9
-                                           - poll.input_samples / poll.input_samprate)
-                self._sleep(self._poll_interval_s)
-                if self._mono() - t0 >= duration_s:
-                    break
+            try:
+                while True:
+                    for s in specs:
+                        try:
+                            reply = self._control.poll_status(s.ssrc, POLL_TIMEOUT_S)
+                        except Exception as exc:  # noqa: BLE001 - a lost poll is not fatal
+                            logger.warning("poll of %s failed: %s", s.label, exc)
+                            continue
+                        take(s, reply)
+                    self._sleep(self._poll_interval_s)
+                    if self._mono() - t0 >= duration_s:
+                        break
+            except KeyboardInterrupt:
+                logger.warning("interrupted: reporting what was gathered")
         finally:
             for stream in streams:
                 try:
@@ -196,12 +232,36 @@ class HfChainDelayProbe:
                 try:
                     self._control.remove_channel(ssrc)
                 except Exception:  # noqa: BLE001
-                    logger.exception("removing probe clone %#x failed; its "
-                                     "LIFETIME will", ssrc)
+                    logger.exception("removing probe clone %#x failed; radiod will "
+                                     "remove it when its LIFETIME runs out, about "
+                                     "36 s after the last poll", ssrc)
 
         captures = [self._capture(s, edges[s.ssrc], recent[s.ssrc],
                                   last_reply.get(s.ssrc)) for s in specs]
         return captures, pair_epochs
+
+    def _await_grant(self, spec: ProbeChannelSpec, take) -> ChannelGrant:
+        """Poll a fresh clone until radiod answers, and read what it granted."""
+        for _ in range(GRANT_TRIES):
+            try:
+                reply = self._control.poll_status(spec.ssrc, POLL_TIMEOUT_S)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("poll of %s failed: %s", spec.label, exc)
+                reply = None
+            if reply is not None and take(spec, reply) is not None:
+                enc = getattr(reply, "output_encoding", None)
+                dest = getattr(reply, "output_data_dest_socket", None) or {}
+                if enc not in DECODABLE_ENCODINGS:
+                    raise RuntimeError(
+                        f"clone {spec.label} (SSRC {spec.ssrc:#x}): radiod granted "
+                        f"encoding {enc}, which the fine stage cannot decode")
+                if not dest.get("address") or not dest.get("port"):
+                    raise RuntimeError(f"clone {spec.label} (SSRC {spec.ssrc:#x}): "
+                                       f"radiod reported no data destination")
+                return ChannelGrant(int(enc), str(dest["address"]), int(dest["port"]))
+            self._sleep(self._poll_interval_s)
+        raise RuntimeError(f"clone {spec.label} (SSRC {spec.ssrc:#x}) never answered "
+                           f"a status poll")
 
     @staticmethod
     def _make_callback(spec, stage, sink: List[EdgeObservation]):

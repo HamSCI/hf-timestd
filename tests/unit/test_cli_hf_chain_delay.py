@@ -74,3 +74,17 @@ def test_cli_exits_2_without_a_pilot(fake_radiod, tmp_path, capsys):
         cli.main(["hf-chain-delay", "--config", str(cfg)])
     assert exc.value.code == 2
     assert "no TS-1 pilot" in capsys.readouterr().err
+
+
+def test_build_probe_uses_the_hfchain_client_id_and_resolved_status(monkeypatch):
+    import ka9q
+    seen = {}
+
+    class RecControl:
+        def __init__(self, status, client_id=None, **kw):
+            seen.update(status=status, client_id=client_id)
+
+    monkeypatch.setattr(ka9q, "RadiodControl", RecControl)
+    probe = cli._build_hf_chain_delay_probe({"ka9q": {"status": "b4-status.local"}}, None)
+    assert seen == {"status": "b4-status.local", "client_id": "hf-timestd-hfchain"}
+    assert isinstance(probe, HfChainDelayProbe)

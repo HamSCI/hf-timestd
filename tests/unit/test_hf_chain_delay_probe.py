@@ -36,7 +36,8 @@ def reply_for(spec, k0, block):
         filter_blocksize=ILEN, filter_fir_length=324_001,
         filter2=SimpleNamespace(fir_length=None),
         output_samprate=spec.sample_rate, low_edge=spec.low_edge_hz,
-        high_edge=spec.high_edge_hz)
+        high_edge=spec.high_edge_hz, output_encoding=4,
+        output_data_dest_socket={"family": "IPv4", "address": "239.1.2.3", "port": 5004})
 
 
 class FakeControl:
@@ -47,6 +48,7 @@ class FakeControl:
         self.k0s = k0s or {s.ssrc: 51 for s in specs}
         self.reply_fn = reply_fn
         self.created, self.removed, self.polls = [], [], {}
+        self.live = set()           # SSRCs that already exist on this radiod
 
     def create_channel(self, **kw):
         self.created.append(kw)
@@ -56,6 +58,10 @@ class FakeControl:
         self.removed.append(ssrc)
 
     def poll_status(self, ssrc, timeout=2.0):
+        if ssrc in self.live:
+            return SimpleNamespace(output_samprate=24_000, frequency=7_000_000.0)
+        if ssrc not in {k["ssrc"] for k in self.created}:      # ghost: frontend only
+            return SimpleNamespace(frontend=SimpleNamespace(input_samples=1))
         n = self.polls.get(ssrc, 0)
         self.polls[ssrc] = n + 1
         if self.reply_fn:
@@ -101,11 +107,13 @@ class Clock:
         self.t += dt
 
 
-def make_probe(control, streams=None, fail_stream=False):
+def make_probe(control, streams=None, fail_stream=False, grants=None):
     clock = Clock()
     streams = streams if streams is not None else []
 
-    def stream_factory(spec, on_samples):
+    def stream_factory(spec, on_samples, grant):
+        if grants is not None:
+            grants.append((spec, grant))
         s = FakeStream(on_samples, fail=fail_stream)
         streams.append(s)
         return s
@@ -170,34 +178,52 @@ def test_every_clone_is_removed_after_a_normal_run_and_streams_stop():
     assert len(streams) == 7 and all(s.stopped for s in streams)
 
 
-def test_ghost_reply_is_not_a_poll():
-    sp = specs()
-
-    def ghost(control, spec, n):
+def _damaged_first(damage, n_bad):
+    def reply(control, spec, n):
         r = reply_for(spec, 51, 100 + n)
-        r.rtp_timesnap = None                      # frontend status only
+        if n < n_bad:
+            damage(r)
         return r
-
-    caps, epochs = make_probe(FakeControl(sp, reply_fn=ghost)).run(sp, 5)
-    assert all(c.counter_map is None for c in caps) and epochs == []
+    return reply
 
 
-@pytest.mark.parametrize("damage", [
+def _ghost(r):
+    r.rtp_timesnap = None                      # frontend status only
+
+
+DAMAGES = [
+    _ghost,
     lambda r: setattr(r, "gps_time", 0),
     lambda r: setattr(r, "gps_time", None),
     lambda r: setattr(r.frontend, "input_samples", None),
     lambda r: setattr(r, "output_samprate", 48_000),
-])
-def test_each_kind_of_bad_reply_is_discarded(damage):
+]
+
+
+@pytest.mark.parametrize("damage", DAMAGES)
+def test_bad_replies_are_not_polls_and_never_enter_a_map(damage):
+    # Three bad replies carry a wrong origin; had they counted they would sit in the window.
     sp = specs()
 
-    def bad(control, spec, n):
-        r = reply_for(spec, 51, 100 + n)
-        damage(r)
+    def reply(control, spec, n):
+        r = reply_for(spec, 58 if n < 3 else 51, 100 + n)
+        if n < 3:
+            damage(r)
         return r
 
-    caps, epochs = make_probe(FakeControl(sp, reply_fn=bad)).run(sp, 5)
-    assert all(c.counter_map is None for c in caps) and epochs == []
+    caps, epochs = make_probe(FakeControl(sp, reply_fn=reply)).run(sp, 6)
+    assert all(c.counter_map is not None and c.counter_map.n_agree == 5
+               for c in caps)
+    assert len(epochs) == 7       # one grant poll after the 3 bad ones, then 6 loop polls
+
+
+@pytest.mark.parametrize("damage", DAMAGES)
+def test_a_clone_that_only_ever_answers_badly_aborts_and_is_removed(damage):
+    sp = specs()
+    control = FakeControl(sp, reply_fn=_damaged_first(damage, 10**6))
+    with pytest.raises(RuntimeError, match="never answered"):
+        make_probe(control).run(sp, 5)
+    assert sorted(control.removed) == sorted(s.ssrc for s in sp)
 
 
 def test_a_poll_that_raises_is_skipped_not_fatal():
@@ -239,3 +265,73 @@ def test_map_comes_from_the_most_recent_five_polls_not_all_of_them():
     # places input block 120 at its own RTP.
     for c, s in zip(caps, sp):
         assert c.counter_map.input_index(rtp_at(120, 51, olen_for(s.sample_rate))) == 120 * ILEN
+
+
+def test_stream_is_built_from_what_radiod_granted():
+    sp = specs()
+
+    def downgraded(control, spec, n):
+        r = reply_for(spec, 51, 100 + n)
+        r.output_encoding = 2                                   # S16BE, not F32
+        r.output_data_dest_socket = {"address": "239.9.9.9", "port": 5010}
+        return r
+
+    grants = []
+    make_probe(FakeControl(sp, reply_fn=downgraded), grants=grants).run(sp, 5)
+    assert len(grants) == 7
+    assert all((g.encoding, g.address, g.port) == (2, "239.9.9.9", 5010) for _, g in grants)
+
+
+def test_undecodable_granted_encoding_aborts_naming_the_clone_and_removes_all():
+    sp = specs()
+
+    def opus(control, spec, n):
+        r = reply_for(spec, 51, 100 + n)
+        r.output_encoding = 3
+        return r
+
+    control = FakeControl(sp, reply_fn=opus)
+    with pytest.raises(RuntimeError, match="T6_REF.*cannot decode"):
+        make_probe(control).run(sp, 5)
+    assert sorted(control.removed) == sorted(s.ssrc for s in sp)
+
+
+def test_a_live_ssrc_refuses_the_whole_run_before_anything_is_created():
+    sp = specs()
+    control = FakeControl(sp)
+    control.live.add(sp[3].ssrc)
+    with pytest.raises(ValueError, match=f"{sp[3].ssrc:#x}"):
+        make_probe(control).run(sp, 5)
+    assert control.created == [] and control.removed == []
+
+
+def test_an_interrupt_mid_run_returns_what_was_gathered_and_removes_all():
+    sp = specs()
+
+    def interrupted(control, spec, n):
+        if n >= 6:                         # grant poll is n=0; polling loop follows
+            raise KeyboardInterrupt
+        return reply_for(spec, 51, 100 + n)
+
+    control = FakeControl(sp, reply_fn=interrupted)
+    caps, epochs = make_probe(control).run(sp, 600)
+    assert len(caps) == 7 and caps[0].counter_map is not None and caps[0].edges
+    assert sorted(control.removed) == sorted(s.ssrc for s in sp)
+
+
+def test_ka9q_stream_factory_opens_nothing_before_start(monkeypatch):
+    import ka9q
+    seen = {}
+
+    class RecStream:
+        def __init__(self, channel, on_samples, **kw):
+            seen.update(channel=channel, kw=kw)
+
+    monkeypatch.setattr(ka9q, "RadiodStream", RecStream)
+    from hf_timestd.core.hf_chain_delay_probe import ChannelGrant, ka9q_stream_factory
+    spec = specs()[0]
+    stream = ka9q_stream_factory()(spec, lambda *a: None, ChannelGrant(2, "239.9.9.9", 5010))
+    ch = seen["channel"]
+    assert isinstance(stream, RecStream)
+    assert (ch.ssrc, ch.sample_rate, ch.multicast_address, ch.port, ch.encoding) == (
+        spec.ssrc, 96_000, "239.9.9.9", 5010, 2)

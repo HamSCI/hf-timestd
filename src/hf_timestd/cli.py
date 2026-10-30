@@ -1056,7 +1056,7 @@ def _build_hf_chain_delay_probe(config, args):
 
     control = RadiodControl(resolve_ka9q_status(config, default='239.192.152.141'),
                             client_id='hf-timestd-hfchain')
-    return HfChainDelayProbe(control, ka9q_stream_factory(control))
+    return HfChainDelayProbe(control, ka9q_stream_factory())
 
 
 def _learned_chain_delay_ms(config_path: Path):
@@ -2095,7 +2095,7 @@ Per-service overrides in [services] take precedence over the profile.
         description='CREATES radiod channels (removed again on exit).  Run only '
                     'as an announced operator step.')
     hfcd_parser.add_argument('--duration-s', type=float, default=600.0,
-        help='Capture length in seconds (default 600)')
+        help='Capture length in seconds (default 600; use 900 for the operator run)')
     hfcd_parser.add_argument('--config', '-c', default='/etc/hf-timestd/timestd-config.toml',
         help='Configuration file path')
     hfcd_parser.add_argument('--output', help='Write the report as JSON to this path')
