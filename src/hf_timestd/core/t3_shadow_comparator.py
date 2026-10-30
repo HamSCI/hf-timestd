@@ -86,8 +86,8 @@ class T3ShadowComparator:
         this number, raw.
 
         None when either side lacks a map or an anchor, when the maps come
-        from different radiod runs, when the anchor's rate does not match
-        its map, or when either RTP lies beyond its map's reach.
+        from different radiod runs, when the anchor's rate or the summary's
+        ``sample_rate`` does not match its map, or when either RTP lies beyond its map's reach.
         """
         if not summary:
             return None
@@ -98,6 +98,14 @@ class T3ShadowComparator:
             return None
         t3_map = CounterMap.from_dict(summary.get("counter_map"))
         if t3_map is None or t6_map is None or t6_anchor is None:
+            return None
+        # The summary's rtp_ref ticks at its own rate; its map must describe
+        # that counter, as the T6 anchor's must describe T6's.
+        try:
+            t3_rate = int(summary["sample_rate"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if t3_rate * t3_map.ilen != t3_map.olen * t3_map.input_samprate:
             return None
         if not T3ShadowComparator._one_run(t3_map, t6_map):
             return None
@@ -122,12 +130,16 @@ class T3ShadowComparator:
         ``t3_minus_t6_ms`` and ``t6_chain_delay_ms`` stand side by side,
         both raw; nothing here subtracts one from the other."""
         s = summary or {}
+        diff = T3ShadowComparator.t3_minus_t6_ms(summary, t6_anchor, t6_map)
         return {
-            "t3_minus_t6_ms": T3ShadowComparator.t3_minus_t6_ms(
-                summary, t6_anchor, t6_map),
+            "t3_minus_t6_ms": diff,
             "t6_chain_delay_ms": (float(chain_delay_ms)
                                   if chain_delay_ms is not None else None),
-            "t6_anchor_input_index": T3ShadowComparator._t6_index(t6_anchor, t6_map),
+            # Only beside an answer: across runs, out of reach or at the
+            # wrong rate, the index means nothing and must not read as data.
+            "t6_anchor_input_index": (
+                T3ShadowComparator._t6_index(t6_anchor, t6_map)
+                if diff is not None else None),
             "t6_anchor_utc_ns": (int(t6_anchor.anchor_utc_ns)
                                  if t6_anchor is not None else None),
             "t3_rtp_domain": s.get("rtp_domain"),

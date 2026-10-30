@@ -2933,19 +2933,37 @@ class CoreRecorderV2:
         drift out of ``COUNTER_MAP_REACH`` (2**30 samples) in about 3 h, and
         past 2**31 a map read at the anchor would alias by a whole wrap.  So
         the first refreshed map that lies within reach of the anchor rolls
-        to ``anchor_rtp`` and stays pinned there for that anchor, as long as
-        the live map names the same radiod run.  A new anchor or a new run
-        re-pins.  Until a map within reach exists, the live map goes through
-        and the comparator refuses it.
+        to ``anchor_rtp`` and stays pinned there for that anchor.
+
+        The pin remembers its radiod run (``input_epoch_gps_s``).  After a
+        radiod restart the old anchor's RTP belongs to the OLD counter.
+        Every channel restarts its counter near 2**32 - olen, so that RTP
+        often lies within reach of the new run's map by chance; reading it
+        there would publish a number off by hours.  So an unchanged anchor
+        whose live map names another run gets None, and keeps getting None
+        until a new anchor replaces it.  Never a re-pin to the new run.
+
+        First sight of an anchor pins only when its capture does not
+        predate the live map's run (in UTC, through GPS-UTC, less the 2 s
+        skew allowance): such an anchor belongs to an earlier run whatever
+        its RTP says.  Until a map within reach exists, the live map goes
+        through and the comparator refuses it.
         """
         if anchor is None or current is None:
             return None
         from .counter_epoch_tracker import COUNTER_EPOCH_SKEW_ALLOWANCE_S
+        from .offset_judge import gps_time_ns_to_unix
         from .registration_acquirer import COUNTER_MAP_REACH, _rtp_gap
         pin = getattr(self, '_t3_shadow_t6_pin', None)
-        if (pin is not None and pin[0] == anchor
-                and pin[1].same_run(current, tol_s=COUNTER_EPOCH_SKEW_ALLOWANCE_S)):
-            return pin[1]
+        if pin is not None and pin[0] == anchor:
+            if pin[1].same_run(current, tol_s=COUNTER_EPOCH_SKEW_ALLOWANCE_S):
+                return pin[1]
+            return None          # the anchor's run has ended; wait for a new one
+        run_start_utc_s = gps_time_ns_to_unix(
+            int(round(current.input_epoch_gps_s * 1e9)))
+        if (anchor.captured_at_utc_ns / 1e9
+                < run_start_utc_s - COUNTER_EPOCH_SKEW_ALLOWANCE_S):
+            return None
         if _rtp_gap(anchor.anchor_rtp, current.rtp_ref) <= COUNTER_MAP_REACH:
             pinned = current.rolled_forward(anchor.anchor_rtp)
             self._t3_shadow_t6_pin = (anchor, pinned)

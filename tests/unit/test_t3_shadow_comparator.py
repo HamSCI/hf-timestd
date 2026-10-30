@@ -198,3 +198,67 @@ def test_recorder_pins_the_t6_map_at_the_anchor_as_the_live_map_moves(tmp_path):
     rec._t6_counter_map = counter_map_for(T6_K0, 96_000, blocks=blocks,
                                           epoch_gps_s=EPOCH_GPS_S + 3600)
     assert rec._t3_shadow_state()["t3_minus_t6_ms"] is None
+
+
+# ── fix round 1 ─────────────────────────────────────────────────────
+
+def test_old_anchor_never_repins_to_a_new_run(tmp_path):
+    """radiod restarts.  Each channel restarts its counter near 2**32 - olen,
+    so the old anchor's RTP can lie within reach of the new run's map by
+    chance.  The old anchor must not read through it: its RTP belongs to the
+    old counter.  A new anchor captured on the new run answers again."""
+    run_b = EPOCH_GPS_S + 3600
+    old = _t6_anchor(102)
+    rec = _recorder(tmp_path, _t3_summary(103, counter_map_for(T3_K0, 24_000)),
+                    old, counter_map_for(T6_K0, 96_000))
+    assert rec._t3_shadow_state()["t3_minus_t6_ms"] is not None   # pinned on run A
+    # run B: same block lattice, so the new map's rtp_ref lies within reach
+    m6_b = counter_map_for(T6_K0, 96_000, epoch_gps_s=run_b)
+    s_b = _t3_summary(103, counter_map_for(T3_K0, 24_000, epoch_gps_s=run_b))
+    rec._t6_counter_map = m6_b
+    rec._t3_shadow_store.summary_path.write_text(__import__("json").dumps(s_b))
+    for _ in range(3):                         # and it keeps refusing
+        b = rec._t3_shadow_state()
+        assert b["t3_minus_t6_ms"] is None
+        assert b["t6_anchor_input_index"] is None
+    rec._t6_native_anchor = _t6_anchor(103)    # captured on run B
+    _assert_ms(rec._t3_shadow_state()["t3_minus_t6_ms"], s_b, 0.3)
+
+
+def test_anchor_captured_before_the_run_began_never_pins(tmp_path):
+    """First sight of an anchor whose capture predates the live map's run:
+    it belongs to an earlier run, whatever its RTP says."""
+    from hf_timestd.core.offset_judge import gps_time_ns_to_unix
+    anchor = _t6_anchor(102)
+    cap_s = anchor.captured_at_utc_ns / 1e9
+    # a run that began an hour after the anchor's capture, in GPS seconds
+    gps_guess = cap_s + 3600 - 315_964_800
+    run = gps_guess + (cap_s + 3600 - gps_time_ns_to_unix(int(gps_guess * 1e9)))
+    m6 = counter_map_for(T6_K0, 96_000, epoch_gps_s=run)
+    s = _t3_summary(103, counter_map_for(T3_K0, 24_000, epoch_gps_s=run))
+    rec = _recorder(tmp_path, s, anchor, m6)
+    assert rec._t3_shadow_state()["t3_minus_t6_ms"] is None
+    # the same run, begun an hour BEFORE the capture, pins as usual
+    early = run - 7200
+    rec2 = _recorder(tmp_path / "e", _t3_summary(
+        103, counter_map_for(T3_K0, 24_000, epoch_gps_s=early)), anchor,
+        counter_map_for(T6_K0, 96_000, epoch_gps_s=early))
+    assert rec2._t3_shadow_state()["t3_minus_t6_ms"] is not None
+
+
+def test_t3_rate_must_match_its_map():
+    m6 = counter_map_for(T6_K0, 96_000)
+    m3 = counter_map_for(T3_K0, 24_000)
+    s = _t3_summary(103, m3)
+    s["sample_rate"] = 96_000
+    assert T3ShadowComparator.t3_minus_t6_ms(s, _t6_anchor(102), m6) is None
+    del s["sample_rate"]
+    assert T3ShadowComparator.t3_minus_t6_ms(s, _t6_anchor(102), m6) is None
+
+
+def test_anchor_index_publishes_only_beside_an_answer():
+    m6 = counter_map_for(T6_K0, 96_000)
+    other = counter_map_for(T3_K0, 24_000, epoch_gps_s=EPOCH_GPS_S + 3.0)
+    b = T3ShadowComparator.block(_t3_summary(103, other), _t6_anchor(102), m6, 1.0)
+    assert b["t3_minus_t6_ms"] is None
+    assert b["t6_anchor_input_index"] is None
