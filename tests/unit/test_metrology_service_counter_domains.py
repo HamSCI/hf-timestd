@@ -220,7 +220,8 @@ def test_counter_map_from_another_radiod_run_resets_the_plane(tmp_path, caplog):
             meta,
         )
     resets = [r for r in caplog.records if "registration reset" in r.getMessage()]
-    assert resets and "another radiod run" in resets[0].getMessage()
+    assert len(resets) == 1
+    assert "another radiod run" in resets[0].getMessage()
     assert svc.acquirer.registration is None
 
 

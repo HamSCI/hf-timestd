@@ -405,6 +405,43 @@ class RegistrationStore:
         self._atomic_write(self.summary_path, payload)
 
     # ── reading ────────────────────────────────────────────────────
+    RUN_FILE = "radiod_run.state"   # not *.json: read_siblings skips it
+
+    def announce_radiod_run(self, input_epoch_gps_s: float, channel: str,
+                            tol_s: float = 2.0) -> Optional[str]:
+        """Claim the station-wide announcement of a new radiod run.
+
+        Final review I-7 (2026-10-30): one radiod restart is one event, but
+        every channel's process sees it.  The first to call this for a run
+        (named by its counter map's ``input_epoch_gps_s``, within
+        ``tol_s``) gets None and logs the event's WARNING; every later
+        caller gets the first one's channel name and logs at INFO.  The
+        claim lives beside the channel files under an advisory lock.  Any
+        I/O failure answers None: a duplicate WARNING beats a lost one."""
+        import fcntl
+        path = self.directory / self.RUN_FILE
+        try:
+            self.directory.mkdir(parents=True, exist_ok=True)
+            with open(path, "a+", encoding="utf-8") as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                f.seek(0)
+                try:
+                    prev = json.loads(f.read() or "null")
+                except ValueError:
+                    prev = None
+                if (isinstance(prev, dict)
+                        and abs(float(prev.get("input_epoch_gps_s", math.inf))
+                                - float(input_epoch_gps_s)) <= tol_s):
+                    return str(prev.get("channel") or "another channel")
+                f.seek(0)
+                f.truncate()
+                json.dump({"input_epoch_gps_s": float(input_epoch_gps_s),
+                           "channel": channel}, f)
+                f.flush()
+        except (OSError, TypeError, ValueError) as e:
+            logger.debug(f"radiod run announcement failed: {e!r}")
+        return None
+
     def read_siblings(
         self,
         exclude_channel: str = "",

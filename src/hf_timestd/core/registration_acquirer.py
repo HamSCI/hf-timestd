@@ -1092,9 +1092,17 @@ class RegistrationAcquirer:
 
     def reset(self, why: str, *, loud: bool = False) -> None:
         """``loud``: a WARNING rather than INFO, for a reset that means the
-        held plane was wrong (a counter-map step), not merely retired."""
+        held plane was wrong (a counter-map step), not merely retired.
+
+        With no plane held there is nothing to reset, so the line drops to
+        DEBUG (final review I-7: a radiod restart reset every channel
+        twice, the second time with no plane left)."""
+        if self._reg is None:
+            level = logging.DEBUG
+        else:
+            level = logging.WARNING if loud else logging.INFO
         logger.log(
-            logging.WARNING if loud else logging.INFO,
+            level,
             f"[{self.channel}] registration reset -> BOOTSTRAP ({why})",
         )
         self._state = self.STATE_BOOTSTRAP
@@ -1187,7 +1195,12 @@ class RegistrationAcquirer:
         if held is not None:
             why = self._counter_map_break(held, cmap)
             if why is not None:
-                self.reset(why, loud=True)
+                # Final review I-7: another radiod run retires every plane
+                # on the station at once, and metrology logs that event's
+                # one WARNING (RegistrationStore.announce_radiod_run).  A
+                # whole-block step on one run means this plane was wrong:
+                # that stays loud here.
+                self.reset(why, loud=not why.endswith("another radiod run"))
                 return
         if self._reg is not None:
             self._stamped(self._reg)

@@ -728,6 +728,9 @@ class MetrologyService:
         # stale state or delays.
         self._shadow_minute = int(minute_utc)
         self._shadow_state = None
+        # Final review I-7: set when this minute sees a radiod run change,
+        # whose one WARNING another line carries; the transition is INFO.
+        self._run_change_minute = False
         self._shadow_details = {}
         try:
             out = self._apply_registration_unsafe(
@@ -773,7 +776,9 @@ class MetrologyService:
             minute = getattr(self, "_shadow_minute", None)
             if counter is None or record is None or minute is None:
                 return
-            row = counter.observe(state, reason, minute)
+            row = counter.observe(
+                state, reason, minute,
+                quiet=bool(getattr(self, "_run_change_minute", False)))
             if row is not None:
                 record.append(row)
         except Exception as e:  # noqa: BLE001  diagnostic only
@@ -898,7 +903,9 @@ class MetrologyService:
                     f"[{self.channel_name}] counter map matches the raw "
                     f"radiod pair again after {streak} minute(s)")
             self._map_mismatch_minutes = 0
+            self._note_radiod_run(cmap)
             return cmap
+        self._run_change_minute = True
         streak += 1
         self._map_mismatch_minutes = streak
         if streak == 1:
@@ -913,6 +920,33 @@ class MetrologyService:
                 f"({miss_s:+.3f} s apart); the recorder's map refresh may "
                 f"have stopped.  No sibling converts into this counter.")
         return None
+
+    def _note_radiod_run(self, cmap) -> None:
+        """Log a new radiod run once for the whole station.
+
+        Final review I-7 (2026-10-30): one restart used to cost about a
+        dozen WARNINGs, a reset and a transition on every channel.  The run
+        is named by the accepted counter map's ``input_epoch_gps_s``.  The
+        first channel to see a new one claims it in the registration store
+        and logs the event's one WARNING; the rest log INFO.  The first map
+        a process sees is its start, not an event."""
+        epoch = float(cmap.input_epoch_gps_s)
+        prev = getattr(self, "_run_epoch_s", None)
+        self._run_epoch_s = epoch
+        if prev is None or abs(epoch - prev) <= COUNTER_EPOCH_SKEW_ALLOWANCE_S:
+            return
+        self._run_change_minute = True
+        first = self.reg_store.announce_radiod_run(epoch, self.channel_name)
+        if first is None:
+            logger.warning(
+                f"[{self.channel_name}] new radiod run: counter map epoch "
+                f"moved {epoch - prev:+.3f} s.  Every channel's T3 plane "
+                f"restarts from BOOTSTRAP; {self.channel_name} saw it first "
+                f"and the other channels log it at INFO.")
+        else:
+            logger.info(
+                f"[{self.channel_name}] new radiod run (epoch moved "
+                f"{epoch - prev:+.3f} s), already announced by {first}")
 
     def _raw_label(self, metadata: Dict[str, Any], start_rtp: int):
         """The label radiod's own (GPS_TIME, RTP_TIMESNAP) pair gives this
@@ -1219,6 +1253,12 @@ class MetrologyService:
         epoch = self.epoch_tracker.observe(
             metadata.get("raw_gps_time_ns"), metadata.get("raw_rtp_timesnap"),
             metadata.get("sample_rate", self.engine.sample_rate))
+        prev_epoch = getattr(self, "_last_epoch_id", None)
+        if prev_epoch is not None and prev_epoch != epoch:
+            # The raw pair moved to a new counter epoch: a radiod restart's
+            # consequences on this channel log at INFO (I-7).
+            self._run_change_minute = True
+        self._last_epoch_id = epoch
         self._minute_now = int(minute_utc)
         refusal = getattr(self, "_refused_donors", None)
         if refusal is not None and refusal["epoch"] != epoch:

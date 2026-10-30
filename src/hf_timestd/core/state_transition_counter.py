@@ -29,11 +29,15 @@ class StateTransitionCounter:
         return self._count
 
     def observe(self, state: str, reason: str,
-                utc_minute: int) -> Optional[dict]:
+                utc_minute: int, quiet: bool = False) -> Optional[dict]:
         """Return a transition row when the state changed, else None.
 
         The first state seen is "startup": it returns a row but counts as
         no transition and logs no WARNING.  A repeated state returns None.
+
+        ``quiet``: another line already carried this event's WARNING (a
+        new radiod run, final review I-7), so the change logs at INFO.  It
+        still counts and still opens the window.
         """
         if self._state is None:
             self._state = state
@@ -49,7 +53,7 @@ class StateTransitionCounter:
         if self._window_start is None:
             self._window_start = int(utc_minute)
             self._window_changes = 1
-            logger.warning(msg)
+            logger.log(logging.INFO if quiet else logging.WARNING, msg)
         else:
             self._window_changes += 1
             logger.info(msg)
