@@ -1520,7 +1520,11 @@ def test_a_verified_own_plane_is_never_gated_by_the_refusal(tmp_path, caplog):
             _sib_at(svc, "WWV_25000", T0 + 0.010)
 
     states, loud = _run_refusal(svc, tmp_path, 34, before=second_sibling)
-    assert len(loud) == 1, loud
+    # Final review I-8: the median's drop of the verified own plane now
+    # logs its own WARNING, once for the episode, beside the refusal's.
+    drops = [m for m in loud if "fusion dropped" in m]
+    assert len(drops) == 1, loud
+    assert len(loud) == 2, loud
     assert len(set(states[6:])) == 1, states
     assert not [r for r in caplog.records if "30 minutes" in r.getMessage()]
 

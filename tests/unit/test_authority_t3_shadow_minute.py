@@ -57,7 +57,8 @@ class _Summary:
 
 SUMMARY = {
     "state": "ACQUIRED", "sigma_ms": 0.8, "contributing": ["WWV_10_MHz"],
-    "waiting": ["WWV_5_MHz"], "n_minutes": 12, "verified": True,
+    "waiting": ["WWV_5_MHz"], "dropped": ["WWV_15_MHz"], "n_minutes": 12,
+    "verified": True,
     "whole_second_unresolved": False, "rtp_domain": "WWV_10_MHz",
     "counter_epoch_id": "ep-1",
 }
@@ -154,7 +155,8 @@ def test_row_carries_registration_judge_and_verdict(tmp_path, reg_state):
     assert row["kind"] == "minute"
     assert row["t3"] == {
         "state": "ACQUIRED", "sigma_ms": 0.8, "contributing": ["WWV_10_MHz"],
-        "waiting": ["WWV_5_MHz"], "n_minutes": 12, "verified": True,
+        "waiting": ["WWV_5_MHz"], "dropped": ["WWV_15_MHz"],
+        "n_minutes": 12, "verified": True,
         "whole_second_unresolved": False, "rtp_domain": "WWV_10_MHz",
         "counter_epoch_id": "ep-1", "age_s": 3.0,
     }

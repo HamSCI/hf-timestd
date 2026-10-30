@@ -731,6 +731,8 @@ class MetrologyService:
         # Final review I-7: set when this minute sees a radiod run change,
         # whose one WARNING another line carries; the transition is INFO.
         self._run_change_minute = False
+        # Final review I-8: the members fusion set aside this minute.
+        self._fusion_dropped = []
         self._shadow_details = {}
         try:
             out = self._apply_registration_unsafe(
@@ -1056,9 +1058,12 @@ class MetrologyService:
             and (own is None or not own.verified)
             and self._donors_refused(fused, kept, int(start_rtp))
         )
+        self._note_fusion_drops(own, fusion_inputs, fused, kept, waiting,
+                                int(start_rtp), at_map)
         if refused:
             self._refused_kept = list(kept)
             fused, kept, waiting = None, [], []
+            self._fusion_dropped = []
         elif (fused is not None and len(kept) > 1 and self.channel_name in kept
                 and getattr(self, "_refused_donors", None) is not None):
             # This channel's own plane now fuses WITH siblings (fusion
@@ -1077,6 +1082,48 @@ class MetrologyService:
             own = self.acquirer.registration
             own_is_adopted = True
         return own, own_is_adopted, fused, kept, waiting, refused
+
+    def _note_fusion_drops(self, own, fusion_inputs, fused, kept, waiting,
+                           start_rtp: int, at_map) -> None:
+        """Name the members fusion converted but set aside as outliers, and
+        say so once per episode when one was this channel's own verified
+        plane.
+
+        Final review I-8 (2026-10-30), provisional pending Michael's
+        ruling: the median rule stays, but its silence does not.  When two
+        siblings agree on another plane more than ``FUSE_OUTLIER_MS`` away,
+        one of the two answers is wrong, and the shadow record needs the
+        evidence.  ``dropped`` goes beside ``contributing`` in the summary
+        and the channel file."""
+        held = set(kept) | set(waiting)
+        dropped = sorted({
+            r.channel for r in fusion_inputs
+            if r.channel not in held
+            and r.in_domain(start_rtp, at_map, self.channel_name) is not None
+        })
+        self._fusion_dropped = dropped if fused is not None else []
+        own_dropped = (
+            fused is not None and own is not None and own.verified
+            and getattr(own, "method", None) != "adopted"
+            and self.channel_name in dropped
+        )
+        if not own_dropped:
+            if getattr(self, "_own_drop_logged", False):
+                logger.info(f"[{self.channel_name}] fusion keeps this "
+                            f"channel's own plane again")
+            self._own_drop_logged = False
+            return
+        if getattr(self, "_own_drop_logged", False):
+            return
+        self._own_drop_logged = True
+        d_ms = (own.sample0_utc_for(start_rtp)
+                - fused.sample0_utc_for(start_rtp)) * 1000.0
+        logger.warning(
+            f"[{self.channel_name}] fusion dropped this channel's own verified "
+            f"plane: it sits {d_ms:+.1f} ms from the plane "
+            f"{', '.join(sorted(kept))} agree on (median rule, "
+            f"FUSE_OUTLIER_MS {FUSE_OUTLIER_MS} ms).  One of the two is wrong; "
+            f"logged once per episode, named under 'dropped'.")
 
     # Fix round 2 (MINOR 3): a refused donor plane is let back in only
     # once it sits within CORRECT_K_SIGMA x ORIGIN_SIGMA_FLOOR_MS (3 ms) of
@@ -1580,15 +1627,20 @@ class MetrologyService:
         else:
             reason = f"acquirer {self.acquirer.state}"
         self._shadow_observe_state(state, reason)
+        # Final review I-8: always present, empty when nothing was dropped.
+        dropped = (sorted(getattr(self, "_fusion_dropped", None) or [])
+                   if fused is not None else [])
         if current is not None:
             self.reg_store.write_channel(current, state, {
                 "label_sample0_utc": label_s0,
-                "correction_ms": None if residual_ms is None else round(residual_ms, 3)})
+                "correction_ms": None if residual_ms is None else round(residual_ms, 3),
+                "dropped": dropped})
         else:
             self.reg_store.write_channel(
                 Registration(counter_epoch_id=epoch, rtp_ref=0, utc_ref=0.0,
                              sample_rate=self.engine.sample_rate, sigma_ms=float("inf"),
-                             channel=self.channel_name), state, {"label_sample0_utc": label_s0})
+                             channel=self.channel_name), state,
+                {"label_sample0_utc": label_s0, "dropped": dropped})
         # The summary is the network-wide view: CANDIDATE only when the
         # SOLE contributor is this channel's own not-yet-verified plane --
         # real corroboration from an ACQUIRED sibling (which is, by the
@@ -1614,6 +1666,9 @@ class MetrologyService:
                  # corroboration floor -- always present, empty when
                  # nobody waits.
                  "waiting": sorted(set(waiting)) if waiting else [],
+                 # Final review I-8: the members fusion converted but set
+                 # aside as outliers -- always present.
+                 "dropped": dropped,
                  # Task 10: always present; None while T3 runs.
                  "standalone_reason": standalone_reason}
         if extra_extra:

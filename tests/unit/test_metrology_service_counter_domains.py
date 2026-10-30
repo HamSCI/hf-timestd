@@ -500,3 +500,48 @@ def dataclasses_replace(obj, **kw):
     import dataclasses
 
     return dataclasses.replace(obj, **kw)
+
+
+# ── Final review I-8 (provisional): fusion drops a verified own plane ──
+
+
+def test_a_dropped_verified_own_plane_is_named_and_logged_once(tmp_path, caplog):
+    """This channel's ticks verified its plane at truth; two siblings agree
+    10 ms late.  The median rule keeps the siblings and drops the own
+    plane.  The rule stays (Michael's ruling pending), but the drop must
+    show: one WARNING per episode, and ``dropped`` beside ``contributing``
+    in the summary and the channel file."""
+    import json
+
+    svc = _channel(tmp_path, "SHARED_10000")
+    _acquire(svc, 51)
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=SVC_LOG):
+        for k in (1, 2, 3):
+            truth = svc.acquirer.registration.sample0_utc_for(_start(51, k))
+            for ch in ("WWV_15000", "WWV_25000"):
+                svc.reg_store.write_channel(
+                    _sibling(ch, 51, k, truth + 0.010), "ACQUIRED", {})
+            svc.apply_registration(
+                label_timing(T0 + 60 * k, 0.250, SR), _ticks(k, seed=8 + k),
+                _start(51, k), MIN + 60 * k, _meta(51, k, walk=0.250))
+            s = svc.reg_store.read_summary()
+            assert s["contributing"] == ["WWV_15000", "WWV_25000"]
+            assert s["dropped"] == ["SHARED_10000"]
+            ch = json.loads((tmp_path / "reg" / "SHARED_10000.json").read_text())
+            assert ch["dropped"] == ["SHARED_10000"]
+    drops = [r for r in caplog.records
+             if r.levelno == logging.WARNING and "dropped" in r.getMessage()]
+    assert len(drops) == 1, [r.getMessage() for r in caplog.records]
+    assert "+10.0 ms" in drops[0].getMessage() or "-10.0 ms" in drops[0].getMessage()
+
+
+def test_dropped_is_empty_when_everyone_fuses(tmp_path):
+    svc = _channel(tmp_path, "SHARED_10000")
+    _acquire(svc, 51)
+    truth = svc.acquirer.registration.sample0_utc_for(_start(51, 1))
+    svc.reg_store.write_channel(_sibling("WWV_15000", 51, 1, truth), "ACQUIRED", {})
+    svc.apply_registration(
+        label_timing(T0 + 60, 0.250, SR), _ticks(1, seed=9), _start(51, 1),
+        MIN + 60, _meta(51, 1, walk=0.250))
+    assert svc.reg_store.read_summary()["dropped"] == []

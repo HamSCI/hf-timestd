@@ -591,6 +591,7 @@ class AuthorityManager:
                 "sigma_ms": reg.get("sigma_ms"),
                 "contributing": reg.get("contributing"),
                 "waiting": summary.get("waiting"),
+                "dropped": summary.get("dropped"),
                 "n_minutes": summary.get("n_minutes"),
                 "verified": summary.get("verified"),
                 "whole_second_unresolved": summary.get(
