@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from hf_timestd.core.buffer_timing import BufferTiming
+from hf_timestd.core.buffer_timing import BufferTiming, unix_ns_to_gps_time_ns
 from hf_timestd.core.counter_epoch_tracker import CounterEpochTracker
 from hf_timestd.core.metrology_service import MetrologyService
 from hf_timestd.core.registration_acquirer import RegistrationAcquirer
@@ -58,19 +58,59 @@ def _service(tmp_path):
     return svc
 
 
-def _pair(k):
-    """Minute k's radiod (GPS_TIME, RTP_TIMESNAP) pair, as the epoch tracker
-    takes it."""
+def _raw_pair(k, walk):
+    """Task 10: radiod's raw (GPS_TIME, RTP_TIMESNAP) pair for minute k,
+    placing the buffer's first sample ``walk`` seconds after truth.  T3
+    starts from this pair, never from the ring label, so a test that wants
+    the acquirer to see a label ``walk`` late says so here."""
+    utc_ns = int(round(T0)) * 10**9 + 60 * k * 10**9 + int(round(walk * 1e9))
     return {
-        "gps_time_ns": 1_000_000_000_000 + k * 60_000_000_000,
-        "rtp_timesnap": 1_000_000 + k * 60 * SR,
+        "raw_gps_time_ns": unix_ns_to_gps_time_ns(utc_ns),
+        "raw_rtp_timesnap": 1_000_000 + k * 60 * SR,
+    }
+
+
+def _pair(k, walk=0.0):
+    """Minute k's radiod (GPS_TIME, RTP_TIMESNAP) pair, as the epoch tracker
+    takes it.  Task 10: the tracker observes radiod's raw pair."""
+    raw = _raw_pair(k, walk)
+    return {
+        "gps_time_ns": raw["raw_gps_time_ns"],
+        "rtp_timesnap": raw["raw_rtp_timesnap"],
         "sample_rate": SR,
     }
 
 
-def _meta(k):
-    """Minute k's ring metadata: the pair and this channel's counter map."""
-    return {**_pair(k), "counter_map": _OWN_MAP}
+def _meta(k, walk=0.0):
+    """Minute k's ring metadata: the ring anchor pair, radiod's raw pair
+    (``walk`` seconds late) and this channel's counter map.  The ring
+    anchor is the same pair here; T3 reads only the raw one."""
+    return {**_pair(k, walk), **_raw_pair(k, walk), "counter_map": _OWN_MAP}
+
+
+def _ticks(k, marker=True, seed=None):
+    """Minute k's 62 s of WWV ticks at truth: the channel's own evidence,
+    which ``measure_minute`` folds on the held plane (Task 10)."""
+    return make_tick_audio(
+        62, SR, T0 + 60 * k, {"WWV": 0.0125}, snr_db=20.0,
+        seed=7 + k if seed is None else seed, marker=marker,
+    )
+
+
+def _minute(svc, k, walk=0.250, raw_walk=None, audio=None, t6=False):
+    """Apply minute k.  ``walk``: the ring label's offset from truth.
+    ``raw_walk``: radiod's raw pair's offset (default: the same).  ``t6``:
+    the ring label is T6's plane."""
+    label = label_timing(T0 + 60 * k, walk, SR)
+    if t6:
+        label.judge_tier = "T6"
+    return svc.apply_registration(
+        label,
+        _ticks(k) if audio is None else audio,
+        1_000_000 + k * 60 * SR,
+        MIN + 60 * k,
+        _meta(k, walk if raw_walk is None else raw_walk),
+    )
 
 
 def test_first_minute_bootstraps_then_acquires(tmp_path):
@@ -82,7 +122,7 @@ def test_first_minute_bootstraps_then_acquires(tmp_path):
     audio = make_tick_audio(62, SR, T0, {"WWV": 0.0125}, snr_db=20.0)
     label = label_timing(T0, 0.250, SR)  # radiod pair 250 ms late
     bt = svc.apply_registration(
-        label, audio, start_rtp=1_000_000, minute_utc=MIN, metadata=_meta(0)
+        label, audio, start_rtp=1_000_000, minute_utc=MIN, metadata=_meta(0, 0.250)
     )
     assert bt.origin_source == "acquired"
     assert bt.sample0_utc == pytest.approx(T0, abs=0.002)
@@ -95,137 +135,97 @@ def test_first_minute_bootstraps_then_acquires(tmp_path):
 
 
 def test_verified_plane_publishes_acquired_next_minute(tmp_path):
-    """task-11b: feed_back_ensembles with a tick-like ensemble for the
-    acquired-plane's own station verifies it; the NEXT apply_registration
-    then publishes ACQUIRED instead of CANDIDATE."""
+    """task-11b, rewritten for Task 10: the acquisition minute publishes
+    CANDIDATE.  In the next minute the channel's own ticks, folded on the
+    held plane (``measure_minute``), verify it, and that minute publishes
+    ACQUIRED.  (Was: a tick-like ``feed_back_ensembles`` ensemble for the
+    plane's own station verified it.)"""
     svc = _service(tmp_path)
-    audio = make_tick_audio(62, SR, T0, {"WWV": 0.0125}, snr_db=20.0)
-    label = label_timing(T0, 0.250, SR)
-    svc.apply_registration(
-        label, audio, start_rtp=1_000_000, minute_utc=MIN, metadata=_meta(0)
-    )
+    bt0 = _minute(svc, 0, audio=_ticks(0, marker=False))
+    assert bt0.origin_source == "acquired"
     assert svc.reg_store.read_summary()["state"] == "CANDIDATE"
-    r = SimpleNamespace(
-        station="WWV",
-        ensemble_timing_error_ms=0.3,
-        sigma_single_ms=0.4,
-        anchor_source="acquired",
-    )
-    svc.feed_back_ensembles([r])
+    assert svc.acquirer.registration.verified is False
+    bt1 = _minute(svc, 1, audio=_ticks(1, marker=False))
     assert svc.acquirer.registration.verified is True
-    bt2 = svc.apply_registration(
-        label_timing(T0 + 60, 0.250, SR),
-        audio,
-        start_rtp=1_000_000 + 60 * SR,
-        minute_utc=MIN + 60,
-        metadata=_meta(1),
-    )
-    assert bt2.origin_source == "acquired"
+    assert set(svc._last_arrivals) == {"WWV"}
+    assert abs(svc._last_arrivals["WWV"].residual_ms) <= 1.0
+    assert bt1.origin_source == "acquired"
     s = svc.reg_store.read_summary()
     assert s["state"] == "ACQUIRED"
 
 
 def test_marker_anchored_ensemble_also_verifies_the_plane(tmp_path):
-    """task-11b fix round 1 (C1): TickEdgeDetector prefers the
-    minute-marker anchor whenever one is found and confirmed, regardless
-    of the buffer's origin_source -- so on strong channels EVERY result
-    is 'minute_marker', never 'acquired', and excluding it meant verify()
-    was never called there.  3 minutes of marker-anchored, tick-like
-    (sigma_1 <= 6 ms) ensembles must verify the plane; the NEXT minute's
-    channel file is ACQUIRED."""
+    """task-11b fix round 1 (C1), rewritten for Task 10: the strongest
+    channels, which hear the minute marker, must verify too.  Then the
+    detector's marker-anchored ensembles had to count; now the
+    self-measurement searches the marker on the held plane every minute
+    (its run-up is the previous minute's tail), finds no whole second on
+    a true plane, and verifies.  The channel file is ACQUIRED from the
+    first measured minute on, and the marker never shifts the residual."""
     svc = _service(tmp_path)
-    audio = make_tick_audio(62, SR, T0, {"WWV": 0.0125}, snr_db=20.0)
-    label = label_timing(T0, 0.250, SR)
-    svc.apply_registration(
-        label, audio, start_rtp=1_000_000, minute_utc=MIN, metadata=_meta(0)
-    )
+    _minute(svc, 0)
     assert svc.reg_store.read_summary()["state"] == "CANDIDATE"
-    for _ in range(3):
-        r = SimpleNamespace(
-            station="WWV",
-            ensemble_timing_error_ms=0.2,
-            sigma_single_ms=0.3,
-            anchor_source="minute_marker",
-        )
-        svc.feed_back_ensembles([r])
-    assert svc.acquirer.registration.verified is True
-    bt2 = svc.apply_registration(
-        label_timing(T0 + 60, 0.250, SR),
-        audio,
-        start_rtp=1_000_000 + 60 * SR,
-        minute_utc=MIN + 60,
-        metadata=_meta(1),
-    )
-    assert bt2.origin_source == "acquired"
-    s = svc.reg_store.read_summary()
-    assert s["state"] == "ACQUIRED"
+    for k in (1, 2, 3):
+        bt = _minute(svc, k)
+        assert svc.acquirer.registration.verified is True
+        assert abs(svc._last_arrivals["WWV"].residual_ms) <= 1.0, (
+            "a marker on a true plane must report no whole second")
+        assert bt.origin_source == "acquired"
+        assert svc.reg_store.read_summary()["state"] == "ACQUIRED"
+    assert svc.acquirer._self_marker_k.get("WWV", (None, 0))[1] == 0, (
+        "the marker was searched and found no whole second")
 
 
 def test_marker_anchored_large_residual_rejects_not_verifies(tmp_path):
-    """task-11b fix round 2 (N1): a marker-anchored search sits on the
-    signal's own grid, so sigma_single_ms stays tick-like regardless of
-    how wrong our plane is -- confirmed round 1's C1 fix opened a hole
-    where a plane 20-200 ms wrong could be VERIFIED from one
-    marker-confirmed minute.  One marker-anchored result with err +30 ms /
-    sigma_1 0.01 ms must reject: the NEXT minute the channel is BOOTSTRAP
-    (not ACQUIRED), and the stale channel file is not offered as a
-    sibling."""
+    """task-11b fix round 2 (N1), rewritten for Task 10: a tick-like
+    measurement (sigma_1 small) whose residual is large is a rejection,
+    never a verification.  The candidate plane sits 30 ms off the ticks;
+    the next minute's self-measurement reads +30 ms at a tick-like sigma
+    and must reject: the channel publishes BOOTSTRAP that same minute and
+    the next, and the stale channel file is never offered as a sibling."""
     svc = _service(tmp_path)
-    audio = make_tick_audio(62, SR, T0, {"WWV": 0.0125}, snr_db=20.0)
-    label = label_timing(T0, 0.250, SR)
-    svc.apply_registration(
-        label, audio, start_rtp=1_000_000, minute_utc=MIN, metadata=_meta(0)
-    )
+    _minute(svc, 0)
     assert svc.reg_store.read_summary()["state"] == "CANDIDATE"
-    r = SimpleNamespace(
-        station="WWV",
-        ensemble_timing_error_ms=30.0,
-        sigma_single_ms=0.01,
-        anchor_source="minute_marker",
-    )
-    svc.feed_back_ensembles([r])
+    svc.acquirer.registration.utc_ref += 0.030  # the plane labels 30 ms late
+    bt1 = _minute(svc, 1)
+    a = svc._last_arrivals["WWV"]
+    assert a.residual_ms == pytest.approx(30.0, abs=1.0)
+    assert a.sigma_ms <= RegistrationAcquirer.TIMING_SIGMA_MAX_MS
     assert svc.acquirer.state == RegistrationAcquirer.STATE_BOOTSTRAP
+    assert bt1.origin_source == "label"
+    assert svc.reg_store.read_summary()["state"] == "BOOTSTRAP"
     rng = np.random.default_rng(5)
     noise = 0.1 * rng.standard_normal(62 * SR)
-    bt2 = svc.apply_registration(
-        label_timing(T0 + 60, 0.250, SR),
-        noise,
-        start_rtp=1_000_000 + 60 * SR,
-        minute_utc=MIN + 60,
-        metadata=_meta(1),
-    )
+    bt2 = _minute(svc, 2, audio=noise)
     assert bt2.origin_source == "label"
     s = svc.reg_store.read_summary()
     assert s["state"] == "BOOTSTRAP"
-    assert svc.reg_store.read_siblings(exclude_channel="WWV_20000") == []
+    assert svc.reg_store.read_siblings(
+        exclude_channel="WWV_20000", states=("ACQUIRED", "WITNESS")) == []
 
 
-def test_unverifiable_plane_publishes_bootstrap_next_minute(tmp_path):
-    """task-11b: a junk (non-tick-like) ensemble fails verification and
-    resets the acquirer -- the next minute publishes BOOTSTRAP."""
+def test_unverifiable_plane_publishes_bootstrap_next_minute(tmp_path, monkeypatch):
+    """task-11b, rewritten for Task 10: a measurement that is not
+    tick-like (sigma 14.6 ms, far past TIMING_SIGMA_MAX_MS) fails
+    verification and resets the acquirer -- this minute and the next
+    publish BOOTSTRAP.  (Was: the same junk ensemble through
+    ``feed_back_ensembles``.)  The measurement is stubbed: a real fold
+    that weak finds no peak at all."""
+    from hf_timestd.core.registration_acquirer import MinuteArrival
+
     svc = _service(tmp_path)
-    audio = make_tick_audio(62, SR, T0, {"WWV": 0.0125}, snr_db=20.0)
-    label = label_timing(T0, 0.250, SR)
-    svc.apply_registration(
-        label, audio, start_rtp=1_000_000, minute_utc=MIN, metadata=_meta(0)
-    )
-    r = SimpleNamespace(
-        station="WWV",
-        ensemble_timing_error_ms=2.0,
-        sigma_single_ms=14.6,  # far past TIMING_SIGMA_MAX_MS -- not tick-like
-        anchor_source="acquired",
-    )
-    svc.feed_back_ensembles([r])
+    _minute(svc, 0)
+    junk = {"WWV": MinuteArrival("WWV", residual_ms=2.0, sigma_ms=14.6,
+                                 arrival_rtp=0.0, fold_snr_db=3.0)}
+    monkeypatch.setattr(svc.acquirer, "measure_minute", lambda *a, **k: dict(junk))
+    bt1 = _minute(svc, 1)
     assert svc.acquirer.state == RegistrationAcquirer.STATE_BOOTSTRAP
+    assert bt1.origin_source == "label"
+    assert svc.reg_store.read_summary()["state"] == "BOOTSTRAP"
+    monkeypatch.undo()
     rng = np.random.default_rng(4)
     noise = 0.1 * rng.standard_normal(62 * SR)
-    bt2 = svc.apply_registration(
-        label_timing(T0 + 60, 0.250, SR),
-        noise,
-        start_rtp=1_000_000 + 60 * SR,
-        minute_utc=MIN + 60,
-        metadata=_meta(1),
-    )
+    bt2 = _minute(svc, 2, audio=noise)
     assert bt2.origin_source == "label"
     assert svc.reg_store.read_summary()["state"] == "BOOTSTRAP"
 
@@ -237,7 +237,7 @@ def test_candidate_file_written_by_channel_a_is_not_adopted_by_channel_b(tmp_pat
     svc_a = _service(tmp_path)
     audio = make_tick_audio(62, SR, T0, {"WWV": 0.0125}, snr_db=20.0)
     svc_a.apply_registration(
-        label_timing(T0, 0.250, SR), audio, 1_000_000, MIN, _meta(0)
+        label_timing(T0, 0.250, SR), audio, 1_000_000, MIN, _meta(0, 0.250)
     )
     assert svc_a.reg_store.read_summary()["state"] == "CANDIDATE"
     channel_file = tmp_path / "reg" / "SHARED_10000.json"
@@ -255,7 +255,7 @@ def test_bootstrap_leaves_the_label_plane_marked(tmp_path):
     rng = np.random.default_rng(3)
     noise = 0.1 * rng.standard_normal(62 * SR)
     bt = svc.apply_registration(
-        label_timing(T0, 0.1, SR), noise, 1_000_000, MIN, _meta(0)
+        label_timing(T0, 0.1, SR), noise, 1_000_000, MIN, _meta(0, 0.1)
     )
     assert bt.origin_source == "label" and bt.sample0_utc == T0 + 0.1
     assert svc.reg_store.read_summary()["state"] == "BOOTSTRAP"
@@ -278,7 +278,7 @@ def test_sibling_registration_is_adopted(tmp_path):
     rng = np.random.default_rng(3)
     noise = 0.1 * rng.standard_normal(62 * SR)  # this channel hears nothing
     bt = svc.apply_registration(
-        label_timing(T0, 0.3, SR), noise, 1_000_000, MIN, _meta(0)
+        label_timing(T0, 0.3, SR), noise, 1_000_000, MIN, _meta(0, 0.3)
     )
     assert bt.origin_source == "acquired" and bt.sample0_utc == pytest.approx(
         T0, abs=1e-6
@@ -310,7 +310,7 @@ def test_sibling_only_fusion_without_maps_yields_no_plane(tmp_path):
     rng = np.random.default_rng(3)
     noise = 0.1 * rng.standard_normal(62 * SR)  # this channel hears nothing
     bt = svc.apply_registration(
-        label_timing(T0, 0.3, SR), noise, 1_000_000, MIN, _meta(0)
+        label_timing(T0, 0.3, SR), noise, 1_000_000, MIN, _meta(0, 0.3)
     )
     assert bt.origin_source == "label"
     assert svc.acquirer.registration is None
@@ -343,7 +343,7 @@ def test_shared_channel_ambiguity_resolved_by_same_site_sibling(tmp_path):
         62, SR, T0, {"WWV": 0.0125}, snr_db=20.0
     )  # only WWV audible
     bt = svc.apply_registration(
-        label_timing(T0, 0.1, SR), audio, 1_000_000, MIN, _meta(0)
+        label_timing(T0, 0.1, SR), audio, 1_000_000, MIN, _meta(0, 0.1)
     )
     assert bt.origin_source == "acquired" and bt.sample0_utc == pytest.approx(
         T0, abs=0.002
@@ -354,25 +354,27 @@ def test_shared_channel_ambiguity_resolved_by_same_site_sibling(tmp_path):
     assert "SHARED_10000" in svc.reg_store.read_summary()["contributing"]
 
 
-def test_feed_back_reacquires_on_sustained_residual(tmp_path):
-    """task-11b: feed_back_ensembles routes an unverified plane's first
-    good ensemble to verify() rather than corroborate(); this test is
-    about corroborate's OWN sustained-residual/reacquire logic, so mark
-    the plane verified directly rather than spending one of the two calls
-    on verification."""
+def test_feed_back_reacquires_on_sustained_residual(tmp_path, caplog):
+    """task-11b, rewritten for Task 10: corroborate's own sustained-residual
+    rule, driven by the self-measurement.  A verified plane that drifts
+    40 ms off its ticks is held one minute and given up the next; the
+    give-up logs exactly one WARNING, the reset's (Task 9 review, ruling
+    3: no "registration residual sustained" line beside it).  (Was: two
+    +40 ms ensembles through ``feed_back_ensembles``.)"""
     svc = _service(tmp_path)
-    audio = make_tick_audio(62, SR, T0, {"WWV": 0.0125}, snr_db=20.0)
-    svc.apply_registration(label_timing(T0, 0.0, SR), audio, 1_000_000, MIN, _meta(0))
-    svc.acquirer.registration.verified = True
-    r = SimpleNamespace(
-        station="WWV",
-        ensemble_timing_error_ms=40.0,
-        sigma_single_ms=0.5,
-        anchor_source="acquired",
-    )
-    svc.feed_back_ensembles([r])
-    svc.feed_back_ensembles([r])
+    _minute(svc, 0)
+    _minute(svc, 1)
+    assert svc.acquirer.registration.verified is True
+    svc.acquirer.registration.utc_ref += 0.040
+    _minute(svc, 2)
+    assert svc.acquirer.state == RegistrationAcquirer.STATE_ACQUIRED  # held
+    caplog.clear()
+    caplog.set_level(logging.INFO)
+    _minute(svc, 3)
     assert svc.acquirer.state == RegistrationAcquirer.STATE_BOOTSTRAP
+    loud = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(loud) == 1 and "registration reset" in loud[0], loud
+    assert "sustained" not in caplog.text
 
 
 # ── Fix round 1 (task-8-review.md / task-8-fix1-brief.md) ──────────────
@@ -382,16 +384,20 @@ def test_t6_authoritative_plane_is_not_replaced(tmp_path):
     """C3: T6 must win.  ``judge_tier == "T6"`` on the incoming plane (the
     sidecar/replay shape) means the ring anchor already carries T6's
     correction -- apply_registration must publish a WITNESS, not overwrite
-    the origin."""
+    the origin.  Task 10: the plane verifies on its own ticks, so the
+    WITNESS comes in the first measured minute; T6's plane is handed back
+    untouched in every minute."""
     svc = _service(tmp_path)
-    audio = make_tick_audio(62, SR, T0, {"WWV": 0.0125}, snr_db=20.0)
-    label = label_timing(T0, 0.010, SR)  # T6 says T0+10ms; the ticks agree closely
-    label.judge_tier = "T6"
-    bt = svc.apply_registration(label, audio, 1_000_000, MIN, _meta(0))
-    assert bt.origin_source == "label"
-    assert bt.sample0_utc == pytest.approx(
-        T0 + 0.010, abs=1e-9
-    )  # T6's plane, untouched
+    for k in (0, 1):
+        # T6 says truth + 10 ms; radiod's raw pair sits at truth.
+        bt = _minute(svc, k, walk=0.010, raw_walk=0.0, t6=True)
+        assert bt.origin_source == "label"
+        assert bt.sample0_utc == pytest.approx(
+            T0 + 60 * k + 0.010, abs=1e-9
+        )  # T6's plane, untouched
+        if k == 0:
+            # T6 agrees within 10 ms, and verifies nothing
+            assert svc.reg_store.read_summary()["state"] == "CANDIDATE"
     s = svc.reg_store.read_summary()
     assert s["state"] == "WITNESS"
     # acquired ~T0, label T0+10ms -> residual (acquired - label) ~ -10 ms
@@ -399,48 +405,57 @@ def test_t6_authoritative_plane_is_not_replaced(tmp_path):
 
 
 def test_t6_authoritative_small_residual_vs_t6_is_witness(tmp_path):
-    """task-11b fix round 3: the CANDIDATE gate applies on T6 stations
-    too -- on the WITNESS path the acquired plane is never applied to
-    BufferTiming, so no detector pass ever verifies it via
-    feed_back_ensembles; verify against T6's OWN plane instead.  A small
-    residual (0.8 ms, well inside VERIFY_MAX_RESIDUAL_MS = 20 ms)
-    verifies -> state WITNESS."""
+    """task-11b fix round 3, rewritten for Task 10: the CANDIDATE gate
+    applies on T6 stations too, and T6 never opens it.  A plane 0.8 ms
+    from T6 is still a CANDIDATE in its acquisition minute; the channel's
+    own ticks verify it the next minute -> WITNESS.  (Was: the residual
+    against T6's plane verified it.)"""
     svc = _service(tmp_path)
-    audio = make_tick_audio(62, SR, T0, {"WWV": 0.0125}, snr_db=20.0)
-    label = label_timing(T0, 0.0008, SR)  # T6 says T0+0.8ms; real ticks at T0
-    label.judge_tier = "T6"
-    bt = svc.apply_registration(label, audio, 1_000_000, MIN, _meta(0))
+    bt = _minute(svc, 0, walk=0.0008, raw_walk=0.0, t6=True)
+    assert bt.origin_source == "label"
+    s = svc.reg_store.read_summary()
+    assert s["state"] == "CANDIDATE", "agreement with T6 verifies nothing"
+    assert abs(s["residual_vs_t6_ms"]) <= RegistrationAcquirer.VERIFY_MAX_RESIDUAL_MS
+    assert svc.acquirer.registration.verified is False
+    bt = _minute(svc, 1, walk=0.0008, raw_walk=0.0, t6=True)
     assert bt.origin_source == "label"
     s = svc.reg_store.read_summary()
     assert s["state"] == "WITNESS"
-    assert abs(s["residual_vs_t6_ms"]) <= RegistrationAcquirer.VERIFY_MAX_RESIDUAL_MS
     assert svc.acquirer.registration.verified is True
 
 
 def test_t6_authoritative_large_residual_vs_t6_is_candidate_not_witness(tmp_path):
-    """task-11b fix round 3: the companion case -- a plane 40 ms off T6
-    (well past VERIFY_MAX_RESIDUAL_MS) must NOT verify -- state CANDIDATE,
-    not WITNESS -- and HfAcquiredBench.poll() must treat that summary as
-    silence (CANDIDATE is not in _LIVE_STATES), so a phantom never reaches
-    the judge on a T6 station."""
+    """task-11b fix round 3, rewritten for Task 10: an unverified plane on
+    a T6 station is a CANDIDATE, not a WITNESS, and HfAcquiredBench.poll()
+    must treat that summary as silence (CANDIDATE is not in
+    _LIVE_STATES), so a phantom never reaches the judge on a T6 station.
+    The phantom here sits 40 ms off its own ticks.  Its acquisition minute
+    is a CANDIDATE (T6 agrees with it, and verifies nothing); its first
+    measured minute rejects it.  The bench stays silent throughout.
+    (Was: a plane 40 ms off T6's plane was the phantom.)"""
     from hf_timestd.core.offset_judge import HfAcquiredBench
 
     svc = _service(tmp_path)
-    audio = make_tick_audio(62, SR, T0, {"WWV": 0.0125}, snr_db=20.0)
-    label = label_timing(T0, 0.040, SR)  # T6 says T0+40ms; real ticks at T0
-    label.judge_tier = "T6"
-    bt = svc.apply_registration(label, audio, 1_000_000, MIN, _meta(0))
-    assert bt.origin_source == "label"
-    s = svc.reg_store.read_summary()
-    assert s["state"] == "CANDIDATE"
-    assert abs(s["residual_vs_t6_ms"]) > RegistrationAcquirer.VERIFY_MAX_RESIDUAL_MS
-    assert svc.acquirer.registration.verified is False
-
     bench = HfAcquiredBench(
         provider=lambda: {"SHARED_10000": (1_000_000, 1000.0, SR)},
         store=svc.reg_store,
         mono_fn=lambda: 1000.0,
     )
+    # T6 sits 40 ms late and the raw pair at truth, so acquisition lands
+    # at truth; move the plane onto T6's, a phantom its own ticks disagree
+    # with, before it is measured.
+    bt = _minute(svc, 0, walk=0.040, raw_walk=0.0, t6=True)
+    assert bt.origin_source == "label"
+    svc.acquirer.registration.utc_ref += 0.040
+    s = svc.reg_store.read_summary()
+    assert s["state"] == "CANDIDATE"
+    assert svc.acquirer.registration.verified is False
+    assert bench.poll() is None
+    bt = _minute(svc, 1, walk=0.040, raw_walk=0.0, t6=True)
+    assert bt.origin_source == "label"
+    assert svc._last_arrivals["WWV"].residual_ms == pytest.approx(40.0, abs=1.0)
+    assert svc.acquirer.state == RegistrationAcquirer.STATE_BOOTSTRAP
+    assert svc.reg_store.read_summary()["state"] == "BOOTSTRAP"
     assert bench.poll() is None
 
 
@@ -449,17 +464,20 @@ def test_t6_authoritative_via_authority_json_on_the_live_ring_path(tmp_path):
     BufferTiming (ring_buffer_reader's metadata carries no "timing" block --
     confirmed by reading resolve_buffer_timing and ring_buffer_reader.
     extract_interval), so on that path the tier must come from
-    AuthorityManager's own /run/hf-timestd/authority.json."""
+    AuthorityManager's own /run/hf-timestd/authority.json.  Task 10: the
+    WITNESS comes once the plane verifies on its own ticks (minute 1)."""
     svc = _service(tmp_path)
     auth_path = tmp_path / "authority.json"
     auth_path.write_text(json.dumps({"t_level_active": "T6"}))
     svc._AUTHORITY_JSON_PATH = auth_path
-    audio = make_tick_audio(62, SR, T0, {"WWV": 0.0125}, snr_db=20.0)
-    label = label_timing(T0, 0.010, SR)
-    assert label.judge_tier is None  # the live-ring shape: never populated
-    bt = svc.apply_registration(label, audio, 1_000_000, MIN, _meta(0))
-    assert bt.origin_source == "label" and bt.sample0_utc == label.sample0_utc
-    assert svc.reg_store.read_summary()["state"] == "WITNESS"
+    for k in (0, 1):
+        label = label_timing(T0 + 60 * k, 0.010, SR)
+        assert label.judge_tier is None  # the live-ring shape: never populated
+        bt = svc.apply_registration(
+            label, _ticks(k), 1_000_000 + k * 60 * SR, MIN + 60 * k, _meta(k, 0.0))
+        assert bt.origin_source == "label" and bt.sample0_utc == label.sample0_utc
+        assert svc.reg_store.read_summary()["state"] == (
+            "CANDIDATE" if k == 0 else "WITNESS")
 
 
 def test_missing_authority_json_is_not_authoritative(tmp_path):
@@ -468,7 +486,7 @@ def test_missing_authority_json_is_not_authoritative(tmp_path):
     svc._AUTHORITY_JSON_PATH = tmp_path / "does_not_exist.json"
     audio = make_tick_audio(62, SR, T0, {"WWV": 0.0125}, snr_db=20.0)
     bt = svc.apply_registration(
-        label_timing(T0, 0.1, SR), audio, 1_000_000, MIN, _meta(0)
+        label_timing(T0, 0.1, SR), audio, 1_000_000, MIN, _meta(0, 0.1)
     )
     assert bt.origin_source == "acquired"
 
@@ -501,7 +519,7 @@ def test_adopted_plane_does_not_re_enter_fusion(tmp_path):
             noise,
             1_000_000 + k * 60 * SR,
             MIN + k * 60,
-            _meta(k),
+            _meta(k, 0.3),
         )
     assert svc.acquirer.registration.channel == "SHARED_10000"
     assert svc.acquirer.registration.method == "adopted"
@@ -521,7 +539,7 @@ def test_apply_registration_failure_keeps_the_label_plane(tmp_path, monkeypatch)
     monkeypatch.setattr(svc.acquirer, "offer_minute", _boom)
     label = label_timing(T0, 0.1, SR)
     audio = make_tick_audio(62, SR, T0, {"WWV": 0.0125}, snr_db=20.0)
-    bt = svc.apply_registration(label, audio, 1_000_000, MIN, _meta(0))
+    bt = svc.apply_registration(label, audio, 1_000_000, MIN, _meta(0, 0.1))
     assert bt is label
     assert bt.origin_source == "label" and bt.sample0_utc == T0 + 0.1
 
@@ -556,7 +574,7 @@ def test_sibling_conflict_reverts_to_label_and_flags_conflict(tmp_path):
     from hf_timestd.core.registration_acquirer import Registration
 
     audio = make_tick_audio(62, SR, T0, {"WWV": 0.0125}, snr_db=20.0)
-    svc.apply_registration(label_timing(T0, 0.0, SR), audio, 1_000_000, MIN, _meta(0))
+    svc.apply_registration(label_timing(T0, 0.0, SR), audio, 1_000_000, MIN, _meta(0, 0.0))
     assert svc.acquirer.state == RegistrationAcquirer.STATE_ACQUIRED
     svc.acquirer.registration.verified = True
     own_epoch = svc.acquirer.registration.counter_epoch_id
@@ -576,7 +594,7 @@ def test_sibling_conflict_reverts_to_label_and_flags_conflict(tmp_path):
         audio1,
         1_000_000 + 60 * SR,
         MIN + 60,
-        _meta(1),
+        _meta(1, 0.0),
     )
     assert bt.origin_source == "label"
     ch = json.loads((tmp_path / "reg" / "SHARED_10000.json").read_text())
@@ -599,7 +617,7 @@ def test_candidate_own_defers_to_verified_sibling_no_conflict(tmp_path):
 
     audio = make_tick_audio(62, SR, T0, {"WWV": 0.0125}, snr_db=20.0)
     bt0 = svc.apply_registration(
-        label_timing(T0, 0.0, SR), audio, 1_000_000, MIN, _meta(0)
+        label_timing(T0, 0.0, SR), audio, 1_000_000, MIN, _meta(0, 0.0)
     )
     assert bt0.origin_source == "acquired"
     assert svc.acquirer.registration.verified is False  # still a CANDIDATE
@@ -619,7 +637,7 @@ def test_candidate_own_defers_to_verified_sibling_no_conflict(tmp_path):
 
     audio1 = make_tick_audio(62, SR, T0 + 60, {"WWV": 0.0125}, snr_db=20.0, seed=8)
     bt1 = svc.apply_registration(
-        label_timing(T0 + 60, 0.0, SR), audio1, 1_000_000 + 60 * SR, MIN + 60, _meta(1)
+        label_timing(T0 + 60, 0.0, SR), audio1, 1_000_000 + 60 * SR, MIN + 60, _meta(1, 0.0)
     )
     assert bt1.origin_source == "acquired"
     assert bt1.sample0_utc == pytest.approx(T0 + 60 + 0.250, abs=0.002)
@@ -662,7 +680,7 @@ def test_adopted_plane_with_expired_donor_returns_to_bootstrap(tmp_path, caplog)
     rng = np.random.default_rng(3)
     noise1 = 0.1 * rng.standard_normal(62 * SR)
     bt1 = svc.apply_registration(
-        label_timing(T0, 0.3, SR), noise1, 1_000_000, MIN, _meta(0)
+        label_timing(T0, 0.3, SR), noise1, 1_000_000, MIN, _meta(0, 0.3)
     )
     assert bt1.origin_source == "acquired"
     assert svc.acquirer.registration.channel == "SHARED_10000"
@@ -680,7 +698,7 @@ def test_adopted_plane_with_expired_donor_returns_to_bootstrap(tmp_path, caplog)
             noise2,
             1_000_000 + 60 * SR,
             MIN + 60,
-            _meta(1),
+            _meta(1, 0.3),
         )
     assert bt2.origin_source == "label"
     s = svc.reg_store.read_summary()
@@ -700,7 +718,7 @@ def test_adopted_plane_with_expired_donor_returns_to_bootstrap(tmp_path, caplog)
         audio3,
         1_000_000 + 120 * SR,
         MIN + 120,
-        _meta(2),
+        _meta(2, 0.0),
     )
     assert bt3.origin_source == "acquired"
     assert svc.acquirer.state == RegistrationAcquirer.STATE_ACQUIRED
@@ -708,21 +726,32 @@ def test_adopted_plane_with_expired_donor_returns_to_bootstrap(tmp_path, caplog)
 
 
 def test_host_label_ensemble_does_not_reach_corroborate(tmp_path, monkeypatch):
-    """I3: the anchor_source filter -- a host_label ensemble must never
-    reach RegistrationAcquirer.corroborate."""
+    """I3, widened by Task 10: no detector ensemble reaches ``verify`` or
+    ``corroborate`` any more, whatever anchored it.  Once only the
+    host-label anchor was filtered out; now the self-measurement is the
+    sole route.  That includes a marker-anchored ensemble reporting an
+    unwrapped whole second (Task 9 review, ruling 4): it carries none of
+    the acquirer's SNR and two-minute bars, and must never reach the
+    whole-second guard."""
     svc = _service(tmp_path)
+    _minute(svc, 0)
+    _minute(svc, 1)
+    held = svc.acquirer.registration
+    utc_ref = held.utc_ref
     seen = []
-    monkeypatch.setattr(
-        svc.acquirer, "corroborate", lambda res: seen.append(res) or "held"
-    )
-    r = SimpleNamespace(
-        station="WWV",
-        ensemble_timing_error_ms=40.0,
-        sigma_single_ms=0.5,
-        anchor_source="host_label",
-    )
-    svc.feed_back_ensembles([r])
+    monkeypatch.setattr(svc.acquirer, "corroborate", lambda res: seen.append(res) or "held")
+    monkeypatch.setattr(svc.acquirer, "verify", lambda res: seen.append(res) or "pending")
+    ensembles = [
+        SimpleNamespace(station="WWV", ensemble_timing_error_ms=40.0,
+                        sigma_single_ms=0.5, anchor_source=src)
+        for src in ("host_label", "acquired", "minute_marker")
+    ] + [
+        SimpleNamespace(station="WWV", ensemble_timing_error_ms=1000.0,
+                        sigma_single_ms=0.01, anchor_source="minute_marker")
+    ]
+    svc.feed_back_ensembles(ensembles)
     assert seen == []
+    assert svc.acquirer.registration is held and held.utc_ref == utc_ref
 
 
 def test_counter_epoch_change_on_the_live_ring_reacquires(tmp_path):
@@ -738,14 +767,14 @@ def test_counter_epoch_change_on_the_live_ring_reacquires(tmp_path):
     svc = _service(tmp_path)
     audio0 = make_tick_audio(62, SR, T0, {"WWV": 0.0125}, snr_db=20.0)
     bt0 = svc.apply_registration(
-        label_timing(T0, 0.0, SR), audio0, 1_000_000, MIN, _meta(0)
+        label_timing(T0, 0.0, SR), audio0, 1_000_000, MIN, _meta(0, 0.0)
     )
     assert bt0.origin_source == "acquired"
     epoch0 = svc.acquirer.registration.counter_epoch_id
     meta1 = dict(_meta(1))
-    meta1["gps_time_ns"] = meta1["gps_time_ns"] + int(
-        69732e9
-    )  # radiod re-anchors 19.4 h away -> a new counter space
+    # radiod re-anchors 19.4 h away -> a new counter space.  Task 10: the
+    # epoch tracker observes radiod's raw pair, so that is where it moves.
+    meta1["raw_gps_time_ns"] = meta1["raw_gps_time_ns"] + int(69732e9)
     audio1 = make_tick_audio(62, SR, T0 + 60, {"WWV": 0.0125}, snr_db=20.0, seed=8)
     bt1 = svc.apply_registration(
         label_timing(T0 + 60, 0.0, SR),
@@ -832,7 +861,7 @@ def test_resolve_before_adopt_precedence(tmp_path, monkeypatch):
     monkeypatch.setattr(svc.acquirer, "adopt", _boom)
     audio = make_tick_audio(62, SR, T0, {"WWV": 0.0125}, snr_db=20.0)
     bt = svc.apply_registration(
-        label_timing(T0, 0.1, SR), audio, 1_000_000, MIN, _meta(0)
+        label_timing(T0, 0.1, SR), audio, 1_000_000, MIN, _meta(0, 0.1)
     )
     assert bt.origin_source == "acquired" and bt.sample0_utc == pytest.approx(
         T0, abs=0.002
@@ -854,7 +883,7 @@ def test_sibling_in_the_same_counter_space_under_a_different_id_still_fuses(tmp_
 
     svc = _service(tmp_path)
     audio = make_tick_audio(62, SR, T0, {"WWV": 0.0125}, snr_db=20.0)
-    svc.apply_registration(label_timing(T0, 0.0, SR), audio, 1_000_000, MIN, _meta(0))
+    svc.apply_registration(label_timing(T0, 0.0, SR), audio, 1_000_000, MIN, _meta(0, 0.0))
     svc.acquirer.registration.verified = True
     own_sigma = svc.acquirer.registration.sigma_ms
     own_offset = svc.epoch_tracker.epoch_offset_s
@@ -876,7 +905,7 @@ def test_sibling_in_the_same_counter_space_under_a_different_id_still_fuses(tmp_
 
     audio1 = make_tick_audio(62, SR, T0 + 60, {"WWV": 0.0125}, snr_db=20.0, seed=8)
     bt = svc.apply_registration(
-        label_timing(T0 + 60, 0.0, SR), audio1, 1_000_000 + 60 * SR, MIN + 60, _meta(1)
+        label_timing(T0 + 60, 0.0, SR), audio1, 1_000_000 + 60 * SR, MIN + 60, _meta(1, 0.0)
     )
     assert bt.origin_source == "acquired"
     s = svc.reg_store.read_summary()
@@ -893,7 +922,7 @@ def test_contributing_names_only_what_fusion_kept(tmp_path):
 
     svc = _service(tmp_path)
     audio = make_tick_audio(62, SR, T0, {"WWV": 0.0125}, snr_db=20.0)
-    svc.apply_registration(label_timing(T0, 0.0, SR), audio, 1_000_000, MIN, _meta(0))
+    svc.apply_registration(label_timing(T0, 0.0, SR), audio, 1_000_000, MIN, _meta(0, 0.0))
     svc.acquirer.registration.verified = True
     own_offset = svc.epoch_tracker.epoch_offset_s
     for ch, delta in (("WWV_20000", 0.0005), ("WWV_25000", 0.020)):
@@ -915,7 +944,7 @@ def test_contributing_names_only_what_fusion_kept(tmp_path):
         )
     audio1 = make_tick_audio(62, SR, T0 + 60, {"WWV": 0.0125}, snr_db=20.0, seed=8)
     svc.apply_registration(
-        label_timing(T0 + 60, 0.0, SR), audio1, 1_000_000 + 60 * SR, MIN + 60, _meta(1)
+        label_timing(T0 + 60, 0.0, SR), audio1, 1_000_000 + 60 * SR, MIN + 60, _meta(1, 0.0)
     )
     s = svc.reg_store.read_summary()
     assert sorted(s["contributing"]) == ["SHARED_10000", "WWV_20000"]
@@ -925,64 +954,66 @@ def test_contributing_names_only_what_fusion_kept(tmp_path):
 # ── I4 (final review): an unverified witness plane must re-acquire ────
 
 
-def test_witness_plane_that_disagrees_with_t6_reacquires(tmp_path):
-    """I4: on the T6 path the service set ``own.verified`` from the
-    residual and published CANDIDATE when that failed -- but never reset
-    the acquirer.  ``offer_minute`` short-circuits on ACQUIRED and
-    ``feed_back_ensembles`` returns immediately because
-    ``_applied_acquired_plane`` stays False all minute on the witness
-    path, so a plane disagreeing with T6 by more than
-    VERIFY_MAX_RESIDUAL_MS stayed in ACQUIRED-but-unverified with no route
-    back to BOOTSTRAP until a counter-epoch change.  That defeats the
-    ``hf_acquired``-vs-T6 residual spec §8 names as B4's acceptance
-    measurement.  After VERIFY_MAX_MINUTES of disagreement, reset."""
+def test_witness_plane_that_disagrees_with_t6_is_kept_and_recorded(tmp_path, caplog):
+    """Task 10 reverses I4.  T3 stands alone: a plane its own ticks
+    verify stays a WITNESS however far T6's plane sits from it.  The
+    residual against T6 is recorded every minute, and nothing resets on
+    it.  (Was: VERIFY_MAX_MINUTES of disagreement with T6 reset the plane,
+    B4's 77 resets in 6 hours.)"""
     svc = _service(tmp_path)
-    audio = make_tick_audio(62, SR, T0, {"WWV": 0.0125}, snr_db=20.0)
-    for k in range(RegistrationAcquirer.VERIFY_MAX_MINUTES):
-        label = label_timing(T0 + 60 * k, 0.040, SR)  # T6 says +40 ms
-        label.judge_tier = "T6"
-        svc.apply_registration(
-            label, audio, 1_000_000 + k * 60 * SR, MIN + 60 * k, _meta(k)
-        )
+    caplog.set_level(logging.INFO)
+    n = RegistrationAcquirer.VERIFY_MAX_MINUTES + 2
+    for k in range(n):
+        _minute(svc, k, walk=0.040, raw_walk=0.0, t6=True)  # T6 says +40 ms
         s = svc.reg_store.read_summary()
-        assert s["state"] == "CANDIDATE"
-        assert abs(s["residual_vs_t6_ms"]) > RegistrationAcquirer.VERIFY_MAX_RESIDUAL_MS
-    # the last minute's publish is honest about what it measured, and THEN
-    # the plane is given up on
+        assert s["residual_vs_t6_ms"] == pytest.approx(-40.0, abs=1.0)
+        assert s["state"] == ("CANDIDATE" if k == 0 else "WITNESS")
+    assert svc.acquirer.state == RegistrationAcquirer.STATE_ACQUIRED
+    assert "registration reset" not in caplog.text
+
+
+def test_unverified_witness_plane_whose_ticks_disagree_reacquires(tmp_path):
+    """What I4 guarded, now on the plane's own evidence: an unverified
+    witness plane must not park.  A plane 40 ms off its own ticks is
+    rejected in its first measured minute, and the channel re-acquires
+    from its ticks on the next."""
+    svc = _service(tmp_path)
+    _minute(svc, 0, walk=0.0, raw_walk=0.0, t6=True)
+    svc.acquirer.registration.utc_ref += 0.040
+    _minute(svc, 1, walk=0.0, raw_walk=0.0, t6=True)
     assert svc.acquirer.state == RegistrationAcquirer.STATE_BOOTSTRAP
     assert svc.acquirer.registration is None
+    assert svc.reg_store.read_summary()["state"] == "BOOTSTRAP"
+    _minute(svc, 2, walk=0.0, raw_walk=0.0, t6=True)
+    assert svc.acquirer.state == RegistrationAcquirer.STATE_ACQUIRED
+    assert svc.acquirer.registration.sample0_utc_for(1_000_000 + 2 * 60 * SR) == (
+        pytest.approx(T0 + 120, abs=0.002))
 
 
 def test_witness_plane_that_agrees_with_t6_is_never_reset(tmp_path):
     """The companion case: a verified witness plane must survive
     indefinitely -- the residual against T6 is the free measurement of the
-    acquisition method's accuracy that spec §6 asks for."""
+    acquisition method's accuracy that spec §6 asks for.  Task 10: the
+    acquisition minute is a CANDIDATE; every minute after it a WITNESS."""
     svc = _service(tmp_path)
-    audio = make_tick_audio(62, SR, T0, {"WWV": 0.0125}, snr_db=20.0)
     for k in range(RegistrationAcquirer.VERIFY_MAX_MINUTES + 2):
-        label = label_timing(T0 + 60 * k, 0.0008, SR)  # T6 says +0.8 ms
-        label.judge_tier = "T6"
-        svc.apply_registration(
-            label, audio, 1_000_000 + k * 60 * SR, MIN + 60 * k, _meta(k)
-        )
-        assert svc.reg_store.read_summary()["state"] == "WITNESS"
+        _minute(svc, k, walk=0.0008, raw_walk=0.0, t6=True)  # T6 says +0.8 ms
+        assert svc.reg_store.read_summary()["state"] == (
+            "CANDIDATE" if k == 0 else "WITNESS")
     assert svc.acquirer.state == RegistrationAcquirer.STATE_ACQUIRED
 
 
 def test_a_witness_plane_that_comes_back_into_agreement_is_not_reset(tmp_path):
-    """The counter is CONSECUTIVE minutes: one minute of disagreement
-    followed by agreement must not accumulate toward a reset (a single
-    bad T6 residual is not evidence the plane is wrong)."""
+    """T6 wandering out of agreement and back never resets the plane, not
+    even after VERIFY_MAX_MINUTES consecutive minutes 40 ms away (Task 10:
+    nothing T6 says ever does)."""
     svc = _service(tmp_path)
-    audio = make_tick_audio(62, SR, T0, {"WWV": 0.0125}, snr_db=20.0)
-    walks = [0.040, 0.0008] * RegistrationAcquirer.VERIFY_MAX_MINUTES
+    n = RegistrationAcquirer.VERIFY_MAX_MINUTES
+    walks = [0.040] * (n + 1) + [0.0008] * n
     for k, walk in enumerate(walks):
-        label = label_timing(T0 + 60 * k, walk, SR)
-        label.judge_tier = "T6"
-        svc.apply_registration(
-            label, audio, 1_000_000 + k * 60 * SR, MIN + 60 * k, _meta(k)
-        )
+        _minute(svc, k, walk=walk, raw_walk=0.0, t6=True)
     assert svc.acquirer.state == RegistrationAcquirer.STATE_ACQUIRED
+    assert svc.reg_store.read_summary()["state"] == "WITNESS"
 
 
 def test_a_waiting_channel_is_named_in_the_summary(tmp_path):
@@ -994,11 +1025,11 @@ def test_a_waiting_channel_is_named_in_the_summary(tmp_path):
 
     assert ADOPT_MIN_CORROBORATED_MINUTES == 2
     svc = _service(tmp_path)
-    # this channel acquires and verifies its own plane first, with no
-    # sibling on disk to adopt: verified, nothing corroborated yet
-    audio = make_tick_audio(62, SR, T0, {"WWV": 0.0125}, snr_db=20.0)
-    svc.apply_registration(label_timing(T0, 0.250, SR), audio, 1_000_000, MIN, _meta(0))
-    svc.feed_back_ensembles([_good_ensemble()])
+    # this channel acquires and verifies its own plane first (Task 10: on
+    # its own ticks, in minute 1), with no sibling on disk to adopt:
+    # verified, nothing corroborated yet
+    _minute(svc, 0)
+    _minute(svc, 1)
     assert svc.acquirer.registration.verified is True
     assert svc.acquirer.registration.n_minutes == 0
     # NOW a long-corroborated sibling appears, same counter space
@@ -1019,15 +1050,9 @@ def test_a_waiting_channel_is_named_in_the_summary(tmp_path):
         {},
     )
 
-    svc.apply_registration(
-        label_timing(T0 + 60, 0.250, SR),
-        make_tick_audio(62, SR, T0 + 60, {"WWV": 0.0125}, snr_db=20.0, seed=8),
-        1_000_000 + 60 * SR,
-        MIN + 60,
-        _meta(1),
-    )
+    _minute(svc, 2)
     s = svc.reg_store.read_summary()
-    assert s["waiting"] == ["SHARED_10000"], "this channel corroborated nothing yet"
+    assert s["waiting"] == ["SHARED_10000"], "this channel corroborated too little yet"
     assert s["contributing"] == ["WWV_20000"]
     assert s["n_minutes"] == 17
     assert s["state"] == "ACQUIRED"
@@ -1037,7 +1062,7 @@ def test_every_summary_carries_a_waiting_key(tmp_path):
     """16c: present on every summary, empty when nobody waits."""
     svc = _service(tmp_path)
     audio = make_tick_audio(62, SR, T0, {"WWV": 0.0125}, snr_db=20.0)
-    svc.apply_registration(label_timing(T0, 0.0, SR), audio, 1_000_000, MIN, _meta(0))
+    svc.apply_registration(label_timing(T0, 0.0, SR), audio, 1_000_000, MIN, _meta(0, 0.0))
     assert svc.reg_store.read_summary()["waiting"] == []
     svc.reg_store.write_summary(None, [], "BOOTSTRAP", {})
     assert svc.reg_store.read_summary().get("waiting", []) == []
@@ -1048,7 +1073,7 @@ def test_every_summary_carries_a_conflicts_key(tmp_path):
     key being there, empty when nothing disagrees."""
     svc = _service(tmp_path)
     audio = make_tick_audio(62, SR, T0, {"WWV": 0.0125}, snr_db=20.0)
-    svc.apply_registration(label_timing(T0, 0.0, SR), audio, 1_000_000, MIN, _meta(0))
+    svc.apply_registration(label_timing(T0, 0.0, SR), audio, 1_000_000, MIN, _meta(0, 0.0))
     assert svc.reg_store.read_summary()["conflicts"] == []
 
 
@@ -1118,39 +1143,20 @@ def test_process_minute_data_feeds_back_the_flat_edge_result_list(tmp_path):
 # ── Task 16b: adoption hysteresis — two corroborated minutes ──────────
 
 
-def _good_ensemble(err_ms=0.3):
-    return SimpleNamespace(
-        station="WWV",
-        ensemble_timing_error_ms=err_ms,
-        sigma_single_ms=0.4,
-        anchor_source="acquired",
-    )
-
-
-def _run_minute(svc, k, ensembles):
-    """One live minute: publish, read the summary's verdict, feed back."""
+def _run_minute(svc, k):
+    """One live minute: apply (Task 10: the self-measurement verifies or
+    corroborates inside it) and read the summary's verdict."""
     import time as _time
 
     from hf_timestd.core.registration_store import registration_refusal
 
-    audio = make_tick_audio(
-        62, SR, T0 + 60 * k, {"WWV": 0.0125}, snr_db=20.0, seed=7 + k
-    )
-    svc.apply_registration(
-        label_timing(T0 + 60 * k, 0.250, SR),
-        audio,
-        start_rtp=1_000_000 + k * 60 * SR,
-        minute_utc=MIN + 60 * k,
-        metadata=_meta(k),
-    )
+    _minute(svc, k)
     s = svc.reg_store.read_summary()
-    verdict = (
+    return (
         s["state"],
         s["n_minutes"],
         registration_refusal(s, now=_time.time(), sample_rate=SR),
     )
-    svc.feed_back_ensembles(ensembles)
-    return verdict
 
 
 def test_adoption_waits_for_two_corroborated_minutes(tmp_path):
@@ -1159,7 +1165,8 @@ def test_adoption_waits_for_two_corroborated_minutes(tmp_path):
     only threw it out six minutes later -- by which time FUSE had told
     chrony the host ran 23-28 ms fast.  A plane must now show
     ADOPT_MIN_CORROBORATED_MINUTES corroborated minutes before any
-    surface may act on it."""
+    surface may act on it.  Task 10: the channel's own ticks verify
+    (minute 1) and corroborate (minutes 2, 3)."""
     from hf_timestd.core.registration_store import (
         ADOPT_MIN_CORROBORATED_MINUTES,
         registration_is_authoritative,
@@ -1167,7 +1174,7 @@ def test_adoption_waits_for_two_corroborated_minutes(tmp_path):
 
     assert ADOPT_MIN_CORROBORATED_MINUTES == 2
     svc = _service(tmp_path)
-    seen = [_run_minute(svc, k, [_good_ensemble()]) for k in range(4)]
+    seen = [_run_minute(svc, k) for k in range(4)]
     assert [v[0] for v in seen] == ["CANDIDATE", "ACQUIRED", "ACQUIRED", "ACQUIRED"]
     assert [v[1] for v in seen] == [0, 0, 1, 2]
     assert [v[2] for v in seen] == [
@@ -1186,27 +1193,24 @@ def test_adoption_waits_for_two_corroborated_minutes(tmp_path):
 def test_a_reset_stands_every_surface_down_the_same_minute(tmp_path):
     """16b: a plane the acquirer gives up on must not keep labelling for
     the rest of the minute.  The summary drops to BOOTSTRAP in the minute
-    the reset happens, and no publish along the way was authoritative."""
+    the reset happens, and no publish along the way was authoritative.
+    Task 10: the plane drifts 40 ms off its own ticks after verification;
+    the first far minute holds, the second gives the plane up."""
     import time as _time
 
     from hf_timestd.core.registration_store import registration_refusal
 
     svc = _service(tmp_path)
-    far = SimpleNamespace(
-        station="WWV",
-        ensemble_timing_error_ms=40.0,  # tick-like, but 40 ms off the plane
-        sigma_single_ms=0.5,
-        anchor_source="acquired",
-    )
-    seen = [
-        _run_minute(svc, 0, [_good_ensemble()]),  # acquire -> verify
-        _run_minute(svc, 1, [far]),  # first far minute: held
-        _run_minute(svc, 2, [far]),  # second: reacquire
-    ]
+    seen = [_run_minute(svc, 0), _run_minute(svc, 1)]  # acquire, verify
+    svc.acquirer.registration.utc_ref += 0.040  # tick-like, but 40 ms off
+    seen.append(_run_minute(svc, 2))  # first far minute: held
+    assert svc.acquirer.state == RegistrationAcquirer.STATE_ACQUIRED
+    seen.append(_run_minute(svc, 3))  # second: reacquire
     assert [v[2] for v in seen] == [
         "state:CANDIDATE",
         "uncorroborated",
         "uncorroborated",
+        "state:BOOTSTRAP",
     ]
     assert svc.acquirer.state == RegistrationAcquirer.STATE_BOOTSTRAP
     s = svc.reg_store.read_summary()

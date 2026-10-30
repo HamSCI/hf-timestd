@@ -976,10 +976,13 @@ SELF_RUNUP_S = 2.5
 # How much of the previous minute's tail to keep: enough to find
 # SELF_RUNUP_S before the next start even when consecutive buffers overlap.
 SELF_TAIL_KEEP_S = 5.0
-# Fix round 1: a residual this large is a whole second, never a tick
+# Fix round 1: a residual past this is a whole second, never a tick
 # timing error (a fold residual wraps to ±500 ms, a tick search spans
-# ±20 ms).  ``verify`` and ``corroborate`` reset on it at once.
-WHOLE_SECOND_GUARD_MS = 500.0
+# ±20 ms).  ``verify`` and ``corroborate`` reset on it at once.  Task 10
+# (ruling 1): the test is strictly greater than 900 ms.  A fold peak
+# exactly half a second from its expected delay wraps to +500.0 ms, which
+# is no whole second; a true whole second reads near 1000 ms.
+WHOLE_SECOND_GUARD_MS = 900.0
 
 
 class RegistrationAcquirer:
@@ -1029,6 +1032,14 @@ class RegistrationAcquirer:
         # second.  Both live only inside one BOOTSTRAP episode.
         self._marker_k_seen: Optional[Tuple[int, int]] = None
         self._marker_k_holds = 0
+        # Task 10: the whole second ``_try_acquire`` added to the label it
+        # acquired on (None for a plane adopted or resolved from a
+        # sibling, or no plane), and the whole second a condemned plane's
+        # marker says that label needs instead.  The second survives only
+        # the whole-second guard's own reset: any other reset (a new
+        # counter epoch, a map step, a failed verification) drops it.
+        self._acq_k_int: Optional[int] = None
+        self._overruling_second: Optional[int] = None
         # Task 7: this channel's counter map, as the recorder last
         # published it (``note_counter_map``).  It survives ``reset``: the
         # map describes the counter, not the plane.
@@ -1050,6 +1061,7 @@ class RegistrationAcquirer:
         self._fold_history = {}
         self._self_tail = None
         self._acq_minute = None
+        self._acq_k_int = None
         self._self_marker_k = {}
         self._self_marker_logged = {}
 
@@ -1081,6 +1093,7 @@ class RegistrationAcquirer:
         self._verify_pending = 0
         self._marker_k_seen = None
         self._marker_k_holds = 0
+        self._overruling_second = None
         self._clear_self_measure()
 
     def adopt(self, reg: Registration) -> None:
@@ -1464,6 +1477,17 @@ class RegistrationAcquirer:
                     f"second by {dec.k_int:+d} s, confirmed on two "
                     f"consecutive minutes (SNR {mk[1]:.1f} dB)"
                 )
+        if mk is None and self._overruling_second is not None:
+            # Task 10: no marker window fits this buffer, and the marker
+            # already condemned a plane built on this label's second.  The
+            # host may name the second only when no broadcast can; this
+            # broadcast already did.
+            k_int = self._overruling_second
+            logger.info(
+                f"[{self.channel}] whole second {k_int:+d} s from the minute "
+                f"marker that condemned the previous plane; the raw label's "
+                f"second stays overruled"
+            )
         corr = h.correction_s + k_int
         if named is not None:
             # The marker RESOLVED the ambiguity: the hypotheses it did not
@@ -1490,6 +1514,7 @@ class RegistrationAcquirer:
         # Task 9: the minutes that built this plane must not also check it.
         self._clear_self_measure()
         self._acq_minute = max(int(m) for _a, _l, _r, m in self._buf)
+        self._acq_k_int = int(k_int)
         # I2: the plane is held in the RTP frame from here on; three
         # promoted float64 minutes (35.7 MB) were kept for the life of the
         # process, and `offer_minute` short-circuits on ACQUIRED so they
@@ -1606,9 +1631,10 @@ class RegistrationAcquirer:
         ``WHOLE_SECOND_GUARD_MS`` outright).  Two marker stations that
         confirm different whole seconds leave nothing to report: the
         minute returns {} and logs one WARNING.  The marker never moves the
-        plane here: expose, never correct.  The minute that confirms a
-        whole second logs one WARNING per episode; the first sighting logs
-        at INFO.
+        plane here: expose, never correct.  The marker's sightings log at
+        INFO, the confirming one included; the reset that follows in
+        ``verify`` or ``corroborate`` carries the event's one WARNING
+        (Task 10, ruling 3).
 
         The rolling fold stores each minute's profile with the UTC the
         plane gave its first sample, and rolls it onto the current plane
@@ -1830,6 +1856,9 @@ class RegistrationAcquirer:
                 level=logging.INFO,
             )
             return 0
+        # Task 10 (ruling 3): INFO.  The residual this returns trips the
+        # whole-second guard in ``verify`` / ``corroborate``, whose reset
+        # carries the event's one WARNING; this line gives the detail.
         self._log_marker_once(
             station,
             "whole_second",
@@ -1838,6 +1867,7 @@ class RegistrationAcquirer:
             f"that the held plane sits a whole second off ({-k:+d} s) on "
             f"{station}'s ticks; reported as a {-1000 * k:+.0f} ms residual "
             f"on every station, never applied",
+            level=logging.INFO,
         )
         return k
 
@@ -1850,32 +1880,52 @@ class RegistrationAcquirer:
             logger.log(level, msg)
 
     def _whole_second_guard(self, residuals_ms: Dict[str, Tuple[float, float]]) -> bool:
-        """Reset at once, loudly, on any residual of ``WHOLE_SECOND_GUARD_MS``
-        or more.  No tick search or fold can produce one: only a whole
-        second the minute marker confirmed can, and that condemns the plane
+        """Reset at once, loudly, on any registering station's residual
+        past ``WHOLE_SECOND_GUARD_MS``.  No tick search or fold can produce
+        one: only a whole second the minute marker confirmed can, and that
+        condemns the plane
         whatever the other stations read.  Such a residual must never enter
         the mean (review, fix round 1, CRITICAL 1)."""
         if self._reg is None:
             return False
-        bad = {s: e for s, (e, _sig) in residuals_ms.items() if abs(e) >= WHOLE_SECOND_GUARD_MS}
+        # Task 10 (ruling 2): BPM may carry DUT1, up to 0.9 s, and never
+        # registers, so its residual is no verdict on the plane.
+        bad = {
+            s: e
+            for s, (e, _sig) in residuals_ms.items()
+            if s not in NON_REGISTERING_STATIONS and abs(e) > WHOLE_SECOND_GUARD_MS
+        }
         if not bad:
             return False
+        # Task 10: a plane ``_try_acquire`` built on the label's second,
+        # condemned by a whole second, tells what that label's second
+        # should have been: the plane's own whole second less the one the
+        # marker found.  ``measure_minute`` reports one whole second for
+        # every station, so the stations agree; if they do not, keep none.
+        fix = None
+        whole = {int(round(e / 1000.0)) for e in bad.values()}
+        if self._acq_k_int is not None and len(whole) == 1:
+            fix = self._acq_k_int - whole.pop()
         self.reset(
             "held plane a whole second off: "
             + ", ".join(f"{s} {e:+.1f} ms" for s, e in sorted(bad.items())),
             loud=True,
         )
+        self._overruling_second = fix
         return True
 
     # ── verification ───────────────────────────────────────────────
     def verify(self, residuals_ms: Dict[str, Tuple[float, float]]) -> str:
-        """Confirm a freshly-acquired (CANDIDATE) plane against the tick
-        detector before it may be trusted as ACQUIRED (spec §10, task-11b).
+        """Confirm a freshly-acquired (CANDIDATE) plane against this
+        channel's own ticks before it may be trusted as ACQUIRED (spec §10,
+        task-11b).  Since Task 10 the service feeds it
+        ``residuals_for_verify(measure_minute(...))`` only, never the tick
+        detector's ensembles.
 
         ``residuals_ms``: same shape as ``corroborate`` -- station ->
-        (ensemble timing error vs the acquired plane, per-tick sigma) --
-        for the ensembles the service saw this minute, restricted here to
-        this registration's own stations.
+        (timing error vs the acquired plane, per-tick sigma) -- for the
+        stations measured this minute, restricted here to this
+        registration's own stations.
 
         * A station in ``self._reg.stations`` with a tick-like ensemble
           (``sigma_single_ms <= TIMING_SIGMA_MAX_MS``) AND a small residual
@@ -1895,13 +1945,10 @@ class RegistrationAcquirer:
           "pending"; after ``VERIFY_MAX_MINUTES`` consecutive pending
           minutes, give up -- reset, returns "rejected".
 
-        The task-11b record claimed "pending" was unreachable through the
-        service because ``_feed_back_ensembles_unsafe`` gates on ``if
-        res:``.  That record is wrong (final review, §3): ``res`` is keyed
-        by station over EVERY plane-anchored result of the minute, so a
-        non-empty ``res`` carrying no station in ``self._reg.stations`` --
-        a sibling station heard while ours was not -- reaches "pending"
-        normally."""
+        The service routes only a non-empty measurement here, so
+        "pending" comes from a minute that measured some station outside
+        ``self._reg.stations`` -- a sibling station heard while ours was
+        not (final review, §3)."""
         if self._reg is None:
             return "pending"
         if self._whole_second_guard(residuals_ms):
@@ -1970,8 +2017,12 @@ class RegistrationAcquirer:
             return self.verify(residuals_ms)
         if self._whole_second_guard(residuals_ms):
             return "reacquire"
+        # BPM never registers (Task 16a), and its ticks may carry DUT1 (Task
+        # 10, ruling 2): its residual stays out of the mean as well.
         good = {
-            s: r for s, r in residuals_ms.items() if r[1] <= self.TIMING_SIGMA_MAX_MS
+            s: r
+            for s, r in residuals_ms.items()
+            if r[1] <= self.TIMING_SIGMA_MAX_MS and s not in NON_REGISTERING_STATIONS
         }
         if not good:
             return "held"
@@ -1980,9 +2031,12 @@ class RegistrationAcquirer:
         if len(far) >= self.CORRECT_MIN_CHANNELS or (len(good) == 1 and far):
             self._bad_minutes += 1
             if self._bad_minutes >= self.CORRECT_MINUTES:
+                # Task 10 (ruling 3): the reset carries the event's one
+                # WARNING; the service no longer adds its own.
                 self.reset(
                     f"residual > {self.CORRECT_K_SIGMA}σ for "
-                    f"{self.CORRECT_MINUTES} minutes on {far}"
+                    f"{self.CORRECT_MINUTES} minutes on {far}",
+                    loud=True,
                 )
                 return "reacquire"
             return "held"

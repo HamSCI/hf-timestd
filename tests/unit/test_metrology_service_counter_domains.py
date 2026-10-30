@@ -13,6 +13,7 @@ import logging
 import numpy as np
 import pytest
 
+from hf_timestd.core.buffer_timing import unix_ns_to_gps_time_ns
 from hf_timestd.core.counter_epoch_tracker import CounterEpochTracker
 from hf_timestd.core.registration_acquirer import Registration, RegistrationAcquirer
 from tests.unit.synth_origins import EPOCH_GPS_S, counter_map_for, olen_for
@@ -22,7 +23,6 @@ from tests.unit.test_metrology_service_registration import (
     SR,
     T0,
     _Engine,
-    _good_ensemble,
     _service,
 )
 
@@ -38,10 +38,15 @@ def _start(k0: int, k: int) -> int:
     return 1_000_000 + (50 - k0) * OLEN + k * 60 * SR
 
 
-def _meta(k0: int, k: int, cmap=None) -> dict:
+def _meta(k0: int, k: int, cmap=None, walk: float = 0.0) -> dict:
+    """``walk``: radiod's raw pair puts the buffer's first sample this many
+    seconds after truth (Task 10: T3 starts from the raw pair)."""
+    utc_ns = int(round(T0)) * 10**9 + 60 * k * 10**9 + int(round(walk * 1e9))
     return {
         "gps_time_ns": 1_000_000_000_000 + k * 60_000_000_000,
         "rtp_timesnap": _start(k0, k),
+        "raw_gps_time_ns": unix_ns_to_gps_time_ns(utc_ns),
+        "raw_rtp_timesnap": _start(k0, k),
         "sample_rate": SR,
         "counter_map": counter_map_for(k0, SR) if cmap is None else cmap,
     }
@@ -63,12 +68,15 @@ def _ticks(k: int, seed: int = 7) -> np.ndarray:
 
 
 def _acquire(svc, k0: int):
-    """Minute 0: this channel acquires from its own ticks; verify it."""
+    """Minute 0: this channel acquires from its own ticks; mark it
+    verified.  Task 10 verifies on the channel's own ticks one minute
+    later (test_metrology_service_registration covers that path); these
+    tests start their own minute 1, so the setup stamps the outcome."""
     svc.apply_registration(
-        label_timing(T0, 0.250, SR), _ticks(0), _start(k0, 0), MIN, _meta(k0, 0)
+        label_timing(T0, 0.250, SR), _ticks(0), _start(k0, 0), MIN, _meta(k0, 0, walk=0.250)
     )
-    svc.feed_back_ensembles([_good_ensemble()])
-    assert svc.acquirer.registration.verified is True
+    assert svc.acquirer.state == RegistrationAcquirer.STATE_ACQUIRED
+    svc.acquirer.registration.verified = True
 
 
 def _sibling(channel, k0, k, utc, **kw) -> Registration:
@@ -98,13 +106,13 @@ def test_adopted_sibling_plane_is_right_in_the_adopters_counter(tmp_path):
     _acquire(svc_a, 50)
     svc_a.apply_registration(
         label_timing(T0 + 60, 0.250, SR), _ticks(1, seed=8), _start(50, 1), MIN + 60,
-        _meta(50, 1),
+        _meta(50, 1, walk=0.250),
     )
     truth_a = svc_a.acquirer.registration.sample0_utc_for(_start(50, 1))
     assert truth_a == pytest.approx(T0 + 60, abs=0.002)
 
     bt = svc_b.apply_registration(
-        label_timing(T0 + 60, 0.3, SR), _noise(3), _start(51, 1), MIN + 60, _meta(51, 1)
+        label_timing(T0 + 60, 0.3, SR), _noise(3), _start(51, 1), MIN + 60, _meta(51, 1, walk=0.3)
     )
     reg = svc_b.acquirer.registration
     assert reg is not None and reg.method == "adopted"
@@ -140,7 +148,7 @@ def test_sibling_resolves_ambiguity_in_its_own_counter(tmp_path):
     svc.engine = _Eng()
     svc.reg_store.write_channel(_sibling("WWV_20000", 50, 0, T0), "ACQUIRED", {})
     bt = svc.apply_registration(
-        label_timing(T0, 0.1, SR), _ticks(0), _start(51, 0), MIN, _meta(51, 0)
+        label_timing(T0, 0.1, SR), _ticks(0), _start(51, 0), MIN, _meta(51, 0, walk=0.1)
     )
     reg = svc.acquirer.registration
     assert reg is not None and reg.method != "adopted"
@@ -162,7 +170,7 @@ def test_counter_map_step_resets_the_plane(tmp_path, caplog):
     with caplog.at_level(logging.INFO, logger=ACQ_LOG):
         svc.apply_registration(
             label_timing(T0 + 60, 0.3, SR), _noise(4), _start(51, 1), MIN + 60,
-            _meta(51, 1, cmap=stepped),
+            _meta(51, 1, cmap=stepped, walk=0.3),
         )
     resets = [r for r in caplog.records if "registration reset" in r.getMessage()]
     assert len(resets) == 1
@@ -186,7 +194,7 @@ def test_late_gps_time_on_the_map_keeps_the_plane(tmp_path, caplog):
     with caplog.at_level(logging.INFO, logger=ACQ_LOG):
         svc.apply_registration(
             label_timing(T0 + 60, 0.250, SR), _ticks(1, seed=8), _start(51, 1),
-            MIN + 60, _meta(51, 1, cmap=late),
+            MIN + 60, _meta(51, 1, cmap=late, walk=0.250),
         )
     assert not any("registration reset" in r.getMessage() for r in caplog.records)
     reg = svc.acquirer.registration
@@ -205,7 +213,7 @@ def test_counter_map_from_another_radiod_run_resets_the_plane(tmp_path, caplog):
     with caplog.at_level(logging.INFO, logger=ACQ_LOG):
         svc.apply_registration(
             label_timing(T0 + 60, 0.3, SR), _noise(5), _start(51, 1), MIN + 60,
-            _meta(51, 1, cmap=restarted),
+            _meta(51, 1, cmap=restarted, walk=0.3),
         )
     resets = [r for r in caplog.records if "registration reset" in r.getMessage()]
     assert len(resets) == 1
@@ -228,7 +236,7 @@ def test_conflict_deltas_are_named_in_the_callers_counter(tmp_path, caplog):
     with caplog.at_level(logging.WARNING, logger=SVC_LOG):
         bt = svc.apply_registration(
             label_timing(T0 + 60, 0.250, SR), _ticks(1, seed=8), _start(51, 1),
-            MIN + 60, _meta(51, 1),
+            MIN + 60, _meta(51, 1, walk=0.250),
         )
     assert bt.origin_source == "label"
     warns = [r.getMessage() for r in caplog.records if "disagree" in r.getMessage()]
@@ -251,8 +259,9 @@ def _adopter_with_sibling(tmp_path, sib_map_epoch_s=EPOCH_GPS_S):
     sib.counter_map = counter_map_for(50, SR, epoch_gps_s=sib_map_epoch_s).rolled_forward(rtp)
     # the adopter's own epoch id, so adoption itself never trips the
     # acquirer's counter-epoch reset and hides what is under test
-    pair = {k: v for k, v in _meta(51, 1).items() if k != "counter_map"}
-    sib.counter_epoch_id = CounterEpochTracker().observe(**pair)
+    meta = _meta(51, 1)
+    sib.counter_epoch_id = CounterEpochTracker().observe(
+        meta["raw_gps_time_ns"], meta["raw_rtp_timesnap"], SR)
     svc.reg_store.write_channel(sib, "ACQUIRED", {})
     return svc, sib
 
@@ -264,7 +273,7 @@ def test_withdrawn_map_stops_every_sibling_fusing(tmp_path, caplog):
     about 49.7 h off.  After the withdrawal no sibling may fuse."""
     svc, _sib = _adopter_with_sibling(tmp_path)
     bt1 = svc.apply_registration(
-        label_timing(T0 + 60, 0.3, SR), _noise(3), _start(51, 1), MIN + 60, _meta(51, 1)
+        label_timing(T0 + 60, 0.3, SR), _noise(3), _start(51, 1), MIN + 60, _meta(51, 1, walk=0.3)
     )
     assert bt1.origin_source == "acquired"  # adopted while the map stood
     for k in (2, 3, 4):
@@ -290,7 +299,7 @@ def test_map_out_of_reach_of_the_minute_is_refused(tmp_path):
     far_start = (stale.rtp_ref + 2**30 + 60 * SR) % 2**32
     bt = svc.apply_registration(
         label_timing(T0 + 60, 0.3, SR), _noise(3), far_start, MIN + 60,
-        _meta(51, 1, cmap=stale),
+        _meta(51, 1, cmap=stale, walk=0.3),
     )
     assert bt.origin_source == "label"
     assert svc.reg_store.read_summary()["contributing"] == []
@@ -319,10 +328,13 @@ def test_held_plane_keeps_a_map_that_answers_at_its_rtp_ref(tmp_path):
 def test_unconvertible_sibling_does_not_conflict_with_a_candidate(tmp_path, caplog):
     """I-3: an own CANDIDATE and one ACQUIRED sibling with no map.  The
     sibling cannot convert, so it is no sibling at all: the candidate is
-    applied (so verify() can run), never CONFLICT."""
+    applied (so it can be verified), never CONFLICT.  Task 10: minute 1
+    hears nothing, so the plane stays a CANDIDATE and is applied; minute 2
+    verifies it on the channel's own ticks.  (Was: verified through
+    ``feed_back_ensembles`` after minute 1.)"""
     svc = _channel(tmp_path, "SHARED_10000")
     svc.apply_registration(
-        label_timing(T0, 0.250, SR), _ticks(0), _start(51, 0), MIN, _meta(51, 0)
+        label_timing(T0, 0.250, SR), _ticks(0), _start(51, 0), MIN, _meta(51, 0, walk=0.250)
     )
     assert svc.acquirer.registration.verified is False
     mapless = _sibling("WWV_20000", 50, 1, T0 + 60)
@@ -330,19 +342,26 @@ def test_unconvertible_sibling_does_not_conflict_with_a_candidate(tmp_path, capl
     svc.reg_store.write_channel(mapless, "ACQUIRED", {})
     with caplog.at_level(logging.WARNING, logger=SVC_LOG):
         bt = svc.apply_registration(
-            label_timing(T0 + 60, 0.250, SR), _ticks(1, seed=8), _start(51, 1),
-            MIN + 60, _meta(51, 1),
+            label_timing(T0 + 60, 0.250, SR), _noise(8), _start(51, 1),
+            MIN + 60, _meta(51, 1, walk=0.250),
         )
     assert bt.origin_source == "acquired"
-    assert svc._applied_acquired_plane is True
+    assert svc.acquirer.registration.verified is False
     import json
 
     ch = json.loads((tmp_path / "reg" / "SHARED_10000.json").read_text())
     assert ch["state"] == "CANDIDATE"
     assert svc.reg_store.read_summary()["conflicts"] == []
     assert not any("disagree" in r.getMessage() for r in caplog.records)
-    svc.feed_back_ensembles([_good_ensemble()])
+    with caplog.at_level(logging.WARNING, logger=SVC_LOG):
+        bt = svc.apply_registration(
+            label_timing(T0 + 120, 0.250, SR), _ticks(2, seed=9), _start(51, 2),
+            MIN + 120, _meta(51, 2, walk=0.250),
+        )
+    assert bt.origin_source == "acquired"
     assert svc.acquirer.registration.verified is True
+    assert svc.reg_store.read_summary()["conflicts"] == []
+    assert not any("disagree" in r.getMessage() for r in caplog.records)
 
 
 def test_adopted_plane_whose_donor_loses_its_map_takes_the_donor_reset(tmp_path, caplog):
@@ -351,7 +370,7 @@ def test_adopted_plane_whose_donor_loses_its_map_takes_the_donor_reset(tmp_path,
     disagreement: reset to BOOTSTRAP, never CONFLICT."""
     svc, sib = _adopter_with_sibling(tmp_path)
     svc.apply_registration(
-        label_timing(T0 + 60, 0.3, SR), _noise(3), _start(51, 1), MIN + 60, _meta(51, 1)
+        label_timing(T0 + 60, 0.3, SR), _noise(3), _start(51, 1), MIN + 60, _meta(51, 1, walk=0.3)
     )
     assert svc.acquirer.registration.method == "adopted"
     sib.counter_map = None
@@ -359,7 +378,7 @@ def test_adopted_plane_whose_donor_loses_its_map_takes_the_donor_reset(tmp_path,
     with caplog.at_level(logging.INFO):
         bt = svc.apply_registration(
             label_timing(T0 + 120, 0.3, SR), _noise(4), _start(51, 2), MIN + 120,
-            _meta(51, 2),
+            _meta(51, 2, walk=0.3),
         )
     assert bt.origin_source == "label"
     assert svc.acquirer.state == RegistrationAcquirer.STATE_BOOTSTRAP
@@ -377,7 +396,7 @@ def test_sibling_map_with_a_late_epoch_still_converts(tmp_path):
     whose map reads 0.7 s late must convert too, not drop silently."""
     svc, _sib = _adopter_with_sibling(tmp_path, sib_map_epoch_s=EPOCH_GPS_S + 0.7)
     bt = svc.apply_registration(
-        label_timing(T0 + 60, 0.3, SR), _noise(3), _start(51, 1), MIN + 60, _meta(51, 1)
+        label_timing(T0 + 60, 0.3, SR), _noise(3), _start(51, 1), MIN + 60, _meta(51, 1, walk=0.3)
     )
     assert bt.origin_source == "acquired"
     assert bt.sample0_utc == pytest.approx(T0 + 60, abs=1e-6)

@@ -54,7 +54,13 @@ from hf_timestd.core.ring_buffer import (
 )
 from hf_timestd.core.ring_buffer_reader import RingBufferReader
 from hf_timestd.core.counter_epoch_tracker import CounterEpochTracker
-from hf_timestd.core.registration_acquirer import RegistrationAcquirer, Registration
+from hf_timestd.core.buffer_timing import resolve_buffer_timing
+from hf_timestd.core.registration_acquirer import (
+    MinuteArrival,
+    Registration,
+    RegistrationAcquirer,
+    residuals_for_verify,
+)
 from hf_timestd.core.registration_store import (
     RegistrationStore,
     fuse_registrations,
@@ -247,15 +253,13 @@ class MetrologyService:
         self.acquirer = RegistrationAcquirer(self.channel_name, self.engine.sample_rate)
         self.reg_store = RegistrationStore()
         self.epoch_tracker = CounterEpochTracker()
-        # I4: consecutive minutes an unverified WITNESS plane has
-        # disagreed with T6 (see _apply_registration_unsafe).
-        self._t6_witness_unverified_minutes = 0
-        # task-11b fix round 1 (C1): whether THIS minute's BufferTiming was
-        # actually built from the acquired/candidate plane (origin_source
-        # "acquired") -- feed_back_ensembles needs this to know whether a
-        # detector result was measured against our plane at all.  False
-        # whenever the label or T6's plane was handed back instead.
-        self._applied_acquired_plane = False
+        # Task 10: this minute's self-measurement of the held plane
+        # (RegistrationAcquirer.measure_minute), kept for the shadow record
+        # (Task 13).  {} when nothing was measured.
+        self._last_arrivals: Dict[str, MinuteArrival] = {}
+        # Task 10: inside an episode with no raw radiod pair in the ring
+        # (one WARNING per episode).
+        self._raw_pair_missing = False
 
         # Storage backend selection. Phase 1 of the HDF5 → SQLite
         # migration (see docs/HDF5-TO-SQLITE-MIGRATION.md): each writer
@@ -695,7 +699,6 @@ class MetrologyService:
         precondition for measuring it (review I1) -- any failure below
         logs and falls back to the plane this method was handed."""
         if buffer_timing is None or buffer_timing.source == 'no_timing':
-            self._applied_acquired_plane = False
             return buffer_timing
         try:
             return self._apply_registration_unsafe(
@@ -705,7 +708,6 @@ class MetrologyService:
                 f"[{self.channel_name}] apply_registration failed for minute "
                 f"{minute_utc}; metrology continues on the label plane",
                 exc_info=True)
-            self._applied_acquired_plane = False
             return buffer_timing
 
     def _t6_authoritative(self, buffer_timing) -> bool:
@@ -725,27 +727,156 @@ class MetrologyService:
         except Exception:
             return False
 
+    def _raw_label(self, metadata: Dict[str, Any], start_rtp: int):
+        """The label radiod's own (GPS_TIME, RTP_TIMESNAP) pair gives this
+        minute's first sample, or None when the ring carries no raw pair.
+
+        Task 10 ("T3 stands alone"): T3 starts here on every station, never
+        from the ring anchor.  The ring anchor carries whatever plane
+        governs -- T6's correction on a T6 station, T3's own adopted plane
+        on a T3-only one -- and starting from it would make T3 check a
+        higher tier, or itself.  The raw pair names the whole second when
+        no minute marker decides it; the fraction comes from the ticks."""
+        raw_gps = metadata.get("raw_gps_time_ns")
+        raw_rtp = metadata.get("raw_rtp_timesnap")
+        if raw_gps is None or raw_rtp is None:
+            return None
+        bt = resolve_buffer_timing(
+            {
+                **metadata,
+                "start_rtp_timestamp": int(start_rtp),
+                "gps_time_ns": int(raw_gps),
+                "rtp_timesnap": int(raw_rtp),
+                # No Offset Judge correction: the raw pair as radiod sent it.
+                "timing": None,
+                # The writer's start_system_time follows the ring anchor,
+                # not this pair; comparing the two would only warn.
+                "start_system_time": 0,
+            },
+            sample_rate=self.engine.sample_rate,
+        )
+        return None if bt.source == "no_timing" else bt
+
+    def _wait_for_raw_pair(self, buffer_timing, t6_authoritative: bool):
+        """No raw pair this minute (an old producer, or one that never set
+        it): T3 has nothing to start from, so it waits in BOOTSTRAP and
+        says why.  One WARNING per episode."""
+        if not getattr(self, "_raw_pair_missing", False):
+            logger.warning(
+                f"[{self.channel_name}] ring carries no raw radiod pair "
+                f"(raw_gps_time_ns / raw_rtp_timesnap); T3 waits in "
+                f"BOOTSTRAP until the recorder publishes one"
+            )
+            self._raw_pair_missing = True
+        self._publish_registration(
+            None, [], None, None, self.epoch_tracker.epoch_id,
+            state_override="BOOTSTRAP",
+            standalone_reason="raw_pair_unavailable",
+        )
+        if t6_authoritative:
+            return buffer_timing
+        return dataclasses.replace(buffer_timing, origin_source="label")
+
+    def _fuse_minute(self, own, convertible, resolved_via_sibling_this_minute: bool,
+                     start_rtp: int, at_map):
+        """Fuse this channel's plane with its convertible siblings, and
+        adopt a sibling-only plane in place of an untrusted own one.
+        Returns ``(own, own_is_adopted, fused, kept, waiting)``.
+
+        Called twice a minute: before the self-measurement (so a sibling
+        plane is adopted before the held plane is measured) and after it
+        (so the fused plane carries what verify or corroborate just did
+        to the held one)."""
+        # An ADOPTED `own` is a derived ECHO of a prior sibling fusion, not
+        # independent evidence -- folding it back into fuse_registrations
+        # alongside the very siblings it was copied from understates sigma
+        # by sqrt(n+1) every minute after the first (review C1).  A
+        # genuinely self-acquired `own` (method != "adopted") IS independent
+        # and belongs in the fusion as before.
+        own_is_adopted = own is not None and getattr(own, "method", None) == "adopted"
+        # task-11b fix round 1 (I1): an UNVERIFIED own (CANDIDATE) plane is
+        # not independent evidence either.  Folding it into
+        # fuse_registrations alongside real (hence already-verified, per
+        # the CANDIDATE invariant) siblings let a phantom knock a good
+        # sibling plane straight to CONFLICT (review, C1/❌1).  Exclude it
+        # -- but NOT when it was resolved via THIS minute's sibling already
+        # (I3), and ONLY when there are siblings to fuse instead: with none,
+        # excluding it would make `fused` None, the plane would never be
+        # applied, and the candidate could never be verified (deadlock).
+        own_unverified_with_siblings = (
+            own is not None
+            and not own_is_adopted
+            and not own.verified
+            and not resolved_via_sibling_this_minute
+            and bool(convertible)
+        )
+        if own_is_adopted or own_unverified_with_siblings:
+            fusion_inputs = convertible
+        else:
+            fusion_inputs = ([own] if own else []) + convertible
+        # C1: `kept` is what fusion ACTUALLY combined.  task 16c: `waiting`
+        # names the members the corroboration floor held back.
+        fused, kept, waiting = fuse_registrations_with_members(
+            fusion_inputs, at_rtp=int(start_rtp), at_map=at_map,
+            domain=self.channel_name,
+        )
+        if fused is not None and (own is None or own_unverified_with_siblings):
+            # `fused` here is built purely from siblings.  read_siblings
+            # returns ACQUIRED and WITNESS files only, and only a VERIFIED
+            # registration is ever published in either state (task-11b;
+            # Task 10: verified by its own channel's ticks).  So a plane
+            # fused entirely from them is itself verified; it is stamped
+            # here rather than inside fuse_registrations.  The unverified
+            # candidate (if any) is dropped in favour of it.
+            self.acquirer.adopt(dataclasses.replace(fused, verified=True))
+            own = self.acquirer.registration
+            own_is_adopted = True
+        return own, own_is_adopted, fused, kept, waiting
+
+    def _route_arrivals(self, arrivals) -> None:
+        """Hand this minute's self-measurement to ``verify`` (an unverified
+        plane) or ``corroborate`` (a verified one).  Either may reset the
+        plane; the reset logs the event's one WARNING (Task 10, ruling 3),
+        so nothing more is logged here.
+
+        A minute that measured nothing ({}: the acquisition minute, no
+        plane, or no peak) routes nothing, as an empty detector minute
+        routed nothing before."""
+        if not arrivals:
+            return
+        res = residuals_for_verify(arrivals)
+        reg = self.acquirer.registration
+        if reg is None:
+            return
+        if not reg.verified:
+            self.acquirer.verify(res)
+        else:
+            self.acquirer.corroborate(res)
+
     def _apply_registration_unsafe(self, buffer_timing, iq_samples: np.ndarray,
                                    start_rtp: int, minute_utc: int,
                                    metadata: Dict[str, Any]):
-        # task-11b fix round 1 (C1): default to "not applied" -- only the
-        # single success path at the bottom, which actually hands the
-        # engine origin_source="acquired", sets this True.
-        self._applied_acquired_plane = False
+        # Task 10: "T3 stands alone".  The same code runs on every station.
+        # T3 starts from radiod's raw pair, verifies and corroborates on
+        # this channel's own fold and marker, and treats T6, where T6
+        # governs, as a recorded diagnostic only.
+        self._last_arrivals = {}
         t6_authoritative = self._t6_authoritative(buffer_timing)
-        epoch = self.epoch_tracker.observe(metadata.get("gps_time_ns", 0),
-                                           metadata.get("rtp_timesnap", 0),
-                                           metadata.get("sample_rate", self.engine.sample_rate))
+        raw = self._raw_label(metadata, int(start_rtp))
+        if raw is None:
+            return self._wait_for_raw_pair(buffer_timing, t6_authoritative)
+        if getattr(self, "_raw_pair_missing", False):
+            logger.info(f"[{self.channel_name}] raw radiod pair present again; T3 resumes")
+            self._raw_pair_missing = False
+        epoch = self.epoch_tracker.observe(
+            metadata.get("raw_gps_time_ns"), metadata.get("raw_rtp_timesnap"),
+            metadata.get("sample_rate", self.engine.sample_rate))
+        label_s0 = float(raw.sample0_utc)
         audio = self.engine.prepare_audio(iq_samples)
-        delays = self.engine.expected_delays_s(buffer_timing.sample0_utc, int(minute_utc))
-        # Still run the acquirer even when T6 is authoritative: a
-        # registration must exist to WITNESS against (spec §6), even though
-        # it will not replace T6's origin below.
+        delays = self.engine.expected_delays_s(label_s0, int(minute_utc))
         # C1: hand the acquirer the epoch as a MEASURED offset as well as a
         # name.  The name is this process's own; the offset is what the
-        # other channels' processes agree on.  Since Task 6 fusion no longer
-        # clusters on it: it converts siblings through their counter maps
-        # (Registration.in_domain).
+        # other channels' processes agree on.
         epoch_offset_s = self.epoch_tracker.epoch_offset_s
         # Task 7: since ka9q-radio e5f790dd each channel starts its own RTP
         # counter, so start_rtp means nothing to a sibling without this
@@ -757,9 +888,13 @@ class MetrologyService:
         # a map out of reach) leaves fusion to this channel's own planes.
         self.acquirer.note_counter_map(metadata.get("counter_map"))
         at_map = self.acquirer.map_at(int(start_rtp))
-        own = self.acquirer.offer_minute(audio, buffer_timing, int(start_rtp), int(minute_utc),
+        own = self.acquirer.offer_minute(audio, raw, int(start_rtp), int(minute_utc),
                                          delays, epoch, epoch_offset_s=epoch_offset_s)
-        sibs = self.reg_store.read_siblings(exclude_channel=self.channel_name)
+        # Task 10 (deferred from Task 6): WITNESS too, so the channels of a
+        # T6 station, which publish WITNESS for a verified plane, see each
+        # other as siblings.
+        sibs = self.reg_store.read_siblings(
+            exclude_channel=self.channel_name, states=("ACQUIRED", "WITNESS"))
         # Task 7 fix round 1 (I-3): a sibling that cannot convert into this
         # channel's counter (no map, another radiod run, no map of our own)
         # is no sibling at all.  Every rule below that asks "are there
@@ -772,137 +907,74 @@ class MetrologyService:
         # I3 (task-11 review): resolve-before-adopt precedence -- a plane
         # `resolve_ambiguity` just named THIS minute already used the
         # sibling to pick the station and supplied the whole second; it is
-        # independent, this-channel evidence (this channel's own fold
-        # named the fractional second), not a candidate to be dropped in
-        # favour of that same sibling below.
+        # independent, this-channel evidence, not a candidate to be dropped
+        # in favour of that same sibling below.
         resolved_via_sibling_this_minute = False
         if own is None and convertible:
-            # a shared channel's open hypotheses: let the siblings' plane name the station
-            # Task 7: every sibling converts into this channel's counter
-            # through both counter maps; one without a map, or from
-            # another radiod run, drops -- never a sibling's plane read at
-            # this channel's raw RTP.
+            # a shared channel's open hypotheses: let the siblings' plane
+            # name the station.  Task 7: every sibling converts into this
+            # channel's counter through both counter maps.
             sib_plane = fuse_registrations(convertible, at_rtp=int(start_rtp),
                                            at_map=at_map, domain=self.channel_name)
             if sib_plane is not None:
-                own = self.acquirer.resolve_ambiguity(sib_plane, int(start_rtp),
-                                                      float(buffer_timing.sample0_utc),
+                own = self.acquirer.resolve_ambiguity(sib_plane, int(start_rtp), label_s0,
                                                       epoch_offset_s=epoch_offset_s)
                 resolved_via_sibling_this_minute = own is not None
-        # An ADOPTED `own` is a derived ECHO of a prior sibling fusion, not
-        # independent evidence -- folding it back into fuse_registrations
-        # alongside the very siblings it was copied from understates sigma
-        # by sqrt(n+1) every minute after the first (review C1).  A
-        # genuinely self-acquired `own` (method != "adopted") IS independent
-        # and belongs in the fusion as before.
-        own_is_adopted = own is not None and getattr(own, "method", None) == "adopted"
-        # task-11b fix round 1 (I1): an UNVERIFIED own (CANDIDATE) plane is
-        # not independent evidence either -- `offer_minute` short-circuits
-        # to the *current* registration once ACQUIRED, so a fresh,
-        # unverified candidate is reachable here every minute.  Folding it
-        # into fuse_registrations alongside real (hence already-verified,
-        # per the CANDIDATE invariant) siblings let a phantom knock a good
-        # sibling plane straight to CONFLICT instead of ever being offered
-        # as a sibling itself (review, C1/❌1).  Exclude it -- but NOT when
-        # it was resolved via THIS minute's sibling already (I3 above), and
-        # ONLY
-        # when there are siblings to fuse instead: with none, excluding it
-        # would make `fused` None, the plane would never be applied, and
-        # the candidate could never reach verify() (deadlock).
-        own_unverified_with_siblings = (
-            own is not None
-            and not own_is_adopted
-            and not own.verified
-            and not resolved_via_sibling_this_minute
-            and bool(convertible)
-        )
-        if own_is_adopted or own_unverified_with_siblings:
-            fusion_inputs = convertible
-        else:
-            fusion_inputs = ([own] if own else []) + convertible
-        # C1: `kept` is what fusion ACTUALLY combined -- the summary's
-        # `contributing` must name those channels, not every sibling read
-        # off disk, or it claims corroboration the station never performed.
-        # task 16c: `waiting` names the members the corroboration floor
-        # held back -- a channel that just re-acquired sits outside the
-        # fused plane for two minutes instead of dragging the station's
-        # own n_minutes to zero with it.
-        fused, kept, waiting = fuse_registrations_with_members(
-            fusion_inputs, at_rtp=int(start_rtp), at_map=at_map,
-            domain=self.channel_name,
-        )
-        if fused is not None and (own is None or own_unverified_with_siblings):
-            # `fused` here is built purely from `sibs` (own contributed
-            # nothing to fusion_inputs in either case above) -- every one
-            # of those siblings came from read_siblings, which by default
-            # returns ACQUIRED files only (WITNESS only when a caller asks,
-            # as Task 10's shadow record will), and (task-11b) only a
-            # VERIFIED registration is ever published as ACQUIRED.  So a
-            # plane fused entirely from such siblings is itself
-            # verified; fuse_registrations doesn't carry that through on
-            # its own (its output defaults verified=False like any fresh
-            # Registration), so it is stamped here rather than by
-            # touching fuse_registrations itself.  The unverified
-            # candidate (if any) is dropped in favour of the verified
-            # sibling plane, not kept alongside it.
-            self.acquirer.adopt(dataclasses.replace(fused, verified=True))
-            own = self.acquirer.registration
-            own_is_adopted = True
-        label_s0 = float(buffer_timing.sample0_utc)
-        # task 16b: what a mid-minute reset needs in order to republish.
-        # `feed_back_ensembles` runs AFTER this minute's publish, so a
-        # plane the acquirer gives up on there would otherwise keep
-        # labelling every surface until the next minute's publish.
-        self._publish_context = (label_s0, epoch)
+        own, own_is_adopted, fused, kept, waiting = self._fuse_minute(
+            own, convertible, resolved_via_sibling_this_minute, int(start_rtp), at_map)
+
+        # Task 10: measure the held plane on this channel's own fold and
+        # marker, every minute (the acquisition minute included: that call
+        # keeps the audio tail the next minute's marker needs), and let the
+        # measurement verify or corroborate it.  Kept for Task 13.
+        self._last_arrivals = self.acquirer.measure_minute(
+            audio, int(start_rtp), int(minute_utc), delays)
+        self._route_arrivals(self._last_arrivals)
+        if self.acquirer.state != self.acquirer.STATE_ACQUIRED:
+            # task 16b: the measurement just gave the plane up.  Stand
+            # every surface down in this minute's publish rather than
+            # label from an abandoned plane.
+            self._publish_registration(
+                None, [], label_s0, None, epoch,
+                extra_extra=({"witness_of": "T6", "residual_vs_t6_ms": None}
+                             if t6_authoritative else None))
+            if t6_authoritative:
+                return dataclasses.replace(buffer_timing, counter_epoch_id=epoch)
+            return dataclasses.replace(buffer_timing, origin_source="label",
+                                       counter_epoch_id=epoch)
+        if own is not None:
+            # Re-fuse on the plane as the measurement left it (verified,
+            # or moved by corroborate).  No adoption follows here: a
+            # sibling-only plane was adopted in the first pass.
+            own, own_is_adopted, fused, kept, waiting = self._fuse_minute(
+                self.acquirer.registration, convertible,
+                resolved_via_sibling_this_minute, int(start_rtp), at_map)
 
         # C3: T6 wins.  The ring anchor already carries T6's correction
         # (offset_judge -> stream_recorder_v2 -> resolve_buffer_timing), so
         # replacing sample0_utc here would fight it, not defer to it.
         # Publish what the acquirer measured as a WITNESS, and hand the
-        # engine T6's plane back untouched.
+        # engine T6's plane back untouched.  Task 10: T6's plane never
+        # verifies the registration and never resets it; the residual
+        # against it is recorded, nothing more.
         if t6_authoritative:
-            residual_vs_t6_ms = (
-                None if fused is None
-                else (fused.sample0_utc_for(int(start_rtp)) - label_s0) * 1000.0
-            )
-            contributing = [] if fused is None else list(kept)
-            waiting_now = [] if fused is None else list(waiting)
-            # task-11b fix round 3: the CANDIDATE gate must apply on T6
-            # stations too.  On this path the acquired plane is never
-            # applied to BufferTiming (T6 wins below), so no detector pass
-            # ever verifies it through feed_back_ensembles
-            # (_applied_acquired_plane stays False all minute) -- but T6's
-            # plane IS the reference here, so verify against IT directly,
-            # overriding whatever `verified` this registration carried in
-            # (e.g. from an earlier sibling-fusion adoption, which agreed
-            # with siblings, not necessarily with T6).
-            if own is not None:
-                own.verified = (
-                    residual_vs_t6_ms is not None
-                    and abs(residual_vs_t6_ms) <= RegistrationAcquirer.VERIFY_MAX_RESIDUAL_MS
-                )
-            witness_state = (
-                "WITNESS" if (own is not None and own.verified) else "CANDIDATE"
-            )
-            # I4 (final review): an unverified witness plane used to park
-            # forever.  `offer_minute` short-circuits on ACQUIRED, and
-            # `feed_back_ensembles` returns immediately here because
-            # `_applied_acquired_plane` stays False all minute on this path,
-            # so nothing ever reset the acquirer -- and the
-            # hf_acquired-vs-T6 residual is exactly the measurement spec §8
-            # names as B4's acceptance number.  Count CONSECUTIVE
-            # disagreeing minutes; give the plane up after
-            # VERIFY_MAX_MINUTES of them, which is the same patience
-            # `verify()` shows an unconfirmed plane on the non-T6 path.
-            if own is None or own.verified:
-                self._t6_witness_unverified_minutes = 0
+            if fused is None:
+                residual_vs_t6_ms = raw_residual_ms = None
             else:
-                self._t6_witness_unverified_minutes = (
-                    getattr(self, "_t6_witness_unverified_minutes", 0) + 1
-                )
+                fused_s0 = fused.sample0_utc_for(int(start_rtp))
+                residual_vs_t6_ms = (fused_s0 - float(buffer_timing.sample0_utc)) * 1000.0
+                raw_residual_ms = (fused_s0 - label_s0) * 1000.0
+            current = self.acquirer.registration
+            if fused is None:
+                witness_state = "BOOTSTRAP"
+            elif current is not None and current.verified:
+                witness_state = "WITNESS"
+            else:
+                witness_state = "CANDIDATE"
             self._publish_registration(
-                fused, contributing, label_s0, residual_vs_t6_ms, epoch,
-                state_override=witness_state, waiting=waiting_now,
+                fused, [] if fused is None else list(kept), label_s0, raw_residual_ms,
+                epoch, state_override=witness_state,
+                waiting=[] if fused is None else list(waiting),
                 extra_extra={
                     "witness_of": "T6",
                     "residual_vs_t6_ms": (
@@ -910,17 +982,6 @@ class MetrologyService:
                     ),
                 },
             )
-            # After the publish, so the record of the minute that ran out
-            # of patience still carries the residual it measured (I4).
-            if (self._t6_witness_unverified_minutes
-                    >= RegistrationAcquirer.VERIFY_MAX_MINUTES):
-                by = (
-                    "no measurable residual" if residual_vs_t6_ms is None
-                    else f"{residual_vs_t6_ms:+.1f} ms")
-                self.acquirer.reset(
-                    f"witness plane disagrees with T6 ({by}) for "
-                    f"{self._t6_witness_unverified_minutes} minutes")
-                self._t6_witness_unverified_minutes = 0
             return dataclasses.replace(buffer_timing, counter_epoch_id=epoch)
 
         # I2: this channel already has its own ACQUIRED plane, but nothing
@@ -938,9 +999,7 @@ class MetrologyService:
                 # ORPHAN, not a disagreement between channels.  CONFLICT
                 # would misreport "channels disagree" when nothing does,
                 # and would never recover on its own (ACQUIRED short-
-                # circuits offer_minute, and a label-plane ensemble is
-                # filtered out of feed_back_ensembles, so corroborate
-                # never runs).  Reset to BOOTSTRAP instead so this channel
+                # circuits offer_minute).  Reset to BOOTSTRAP instead so this channel
                 # tries its own signal, or re-adopts a fresh sibling, next
                 # minute (review, fix round 2).
                 self.acquirer.reset("adopted plane's donor expired")
@@ -996,10 +1055,6 @@ class MetrologyService:
         contributing = list(kept)
         self._publish_registration(fused, contributing, label_s0, residual_ms, epoch,
                                    waiting=list(waiting))
-        # task-11b fix round 1 (C1): this minute's BufferTiming really is
-        # the acquired/candidate plane -- feed_back_ensembles needs this to
-        # know a detector result was measured against it at all.
-        self._applied_acquired_plane = True
         # I4: the label carried T6's (or whatever incumbent's) provenance;
         # once the origin is replaced the provenance must move with it --
         # one measurand, one ruler, one registration.
@@ -1012,13 +1067,17 @@ class MetrologyService:
                               channel_state_override: Optional[str] = None,
                               conflicts: Optional[List[str]] = None,
                               waiting: Optional[List[str]] = None,
-                              extra_extra: Optional[Dict[str, Any]] = None):
+                              extra_extra: Optional[Dict[str, Any]] = None,
+                              standalone_reason: Optional[str] = None):
         """``state_override`` names BOTH the channel file's state and the
         summary's -- use it only for a state the FUSED result justifies
-        (WITNESS / CANDIDATE on the T6 path).  ``channel_state_override``
-        names a PER-CHANNEL state that must not reach the summary
-        (CONFLICT); pass ``conflicts`` alongside it so the summary can name
-        the channels involved (final review, I6)."""
+        (WITNESS / CANDIDATE / BOOTSTRAP on the T6 path, BOOTSTRAP without
+        a raw pair).  ``channel_state_override`` names a PER-CHANNEL state
+        that must not reach the summary (CONFLICT); pass ``conflicts``
+        alongside it so the summary can name the channels involved (final
+        review, I6).  ``standalone_reason`` says why T3 cannot run this
+        minute (Task 10: ``"raw_pair_unavailable"``); None when it runs.
+        ``label_s0`` is the raw pair's label, None without one."""
         # NOTE: this "current" registration is the ACQUIRER's own state as of
         # right now (post adopt/acquire this minute) -- a distinct quantity
         # from the caller's "own" (this minute's fresh offer_minute /
@@ -1073,73 +1132,27 @@ class MetrologyService:
                  # task 16c: the channels fusion held back on the
                  # corroboration floor -- always present, empty when
                  # nobody waits.
-                 "waiting": sorted(set(waiting)) if waiting else []}
+                 "waiting": sorted(set(waiting)) if waiting else [],
+                 # Task 10: always present; None while T3 runs.
+                 "standalone_reason": standalone_reason}
         if extra_extra:
             extra.update(extra_extra)
         self.reg_store.write_summary(fused, sorted(set(contributing)), summary_state, extra)
 
     def feed_back_ensembles(self, results) -> None:
-        """Hand this minute's acquired-plane ensembles to the acquirer
-        (spec §5 corroborate / correct).
+        """Retired as a route to the registration (Task 10, "T3 stands
+        alone").  Kept, with its call site in ``_process_minute_data``, so
+        the seam stays visible; it never touches the plane.
 
-        Never raises (review I1): a bad ensemble must not abort the
-        minute's product writes in ``_process_minute_data``."""
-        try:
-            self._feed_back_ensembles_unsafe(results)
-        except Exception:
-            logger.error(f"[{self.channel_name}] feed_back_ensembles failed",
-                        exc_info=True)
-
-    # task-11b fix round 1 (C1): anchor sources whose timing_error_ms is
-    # measured against OUR plane (whatever anchored the search), and so are
-    # valid feedback about it.  TickEdgeDetector prefers the minute-marker
-    # anchor whenever one is found and confirmed (n_detected sufficient AND
-    # sigma_single_ms <= LABEL_ANCHOR_MAX_SIGMA_MS) -- regardless of the
-    # buffer's origin_source -- so on the strongest channels EVERY result
-    # was 'minute_marker', never 'acquired', and excluding it meant verify()
-    # was never called: the better the signal, the less likely the plane
-    # was ever confirmed.  A marker-anchored, already-confirmed (sigma_1 <=
-    # 6 ms) ensemble is not weaker evidence about the plane than an
-    # acquired-anchored one -- it is stronger.  'host_label' stays excluded
-    # (review I3): that residual is measured against the host clock, not
-    # our plane.
-    _PLANE_FEEDBACK_ANCHOR_SOURCES = ("acquired", "minute_marker")
-
-    def _feed_back_ensembles_unsafe(self, results) -> None:
-        if not getattr(self, "_applied_acquired_plane", False):
-            # This minute's BufferTiming was NOT the acquired/candidate
-            # plane (T6 witness, label fallback, ...) -- nothing measured
-            # against it is feedback about it.
-            return
-        res = {}
-        for r in results or []:
-            if getattr(r, "anchor_source", None) not in self._PLANE_FEEDBACK_ANCHOR_SOURCES:
-                continue
-            res[str(r.station)] = (float(r.ensemble_timing_error_ms), float(r.sigma_single_ms))
-        if res:
-            # An unverified (CANDIDATE) plane must be confirmed by the tick
-            # detector before it is trusted enough to tighten --
-            # RegistrationAcquirer.corroborate() also routes this itself,
-            # but the service decides it explicitly too so the intent is
-            # visible at the call site.
-            reg = self.acquirer.registration
-            if reg is not None and not reg.verified:
-                outcome = self.acquirer.verify(res)
-            else:
-                outcome = self.acquirer.corroborate(res)
-            if outcome == "reacquire":
-                logger.warning(f"[{self.channel_name}] registration residual sustained; re-acquiring")
-            if self.acquirer.state != self.acquirer.STATE_ACQUIRED:
-                # task 16b: the acquirer just gave this plane up (verify
-                # "rejected" or corroborate "reacquire").  Publish the
-                # stand-down NOW: the ring anchor, authority.json §18, the
-                # sidecar and the FUSE chrony feed all read the summary,
-                # and every one of them would otherwise go on labelling
-                # from an abandoned plane for the rest of the minute.
-                ctx = getattr(self, "_publish_context", None)
-                if ctx is not None:
-                    self._publish_registration(None, [], ctx[0], None, ctx[1])
-                    self._applied_acquired_plane = False
+        The tick detector measures against whatever plane the engine was
+        handed: T6's on a T6 station, so its ensembles would verify T3
+        against a higher tier.  Its marker-anchored ensembles also report
+        an unwrapped whole-second error without the acquirer's SNR and
+        two-consecutive-minute bars.  The registration now verifies and
+        corroborates only on its own fold and marker
+        (``RegistrationAcquirer.measure_minute``, routed in
+        ``_apply_registration_unsafe``)."""
+        return None
 
     def _process_minute_data(
         self,

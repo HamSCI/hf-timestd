@@ -108,10 +108,12 @@ def test_a_plane_one_second_off_is_rejected_by_the_marker(caplog):
     # whose noise (< 0.5 ms here) may sit on either side.
     assert confirmed.residual_ms == pytest.approx(+1000.0, abs=0.5)
     assert confirmed.residual_ms > 0, "a plane 1 s late must move earlier"
-    warnings = [r for r in caplog.records if "whole second" in r.getMessage()]
-    assert len(warnings) == 1, [r.getMessage() for r in warnings]
     assert acq.verify(ra.residuals_for_verify({"WWV": confirmed})) == "rejected"
     assert acq.state == acq.STATE_BOOTSTRAP
+    # Task 10 (ruling 3): the event's one WARNING comes from the reset.
+    warnings = [r for r in caplog.records if "whole second" in r.getMessage()]
+    assert len(warnings) == 1, [r.getMessage() for r in warnings]
+    assert "registration reset" in warnings[0].getMessage()
 
 
 def test_a_one_second_plane_resets_corroboration():
@@ -261,8 +263,11 @@ def test_the_rolling_fold_follows_a_plane_move():
     assert _measure(acq, 5)["WWV"].residual_ms == pytest.approx(-5.0, abs=0.3)
 
 
-def test_the_confirming_minute_logs_the_warning(caplog):
-    """Minor 5: the first sighting is quiet; the confirmation is loud."""
+def test_the_confirming_minute_logs_its_detail_once(caplog):
+    """Minor 5, as Task 10's ruling 3 revised it: the first sighting and
+    the confirmation both log at INFO, once each per episode.  The reset
+    that the confirmed residual causes in ``verify`` / ``corroborate``
+    carries the event's one WARNING (test_a_whole_second_event_logs_one_warning)."""
     acq, _ = _acquired()
     acq.registration.utc_ref += 1.0
     caplog.set_level(logging.INFO)
@@ -272,9 +277,115 @@ def test_the_confirming_minute_logs_the_warning(caplog):
     assert first and all(r.levelno < logging.WARNING for r in first)
     caplog.clear()
     _measure(acq, 5)  # confirmation
-    loud = [r for r in caplog.records
-            if "whole second" in r.getMessage() and r.levelno >= logging.WARNING]
-    assert len(loud) == 1
+    detail = [r for r in caplog.records if "confirms on two consecutive" in r.getMessage()]
+    assert len(detail) == 1 and detail[0].levelno == logging.INFO
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
     caplog.clear()
     _measure(acq, 6)
-    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert not [r for r in caplog.records if "whole second" in r.getMessage()]
+
+
+# ── Task 10: rulings carried from the Task 9 review ──────────────────
+
+
+def test_half_a_second_is_not_a_whole_second():
+    """Ruling 1: a fold peak exactly half a second from its expected delay
+    wraps to +500.0 ms.  That is no whole second, and must not trip the
+    whole-second guard; a true whole second reads near 1000 ms."""
+    acq, _ = _acquired()
+    acq.registration.verified = True
+    held = acq.registration.utc_ref
+    assert acq.corroborate({"WWV": (+500.0, 1.0)}) == "held"
+    assert acq.state == acq.STATE_ACQUIRED
+    assert acq.registration.utc_ref == held
+    assert acq.corroborate({"WWV": (+1000.0, 1.0)}) == "reacquire"
+    assert acq.state == acq.STATE_BOOTSTRAP
+
+
+def test_bpm_dut1_never_trips_the_whole_second_guard():
+    """Ruling 2: BPM may carry DUT1, up to 0.9 s.  A BPM residual is no
+    verdict on the plane: it neither trips the guard nor enters the mean."""
+    acq, _ = _acquired()
+    acq.registration.verified = True
+    held = acq.registration.utc_ref
+    assert acq.corroborate({"WWV": (0.0, 1.0), "BPM": (+950.0, 1.0)}) == "tightened"
+    assert acq.state == acq.STATE_ACQUIRED
+    assert acq.registration.utc_ref == pytest.approx(held, abs=1e-9)
+
+
+def test_a_whole_second_event_logs_one_warning(caplog):
+    """Ruling 3: one event, one WARNING, and it comes from the reset.  The
+    confirming minute's detail (marker offset, SNR) logs at INFO."""
+    acq, _ = _acquired()
+    acq.registration.verified = True
+    acq.registration.utc_ref += 1.0
+    caplog.set_level(logging.INFO)
+    outcomes = []
+    for k in (3, 4, 5):
+        outcomes.append(acq.corroborate(ra.residuals_for_verify(_measure(acq, k))))
+    assert outcomes[-1] == "reacquire", outcomes
+    loud = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(loud) == 1, loud
+    assert "registration reset" in loud[0] and "whole second" in loud[0]
+    detail = [r for r in caplog.records
+              if "confirms on two consecutive minutes" in r.getMessage()]
+    assert len(detail) == 1 and detail[0].levelno == logging.INFO
+
+
+def test_a_sustained_residual_reset_is_one_warning(caplog):
+    """Ruling 3, the other reset ``corroborate`` makes: the residual held
+    past 3 sigma for two minutes.  The service used to add its own
+    "residual sustained" WARNING; the reset itself now carries it."""
+    acq, _ = _acquired()
+    acq.registration.verified = True
+    caplog.set_level(logging.INFO)
+    assert acq.corroborate({"WWV": (+40.0, 0.5)}) == "held"
+    assert acq.corroborate({"WWV": (+40.0, 0.5)}) == "reacquire"
+    loud = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(loud) == 1 and "registration reset" in loud[0], loud
+
+
+def _condemn_a_late_second(acq):
+    """Acquire on one minute whose label runs 1 s late (no marker window
+    fits one minute, so the raw label names the second), then let the
+    self-measurement condemn the plane."""
+    audio, label, rtp, m = _minute(0, walk_s=1.0)
+    acq.offer_minute(audio, label, rtp, m, D, "ep-1")
+    assert acq.state == acq.STATE_ACQUIRED
+    assert acq.registration.sample0_utc_for(rtp) == pytest.approx(T0 + 1.0, abs=0.002)
+    for k in (1, 2, 3):
+        res = ra.residuals_for_verify(_measure(acq, k))
+        if acq.registration.verified:
+            acq.corroborate(res)
+        else:
+            acq.verify(res)
+        if acq.state == acq.STATE_BOOTSTRAP:
+            return k
+    raise AssertionError("the marker never condemned the plane")
+
+
+def test_a_condemned_second_names_the_next_acquisitions_second():
+    """Task 10: the host may name the whole second only when no broadcast
+    can, and a broadcast namer that disagrees overrules it.  Once the
+    marker has condemned a plane built on the raw label's second, the next
+    acquisition from that label takes the marker's second, not the raw
+    label's again (which would cycle: acquire, condemn, reset, forever)."""
+    acq = RegistrationAcquirer("WWV_10000", SR)
+    k = _condemn_a_late_second(acq)
+    audio, label, rtp, m = _minute(k + 1, walk_s=1.0)
+    acq.offer_minute(audio, label, rtp, m, D, "ep-1")
+    assert acq.state == acq.STATE_ACQUIRED
+    assert acq.registration.sample0_utc_for(rtp) == pytest.approx(T0 + 60 * (k + 1), abs=0.002)
+
+
+def test_a_new_counter_epoch_forgets_the_condemned_second():
+    """The overruling second belongs to the raw pair that was condemned; a
+    new counter epoch is a new pair, and the raw label names its second
+    again."""
+    acq = RegistrationAcquirer("WWV_10000", SR)
+    k = _condemn_a_late_second(acq)
+    audio, label, rtp, m = _minute(k + 1, walk_s=1.0)
+    acq.offer_minute(audio, label, rtp, m, D, "ep-2")
+    assert acq.state == acq.STATE_ACQUIRED
+    assert acq.registration.sample0_utc_for(rtp) == pytest.approx(
+        T0 + 60 * (k + 1) + 1.0, abs=0.002)
