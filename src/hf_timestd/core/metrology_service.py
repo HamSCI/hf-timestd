@@ -260,6 +260,12 @@ class MetrologyService:
         # Task 10: inside an episode with no raw radiod pair in the ring
         # (one WARNING per episode).
         self._raw_pair_missing = False
+        # Fix round 1 (I-2): (donor channels, their plane) this channel's
+        # own ticks condemned; refused until the plane moves.
+        self._refused_donors = None
+        # Fix round 1: the involved set of the CONFLICT episode already
+        # logged, so a persisting conflict logs one WARNING.
+        self._conflict_logged = None
 
         # Storage backend selection. Phase 1 of the HDF5 → SQLite
         # migration (see docs/HDF5-TO-SQLITE-MIGRATION.md): each writer
@@ -781,7 +787,9 @@ class MetrologyService:
                      start_rtp: int, at_map):
         """Fuse this channel's plane with its convertible siblings, and
         adopt a sibling-only plane in place of an untrusted own one.
-        Returns ``(own, own_is_adopted, fused, kept, waiting)``.
+        Returns ``(own, own_is_adopted, fused, kept, waiting, refused)``;
+        ``refused`` says the siblings' plane was set aside because this
+        channel's own ticks condemned it (fix round 1, I-2).
 
         Called twice a minute: before the self-measurement (so a sibling
         plane is adopted before the held plane is measured) and after it
@@ -820,6 +828,16 @@ class MetrologyService:
             fusion_inputs, at_rtp=int(start_rtp), at_map=at_map,
             domain=self.channel_name,
         )
+        # Fix round 1 (I-2): a sibling-only plane whose donors this
+        # channel's own ticks already condemned is neither adopted nor
+        # applied again until the donors' planes move.
+        refused = (
+            fused is not None
+            and self.channel_name not in kept
+            and self._donors_refused(fused, kept, int(start_rtp))
+        )
+        if refused:
+            fused, kept, waiting = None, [], []
         if fused is not None and (own is None or own_unverified_with_siblings):
             # `fused` here is built purely from siblings.  read_siblings
             # returns ACQUIRED and WITNESS files only, and only a VERIFIED
@@ -831,7 +849,50 @@ class MetrologyService:
             self.acquirer.adopt(dataclasses.replace(fused, verified=True))
             own = self.acquirer.registration
             own_is_adopted = True
-        return own, own_is_adopted, fused, kept, waiting
+        return own, own_is_adopted, fused, kept, waiting, refused
+
+    # Fix round 1 (I-2): how far a refused donor set's plane must move,
+    # at this minute's RTP, before this channel may adopt it again: the
+    # acquirer's ORIGIN_SIGMA_FLOOR_MS.  The donors' own corroboration
+    # moves them by far less than this per minute.
+    DONOR_REFUSAL_TOLERANCE_MS = 1.0
+
+    def _donors_refused(self, fused, kept, start_rtp: int) -> bool:
+        """Is ``fused`` (a plane from siblings ``kept`` alone) the plane
+        this channel's own ticks already condemned?  A different donor
+        set, or a plane that has moved, lifts the refusal."""
+        refusal = getattr(self, "_refused_donors", None)
+        if refusal is None:
+            return False
+        names, plane = refusal
+        moved_ms = abs(fused.sample0_utc_for(start_rtp)
+                       - plane.sample0_utc_for(start_rtp)) * 1000.0
+        if frozenset(kept) == names and moved_ms <= self.DONOR_REFUSAL_TOLERANCE_MS:
+            return True
+        logger.info(
+            f"[{self.channel_name}] the donor plane this channel's ticks "
+            f"condemned has changed ({sorted(kept)}, moved {moved_ms:.1f} ms); "
+            f"adoption allowed again")
+        self._refused_donors = None
+        return False
+
+    def _publish_conflict(self, others, label_s0, epoch, message: str,
+                          extra_extra: Optional[Dict[str, Any]]) -> None:
+        """Publish a per-channel CONFLICT naming ``others`` beside this
+        channel, with one WARNING per episode (one involved set).  The
+        episode ends at the first publish that names no conflict."""
+        involved = sorted({self.channel_name, *others})
+        if getattr(self, "_conflict_logged", None) != tuple(involved):
+            logger.warning(message)
+            self._conflict_logged = tuple(involved)
+        # I6: CONFLICT is a PER-CHANNEL verdict.  It belongs in this
+        # channel's file; the station summary carries the channels
+        # involved under `conflicts` and keeps a state derived from the
+        # fused result, so one channel's disagreement no longer
+        # overwrites the station's state for every reader.
+        self._publish_registration(None, [], label_s0, None, epoch,
+                                   channel_state_override="CONFLICT",
+                                   conflicts=involved, extra_extra=extra_extra)
 
     def _route_arrivals(self, arrivals) -> None:
         """Hand this minute's self-measurement to ``verify`` (an unverified
@@ -920,35 +981,131 @@ class MetrologyService:
                 own = self.acquirer.resolve_ambiguity(sib_plane, int(start_rtp), label_s0,
                                                       epoch_offset_s=epoch_offset_s)
                 resolved_via_sibling_this_minute = own is not None
-        own, own_is_adopted, fused, kept, waiting = self._fuse_minute(
+        own, own_is_adopted, fused, kept, waiting, refused = self._fuse_minute(
             own, convertible, resolved_via_sibling_this_minute, int(start_rtp), at_map)
 
         # Task 10: measure the held plane on this channel's own fold and
         # marker, every minute (the acquisition minute included: that call
         # keeps the audio tail the next minute's marker needs), and let the
         # measurement verify or corroborate it.  Kept for Task 13.
+        held = self.acquirer.registration
         self._last_arrivals = self.acquirer.measure_minute(
             audio, int(start_rtp), int(minute_utc), delays)
         self._route_arrivals(self._last_arrivals)
+
+        # Fix round 1 (I-1): every station runs the same orphan, CONFLICT
+        # and stand-down logic below; T6 changes only which plane the
+        # engine gets back and how a surviving plane is named.
+        t6_extra = ({"witness_of": "T6", "residual_vs_t6_ms": None}
+                    if t6_authoritative else None)
+        if t6_authoritative:
+            fallback = dataclasses.replace(buffer_timing, counter_epoch_id=epoch)
+        else:
+            fallback = dataclasses.replace(buffer_timing, origin_source="label",
+                                           counter_epoch_id=epoch)
+
         if self.acquirer.state != self.acquirer.STATE_ACQUIRED:
+            if (held is not None and getattr(held, "method", None) == "adopted"
+                    and fused is not None and self.channel_name not in kept):
+                # Fix round 1 (I-2): this channel's own ticks condemned the
+                # plane it adopted.  That is a disagreement with its
+                # donors, not a bootstrap: name them, once per episode,
+                # and refuse the same plane until it moves, or the next
+                # minute re-adopts it and the cycle repeats.
+                self._refused_donors = (frozenset(kept), fused)
+                own_ms = ", ".join(
+                    f"{st} {a.residual_ms:+.1f} ms"
+                    for st, a in sorted(self._last_arrivals.items()))
+                self._publish_conflict(
+                    kept, label_s0, epoch,
+                    f"[{self.channel_name}] this channel's own ticks disagree "
+                    f"with the plane adopted from {sorted(kept)} ({own_ms}); "
+                    f"not adopting it again until the donors' plane moves",
+                    t6_extra)
+                return fallback
             # task 16b: the measurement just gave the plane up.  Stand
             # every surface down in this minute's publish rather than
             # label from an abandoned plane.
-            self._publish_registration(
-                None, [], label_s0, None, epoch,
-                extra_extra=({"witness_of": "T6", "residual_vs_t6_ms": None}
-                             if t6_authoritative else None))
-            if t6_authoritative:
-                return dataclasses.replace(buffer_timing, counter_epoch_id=epoch)
-            return dataclasses.replace(buffer_timing, origin_source="label",
-                                       counter_epoch_id=epoch)
+            self._publish_registration(None, [], label_s0, None, epoch,
+                                       extra_extra=t6_extra)
+            return fallback
         if own is not None:
-            # Re-fuse on the plane as the measurement left it (verified,
-            # or moved by corroborate).  No adoption follows here: a
-            # sibling-only plane was adopted in the first pass.
-            own, own_is_adopted, fused, kept, waiting = self._fuse_minute(
+            # Re-fuse on the plane as the measurement left it.  A
+            # self-acquired plane enters fusion as verify or corroborate
+            # left it.  An ADOPTED plane never enters fusion (the echo
+            # rule in _fuse_minute), so whatever corroborate did to the
+            # adopted copy does not reach the published plane, which
+            # follows the donors; for an adopted plane the measurement's
+            # job is to condemn it (I-2), not to steer it.  No adoption
+            # follows here: a sibling-only plane was adopted in the first
+            # pass.
+            own, own_is_adopted, fused, kept, waiting, refused = self._fuse_minute(
                 self.acquirer.registration, convertible,
                 resolved_via_sibling_this_minute, int(start_rtp), at_map)
+
+        if refused:
+            # The donors this channel's ticks condemned are still the only
+            # plane on offer: the conflict goes on (no new WARNING).
+            self._publish_conflict(
+                self._refused_donors[0], label_s0, epoch,
+                f"[{self.channel_name}] still refusing the plane of "
+                f"{sorted(self._refused_donors[0])}", t6_extra)
+            return fallback
+
+        # I2: this channel already has its own ACQUIRED plane, but nothing
+        # in the sibling fusion agrees with it within FUSE_OUTLIER_MS of the
+        # combined median -- a real disagreement between channels sharing
+        # one origin, not a bootstrap.  Surface it; do not silently revert
+        # with contradictory provenance (channel file ACQUIRED, summary
+        # BOOTSTRAP) as before.
+        if own is not None and fused is None:
+            if own_is_adopted and not convertible:
+                # The donor's evidence is gone (its file expired past
+                # RegistrationStore.stale_s, simply vanished, or no longer
+                # converts into this counter -- Task 7 fix round 1) -- an
+                # adopted plane with nothing left to corroborate it is an
+                # ORPHAN, not a disagreement between channels.  CONFLICT
+                # would misreport "channels disagree" when nothing does,
+                # and would never recover on its own (ACQUIRED short-
+                # circuits offer_minute).  Reset to BOOTSTRAP instead so
+                # this channel tries its own signal, or re-adopts a fresh
+                # sibling, next minute (review, fix round 2).
+                self.acquirer.reset("adopted plane's donor expired")
+                self._publish_registration(None, [], label_s0, None, epoch,
+                                           extra_extra=t6_extra)
+                return fallback
+            elif convertible:
+                # A genuine disagreement between channels on one radiod
+                # run -- CONFLICT requires siblings to disagree WITH.
+                # Task 7: each sibling's delta is read in THIS channel's
+                # counter (through both maps); at raw RTP a sibling on
+                # another start block reads 20 ms per block off.  A
+                # sibling that cannot convert took no part in fusion, so
+                # it is named as such and not among the channels involved.
+                own_s0 = own.sample0_utc_for(int(start_rtp))
+                parts = []
+                involved_sibs = []
+                for r in sibs:
+                    c = r.in_domain(int(start_rtp), at_map, self.channel_name)
+                    if c is None:
+                        parts.append(f"{r.channel}=not in this counter")
+                        continue
+                    involved_sibs.append(r.channel)
+                    parts.append(f"{r.channel}={(c.utc_ref - own_s0) * 1000.0:+.1f}ms")
+                deltas = ", ".join(parts)
+                plane = "T6's" if t6_authoritative else "the label"
+                self._publish_conflict(
+                    involved_sibs, label_s0, epoch,
+                    f"[{self.channel_name}] sibling registrations disagree with this "
+                    f"channel's own plane ({deltas}); handing back {plane} plane "
+                    f"while they do",
+                    t6_extra)
+                return fallback
+            # else: a genuinely self-acquired `own` with zero siblings and
+            # `fused is None` is mathematically unreachable here --
+            # fuse_registrations of a single entry is an identity and
+            # never returns None -- so no case falls through unhandled;
+            # continue to the generic BOOTSTRAP publish below.
 
         # C3: T6 wins.  The ring anchor already carries T6's correction
         # (offset_judge -> stream_recorder_v2 -> resolve_buffer_timing), so
@@ -982,69 +1139,7 @@ class MetrologyService:
                     ),
                 },
             )
-            return dataclasses.replace(buffer_timing, counter_epoch_id=epoch)
-
-        # I2: this channel already has its own ACQUIRED plane, but nothing
-        # in the sibling fusion agrees with it within FUSE_OUTLIER_MS of the
-        # combined median -- a real disagreement between channels sharing
-        # one origin, not a bootstrap.  Surface it; do not silently revert
-        # with contradictory provenance (channel file ACQUIRED, summary
-        # BOOTSTRAP) as before.
-        if own is not None and fused is None:
-            if own_is_adopted and not convertible:
-                # The donor's evidence is gone (its file expired past
-                # RegistrationStore.stale_s, simply vanished, or no longer
-                # converts into this counter -- Task 7 fix round 1) -- an
-                # adopted plane with nothing left to corroborate it is an
-                # ORPHAN, not a disagreement between channels.  CONFLICT
-                # would misreport "channels disagree" when nothing does,
-                # and would never recover on its own (ACQUIRED short-
-                # circuits offer_minute).  Reset to BOOTSTRAP instead so this channel
-                # tries its own signal, or re-adopts a fresh sibling, next
-                # minute (review, fix round 2).
-                self.acquirer.reset("adopted plane's donor expired")
-                self._publish_registration(None, [], label_s0, None, epoch)
-                return dataclasses.replace(buffer_timing, origin_source="label",
-                                           counter_epoch_id=epoch)
-            elif convertible:
-                # A genuine disagreement between channels on one radiod
-                # run -- CONFLICT requires siblings to disagree WITH.
-                # Task 7: each sibling's delta is read in THIS channel's
-                # counter (through both maps); at raw RTP a sibling on
-                # another start block reads 20 ms per block off.  A
-                # sibling that cannot convert took no part in fusion, so
-                # it is named as such and not among the channels involved.
-                own_s0 = own.sample0_utc_for(int(start_rtp))
-                parts = []
-                involved_sibs = []
-                for r in sibs:
-                    c = r.in_domain(int(start_rtp), at_map, self.channel_name)
-                    if c is None:
-                        parts.append(f"{r.channel}=not in this counter")
-                        continue
-                    involved_sibs.append(r.channel)
-                    parts.append(f"{r.channel}={(c.utc_ref - own_s0) * 1000.0:+.1f}ms")
-                deltas = ", ".join(parts)
-                logger.warning(
-                    f"[{self.channel_name}] sibling registrations disagree with this "
-                    f"channel's own plane ({deltas}); reverting to the label plane "
-                    f"this minute")
-                involved = sorted({self.channel_name, *involved_sibs})
-                # I6: CONFLICT is a PER-CHANNEL verdict.  It belongs in this
-                # channel's file; the station summary carries the channels
-                # involved under `conflicts` and keeps a state derived from
-                # the fused result, so one channel's disagreement no longer
-                # overwrites the station's state for every reader.
-                self._publish_registration(None, [], label_s0, None, epoch,
-                                           channel_state_override="CONFLICT",
-                                           conflicts=involved)
-                return dataclasses.replace(buffer_timing, origin_source="label",
-                                           counter_epoch_id=epoch)
-            # else: a genuinely self-acquired `own` with zero siblings and
-            # `fused is None` is mathematically unreachable here --
-            # fuse_registrations of a single entry is an identity and
-            # never returns None -- so no case falls through unhandled;
-            # continue to the generic BOOTSTRAP publish below.
+            return fallback
 
         if fused is None:
             self._publish_registration(None, [], label_s0, None, epoch)
@@ -1087,8 +1182,9 @@ class MetrologyService:
         # (review M5).
         current = self.acquirer.registration
         # task-11b: an ACQUIRED-state channel file is a CANDIDATE until this
-        # channel's own registration is verified against the tick detector
-        # (RegistrationAcquirer.verify) -- publishing it as ACQUIRED before
+        # channel's own registration is verified on its own ticks
+        # (RegistrationAcquirer.verify, fed by measure_minute since Task 10)
+        # -- publishing it as ACQUIRED before
         # that let a single-station channel self-register on a fold-lattice
         # phantom and offer it to siblings as trustworthy evidence.
         if channel_state_override is not None:
@@ -1137,6 +1233,9 @@ class MetrologyService:
                  "standalone_reason": standalone_reason}
         if extra_extra:
             extra.update(extra_extra)
+        if not conflicts:
+            # Fix round 1: a publish naming no conflict ends the episode.
+            self._conflict_logged = None
         self.reg_store.write_summary(fused, sorted(set(contributing)), summary_state, extra)
 
     def feed_back_ensembles(self, results) -> None:

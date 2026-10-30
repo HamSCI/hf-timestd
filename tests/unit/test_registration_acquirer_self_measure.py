@@ -389,3 +389,46 @@ def test_a_new_counter_epoch_forgets_the_condemned_second():
     assert acq.state == acq.STATE_ACQUIRED
     assert acq.registration.sample0_utc_for(rtp) == pytest.approx(
         T0 + 60 * (k + 1) + 1.0, abs=0.002)
+
+
+# ── Task 10 fix round 1 ───────────────────────────────────────────────
+
+
+def test_an_unresolved_marker_does_not_rebuild_the_condemned_second(monkeypatch):
+    """Minor 3: the next acquisition's buffer holds a marker, but its
+    decision is unresolved (here: too weak to name a second).  The
+    remembered second still governs; otherwise the plane is rebuilt on the
+    raw label's second, which the broadcast already condemned."""
+    acq = RegistrationAcquirer("WWV_10000", SR)
+    k = _condemn_a_late_second(acq)
+    monkeypatch.setattr(ra, "marker_in_envelope", lambda *a, **kw: (1.0125, 12.0))
+    monkeypatch.setattr(
+        ra, "whole_second_from_marker",
+        lambda *a, **kw: ra.WholeSecondDecision(
+            k_int=0, k_raw=-1, agrees=True, unresolved=True, reason="snr"),
+    )
+    audio, label, rtp, m = _minute(k + 1, walk_s=1.0)
+    acq.offer_minute(audio, label, rtp, m, D, "ep-1")
+    assert acq.state == acq.STATE_ACQUIRED
+    assert acq.registration.sample0_utc_for(rtp) == pytest.approx(T0 + 60 * (k + 1), abs=0.002)
+
+
+def test_sixty_second_buffers_recover_a_raw_pair_one_second_late():
+    """Minor 8: the live ring hands over [minute, minute + 60 s), never
+    the 62 s the other tests use, so one minute holds no marker window
+    at acquisition and the run-up comes only from the previous tail.  A
+    raw label 1 s late must still end on a verified plane at truth."""
+    acq = RegistrationAcquirer("WWV_10000", SR)
+    states = []
+    for k in range(8):
+        t0 = MIN + 60 * k  # truth: the buffer starts on the minute
+        audio = make_tick_audio(60, SR, t0, D, snr_db=20.0, seed=7 + k)
+        rtp = 1_000_000 + k * 60 * SR
+        acq.offer_minute(audio, label_timing(t0, 1.0, SR), rtp, MIN + 60 * k, D, "ep-1")
+        res = ra.residuals_for_verify(acq.measure_minute(audio, rtp, MIN + 60 * k, D))
+        if res and acq.registration is not None:
+            (acq.corroborate if acq.registration.verified else acq.verify)(res)
+        states.append(acq.state)
+    assert acq.state == acq.STATE_ACQUIRED and acq.registration.verified, states
+    assert acq.registration.sample0_utc_for(1_000_000 + 7 * 60 * SR) == pytest.approx(
+        MIN + 420, abs=0.002)

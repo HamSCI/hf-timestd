@@ -1216,3 +1216,91 @@ def test_a_reset_stands_every_surface_down_the_same_minute(tmp_path):
     s = svc.reg_store.read_summary()
     assert s["state"] == "BOOTSTRAP", "the summary must stand down the SAME minute"
     assert registration_refusal(s, now=_time.time()) == "state:BOOTSTRAP"
+
+
+# ── Task 10 fix round 1: every station runs the same sibling logic ────
+
+
+def _witness_sibling(svc, utc_ref, state="WITNESS"):
+    from hf_timestd.core.registration_acquirer import Registration
+
+    sib = Registration(
+        svc.epoch_tracker.observe(**_pair(0)), rtp_ref=1_000_000, utc_ref=utc_ref,
+        sample_rate=SR, sigma_ms=0.9, n_minutes=5, channel="WWV_20000",
+        counter_map=_SIB_MAP, stations=("WWV",), verified=True,
+    )
+    svc.reg_store.write_channel(sib, state, {})
+    return sib
+
+
+def _noise_minute(k):
+    return 0.1 * np.random.default_rng(100 + k).standard_normal(62 * SR)
+
+
+def test_t6_station_orphaned_adoption_resets_and_reacquires(tmp_path):
+    """I-1: a T6 station adopts a WITNESS sibling, then the sibling's file
+    goes.  The adopted plane is an orphan there as on any station: reset,
+    then re-acquire from this channel's own signal.  Before the fix the
+    T6 branch returned first, the acquirer stayed ACQUIRED on the orphan,
+    and ``offer_minute`` short-circuited for ever."""
+    svc = _service(tmp_path)
+    _witness_sibling(svc, T0)
+    for k in (0, 1):
+        _minute(svc, k, walk=0.0, raw_walk=0.0, audio=_noise_minute(k), t6=True)
+    assert svc.acquirer.registration.method == "adopted"
+    assert svc.reg_store.read_summary()["state"] == "WITNESS"
+    (tmp_path / "reg" / "WWV_20000.json").unlink()
+    _minute(svc, 2, walk=0.0, raw_walk=0.0, audio=_noise_minute(2), t6=True)
+    assert svc.acquirer.state == RegistrationAcquirer.STATE_BOOTSTRAP
+    assert svc.reg_store.read_summary()["state"] == "BOOTSTRAP"
+    _minute(svc, 3, walk=0.0, raw_walk=0.0, t6=True)  # its own ticks
+    reg = svc.acquirer.registration
+    assert reg is not None and reg.method != "adopted"
+    assert reg.sample0_utc_for(1_000_000 + 3 * 60 * SR) == pytest.approx(T0 + 180, abs=0.002)
+
+
+def test_t6_station_sibling_conflict_is_named_once(tmp_path, caplog):
+    """I-1: a verified, self-acquired plane whose WITNESS sibling sits
+    20 ms away is a CONFLICT on a T6 station too: the channel file says
+    so, the summary names both channels under ``conflicts``, and the
+    episode logs one WARNING, not one per minute."""
+    svc = _service(tmp_path)
+    _minute(svc, 0, walk=0.0, raw_walk=0.0, t6=True)
+    _minute(svc, 1, walk=0.0, raw_walk=0.0, t6=True)
+    assert svc.acquirer.registration.verified is True
+    _witness_sibling(svc, T0 + 0.020)
+    caplog.set_level(logging.INFO)
+    for k in (2, 3, 4):
+        bt = _minute(svc, k, walk=0.0, raw_walk=0.0, t6=True)
+        assert bt.sample0_utc == pytest.approx(T0 + 60 * k, abs=1e-9)  # T6's plane
+        ch = json.loads((tmp_path / "reg" / "SHARED_10000.json").read_text())
+        assert ch["state"] == "CONFLICT"
+        assert svc.reg_store.read_summary()["conflicts"] == ["SHARED_10000", "WWV_20000"]
+    loud = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(loud) == 1 and "disagree" in loud[0], loud
+
+
+def test_a_donor_its_adopter_s_ticks_disagree_with_is_one_conflict(tmp_path, caplog):
+    """I-2: this channel hears its ticks at truth; the only sibling's
+    verified plane sits 10 ms late.  The channel adopts it, its own ticks
+    condemn it, and before the fix it reset, re-adopted from the same
+    donor and repeated every 2-3 minutes with a WARNING each time, the
+    summary flapping.  Now the condemned donor set stays refused until
+    its plane moves: ten minutes give one WARNING, and from the first
+    CONFLICT on, the channel file and the summary hold still."""
+    svc = _service(tmp_path)
+    _witness_sibling(svc, T0 + 0.010, state="ACQUIRED")
+    caplog.set_level(logging.INFO)
+    seen = []
+    for k in range(10):
+        _minute(svc, k, walk=0.0, raw_walk=0.0)
+        ch = json.loads((tmp_path / "reg" / "SHARED_10000.json").read_text())
+        s = svc.reg_store.read_summary()
+        seen.append((ch["state"], s["state"], tuple(s["conflicts"])))
+    loud = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(loud) == 1, loud
+    assert "WWV_20000" in loud[0]
+    first = next(i for i, v in enumerate(seen) if v[0] == "CONFLICT")
+    assert first <= 2, seen
+    assert len(set(seen[first:])) == 1, seen
+    assert seen[-1] == ("CONFLICT", "BOOTSTRAP", ("SHARED_10000", "WWV_20000"))

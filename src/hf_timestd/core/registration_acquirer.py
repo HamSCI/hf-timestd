@@ -970,9 +970,14 @@ def residuals_for_verify(
 SELF_FOLD_MINUTES = 3
 # Run-up kept from the previous minute's audio so the marker search
 # (±MARKER_SEARCH_HALF_S around the label minute) fits when the live ring
-# hands over [minute, minute + 60 s).  2.5 s covers the 1.5 s half-window
-# plus a margin for the band filter's edge.
-SELF_RUNUP_S = 2.5
+# hands over [minute, minute + 60 s).  The window must fit around the
+# minute the HELD plane names, and a plane up to MARKER_INT_SECOND_MAX_K
+# (1 s) late names it that much later into the run-up: 1.5 s half-window
+# + 1 s + 0.5 s margin for the fold's fraction and the band filter's edge.
+# Task 10 fix round 1: 2.5 s left a plane 1 s late (plus its +0.6 ms
+# fraction) 0.6 ms short of the window, so on 60 s live buffers the marker
+# never saw the whole second it exists to catch.
+SELF_RUNUP_S = 3.0
 # How much of the previous minute's tail to keep: enough to find
 # SELF_RUNUP_S before the next start even when consecutive buffers overlap.
 SELF_TAIL_KEEP_S = 5.0
@@ -1384,6 +1389,7 @@ class RegistrationAcquirer:
         # whole-second answer
         k_int = 0
         whole_second_unresolved = False
+        marker_resolved = False
         st0 = h.assignments[0][0]
         mk = marker_for_band(BAND_OF_STATION[st0])
         # I2: the two float32 envelopes go here, the last point that reads
@@ -1438,6 +1444,7 @@ class RegistrationAcquirer:
                 )
             k_int = dec.k_int
             whole_second_unresolved = dec.unresolved
+            marker_resolved = not dec.unresolved
             if not dec.agrees:
                 # Task 17 review I1.  Logged on DISAGREEMENT ALONE, never
                 # on the whole second it happens to imply.
@@ -1477,12 +1484,22 @@ class RegistrationAcquirer:
                     f"second by {dec.k_int:+d} s, confirmed on two "
                     f"consecutive minutes (SNR {mk[1]:.1f} dB)"
                 )
-        if mk is None and self._overruling_second is not None:
-            # Task 10: no marker window fits this buffer, and the marker
+        if not marker_resolved and self._overruling_second is not None:
+            # Task 10: this buffer's marker decides nothing (no window
+            # fits, or its decision stayed unresolved), and the marker
             # already condemned a plane built on this label's second.  The
             # host may name the second only when no broadcast can; this
             # broadcast already did.
+            #
+            # The remembered second can go stale.  On B4 the raw pair
+            # arrives up to 816 ms late, and lateness drifting by less
+            # than 0.5 s inside one epoch (no epoch change, so nothing
+            # clears this) can flip the label's rounding to the other
+            # whole second.  The self-measurement's marker catches that
+            # plane exactly as it caught the first, and the guard then
+            # records the corrected second.
             k_int = self._overruling_second
+            whole_second_unresolved = False
             logger.info(
                 f"[{self.channel}] whole second {k_int:+d} s from the minute "
                 f"marker that condemned the previous plane; the raw label's "
@@ -2032,11 +2049,16 @@ class RegistrationAcquirer:
             self._bad_minutes += 1
             if self._bad_minutes >= self.CORRECT_MINUTES:
                 # Task 10 (ruling 3): the reset carries the event's one
-                # WARNING; the service no longer adds its own.
+                # WARNING; the service no longer adds its own.  Fix round
+                # 1 (I-2): an ADOPTED plane's own ticks disagreeing with
+                # it is a conflict with its donors, which the service
+                # reports once per episode (CONFLICT); the reset stays
+                # quiet so that event, too, logs one WARNING.
+                adopted = self._reg.method == "adopted"
                 self.reset(
                     f"residual > {self.CORRECT_K_SIGMA}σ for "
                     f"{self.CORRECT_MINUTES} minutes on {far}",
-                    loud=True,
+                    loud=not adopted,
                 )
                 return "reacquire"
             return "held"
