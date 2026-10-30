@@ -520,17 +520,38 @@ class MetrologyEngine:
         return envelope - np.mean(envelope)
 
     def expected_delays_s(self, system_time: float, minute_utc: int) -> Dict[str, float]:
-        """Geometric expected delays (seconds) for the stations that can be
-        on the air at this minute on this frequency — the same set and the
-        same numbers the tick search uses.  ``minute_utc`` is the minute
-        boundary in Unix seconds; ``eligible_candidates`` wants minute-of-
-        hour and hour-of-day, derived here."""
+        """Geometric expected delays (seconds): the ``delay_s`` of each entry
+        of :meth:`expected_delay_details`."""
+        return {s: d["delay_s"]
+                for s, d in self.expected_delay_details(system_time, minute_utc).items()}
+
+    def expected_delay_details(self, system_time: float,
+                               minute_utc: int) -> Dict[str, Dict[str, Any]]:
+        """Expected delay per station that can be on the air at this minute
+        on this frequency, with the mode and ionospheric source that made it.
+
+        Each value: ``{"delay_s", "sigma_ms", "mode", "iono_source"}``.
+        ``mode`` and ``iono_source`` come from ``_last_prediction_meta``
+        (``propagation_mode``, ``data_source``) read right after that
+        station's own prediction; None when the model recorded none.
+        ``minute_utc`` is the minute boundary in Unix seconds;
+        ``eligible_candidates`` wants minute-of-hour and hour-of-day,
+        derived here.
+        """
         from hf_timestd.core.station_arrival_gate import eligible_candidates
         delays_ms: Dict[str, float] = {}
+        extras: Dict[str, Dict[str, Any]] = {}
         for station in _live_station_names():
-            expected_delay_ms, _dist_km, _unc = self._predict_geometric_delay(station, system_time)
+            self._last_prediction_meta = {}
+            expected_delay_ms, _dist_km, unc_ms = self._predict_geometric_delay(station, system_time)
             if expected_delay_ms > 0:
                 delays_ms[station] = expected_delay_ms
+                meta = getattr(self, '_last_prediction_meta', None) or {}
+                extras[station] = {
+                    "sigma_ms": float(unc_ms),
+                    "mode": meta.get('propagation_mode'),
+                    "iono_source": meta.get('data_source'),
+                }
         # ONE minute-boundary derivation (review M1): round to the nearest
         # whole minute rather than trusting the caller's minute_utc to
         # already be exactly aligned, and hand this same mb to
@@ -548,7 +569,7 @@ class MetrologyEngine:
                                        utc_hour=utc_hour, bpm_active_hours=bpm_hours,
                                        frequency_mhz=self.frequency_mhz,
                                        station_frequencies=st_freqs)
-        return {s: d / 1000.0 for s, d in eligible.items()}
+        return {s: {"delay_s": d / 1000.0, **extras[s]} for s, d in eligible.items()}
 
     def _validate_input(self, iq_samples: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
         """Validate and normalize input samples."""
