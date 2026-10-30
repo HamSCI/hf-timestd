@@ -64,6 +64,7 @@ from hf_timestd.core.registration_acquirer import (
     residuals_for_verify,
 )
 from hf_timestd.core.registration_store import (
+    FUSE_OUTLIER_MS,
     RegistrationStore,
     fuse_registrations,
     fuse_registrations_with_members,
@@ -271,6 +272,8 @@ class MetrologyService:
         # Fix round 1: the involved set of the CONFLICT episode already
         # logged, so a persisting conflict logs one WARNING.
         self._conflict_logged = None
+        # Fix round 3 (M1): the named siblings' planes in this episode.
+        self._conflict_planes: Dict[str, Any] = {}
 
         # Storage backend selection. Phase 1 of the HDF5 → SQLite
         # migration (see docs/HDF5-TO-SQLITE-MIGRATION.md): each writer
@@ -835,10 +838,15 @@ class MetrologyService:
         )
         # Fix round 1 (I-2): a sibling-only plane whose donors this
         # channel's own ticks already condemned is neither adopted nor
-        # applied again until the donors' planes move.
+        # applied again until the donors' planes move.  Fix round 3 (I2):
+        # only while this channel has no verified plane of its own.  Once
+        # its own ticks verify a plane, ordinary fusion and the CONFLICT
+        # rules govern ("T3 stands alone": verified own evidence outranks
+        # a remembered refusal).
         refused = (
             fused is not None
             and self.channel_name not in kept
+            and (own is None or not own.verified)
             and self._donors_refused(fused, kept, int(start_rtp))
         )
         if refused:
@@ -887,6 +895,30 @@ class MetrologyService:
             "epoch": epoch, "minute": int(minute_utc),
         }
 
+    def _renew_refusal(self, start_rtp: int) -> None:
+        """Fix round 3 (I1): restart the backstop's clock when this
+        channel's OWN evidence still stands against the refused plane --
+        its held (not adopted) plane, corrected by this minute's own
+        residuals, or a verified plane when nothing was measured, sits
+        more than DONOR_REFUSAL_LIFT_MS from it.  The backstop then means
+        "30 minutes without own evidence".  A CONFLICT publish alone
+        renews nothing: the refused path publishes one every minute, and
+        the backstop would never fire."""
+        r = getattr(self, "_refused_donors", None)
+        reg = self.acquirer.registration
+        if r is None or reg is None or getattr(reg, "method", None) == "adopted":
+            return
+        res = sorted(a.residual_ms for st, a in self._last_arrivals.items()
+                     if st not in NON_REGISTERING_STATIONS)
+        own_s0 = reg.sample0_utc_for(start_rtp)
+        if res:
+            own_s0 -= res[len(res) // 2] / 1000.0
+        elif not reg.verified:
+            return
+        off_ms = abs(own_s0 - r["plane"].sample0_utc_for(start_rtp)) * 1000.0
+        if off_ms > self.DONOR_REFUSAL_LIFT_MS and self._minute_now is not None:
+            r["minute"] = int(self._minute_now)
+
     def _donors_refused(self, fused, kept, start_rtp: int) -> bool:
         """Is ``fused`` (a plane from siblings alone) still the plane this
         channel's own ticks condemned?  Which siblings carry it does not
@@ -900,7 +932,8 @@ class MetrologyService:
         if now is not None and now - r["minute"] >= self.DONOR_REFUSAL_MAX_S:
             logger.info(
                 f"[{self.channel_name}] refusal of {sorted(r['names'])}'s plane "
-                f"lifted after 30 minutes; adoption allowed again")
+                f"lifted after 30 minutes without this channel's own evidence "
+                f"against it; adoption allowed again")
             self._refused_donors = None
             return False
         if r["residual_s"] is None:
@@ -917,7 +950,9 @@ class MetrologyService:
         return False
 
     def _publish_conflict(self, others, label_s0, epoch, message: str,
-                          extra_extra: Optional[Dict[str, Any]]) -> None:
+                          extra_extra: Optional[Dict[str, Any]],
+                          planes: Optional[Dict[str, Any]] = None,
+                          start_rtp: Optional[int] = None) -> None:
         """Publish a per-channel CONFLICT naming ``others`` beside this
         channel, with one WARNING per episode.
 
@@ -928,16 +963,42 @@ class MetrologyService:
         sibling), and a donor clearing the corroboration floor changes
         the set mid-episode; keying on the set logged a second WARNING
         for one disagreement.  A changed set logs at INFO.  The episode
-        ends at the first publish that names no conflict."""
+        ends at the first publish that names no conflict.
+
+        Fix round 3 (M1): ``planes`` maps the named siblings to their
+        planes in this channel's counter.  A member joining mid-episode
+        more than FUSE_OUTLIER_MS from every member already named is a
+        new disagreement, not a re-labelling, and logs its own WARNING;
+        a joiner on a plane already named stays at INFO."""
         involved = sorted({self.channel_name, *others})
         logged = getattr(self, "_conflict_logged", None)
+        known = getattr(self, "_conflict_planes", None) or {}
+        planes = planes or {}
         if logged is None:
             logger.warning(message)
         elif logged != tuple(involved):
-            logger.info(
-                f"[{self.channel_name}] the conflict now names {involved} "
-                f"(was {list(logged)})")
+            far = {}
+            if start_rtp is not None and known:
+                for n in involved:
+                    if n in logged or n not in planes:
+                        continue
+                    s0 = planes[n].sample0_utc_for(start_rtp)
+                    nearest = min(abs(s0 - k.sample0_utc_for(start_rtp)) * 1000.0
+                                  for k in known.values())
+                    if nearest > FUSE_OUTLIER_MS:
+                        far[n] = nearest
+            if far:
+                logger.warning(
+                    f"[{self.channel_name}] the conflict gains a new plane: "
+                    + ", ".join(f"{n} sits {d:.1f} ms from every channel already named"
+                                for n, d in sorted(far.items()))
+                    + f"; now {involved}")
+            else:
+                logger.info(
+                    f"[{self.channel_name}] the conflict now names {involved} "
+                    f"(was {list(logged)})")
         self._conflict_logged = tuple(involved)
+        self._conflict_planes = {**known, **planes}
         # I6: CONFLICT is a PER-CHANNEL verdict.  It belongs in this
         # channel's file; the station summary carries the channels
         # involved under `conflicts` and keeps a state derived from the
@@ -1027,6 +1088,12 @@ class MetrologyService:
             r for r in sibs
             if r.in_domain(int(start_rtp), at_map, self.channel_name) is not None
         ]
+        # Fix round 3 (M1): each convertible sibling's plane in this
+        # channel's counter, for naming what a CONFLICT is about.
+        sib_planes = {
+            r.channel: r.in_domain(int(start_rtp), at_map, self.channel_name)
+            for r in convertible
+        }
         # I3 (task-11 review): resolve-before-adopt precedence -- a plane
         # `resolve_ambiguity` just named THIS minute already used the
         # sibling to pick the station and supplied the whole second; it is
@@ -1057,6 +1124,7 @@ class MetrologyService:
         self._last_arrivals = self.acquirer.measure_minute(
             audio, int(start_rtp), int(minute_utc), delays)
         self._route_arrivals(self._last_arrivals)
+        self._renew_refusal(int(start_rtp))
 
         # Fix round 1 (I-1): every station runs the same orphan, CONFLICT
         # and stand-down logic below; T6 changes only which plane the
@@ -1086,7 +1154,8 @@ class MetrologyService:
                     f"[{self.channel_name}] this channel's own ticks disagree "
                     f"with the plane adopted from {sorted(kept)} ({own_ms}); "
                     f"not adopting it again until the donors' plane moves",
-                    t6_extra)
+                    t6_extra, planes={n: sib_planes[n] for n in kept if n in sib_planes},
+                    start_rtp=int(start_rtp))
                 return fallback
             if refused:
                 # Fix round 2 (IMPORTANT 1): no own plane this minute (a
@@ -1098,7 +1167,10 @@ class MetrologyService:
                 self._publish_conflict(
                     self._refused_kept, label_s0, epoch,
                     f"[{self.channel_name}] still refusing the plane of "
-                    f"{sorted(self._refused_kept)}", t6_extra)
+                    f"{sorted(self._refused_kept)}", t6_extra,
+                    planes={n: sib_planes[n] for n in self._refused_kept
+                            if n in sib_planes},
+                    start_rtp=int(start_rtp))
                 return fallback
             # task 16b: the measurement just gave the plane up.  Stand
             # every surface down in this minute's publish rather than
@@ -1126,7 +1198,10 @@ class MetrologyService:
             self._publish_conflict(
                 self._refused_kept, label_s0, epoch,
                 f"[{self.channel_name}] still refusing the plane of "
-                f"{sorted(self._refused_kept)}", t6_extra)
+                f"{sorted(self._refused_kept)}", t6_extra,
+                planes={n: sib_planes[n] for n in self._refused_kept
+                        if n in sib_planes},
+                start_rtp=int(start_rtp))
             return fallback
 
         # I2: this channel already has its own ACQUIRED plane, but nothing
@@ -1168,7 +1243,8 @@ class MetrologyService:
                         parts.append(f"{r.channel}=not in this counter")
                         continue
                     involved_sibs.append(r.channel)
-                    parts.append(f"{r.channel}={(c.utc_ref - own_s0) * 1000.0:+.1f}ms")
+                    parts.append(
+                        f"{r.channel}={(c.sample0_utc_for(int(start_rtp)) - own_s0) * 1000.0:+.1f}ms")
                 deltas = ", ".join(parts)
                 plane = "T6's" if t6_authoritative else "the label"
                 self._publish_conflict(
@@ -1176,7 +1252,9 @@ class MetrologyService:
                     f"[{self.channel_name}] sibling registrations disagree with this "
                     f"channel's own plane ({deltas}); handing back {plane} plane "
                     f"while they do",
-                    t6_extra)
+                    t6_extra,
+                    planes={n: sib_planes[n] for n in involved_sibs if n in sib_planes},
+                    start_rtp=int(start_rtp))
                 return fallback
             # else: a genuinely self-acquired `own` with zero siblings and
             # `fused is None` is mathematically unreachable here --
@@ -1313,6 +1391,7 @@ class MetrologyService:
         if not conflicts:
             # Fix round 1: a publish naming no conflict ends the episode.
             self._conflict_logged = None
+            self._conflict_planes = {}
         self.reg_store.write_summary(fused, sorted(set(contributing)), summary_state, extra)
 
     def feed_back_ensembles(self, results) -> None:

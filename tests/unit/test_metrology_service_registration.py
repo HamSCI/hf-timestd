@@ -1368,7 +1368,14 @@ def test_the_conflict_episode_survives_a_change_of_named_channels(tmp_path, capl
     corroboration floor, so the conflict names only the donor fusion
     kept.  At minute 5 the young donor clears the floor and joins: the
     named channels change mid-episode.  One episode, one WARNING (the
-    change of channels logs at INFO)."""
+    change of channels logs at INFO).
+
+    Fix round 3 (I2, ruling a) moved this scenario into a gap: this
+    channel hears only noise after its condemnation, so no verified own
+    plane exists and the refusal governs throughout.  With its own plane
+    verified, the two donors would now outvote it under the median rule
+    (pre-existing, out of scope) and no episode would remain to hand
+    off."""
     from hf_timestd.core.registration_acquirer import Registration
 
     svc = _service(tmp_path)
@@ -1387,9 +1394,14 @@ def test_the_conflict_episode_survives_a_change_of_named_channels(tmp_path, capl
             assert svc.reg_store.read_summary()["conflicts"] == [
                 "SHARED_10000", "WWV_20000"], "the young donor waited until now"
 
-    states, loud = _run_refusal(svc, tmp_path, 10, before=mature)
+    caplog.set_level(logging.INFO)
+    states, loud = _run_refusal(
+        svc, tmp_path, 10, before=mature,
+        audio_for=lambda k: _noise_minute(k) if k >= 2 else None)
     assert len(loud) == 1, loud
-    assert states[-1] == "CONFLICT"
+    assert set(states[1:]) == {"CONFLICT"}, states
+    assert any("now names" in r.getMessage() and r.levelno == logging.INFO
+               for r in caplog.records)
     assert svc.reg_store.read_summary()["conflicts"] == [
         "SHARED_10000", "WWV_20000", "WWV_25000"]
 
@@ -1448,3 +1460,91 @@ def test_a_new_counter_epoch_clears_the_refusal(tmp_path, caplog):
     cleared = [r for r in caplog.records if "counter epoch" in r.getMessage()
                and "refus" in r.getMessage()]
     assert len(cleared) == 1 and cleared[0].levelno == logging.INFO
+
+
+# ── Task 10 fix round 3 ───────────────────────────────────────────────
+
+
+def _sib_at(svc, name, utc, n_minutes=5):
+    from hf_timestd.core.registration_acquirer import Registration
+
+    svc.reg_store.write_channel(Registration(
+        svc.epoch_tracker.observe(**_pair(0)), rtp_ref=1_000_000, utc_ref=utc,
+        sample_rate=SR, sigma_ms=0.9, n_minutes=n_minutes, channel=name,
+        counter_map=_SIB_MAP, stations=("WWV",), verified=True,
+    ), "ACQUIRED", {})
+
+
+def test_the_backstop_counts_minutes_without_own_evidence(tmp_path, caplog):
+    """Fix round 3, I1: while this channel holds its own verified plane
+    in CONFLICT, its ticks renew the refusal every minute.  The backstop
+    measures 30 minutes WITHOUT such evidence, not 30 minutes since the
+    first condemnation.  Before, an ordinary re-acquisition at minute 36
+    found the refusal 35 minutes old, lifted it, adopted the condemned
+    plane for a minute (labels 10 ms wrong) and logged a second WARNING."""
+    svc = _service(tmp_path)
+    _witness_sibling(svc, T0 + 0.010, state="ACQUIRED")
+    caplog.set_level(logging.INFO)
+
+    def lose_own_plane(k):
+        if k == 36:
+            svc.acquirer.reset("test: own plane lost (re-acquisition)")
+
+    states, loud = _run_refusal(svc, tmp_path, 40, before=lose_own_plane)
+    assert len(loud) == 1, loud
+    assert set(states[1:]) == {"CONFLICT"}, states
+    assert not [r for r in caplog.records if "30 minutes" in r.getMessage()]
+    assert svc.acquirer.registration is None or svc.acquirer.registration.method != "adopted"
+
+
+def test_a_verified_own_plane_is_never_gated_by_the_refusal(tmp_path, caplog):
+    """Fix round 3, I2 (ruling a): once this channel's own plane verifies,
+    ordinary fusion and the CONFLICT rules govern; a remembered refusal
+    never gates it.  Two donors at +10 ms (the second from minute 6): the
+    median drops the own plane (a pre-existing rule, out of scope), and
+    the refusal used to keep it in CONFLICT until its 30-minute backstop
+    flipped the channel to ACQUIRED at minute 31 with an INFO line.  Now
+    nothing changes at minute 31: the refusal is not consulted at all."""
+    svc = _service(tmp_path)
+    _witness_sibling(svc, T0 + 0.010, state="ACQUIRED")
+    caplog.set_level(logging.INFO)
+
+    def second_sibling(k):
+        if k >= 6:
+            _sib_at(svc, "WWV_25000", T0 + 0.010)
+
+    states, loud = _run_refusal(svc, tmp_path, 34, before=second_sibling)
+    assert len(loud) == 1, loud
+    assert len(set(states[6:])) == 1, states
+    assert not [r for r in caplog.records if "30 minutes" in r.getMessage()]
+
+
+def test_a_sibling_joining_at_a_new_plane_is_a_warning(tmp_path, caplog):
+    """Fix round 3, M1: a conflict episode logs once, but a member that
+    joins at a NEW plane -- more than FUSE_OUTLIER_MS from every member
+    already named -- is a new disagreement and logs its own WARNING.  Own
+    at truth and A at +10 ms conflict; then B (-10 ms) and C (+25 ms)
+    join, and the four still fuse to nothing.  (A joiner on a named
+    plane stays at INFO:
+    test_the_conflict_episode_survives_a_change_of_named_channels.)"""
+    svc = _service(tmp_path)
+    for k in range(4):
+        _minute(svc, k, walk=0.0, raw_walk=0.0)
+    assert svc.acquirer.registration.verified and svc.acquirer.registration.n_minutes >= 2
+    caplog.set_level(logging.INFO)
+    _sib_at(svc, "WWV_20000", T0 + 0.010)
+    for k in (4, 5):
+        _minute(svc, k, walk=0.0, raw_walk=0.0)
+        assert svc.reg_store.read_summary()["conflicts"] == ["SHARED_10000", "WWV_20000"]
+    first = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(first) == 1, first
+    caplog.clear()
+    _sib_at(svc, "WWV_15000", T0 - 0.010)
+    _sib_at(svc, "WWV_25000", T0 + 0.025)
+    for k in (6, 7):
+        _minute(svc, k, walk=0.0, raw_walk=0.0)
+        assert svc.reg_store.read_summary()["conflicts"] == [
+            "SHARED_10000", "WWV_15000", "WWV_20000", "WWV_25000"]
+    loud = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(loud) == 1, loud
+    assert "WWV_25000" in loud[0] and "WWV_15000" in loud[0]
