@@ -99,3 +99,84 @@ def test_row_without_minute_never_raises(tmp_path, caplog):
         rec.append({"kind": "minute"})
     assert len([r for r in caplog.records
                 if r.levelno >= logging.ERROR]) == 1
+
+
+def _fail_unlink_for(monkeypatch, names):
+    from pathlib import Path
+    real = Path.unlink
+
+    def unlink(self, *a, **k):
+        if self.name in names:
+            raise PermissionError(13, "immutable", str(self))
+        return real(self, *a, **k)
+    monkeypatch.setattr(Path, "unlink", unlink)
+
+
+def test_failing_prune_warns_once_per_streak_and_retries(
+        tmp_path, caplog, monkeypatch):
+    stuck = tmp_path / "minutes-20261001.jsonl"
+    other = tmp_path / "minutes-20261002.jsonl"
+    for p in (stuck, other):
+        p.write_text("{}\n")
+    _fail_unlink_for(monkeypatch, {stuck.name})
+    rec = T3ShadowRecord("minutes", tmp_path, retention_days=14)
+    with caplog.at_level(logging.DEBUG):
+        rec.append({"utc_minute": _ts(2026, 10, 30, 0, 0)})
+        rec.append({"utc_minute": _ts(2026, 10, 30, 0, 1)})
+    warns = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warns) == 1
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert stuck.exists()
+    assert not other.exists()  # one stuck file does not stop the rest
+    # the fault clears: the prune retries the same day and succeeds
+    monkeypatch.undo()
+    rec.append({"utc_minute": _ts(2026, 10, 30, 0, 2)})
+    assert not stuck.exists()
+
+
+@pytest.mark.parametrize("bad", [float("nan"), {1, 2}, b"raw"])
+def test_unserialisable_row_writes_nothing_and_logs_once(
+        tmp_path, caplog, bad):
+    rec = T3ShadowRecord("minutes", tmp_path)
+    with caplog.at_level(logging.DEBUG):
+        for i in range(2):
+            rec.append({"utc_minute": _ts(2026, 10, 30, 0, i), "x": bad})
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errors) == 1
+    assert "BAD ROW" in errors[0].getMessage()
+    f = tmp_path / "minutes-20261030.jsonl"
+    assert not f.exists() or f.read_text() == ""
+
+
+def test_io_error_message_differs_from_serialisation_error(tmp_path, caplog):
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    rec = T3ShadowRecord("minutes", blocker)  # a file, not a directory
+    with caplog.at_level(logging.DEBUG):
+        rec.append({"utc_minute": _ts(2026, 10, 30)})
+    msg = [r for r in caplog.records if r.levelno >= logging.ERROR][0]
+    assert "BAD ROW" not in msg.getMessage()
+
+
+def test_prune_leaves_a_prefix_sibling_stream_alone(tmp_path):
+    a = tmp_path / "broadcasts-SHARED_1000-20261001.jsonl"
+    b = tmp_path / "broadcasts-SHARED_10000-20261001.jsonl"
+    for p in (a, b):
+        p.write_text("{}\n")
+    T3ShadowRecord("broadcasts-SHARED_1000", tmp_path).append(
+        {"utc_minute": _ts(2026, 10, 30)})
+    assert not a.exists() and b.exists()
+    b2 = tmp_path / "broadcasts-SHARED_10000-20261001.jsonl"
+    a.write_text("{}\n")
+    T3ShadowRecord("broadcasts-SHARED_10000", tmp_path).append(
+        {"utc_minute": _ts(2026, 10, 30)})
+    assert not b2.exists() and a.exists()
+
+
+def test_a_late_row_does_not_prune_again(tmp_path):
+    rec = T3ShadowRecord("minutes", tmp_path, retention_days=14)
+    rec.append({"utc_minute": _ts(2026, 10, 30)})
+    old = tmp_path / "minutes-20261001.jsonl"
+    old.write_text("{}\n")
+    rec.append({"utc_minute": _ts(2026, 10, 29, 23, 59)})  # late row
+    assert old.exists()
