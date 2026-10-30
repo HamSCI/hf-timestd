@@ -163,6 +163,23 @@ radiod restart, or a channel created afresh.  So the host-clock fallback for nam
 rarely, and the record of §7.4 counts each time it does.  While the broadcasts fade, T3 holds its
 last registration and its sigma grows at the ruler's rate; it does not drop to T2.
 
+**Channels and the station answer (Michael, 2026-10-30).**  Every channel on a station samples
+one ADC through one clock, so a station has one true registration.  A lasting disagreement
+between channels therefore measures the propagation model's error for those frequencies, not
+the clock.  Two jobs follow, kept apart:
+
+- Each channel keeps its own verified plane, measured on its own ticks and marker, and
+  publishes it with its distance from the station answer.  Fusion never replaces a verified
+  channel plane with its siblings'.  The per-channel residuals feed the refinement loop (§7.4).
+- One station answer combines the channels with one witness per transmitter site (WWV, WWVH,
+  WWVB, later others), weighted by measured precision, with a median gate against outliers.
+  Once T3 is admitted, that answer becomes the registration the station labels with, as T6's
+  does today: one result for every consumer, derived from the payload.  It never votes on
+  chrony (MEASUREMENT_MODEL.md §7.1.1).
+
+Expose, never correct: a channel that disagrees stays visible as a number in the record and
+in its published plane; no rule quietly overwrites it.
+
 ### 7.4 The refinement loop on B4
 
 B4 holds two references, T6 and the LAN GPS server behind T4.  *(My call.)*  T6 serves as the
