@@ -17,7 +17,11 @@ from hamsci_dsp.counter_map import CounterMap, CounterPoll
 F_IN = 64_800_000
 ILEN = 1_296_000
 ND_K0 = (51, 51, 51, 51, 50)     # ND's measured start blocks
-EPOCH_GPS_S = 1_000_000.0        # synthetic radiod start, in GPS seconds
+# Synthetic radiod start, in GPS seconds.  Chosen where the metrology
+# tests' raw pair (UTC 1_799_999_999 at RTP 1_000_000, k0 51) puts the
+# run, so a map built here and that raw pair name one run (final review
+# I-4: metrology refuses a map more than 2 s from its raw pair's epoch).
+EPOCH_GPS_S = 1_484_035_174.0
 DEFAULT_BLOCKS = (100, 101, 102, 103, 104)
 
 

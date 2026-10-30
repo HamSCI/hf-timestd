@@ -1185,6 +1185,16 @@ class RegistrationAcquirer:
         if self._reg is not None:
             self._stamped(self._reg)
 
+    def set_aside_counter_map(self) -> None:
+        """Forget the held map without the withdrawal WARNING.
+
+        Final review I-4 (2026-10-30): after a radiod restart the ring can
+        carry the new run's raw pair beside the old run's map for up to a
+        minute.  The caller found the map does not fit the raw pair and
+        logs that itself; a map that matches again is then taken as a
+        fresh one, with no continuity to prove against the old run."""
+        self._cmap = None
+
     @staticmethod
     def _counter_map_break(held: CounterMap, new: CounterMap) -> Optional[str]:
         """Why ``new`` does not continue ``held``, or None when it does."""

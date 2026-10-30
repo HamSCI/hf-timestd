@@ -96,6 +96,25 @@ def resync_minute_after(exc: Exception, head_utc: float, jump_min: int) -> int:
     return (int(head_utc) // 60) * 60 - int(jump_min) * 60
 
 
+def counter_map_run_mismatch_s(cmap, raw_gps_time_ns: int,
+                               raw_rtp_timesnap: int) -> float:
+    """How far, in seconds, radiod's raw pair puts its run's epoch from
+    ``cmap``'s ``input_epoch_gps_s``.  Zero for one run; hours for two.
+
+    The raw pair's own epoch is ``gps_s - input_index(rtp) / f_in``, the
+    quantity the map's epoch names.  RTP is a 32-bit counter, and a
+    steady raw pair is never refreshed, so ``input_index`` may read the
+    pair's RTP one wrap away; the difference is taken modulo that wrap
+    (``2**32`` output samples), which cannot hide a second run unless it
+    started a whole number of wraps (49.7 h at 24 kHz) after the first,
+    to within the tolerance.  Final review I-4, 2026-10-30."""
+    wrap_s = 2**32 * cmap.ilen / cmap.olen / cmap.input_samprate
+    implied = (int(raw_gps_time_ns) / 1e9
+               - cmap.input_index(int(raw_rtp_timesnap)) / cmap.input_samprate)
+    d = implied - cmap.input_epoch_gps_s
+    return (d + wrap_s / 2.0) % wrap_s - wrap_s / 2.0
+
+
 class MetrologyService:
     """
     Metrology Service: The "Instrument" layer.
@@ -865,6 +884,54 @@ class MetrologyService:
         except Exception:
             return False
 
+    # Minutes a map may disagree with the raw pair before the INFO line
+    # becomes a WARNING.  The recorder refreshes maps every 60 s, so a
+    # restart's window lasts one or two minutes; longer means a fault.
+    _MAP_MISMATCH_WARN_MIN = 3
+
+    def _counter_map_for_raw_pair(self, metadata: Dict[str, Any]):
+        """The ring's counter map, or None when it belongs to another
+        radiod run than the ring's raw pair.
+
+        Final review I-4 (2026-10-30): the recorder re-seeds the raw pair
+        the moment radiod restarts, but refreshes the maps only on its
+        60 s tick.  A minute in between sees the new run's counter beside
+        the old run's map, and converting fresh old-run siblings through
+        it lands them hours off.  So the map stands only while the raw
+        pair's own epoch lies within ``COUNTER_EPOCH_SKEW_ALLOWANCE_S``
+        of the map's; otherwise it reads as absent until one matches."""
+        cmap = metadata.get("counter_map")
+        raw_gps = metadata.get("raw_gps_time_ns")
+        raw_rtp = metadata.get("raw_rtp_timesnap")
+        if cmap is None or raw_gps is None or raw_rtp is None:
+            return cmap
+        from hf_timestd.core.counter_epoch_tracker import (
+            COUNTER_EPOCH_SKEW_ALLOWANCE_S,
+        )
+        miss_s = counter_map_run_mismatch_s(cmap, raw_gps, raw_rtp)
+        streak = getattr(self, "_map_mismatch_minutes", 0)
+        if abs(miss_s) <= COUNTER_EPOCH_SKEW_ALLOWANCE_S:
+            if streak:
+                logger.info(
+                    f"[{self.channel_name}] counter map matches the raw "
+                    f"radiod pair again after {streak} minute(s)")
+            self._map_mismatch_minutes = 0
+            return cmap
+        streak += 1
+        self._map_mismatch_minutes = streak
+        if streak == 1:
+            logger.info(
+                f"[{self.channel_name}] counter map names another radiod run "
+                f"than the raw pair ({miss_s:+.3f} s apart): no sibling "
+                f"converts until the recorder's next map refresh")
+        elif streak == self._MAP_MISMATCH_WARN_MIN:
+            logger.warning(
+                f"[{self.channel_name}] counter map still names another "
+                f"radiod run than the raw pair after {streak} minutes "
+                f"({miss_s:+.3f} s apart); the recorder's map refresh may "
+                f"have stopped.  No sibling converts into this counter.")
+        return None
+
     def _raw_label(self, metadata: Dict[str, Any], start_rtp: int):
         """The label radiod's own (GPS_TIME, RTP_TIMESNAP) pair gives this
         minute's first sample, or None when the ring carries no raw pair.
@@ -1198,7 +1265,11 @@ class MetrologyService:
         # is offered this minute.  `at_map` names start_rtp's counter for
         # every fusion call below; None (an old producer, a withdrawn map,
         # a map out of reach) leaves fusion to this channel's own planes.
-        self.acquirer.note_counter_map(metadata.get("counter_map"))
+        cmap = self._counter_map_for_raw_pair(metadata)
+        if cmap is None and metadata.get("counter_map") is not None:
+            self.acquirer.set_aside_counter_map()
+        else:
+            self.acquirer.note_counter_map(cmap)
         at_map = self.acquirer.map_at(int(start_rtp))
         own = self.acquirer.offer_minute(audio, raw, int(start_rtp), int(minute_utc),
                                          delays, epoch, epoch_offset_s=epoch_offset_s)

@@ -207,7 +207,9 @@ def test_old_anchor_never_repins_to_a_new_run(tmp_path):
     so the old anchor's RTP can lie within reach of the new run's map by
     chance.  The old anchor must not read through it: its RTP belongs to the
     old counter.  A new anchor captured on the new run answers again."""
-    run_b = EPOCH_GPS_S + 3600
+    # 30 s into run A, so both anchors' captures (about 46 s after A
+    # began) follow B's start and only the repin guard can refuse.
+    run_b = EPOCH_GPS_S + 30
     old = _t6_anchor(102)
     rec = _recorder(tmp_path, _t3_summary(103, counter_map_for(T3_K0, 24_000)),
                     old, counter_map_for(T6_K0, 96_000))

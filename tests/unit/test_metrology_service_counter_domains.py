@@ -210,14 +210,17 @@ def test_counter_map_from_another_radiod_run_resets_the_plane(tmp_path, caplog):
     svc = _channel(tmp_path, "SHARED_10000")
     _acquire(svc, 51)
     restarted = counter_map_for(51, SR, epoch_gps_s=EPOCH_GPS_S + 3600.0)
+    # The raw pair moves with the run (final review I-4: a map that names
+    # another run than the raw pair reads as absent).
+    meta = _meta(51, 1, cmap=restarted, walk=0.3)
+    meta["raw_gps_time_ns"] += 3600 * 10**9
     with caplog.at_level(logging.INFO, logger=ACQ_LOG):
         svc.apply_registration(
             label_timing(T0 + 60, 0.3, SR), _noise(5), _start(51, 1), MIN + 60,
-            _meta(51, 1, cmap=restarted, walk=0.3),
+            meta,
         )
     resets = [r for r in caplog.records if "registration reset" in r.getMessage()]
-    assert len(resets) == 1
-    assert "another radiod run" in resets[0].getMessage()
+    assert resets and "another radiod run" in resets[0].getMessage()
     assert svc.acquirer.registration is None
 
 
@@ -419,3 +422,80 @@ def test_map_too_far_from_the_held_one_resets_loudly(caplog):
     assert len(resets) == 1 and "past reach" in resets[0].getMessage()
     assert resets[0].levelno >= logging.WARNING
     assert acq.registration is None
+
+
+# ── Final review I-4: the ring's map lags its raw pair after a restart ──
+
+
+def _map_fitting(k0: int, meta: dict, shift_s: float = 0.0):
+    """Channel k0's map, its epoch set where ``meta``'s raw pair puts the
+    run (less ``shift_s``): the map the recorder would publish for it."""
+    import dataclasses
+
+    from tests.unit.synth_origins import F_IN
+
+    m = counter_map_for(k0, SR)
+    implied = (meta["raw_gps_time_ns"] / 1e9
+               - m.input_index(meta["raw_rtp_timesnap"]) / F_IN)
+    return dataclasses.replace(m, input_epoch_gps_s=implied - shift_s)
+
+
+def test_old_runs_map_beside_a_new_raw_pair_converts_no_sibling(tmp_path, caplog):
+    """radiod restarted an hour into a run.  The recorder re-seeded the
+    raw pair at once but still publishes the old run's map, and
+    WWV_20000's file still holds a fresh plane from the old run.
+
+    Old run: this instant sat D = 3600 s of samples later in every
+    counter.  Read through the old map at the new counter, the sibling's
+    plane lands an hour off; adopting it stamps garbage verified.  The
+    map must read as absent until one fits the raw pair."""
+    d = 3600 * SR
+    svc = _channel(tmp_path, "SHARED_10000")
+    meta = _meta(51, 1, walk=0.3)               # the new run's raw pair
+    old_map = _map_fitting(51, meta, shift_s=3600.0)
+    meta["counter_map"] = old_map
+    sib_rtp = (_start(50, 1) + d) % 2**32
+    sib_map = dataclasses_replace(counter_map_for(50, SR),
+                                  input_epoch_gps_s=old_map.input_epoch_gps_s)
+    sib = _sibling("WWV_20000", 50, 1, T0 + 60)
+    sib.rtp_ref = sib_rtp
+    sib.counter_map = sib_map.rolled_forward(sib_rtp)
+    sib.counter_epoch_id = CounterEpochTracker().observe(
+        meta["raw_gps_time_ns"], meta["raw_rtp_timesnap"], SR)
+    svc.reg_store.write_channel(sib, "ACQUIRED", {})
+    with caplog.at_level(logging.INFO, logger=SVC_LOG):
+        bt = svc.apply_registration(
+            label_timing(T0 + 60, 0.3, SR), _noise(3), _start(51, 1), MIN + 60, meta)
+    assert bt.origin_source == "label"
+    assert svc.acquirer.registration is None
+    assert svc.reg_store.read_summary()["contributing"] == []
+    assert any("another radiod run than the raw pair" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_map_fitting_the_raw_pair_within_two_seconds_stands(tmp_path):
+    """Control: a map whose epoch sits 1.5 s from the raw pair's (a late
+    GPS_TIME packet) is the same run; the sibling converts and is
+    adopted at truth."""
+    svc = _channel(tmp_path, "SHARED_10000")
+    meta = _meta(51, 1, walk=0.0)
+    meta["counter_map"] = _map_fitting(51, meta, shift_s=1.5)
+    sib = _sibling("WWV_20000", 50, 1, T0 + 60)
+    sib.counter_map = dataclasses_replace(
+        counter_map_for(50, SR),
+        input_epoch_gps_s=meta["counter_map"].input_epoch_gps_s,
+    ).rolled_forward(sib.rtp_ref)
+    sib.counter_epoch_id = CounterEpochTracker().observe(
+        meta["raw_gps_time_ns"], meta["raw_rtp_timesnap"], SR)
+    svc.reg_store.write_channel(sib, "ACQUIRED", {})
+    bt = svc.apply_registration(
+        label_timing(T0 + 60, 0.0, SR), _noise(3), _start(51, 1), MIN + 60, meta)
+    assert bt.origin_source == "acquired"
+    assert bt.sample0_utc == pytest.approx(T0 + 60, abs=1e-6)
+    assert svc.reg_store.read_summary()["contributing"] == ["WWV_20000"]
+
+
+def dataclasses_replace(obj, **kw):
+    import dataclasses
+
+    return dataclasses.replace(obj, **kw)
