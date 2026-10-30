@@ -84,6 +84,19 @@ logger = logging.getLogger(__name__)
 
 
 
+def metrology_config_from_toml(toml_config: Dict[str, Any]) -> Dict[str, Any]:
+    """The service's config dict from the loaded TOML: the timing,
+    metrology and storage sections.  ``timing`` carries ``[timing.t3]
+    admitted`` (Ruling B), which ``MetrologyService.__init__`` reads."""
+    toml_config = toml_config or {}
+    return {
+        "sample_rate": 24000,
+        "timing": dict(toml_config.get("timing", {}) or {}),
+        "metrology": toml_config.get("metrology", {}),
+        "storage": toml_config.get("storage", {}),
+    }
+
+
 def resync_minute_after(exc: Exception, head_utc: float, jump_min: int) -> int:
     """The next minute to process after the ring refused a window.
 
@@ -1119,7 +1132,14 @@ class MetrologyService:
             and self.channel_name in dropped
         )
         if not own_dropped:
-            if getattr(self, "_own_drop_logged", False):
+            # Fix round 1, m-3: only a minute in which fusion actually kept
+            # this channel's own verified plane counts toward the streak.
+            # A minute with no fused plane, or no verified own plane (a
+            # BOOTSTRAP after a restart), kept nothing and leaves it alone.
+            kept_own = (fused is not None and own is not None and own.verified
+                        and getattr(own, "method", None) != "adopted"
+                        and self.channel_name in set(kept) | set(waiting))
+            if getattr(self, "_own_drop_logged", False) and kept_own:
                 streak = getattr(self, "_own_kept_streak", 0) + 1
                 self._own_kept_streak = streak
                 if streak >= self._OWN_DROP_CLEAR_MIN:
@@ -2412,12 +2432,7 @@ if __name__ == "__main__":
     # migration). Without it here, even if [storage] write_sqlite=true is set
     # in the TOML the writer never opts into SQLite — config.get('storage', {})
     # would always be empty.
-    config = {
-        "sample_rate": 24000,
-        "timing": toml_config.get("timing", {}),  # Pass timing section for authority mode
-        "metrology": toml_config.get("metrology", {}),
-        "storage": toml_config.get("storage", {}),
-    }
+    config = metrology_config_from_toml(toml_config)
     
     station_config = {
         "callsign": args.callsign,

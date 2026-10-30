@@ -2397,7 +2397,8 @@ Per-service overrides in [services] take precedence over the profile.
             receiver_lat=receiver_lat,
             receiver_lon=receiver_lon,
             timing_authority_level=timing_level,
-            calib_file=args.calib_file
+            calib_file=args.calib_file,
+            config_path=config_path,
         )
 
 if __name__ == '__main__':

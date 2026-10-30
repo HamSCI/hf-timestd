@@ -433,8 +433,15 @@ class AuthorityManager:
         detail.setdefault("probe_available", bool(r.available))
         if r.reason is not None:
             detail.setdefault("probe_reason", r.reason)
+        if r.witness_only:
+            detail.setdefault("probe_witness_only", True)
+        # Fix round 1, m-1: nor may it witness.  The cross-check takes
+        # ``available or witness_only``, so a witness-only T3 would still
+        # vote in the majority downgrade, the T3-T2 rule and the
+        # host-clock pairs.
         results["T3"] = dataclasses.replace(
-            r, available=False, reason=NOT_ADMITTED_REASON, detail=detail)
+            r, available=False, witness_only=False,
+            reason=NOT_ADMITTED_REASON, detail=detail)
 
     def _note_t3(self, results: Dict[str, ProbeResult]) -> Optional[str]:
         """Announce T3's state once, at start and on any change.

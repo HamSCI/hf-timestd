@@ -183,3 +183,36 @@ def test_a_stuck_sequence_costs_the_wait_once_per_episode(ring):
     second = time.monotonic() - t0
     assert first >= 0.9
     assert second < 0.1
+
+
+def test_read_aux_gives_up_by_an_overall_deadline(ring):
+    """Review m-4: a sequence that sits odd at a NEW value every look never
+    counts as stuck, so read_aux waited for ever.  It now returns absent by
+    an overall deadline (2 s)."""
+    import threading
+    import time
+
+    from hf_timestd.core.ring_buffer import HOT_AUX_SEQ
+    buf, reader = ring
+    _fill(buf, reader, _judged(reader))
+    buf.update_raw_pair(5, 6)
+    stop = threading.Event()
+
+    def churn():                                  # odd, odd+2, odd+4, ...
+        buf._hot[HOT_AUX_SEQ] = int(buf._hot[HOT_AUX_SEQ]) | 1
+        end = time.monotonic() + 4.0             # bounded, so old code ends too
+        while not stop.is_set() and time.monotonic() < end:
+            buf._hot[HOT_AUX_SEQ] = int(buf._hot[HOT_AUX_SEQ]) + 2
+            time.sleep(0.0005)
+
+    t = threading.Thread(target=churn)
+    t.start()
+    try:
+        t0 = time.monotonic()
+        aux = reader.read_aux()
+        elapsed = time.monotonic() - t0
+    finally:
+        stop.set()
+        t.join()
+    assert aux["raw_gps_time_ns"] is None
+    assert elapsed < 2.5, elapsed

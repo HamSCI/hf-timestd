@@ -4593,6 +4593,24 @@ def anchor_sign_line(
     )
 
 
+
+DEFAULT_CONFIG_PATH = Path('/etc/hf-timestd/timestd-config.toml')
+
+
+def load_fusion_config(path) -> dict:
+    """The TOML at ``path``, or {} when it is missing or unreadable.
+
+    {} fails closed: no anchor closure, and T3 not admitted."""
+    try:
+        path = Path(path)
+        if not path.exists():
+            return {}
+        import toml
+        return toml.load(str(path)) or {}
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Could not read config {path}: {e}")
+        return {}
+
 def run_fusion_service(
     data_root: Path,
     interval_sec: float = 60.0,
@@ -4601,7 +4619,8 @@ def run_fusion_service(
     receiver_lat: Optional[float] = None,
     receiver_lon: Optional[float] = None,
     timing_authority_level: str = 'L5',
-    calib_file: Optional[str] = None
+    calib_file: Optional[str] = None,
+    config_path: Optional[Path] = None,
 ):
     """
     Run continuous fusion service that aggregates Phase 2 timing measurements.
@@ -4626,18 +4645,19 @@ def run_fusion_service(
             containing offset_ms, uncertainty_ms, convergence_state, and
             quality diagnostics.  Consumed by wd-ka9q-record to align wav
             start times.
+        config_path: the timestd-config.toml this unit runs from (default
+            ``DEFAULT_CONFIG_PATH``).  Fix round 1, m-2: the authority
+            manager, the anchor closure and ``[timing.t3] admitted`` all
+            read this one file, as the recorder and metrology read theirs.
     """
+    config_path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
     # Here, not under __main__, so the hf-timestd CLI path gets it too.
     # addFilter() ignores a filter already installed.
     logging.getLogger().addFilter(demote_iri2020_command_line)
     # [storage] backend selection from config
     _storage_config = {}
     try:
-        import toml as _toml_fs
-        _cfg_path = Path('/etc/hf-timestd/timestd-config.toml')
-        if _cfg_path.exists():
-            _cfg_fs = _toml_fs.load(_cfg_path)
-            _storage_config = _cfg_fs.get('storage', {}) or {}
+        _storage_config = load_fusion_config(config_path).get('storage', {}) or {}
     except Exception as _e:
         logger.warning(f"[FUSION] Could not read config for [storage]: {_e}")
 
@@ -4725,14 +4745,7 @@ def run_fusion_service(
         # Re-read config for the authority block (config was loaded earlier
         # for station coords and timing_authority; the authority.* subtree
         # may only be present in fresh configs, so handle absence gracefully).
-        _auth_config: dict = {}
-        try:
-            import toml as _toml_auth
-            _auth_cfg_path = Path('/etc/hf-timestd/timestd-config.toml')
-            if _auth_cfg_path.exists():
-                _auth_config = _toml_auth.load(_auth_cfg_path)
-        except Exception as _e:
-            logger.warning(f"Could not re-read config for authority manager: {_e}")
+        _auth_config: dict = load_fusion_config(config_path)
         try:
             from hf_timestd.core.anchor_closure import anchor_closure_enabled
             _anchor_closure = anchor_closure_enabled(_auth_config)
@@ -5233,5 +5246,6 @@ if __name__ == '__main__':
         receiver_lat=receiver_lat,
         receiver_lon=receiver_lon,
         timing_authority_level=timing_level,
-        calib_file=args.calib_file
+        calib_file=args.calib_file,
+        config_path=args.config,
     )

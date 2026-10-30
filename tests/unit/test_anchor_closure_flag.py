@@ -127,7 +127,7 @@ def test_t3_anchor_stands_down_with_the_flag_off():
     from ``state()`` is exactly that.
     """
     store = _Store(_summary(WALL0))
-    off = T3RegistrationAnchor(store=store, time_fn=lambda: WALL0)
+    off = T3RegistrationAnchor(store=store, time_fn=lambda: WALL0, admitted=True)
     on = T3RegistrationAnchor(store=store, time_fn=lambda: WALL0, anchor_closure=True,
                               admitted=True)
     # The flag is the ONLY difference; the summary is fully verified and

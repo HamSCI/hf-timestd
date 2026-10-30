@@ -98,6 +98,10 @@ _MAX_SEQLOCK_RETRIES = 128
 # dead.  A second outlasts any scheduling delay; a killed producer leaves
 # the value odd for good.
 _AUX_STUCK_S = 1.0
+# And never longer than this in all (fix round 1, m-4): a sequence odd at
+# a new value every look never counts as stuck, and must not hold the
+# reader for ever either.
+_AUX_DEADLINE_S = 2.0
 
 # Safety margin for overrun detection.  When the producer's cursor
 # advances enough that (w2 - s_start) > (ring_size - margin), the copy
@@ -297,9 +301,18 @@ class RingBufferReader:
         odd_seq: Optional[int] = None
         odd_since = 0.0
         tries = 0
+        deadline = time.monotonic() + _AUX_DEADLINE_S
         while True:
             s1 = int(self._hot[HOT_AUX_SEQ])
             if s1 & 1:
+                if time.monotonic() >= deadline:
+                    # Busy, not stuck: no one odd value lasted.  Absent
+                    # this once.
+                    logger.debug(
+                        f"RingBufferReader[{self._channel_name}]: aux block "
+                        f"busy for {_AUX_DEADLINE_S:.0f} s; read as absent")
+                    return {"raw_gps_time_ns": None, "raw_rtp_timesnap": None,
+                            "counter_map": None}
                 # M-1: stuck means one odd value for _AUX_STUCK_S, not a
                 # count of retries.  A value already declared stuck gives
                 # up at once, so a dead producer costs the wait once.
