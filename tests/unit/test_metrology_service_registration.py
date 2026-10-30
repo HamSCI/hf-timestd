@@ -33,6 +33,12 @@ class _Engine:
     def expected_delays_s(self, system_time, utc_minute):
         return {"WWV": 0.0125}
 
+    def expected_delay_details(self, system_time, utc_minute):
+        # Task 13: the service asks for details; subclasses that override
+        # expected_delays_s flow through here.
+        return {s: {"delay_s": d}
+                for s, d in self.expected_delays_s(system_time, utc_minute).items()}
+
 
 # Task 7: every channel names its own RTP counter through a counter map
 # (ka9q-radio e5f790dd gives each channel its own start block).  This

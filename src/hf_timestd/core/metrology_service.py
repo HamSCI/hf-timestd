@@ -55,6 +55,8 @@ from hf_timestd.core.ring_buffer import (
 from hf_timestd.core.ring_buffer_reader import RingBufferReader
 from hf_timestd.core.counter_epoch_tracker import CounterEpochTracker
 from hf_timestd.core.buffer_timing import resolve_buffer_timing
+from hf_timestd.core.state_transition_counter import StateTransitionCounter
+from hf_timestd.core.t3_shadow_record import T3ShadowRecord
 from hf_timestd.core.registration_acquirer import (
     NON_REGISTERING_STATIONS,
     ORIGIN_SIGMA_FLOOR_MS,
@@ -274,6 +276,9 @@ class MetrologyService:
         self._conflict_logged = None
         # Fix round 3 (M1): the named siblings' planes in this episode.
         self._conflict_planes: Dict[str, Any] = {}
+        # Task 13: the durable T3 shadow record (stream broadcasts-<channel>)
+        # and this channel's state-transition counter.
+        self._init_shadow(config)
 
         # Storage backend selection. Phase 1 of the HDF5 → SQLite
         # migration (see docs/HDF5-TO-SQLITE-MIGRATION.md): each writer
@@ -714,15 +719,134 @@ class MetrologyService:
         logs and falls back to the plane this method was handed."""
         if buffer_timing is None or buffer_timing.source == 'no_timing':
             return buffer_timing
+        # Task 13: the minute every shadow row of this call names, from the
+        # data (never a clock read); reset so a failed minute writes no
+        # stale state or delays.
+        self._shadow_minute = int(minute_utc)
+        self._shadow_state = None
+        self._shadow_details = {}
         try:
-            return self._apply_registration_unsafe(
+            out = self._apply_registration_unsafe(
                 buffer_timing, iq_samples, start_rtp, minute_utc, metadata)
         except Exception:
             logger.error(
                 f"[{self.channel_name}] apply_registration failed for minute "
                 f"{minute_utc}; metrology continues on the label plane",
                 exc_info=True)
-            return buffer_timing
+            out = buffer_timing
+        self._write_broadcast_rows(int(minute_utc))
+        return out
+
+    # ── Task 13: the durable shadow record ─────────────────────────
+    SHADOW_DEFAULTS = {"enabled": True, "directory": str(T3ShadowRecord.DEFAULT_DIR),
+                       "retention_days": 14}
+
+    def _init_shadow(self, config: Dict[str, Any]) -> None:
+        """Build the shadow record and the transition counter from
+        ``[timing.t3_shadow]`` (``enabled``, ``directory``,
+        ``retention_days``); absent keys take ``SHADOW_DEFAULTS``.  Disabled,
+        both stay None and nothing is written."""
+        cfg = {**self.SHADOW_DEFAULTS,
+               **(((config or {}).get("timing") or {}).get("t3_shadow") or {})}
+        self._shadow_record: Optional[T3ShadowRecord] = None
+        self._shadow_transitions: Optional[StateTransitionCounter] = None
+        if not bool(cfg["enabled"]):
+            logger.info(f"[{self.channel_name}] [timing.t3_shadow] enabled=false: "
+                        f"no T3 shadow rows")
+            return
+        self._shadow_record = T3ShadowRecord(
+            f"broadcasts-{self.channel_name}", Path(cfg["directory"]),
+            int(cfg["retention_days"]))
+        self._shadow_transitions = StateTransitionCounter(self.channel_name)
+
+    def _shadow_observe_state(self, state: str, reason: str) -> None:
+        """Note the state this minute's publish gave the channel file, and
+        append a transition row when it changed.  Never raises."""
+        try:
+            self._shadow_state = state
+            counter = getattr(self, "_shadow_transitions", None)
+            record = getattr(self, "_shadow_record", None)
+            minute = getattr(self, "_shadow_minute", None)
+            if counter is None or record is None or minute is None:
+                return
+            row = counter.observe(state, reason, minute)
+            if row is not None:
+                record.append(row)
+        except Exception as e:  # noqa: BLE001  diagnostic only
+            logger.debug(f"[{self.channel_name}] shadow transition failed: {e!r}")
+
+    def _write_broadcast_rows(self, minute_utc: int) -> None:
+        """One row per broadcast this minute measured (``_last_arrivals``),
+        joined with this minute's expected-delay details.  Never raises."""
+        record = getattr(self, "_shadow_record", None)
+        if record is None:
+            return
+        try:
+            arrivals = getattr(self, "_last_arrivals", None) or {}
+            details = getattr(self, "_shadow_details", None) or {}
+            for station, a in sorted(arrivals.items()):
+                record.append(self._broadcast_row(minute_utc, station, a,
+                                                  details.get(station)))
+        except Exception as e:  # noqa: BLE001  diagnostic only
+            logger.debug(f"[{self.channel_name}] shadow broadcast rows failed: {e!r}")
+
+    def _broadcast_row(self, minute_utc: int, station: str, a: MinuteArrival,
+                       det: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        def num(x, nd=3):
+            if x is None:
+                return None
+            x = float(x)
+            return round(x, nd) if math.isfinite(x) else None
+
+        det = det or {}
+        exp_ms = None if det.get("delay_s") is None else float(det["delay_s"]) * 1000.0
+        residual = num(a.residual_ms)
+        prediction = {
+            "model": "hop",
+            "delay_ms": num(exp_ms),
+            "sigma_ms": num(det.get("sigma_ms")),
+            "mode": det.get("mode"),
+            "iono_source": det.get("iono_source"),
+            "iono_giro": det.get("iono_giro"),
+        }
+        return {
+            "kind": "broadcast",
+            "utc_minute": int(minute_utc),
+            "channel": self.channel_name,
+            "frequency_hz": num(getattr(self, "frequency_hz", None)),
+            "station": station,
+            "arrival_rtp": num(a.arrival_rtp),
+            "arrival_input_index": num(self._arrival_input_index(a.arrival_rtp)),
+            "arrival_ms_in_plane": (None if residual is None or exp_ms is None
+                                    else num(residual + exp_ms)),
+            "fold_snr_db": num(a.fold_snr_db, 2),
+            "residual_ms": residual,
+            "sigma_ms": num(a.sigma_ms),
+            "expected_delay_ms": prediction["delay_ms"],
+            "model_sigma_ms": prediction["sigma_ms"],
+            "mode": prediction["mode"],
+            "iono_source": prediction["iono_source"],
+            "iono_giro": prediction["iono_giro"],
+            "iono_source_raw": det.get("iono_source_raw"),
+            "t3_state": getattr(self, "_shadow_state", None),
+            # MinuteArrival.arrival_rtp lives in this channel's own counter.
+            "rtp_domain": self.channel_name,
+            # Room for more than one model (a PHaRLAP ray trace, later);
+            # the flat fields above repeat the prediction actually used.
+            "predictions": [prediction],
+        }
+
+    def _arrival_input_index(self, arrival_rtp) -> Optional[float]:
+        """radiod's input-sample index of ``arrival_rtp``, through this
+        channel's own current map; None without one (never a guess)."""
+        if arrival_rtp is None or not math.isfinite(float(arrival_rtp)):
+            return None
+        whole = math.floor(float(arrival_rtp))
+        cmap = self.acquirer.map_at(int(whole) % 2**32)
+        if cmap is None:
+            return None
+        return cmap.input_index(int(whole) % 2**32) + (
+            float(arrival_rtp) - whole) * cmap.ilen / cmap.olen
 
     def _t6_authoritative(self, buffer_timing) -> bool:
         """Is T6 the active timing authority right now?
@@ -1057,7 +1181,11 @@ class MetrologyService:
             self._refused_donors = None
         label_s0 = float(raw.sample0_utc)
         audio = self.engine.prepare_audio(iq_samples)
-        delays = self.engine.expected_delays_s(label_s0, int(minute_utc))
+        # Task 13: one prediction call; the shadow rows keep its mode and
+        # ionospheric source beside the delays the acquirer uses.
+        details = self.engine.expected_delay_details(label_s0, int(minute_utc))
+        self._shadow_details = details
+        delays = {s: d["delay_s"] for s, d in details.items()}
         # C1: hand the acquirer the epoch as a MEASURED offset as well as a
         # name.  The name is this process's own; the offset is what the
         # other channels' processes agree on.
@@ -1350,6 +1478,15 @@ class MetrologyService:
             state = "ACQUIRED" if (current is not None and current.verified) else "CANDIDATE"
         else:
             state = self.acquirer.state
+        # Task 13: the channel file's state feeds the transition counter.
+        if standalone_reason:
+            reason = standalone_reason
+        elif conflicts:
+            reason = "conflict with " + ", ".join(
+                c for c in sorted(set(conflicts)) if c != self.channel_name)
+        else:
+            reason = f"acquirer {self.acquirer.state}"
+        self._shadow_observe_state(state, reason)
         if current is not None:
             self.reg_store.write_channel(current, state, {
                 "label_sample0_utc": label_s0,

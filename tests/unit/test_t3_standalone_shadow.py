@@ -50,6 +50,12 @@ class _Engine:
     def expected_delays_s(self, system_time, utc_minute):
         return dict(DELAYS)
 
+    def expected_delay_details(self, system_time, utc_minute):
+        # Task 13: the service asks for details; subclasses that override
+        # expected_delays_s flow through here.
+        return {s: {"delay_s": d}
+                for s, d in self.expected_delays_s(system_time, utc_minute).items()}
+
 
 def truth(k: int) -> float:
     """Minute k's true sample-0 UTC."""
