@@ -55,6 +55,8 @@ from ka9q import discover_channels, RadiodControl, ChannelInfo, StreamQuality, E
 from ..quota_manager import QuotaManager
 from .stream_recorder_v2 import StreamRecorderV2, StreamRecorderConfig
 from .quality_snapshot import QualitySnapshotWriter
+from .counter_map_probe import CounterMapProbe
+from hamsci_dsp.counter_map import CounterMap
 # Module scope: the coast bound is a class attribute, evaluated
 # at import time, and must stay tied to the precision field's
 # saturation point rather than drifting from it.
@@ -453,6 +455,12 @@ class CoreRecorderV2:
         # ka9q-python the kwarg is silently ignored.
         self.control = RadiodControl(self.status_address,
                                       client_id="hf-timestd")
+
+        # Each channel's own counter map, learned from its status pair
+        # (ka9q-radio e5f790dd: every channel starts its own RTP counter).
+        self._counter_probe = CounterMapProbe(self.control)
+        self._counter_maps: Dict[str, CounterMap] = {}   # by channel description
+        self._t6_counter_map: Optional[CounterMap] = None
 
         # Station config
         self.station_config = config.get('station', {})
@@ -1374,6 +1382,7 @@ class CoreRecorderV2:
                     self._refresh_t3_native_anchor()
                     for _rec in list(self.recorders.values()):
                         _rec.revalidate_radiod_pair()
+                    self._refresh_counter_maps()
                     last_pair_revalidate = now
         
         except KeyboardInterrupt:
@@ -1382,6 +1391,31 @@ class CoreRecorderV2:
         finally:
             self._shutdown()
     
+    def _refresh_counter_maps(self) -> None:
+        """Re-learn every channel's counter map and publish it to its ring.
+
+        Runs on the 60 s tick.  A channel whose map is unavailable publishes
+        None, so readers see no map rather than a stale one.
+        """
+        try:
+            for desc, rec in list(self.recorders.items()):
+                ci = getattr(rec, "channel_info", None)
+                ssrc = getattr(ci, "ssrc", None)
+                if ssrc is None:
+                    continue
+                cmap = self._counter_probe.refresh(desc, ssrc, rec.config.sample_rate)
+                rec.publish_counter_map(cmap)
+                if cmap is None:
+                    self._counter_maps.pop(desc, None)
+                else:
+                    self._counter_maps[desc] = cmap
+            ci = self._t6_channel_info
+            if ci is not None:
+                self._t6_counter_map = self._counter_probe.refresh(
+                    "T6", ci.ssrc, ci.sample_rate)
+        except Exception:
+            logger.exception("counter map refresh failed")
+
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals."""
         logger.info(f"Received signal {signum}, shutting down...")

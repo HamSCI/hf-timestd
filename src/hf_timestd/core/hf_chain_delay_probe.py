@@ -25,6 +25,7 @@ from typing import Callable, Deque, Dict, List, Optional, Sequence, Tuple
 from hamsci_dsp.counter_map import CounterMap, CounterPoll
 
 from .bpsk_edge_fine_stage import BpskEdgeFineStage
+from .counter_map_probe import counter_poll_from_reply
 from .hf_chain_delay_analysis import EdgeObservation, ProbeChannelCapture
 
 logger = logging.getLogger(__name__)
@@ -147,19 +148,7 @@ class HfChainDelayProbe:
     def _accept(reply, spec: ProbeChannelSpec) -> Optional[CounterPoll]:
         """radiod answers a ghost SSRC with frontend status alone.  A reply
         without a pair, or from another output rate, is not a poll."""
-        fe = getattr(reply, "frontend", None)
-        gps = getattr(reply, "gps_time", None)
-        rtp = getattr(reply, "rtp_timesnap", None)
-        n_in = getattr(fe, "input_samples", None)
-        f_in = getattr(fe, "input_samprate", None)
-        ilen = getattr(reply, "filter_blocksize", None)
-        if not gps or rtp is None or n_in is None or not f_in or not ilen:
-            return None
-        if getattr(reply, "output_samprate", None) != spec.sample_rate:
-            return None
-        return CounterPoll(rtp_timesnap=int(rtp), input_samples=int(n_in),
-                           filter_blocksize=int(ilen), input_samprate=int(f_in),
-                           output_samprate=int(spec.sample_rate), gps_time_ns=int(gps))
+        return counter_poll_from_reply(reply, spec.sample_rate)
 
     def run(self, specs: Sequence[ProbeChannelSpec], duration_s: float
             ) -> Tuple[List[ProbeChannelCapture], List[float]]:

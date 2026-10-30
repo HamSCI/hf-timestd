@@ -896,6 +896,14 @@ class StreamRecorderV2:
         """
         if self.ring_buffer is None:
             return
+        # radiod's own pair, before any judge offset or label-plane anchor:
+        # the T3 registration reads this beside the judged one.
+        try:
+            self.ring_buffer.update_raw_pair(int(gps_time_ns), int(rtp_timesnap))
+        except Exception as exc:
+            logger.error(
+                f"{self.config.description}: ring update_raw_pair failed: {exc}"
+            )
         label = self._label_anchor_state()
         if label is not None:
             # Keep the raw pair for the fallback path, then let the
@@ -924,6 +932,20 @@ class StreamRecorderV2:
         except Exception as exc:
             logger.error(
                 f"{self.config.description}: ring update_anchor failed: {exc}"
+            )
+
+    def publish_counter_map(self, cmap) -> None:
+        """Publish this channel's CounterMap (None clears it) into the ring.
+
+        Never raises: a failed write must not stop the recorder loop.
+        """
+        if self.ring_buffer is None:
+            return
+        try:
+            self.ring_buffer.update_counter_map(cmap)
+        except Exception as exc:
+            logger.error(
+                f"{self.config.description}: ring update_counter_map failed: {exc}"
             )
 
     def _reanchor_ring_if_offset_drifted(self) -> None:
