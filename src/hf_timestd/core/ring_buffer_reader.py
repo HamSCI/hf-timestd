@@ -19,6 +19,8 @@ from typing import Optional, Tuple
 
 import numpy as np
 
+from hamsci_dsp.counter_map import CounterMap
+
 try:
     import sysv_ipc
 except ImportError as exc:  # pragma: no cover
@@ -34,6 +36,16 @@ from .ring_buffer import (
     HEADER_VERSION,
     HOT_ANCHOR_GPS_NS,
     HOT_ANCHOR_RTP_SNAP,
+    HOT_AUX_SEQ,
+    HOT_CMAP_EPOCH_GPS_MS,
+    HOT_CMAP_ILEN,
+    HOT_CMAP_INPUT,
+    HOT_CMAP_INPUT_RATE,
+    HOT_CMAP_N_AGREE,
+    HOT_CMAP_OLEN,
+    HOT_CMAP_RTP,
+    HOT_RAW_GPS_NS,
+    HOT_RAW_RTP_SNAP,
     HOT_BATCH_CURSOR_POS,
     HOT_BATCH_FIRST_RTP,
     HOT_EPOCH_COUNTER,
@@ -258,6 +270,44 @@ class RingBufferReader:
             f"after {_MAX_SEQLOCK_RETRIES} retries"
         )
 
+    def read_aux(self) -> dict:
+        """Seqlock-protected read of the aux block.
+
+        Returns ``raw_gps_time_ns``, ``raw_rtp_timesnap`` and
+        ``counter_map``; each is None when the producer never set it
+        (an old producer leaves the whole block zero).
+        """
+        def s64(u: int) -> int:
+            return u - (1 << 64) if u >= (1 << 63) else u
+
+        for _ in range(_MAX_SEQLOCK_RETRIES):
+            s1 = int(self._hot[HOT_AUX_SEQ])
+            if s1 & 1:
+                time.sleep(0.0001)
+                continue
+            raw_gps = int(self._hot[HOT_RAW_GPS_NS])
+            raw_rtp = int(self._hot[HOT_RAW_RTP_SNAP])
+            f = [int(self._hot[i]) for i in (
+                HOT_CMAP_RTP, HOT_CMAP_INPUT, HOT_CMAP_ILEN, HOT_CMAP_OLEN,
+                HOT_CMAP_INPUT_RATE, HOT_CMAP_EPOCH_GPS_MS, HOT_CMAP_N_AGREE)]
+            if int(self._hot[HOT_AUX_SEQ]) != s1:
+                continue
+            out = {"raw_gps_time_ns": None, "raw_rtp_timesnap": None,
+                   "counter_map": None}
+            if raw_gps:
+                out["raw_gps_time_ns"] = s64(raw_gps)
+                out["raw_rtp_timesnap"] = raw_rtp & 0xFFFFFFFF
+            if f[2] and f[3]:
+                out["counter_map"] = CounterMap(
+                    rtp_ref=f[0] & 0xFFFFFFFF, input_ref=s64(f[1]),
+                    ilen=f[2], olen=f[3], input_samprate=f[4],
+                    input_epoch_gps_s=s64(f[5]) / 1000.0, n_agree=f[6])
+            return out
+        raise RingBufferError(
+            f"RingBufferReader[{self._channel_name}]: aux seqlock stuck "
+            f"after {_MAX_SEQLOCK_RETRIES} retries"
+        )
+
     def get_anchor(self) -> dict:
         """Snapshot of all timing fields (for diagnostics / tests)."""
         gps_ns, rtp_snap = self._read_gps_anchor()
@@ -429,6 +479,7 @@ class RingBufferReader:
             "start_system_time": self._rtp_to_utc(start_rtp, gps_ns, rtp_snap),
             "source": "ring_buffer",
         }
+        metadata.update(self.read_aux())
         return out, metadata
 
     def extract_samples(self, count: int) -> Tuple[np.ndarray, dict]:
@@ -482,6 +533,7 @@ class RingBufferReader:
             "start_system_time": self._rtp_to_utc(start_rtp, gps_ns, rtp_snap),
             "source": "ring_buffer",
         }
+        metadata.update(self.read_aux())
         return out, metadata
 
     def _copy_out(self, s_start: int, n: int) -> np.ndarray:

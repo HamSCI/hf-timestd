@@ -58,6 +58,7 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import Optional, Tuple
+from hamsci_dsp.counter_map import CounterMap
 
 import numpy as np
 
@@ -115,6 +116,19 @@ HOT_RTP_BASE_CURSOR   = 13  # write_cursor where the CURRENT RTP numbering
                             # began; content before it was written under a
                             # previous numbering (radiod re-base, producer
                             # restart) and no reader may address it.
+# Aux block: radiod's RAW (GPS_TIME, RTP_TIMESNAP) pair and the channel's
+# CounterMap, under their own seqlock (odd while writing, even when stable).
+# They never touch HOT_EPOCH_COUNTER.  Zero means absent.  Do NOT renumber.
+HOT_AUX_SEQ           = 14
+HOT_RAW_GPS_NS        = 15  # i64 bit pattern; 0 = no raw pair
+HOT_RAW_RTP_SNAP      = 16
+HOT_CMAP_RTP          = 17  # CounterMap.rtp_ref
+HOT_CMAP_INPUT        = 18  # CounterMap.input_ref (i64 bit pattern)
+HOT_CMAP_ILEN         = 19  # 0 = no counter map
+HOT_CMAP_OLEN         = 20
+HOT_CMAP_INPUT_RATE   = 21
+HOT_CMAP_EPOCH_GPS_MS = 22  # input_epoch_gps_s in integer ms (i64 pattern)
+HOT_CMAP_N_AGREE      = 23
 
 _SAMPLE_REGION_OFFSET = HEADER_SIZE
 
@@ -574,6 +588,56 @@ class RingBuffer:
                 f"RingBuffer[{self._config.channel_name}]: anchor updated "
                 f"gps_ns={gps_time_ns} rtp_snap={rtp_timesnap} epoch={new_epoch}"
             )
+
+    def _aux_begin(self) -> None:
+        self._hot[HOT_AUX_SEQ] = int(self._hot[HOT_AUX_SEQ]) + 1  # odd
+
+    def _aux_end(self) -> None:
+        self._hot[HOT_AUX_SEQ] = int(self._hot[HOT_AUX_SEQ]) + 1  # even
+
+    def update_raw_pair(self, gps_time_ns: int, rtp_timesnap: int) -> None:
+        """Publish radiod's own (GPS_TIME, RTP_TIMESNAP), unjudged.
+
+        Own seqlock; does not bump the anchor epoch.
+        """
+        if self._closed:
+            return
+        with self._lock:
+            if self._closed:
+                return
+            self._aux_begin()
+            self._hot[HOT_RAW_GPS_NS] = gps_time_ns & 0xFFFFFFFFFFFFFFFF
+            self._hot[HOT_RAW_RTP_SNAP] = rtp_timesnap & 0xFFFFFFFF
+            self._aux_end()
+
+    def update_counter_map(self, cmap: Optional[CounterMap]) -> None:
+        """Publish this channel's CounterMap (None clears it).
+
+        The epoch is stored in integer milliseconds.  Own seqlock; does
+        not bump the anchor epoch.
+        """
+        if self._closed:
+            return
+        m64 = 0xFFFFFFFFFFFFFFFF
+        with self._lock:
+            if self._closed:
+                return
+            self._aux_begin()
+            if cmap is None:
+                for i in (HOT_CMAP_RTP, HOT_CMAP_INPUT, HOT_CMAP_ILEN,
+                          HOT_CMAP_OLEN, HOT_CMAP_INPUT_RATE,
+                          HOT_CMAP_EPOCH_GPS_MS, HOT_CMAP_N_AGREE):
+                    self._hot[i] = 0
+            else:
+                self._hot[HOT_CMAP_RTP] = cmap.rtp_ref & 0xFFFFFFFF
+                self._hot[HOT_CMAP_INPUT] = cmap.input_ref & m64
+                self._hot[HOT_CMAP_ILEN] = cmap.ilen
+                self._hot[HOT_CMAP_OLEN] = cmap.olen
+                self._hot[HOT_CMAP_INPUT_RATE] = cmap.input_samprate
+                self._hot[HOT_CMAP_EPOCH_GPS_MS] = (
+                    round(cmap.input_epoch_gps_s * 1000) & m64)
+                self._hot[HOT_CMAP_N_AGREE] = cmap.n_agree
+            self._aux_end()
 
     def bump_heartbeat(self) -> None:
         """Publish a fresh heartbeat without advancing the cursor.
