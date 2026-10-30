@@ -13,6 +13,7 @@ import logging
 import numpy as np
 import pytest
 
+from hf_timestd.core.counter_epoch_tracker import CounterEpochTracker
 from hf_timestd.core.registration_acquirer import Registration, RegistrationAcquirer
 from tests.unit.synth_origins import EPOCH_GPS_S, counter_map_for, olen_for
 from tests.unit.synth_ticks import label_timing, make_tick_audio
@@ -236,3 +237,166 @@ def test_conflict_deltas_are_named_in_the_callers_counter(tmp_path, caplog):
     assert "WWV_15000=+10.0ms" in warns[0] and "WWV_25000=+10.0ms" in warns[0]
     s = svc.reg_store.read_summary()
     assert s["conflicts"] == ["SHARED_10000", "WWV_15000", "WWV_20000", "WWV_25000"]
+
+
+# ── Fix round 1 ───────────────────────────────────────────────────────
+
+
+def _adopter_with_sibling(tmp_path, sib_map_epoch_s=EPOCH_GPS_S):
+    """SHARED_10000 (k0 51) hears noise; WWV_20000 (k0 50) holds a verified
+    plane at T0 + 60 for minute 1, with its counter map."""
+    svc = _channel(tmp_path, "SHARED_10000")
+    rtp = _start(50, 1)
+    sib = _sibling("WWV_20000", 50, 1, T0 + 60)
+    sib.counter_map = counter_map_for(50, SR, epoch_gps_s=sib_map_epoch_s).rolled_forward(rtp)
+    # the adopter's own epoch id, so adoption itself never trips the
+    # acquirer's counter-epoch reset and hides what is under test
+    pair = {k: v for k, v in _meta(51, 1).items() if k != "counter_map"}
+    sib.counter_epoch_id = CounterEpochTracker().observe(**pair)
+    svc.reg_store.write_channel(sib, "ACQUIRED", {})
+    return svc, sib
+
+
+def test_withdrawn_map_stops_every_sibling_fusing(tmp_path, caplog):
+    """I-1: the recorder publishes None once its map has gone stale.  The
+    held map must go with it: past half the signed-32 reach a map rolled
+    from its old rtp_ref rolls the wrong way and every sibling converts
+    about 49.7 h off.  After the withdrawal no sibling may fuse."""
+    svc, _sib = _adopter_with_sibling(tmp_path)
+    bt1 = svc.apply_registration(
+        label_timing(T0 + 60, 0.3, SR), _noise(3), _start(51, 1), MIN + 60, _meta(51, 1)
+    )
+    assert bt1.origin_source == "acquired"  # adopted while the map stood
+    for k in (2, 3, 4):
+        meta = _meta(51, k)
+        meta["counter_map"] = None
+        bt = svc.apply_registration(
+            label_timing(T0 + 60 * k, 0.3, SR), _noise(10 + k), _start(51, k),
+            MIN + 60 * k, meta,
+        )
+        assert bt.origin_source == "label"
+        s = svc.reg_store.read_summary()
+        assert s["contributing"] == []
+        assert s["state"] == "BOOTSTRAP"
+    assert svc.acquirer.counter_map is None
+    assert svc.acquirer.registration is None
+
+
+def test_map_out_of_reach_of_the_minute_is_refused(tmp_path):
+    """I-1 backstop: a map whose rtp_ref sits more than 2**30 samples from
+    this minute's start RTP is not used, even if it keeps arriving."""
+    svc, _sib = _adopter_with_sibling(tmp_path)
+    stale = counter_map_for(51, SR)  # rtp_ref near 23520
+    far_start = (stale.rtp_ref + 2**30 + 60 * SR) % 2**32
+    bt = svc.apply_registration(
+        label_timing(T0 + 60, 0.3, SR), _noise(3), far_start, MIN + 60,
+        _meta(51, 1, cmap=stale),
+    )
+    assert bt.origin_source == "label"
+    assert svc.reg_store.read_summary()["contributing"] == []
+
+
+def test_held_plane_keeps_a_map_that_answers_at_its_rtp_ref(tmp_path):
+    """I-2: maps keep arriving, continuous, across more than 2**31 samples
+    while one plane is held.  The plane's published map must still give the
+    right input-sample index at the plane's own rtp_ref."""
+    acq = RegistrationAcquirer("SHARED_10000", SR)
+    base = counter_map_for(51, SR)
+    rtp0 = _start(51, 0)
+    acq.note_counter_map(base)
+    acq.adopt(Registration("ep-x", rtp_ref=rtp0, utc_ref=T0, sample_rate=SR,
+                           sigma_ms=1.0, channel="fused", verified=True))
+    truth = base.input_index(rtp0)
+    assert acq.registration.counter_map.input_index(rtp0) == truth
+    m = base
+    for _ in range(12):  # 12 x 2**28 = 3 x 2**30 samples, past 2**31
+        m = m.rolled_forward((m.rtp_ref + 2**28) % 2**32)
+        acq.note_counter_map(m)
+        assert acq.registration is not None
+        assert acq.registration.counter_map.input_index(rtp0) == truth
+
+
+def test_unconvertible_sibling_does_not_conflict_with_a_candidate(tmp_path, caplog):
+    """I-3: an own CANDIDATE and one ACQUIRED sibling with no map.  The
+    sibling cannot convert, so it is no sibling at all: the candidate is
+    applied (so verify() can run), never CONFLICT."""
+    svc = _channel(tmp_path, "SHARED_10000")
+    svc.apply_registration(
+        label_timing(T0, 0.250, SR), _ticks(0), _start(51, 0), MIN, _meta(51, 0)
+    )
+    assert svc.acquirer.registration.verified is False
+    mapless = _sibling("WWV_20000", 50, 1, T0 + 60)
+    mapless.counter_map = None
+    svc.reg_store.write_channel(mapless, "ACQUIRED", {})
+    with caplog.at_level(logging.WARNING, logger=SVC_LOG):
+        bt = svc.apply_registration(
+            label_timing(T0 + 60, 0.250, SR), _ticks(1, seed=8), _start(51, 1),
+            MIN + 60, _meta(51, 1),
+        )
+    assert bt.origin_source == "acquired"
+    assert svc._applied_acquired_plane is True
+    import json
+
+    ch = json.loads((tmp_path / "reg" / "SHARED_10000.json").read_text())
+    assert ch["state"] == "CANDIDATE"
+    assert svc.reg_store.read_summary()["conflicts"] == []
+    assert not any("disagree" in r.getMessage() for r in caplog.records)
+    svc.feed_back_ensembles([_good_ensemble()])
+    assert svc.acquirer.registration.verified is True
+
+
+def test_adopted_plane_whose_donor_loses_its_map_takes_the_donor_reset(tmp_path, caplog):
+    """I-3: the donor's file is still fresh and ACQUIRED, but it no longer
+    carries a map, so nothing converts.  That is a donor gone, not a
+    disagreement: reset to BOOTSTRAP, never CONFLICT."""
+    svc, sib = _adopter_with_sibling(tmp_path)
+    svc.apply_registration(
+        label_timing(T0 + 60, 0.3, SR), _noise(3), _start(51, 1), MIN + 60, _meta(51, 1)
+    )
+    assert svc.acquirer.registration.method == "adopted"
+    sib.counter_map = None
+    svc.reg_store.write_channel(sib, "ACQUIRED", {})
+    with caplog.at_level(logging.INFO):
+        bt = svc.apply_registration(
+            label_timing(T0 + 120, 0.3, SR), _noise(4), _start(51, 2), MIN + 120,
+            _meta(51, 2),
+        )
+    assert bt.origin_source == "label"
+    assert svc.acquirer.state == RegistrationAcquirer.STATE_BOOTSTRAP
+    assert any("donor expired" in r.getMessage() for r in caplog.records)
+    import json
+
+    ch = json.loads((tmp_path / "reg" / "SHARED_10000.json").read_text())
+    assert ch["state"] != "CONFLICT"
+    assert svc.reg_store.read_summary()["conflicts"] == []
+
+
+def test_sibling_map_with_a_late_epoch_still_converts(tmp_path):
+    """Ruling: one tolerance for "same run".  The acquirer keeps its own
+    plane through a 0.7 s epoch shift (a late GPS_TIME packet); a sibling
+    whose map reads 0.7 s late must convert too, not drop silently."""
+    svc, _sib = _adopter_with_sibling(tmp_path, sib_map_epoch_s=EPOCH_GPS_S + 0.7)
+    bt = svc.apply_registration(
+        label_timing(T0 + 60, 0.3, SR), _noise(3), _start(51, 1), MIN + 60, _meta(51, 1)
+    )
+    assert bt.origin_source == "acquired"
+    assert bt.sample0_utc == pytest.approx(T0 + 60, abs=1e-6)
+    assert svc.reg_store.read_summary()["contributing"] == ["WWV_20000"]
+
+
+def test_map_too_far_from_the_held_one_resets_loudly(caplog):
+    """I-1/I-2 companion: a new map more than 2**30 samples from the held
+    one cannot be compared with it (the signed-32 reading would alias), so
+    continuity cannot be shown and the held plane resets, loudly."""
+    acq = RegistrationAcquirer("SHARED_10000", SR)
+    base = counter_map_for(51, SR)
+    acq.note_counter_map(base)
+    acq.adopt(Registration("ep-x", rtp_ref=_start(51, 0), utc_ref=T0, sample_rate=SR,
+                           sigma_ms=1.0, channel="fused", verified=True))
+    far = base.rolled_forward((base.rtp_ref + 2**30 + 2**20) % 2**32)
+    with caplog.at_level(logging.INFO, logger=ACQ_LOG):
+        acq.note_counter_map(far)
+    resets = [r for r in caplog.records if "registration reset" in r.getMessage()]
+    assert len(resets) == 1 and "past reach" in resets[0].getMessage()
+    assert resets[0].levelno >= logging.WARNING
+    assert acq.registration is None

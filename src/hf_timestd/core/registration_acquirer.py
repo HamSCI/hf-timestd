@@ -37,6 +37,18 @@ from .tick_edge_detector import TickEdgeDetector
 
 logger = logging.getLogger(__name__)
 
+# Task 7 fix round 1: how far, in samples of one channel's counter, a held
+# counter map may be read from its rtp_ref.  CounterMap reads RTP as a
+# signed 32-bit difference, so past 2**31 (24 h 51 m at 24 kHz) it rolls
+# the wrong way; half that leaves margin on either side.
+COUNTER_MAP_REACH = 2**30
+
+
+def _rtp_gap(a: int, b: int) -> int:
+    """|a - b| in the 32-bit RTP counter, signed reading."""
+    d = (int(a) - int(b)) & 0xFFFFFFFF
+    return abs(d - 2**32 if d >= 2**31 else d)
+
 ACQ_MIN_FOLD_SNR_DB = 10.0
 FOLD_LENGTHS_S = (60, 120, 180)
 TONE_BANDS_HZ: Dict[str, Tuple[float, float]] = {
@@ -867,9 +879,11 @@ class Registration:
         counter maps, ``utc_ref + (cmap.input_index(rtp) -
         self.counter_map.input_index(rtp_ref)) / input_samprate``, and only
         when both maps exist and name one radiod run.  ``same_run``
-        compares the maps' epochs alone; radiod's GPS_TIME can arrive up to
-        816 ms late, but each map holds the least-late epoch its probe saw,
-        so the 0.5 s tolerance separates runs that are hours apart.
+        compares the maps' epochs alone, here within
+        ``COUNTER_EPOCH_SKEW_ALLOWANCE_S`` (2 s): radiod's GPS_TIME can
+        arrive up to 816 ms late, and ``RegistrationAcquirer`` keeps its own
+        plane across such a shift, so a sibling's must convert across it
+        too.  Runs hours apart stay apart.
 
         Channels at different output rates (24 kHz against 96 kHz) never
         convert: ``same_run`` also requires equal ``olen`` and
@@ -888,7 +902,7 @@ class Registration:
             )
         if cmap is None or self.counter_map is None:
             return None
-        if not self.counter_map.same_run(cmap):
+        if not self.counter_map.same_run(cmap, tol_s=COUNTER_EPOCH_SKEW_ALLOWANCE_S):
             return None
         delta_in = cmap.input_index(rtp) - self.counter_map.input_index(self.rtp_ref)
         return replace(
@@ -1050,10 +1064,34 @@ class RegistrationAcquirer:
           that restarts at the same start block maps its counter exactly
           as before, and only the epoch, hours away, tells the runs apart.
 
-        None (an old producer, or no map yet) changes nothing."""
+        None from a producer that never sent a map changes nothing.  None
+        after a map withdraws it: the recorder publishes None once its map
+        has gone stale, and a map read past its reach converts every
+        sibling about 49.7 h wrong.  The held plane keeps the map it was
+        stamped with, which continuity already proved.
+
+        A continuous map re-stamps the held plane only while the plane's
+        ``rtp_ref`` lies within ``COUNTER_MAP_REACH`` of it.  ``in_domain``
+        works on absolute input indices, so a map stamped once in reach
+        stays exact for the plane's whole life; rolling the newest map
+        back to an ever-older ``rtp_ref`` would not."""
         if cmap is None:
+            if self._cmap is not None:
+                logger.warning(
+                    f"[{self.channel}] counter map withdrawn by the recorder; "
+                    f"no sibling converts into this counter until one returns"
+                )
+                self._cmap = None
             return
         held = self._cmap
+        if held is not None and _rtp_gap(cmap.rtp_ref, held.rtp_ref) > COUNTER_MAP_REACH:
+            self._cmap = cmap
+            self.reset(
+                f"counter map {_rtp_gap(cmap.rtp_ref, held.rtp_ref)} samples from the "
+                f"held one, past reach: continuity cannot be shown",
+                loud=True,
+            )
+            return
         self._cmap = cmap
         if held is not None:
             why = self._counter_map_break(held, cmap)
@@ -1091,11 +1129,27 @@ class RegistrationAcquirer:
 
     def _stamped(self, reg: Registration) -> Registration:
         """``reg`` named in this channel's counter, with this channel's map
-        rolled to its ``rtp_ref`` (Task 6 review: map reach)."""
+        rolled to its ``rtp_ref`` (Task 6 review: map reach).  A map out of
+        reach of ``rtp_ref`` leaves the plane's existing map in place."""
         reg.rtp_domain = self.channel
-        if self._cmap is not None:
+        if (
+            self._cmap is not None
+            and _rtp_gap(reg.rtp_ref, self._cmap.rtp_ref) < COUNTER_MAP_REACH
+        ):
             reg.counter_map = self._cmap.rolled_forward(reg.rtp_ref)
         return reg
+
+    def map_at(self, rtp: int) -> Optional[CounterMap]:
+        """This channel's map rolled to ``rtp``, for fusion's ``at_map``.
+
+        The held map rolls forward with it, so it never ages past reach
+        while minutes keep arriving.  None when no map is held, or when the
+        held map lies more than ``COUNTER_MAP_REACH`` from ``rtp`` (a stale
+        map the recorder failed to roll): no sibling converts then."""
+        if self._cmap is None or _rtp_gap(rtp, self._cmap.rtp_ref) > COUNTER_MAP_REACH:
+            return None
+        self._cmap = self._cmap.rolled_forward(rtp)
+        return self._cmap
 
     # ── acquisition ────────────────────────────────────────────────
     def offer_minute(

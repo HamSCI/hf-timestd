@@ -753,14 +753,22 @@ class MetrologyService:
         # stamps the map on every plane it holds or makes, and resets a
         # plane whose counter no longer continues (a map step), before it
         # is offered this minute.  `at_map` names start_rtp's counter for
-        # every fusion call below; None (an old producer) leaves fusion to
-        # this channel's own planes.
+        # every fusion call below; None (an old producer, a withdrawn map,
+        # a map out of reach) leaves fusion to this channel's own planes.
         self.acquirer.note_counter_map(metadata.get("counter_map"))
-        held_map = self.acquirer.counter_map
-        at_map = None if held_map is None else held_map.rolled_forward(int(start_rtp))
+        at_map = self.acquirer.map_at(int(start_rtp))
         own = self.acquirer.offer_minute(audio, buffer_timing, int(start_rtp), int(minute_utc),
                                          delays, epoch, epoch_offset_s=epoch_offset_s)
         sibs = self.reg_store.read_siblings(exclude_channel=self.channel_name)
+        # Task 7 fix round 1 (I-3): a sibling that cannot convert into this
+        # channel's counter (no map, another radiod run, no map of our own)
+        # is no sibling at all.  Every rule below that asks "are there
+        # siblings?" -- the deadlock guard, the orphaned-adoption reset and
+        # CONFLICT -- asks it of these, never of the raw files.
+        convertible = [
+            r for r in sibs
+            if r.in_domain(int(start_rtp), at_map, self.channel_name) is not None
+        ]
         # I3 (task-11 review): resolve-before-adopt precedence -- a plane
         # `resolve_ambiguity` just named THIS minute already used the
         # sibling to pick the station and supplied the whole second; it is
@@ -768,13 +776,13 @@ class MetrologyService:
         # named the fractional second), not a candidate to be dropped in
         # favour of that same sibling below.
         resolved_via_sibling_this_minute = False
-        if own is None and sibs:
+        if own is None and convertible:
             # a shared channel's open hypotheses: let the siblings' plane name the station
             # Task 7: every sibling converts into this channel's counter
             # through both counter maps; one without a map, or from
             # another radiod run, drops -- never a sibling's plane read at
             # this channel's raw RTP.
-            sib_plane = fuse_registrations(sibs, at_rtp=int(start_rtp),
+            sib_plane = fuse_registrations(convertible, at_rtp=int(start_rtp),
                                            at_map=at_map, domain=self.channel_name)
             if sib_plane is not None:
                 own = self.acquirer.resolve_ambiguity(sib_plane, int(start_rtp),
@@ -806,12 +814,12 @@ class MetrologyService:
             and not own_is_adopted
             and not own.verified
             and not resolved_via_sibling_this_minute
-            and bool(sibs)
+            and bool(convertible)
         )
         if own_is_adopted or own_unverified_with_siblings:
-            fusion_inputs = sibs
+            fusion_inputs = convertible
         else:
-            fusion_inputs = ([own] if own else []) + sibs
+            fusion_inputs = ([own] if own else []) + convertible
         # C1: `kept` is what fusion ACTUALLY combined -- the summary's
         # `contributing` must name those channels, not every sibling read
         # off disk, or it claims corroboration the station never performed.
@@ -922,9 +930,10 @@ class MetrologyService:
         # with contradictory provenance (channel file ACQUIRED, summary
         # BOOTSTRAP) as before.
         if own is not None and fused is None:
-            if own_is_adopted and not sibs:
+            if own_is_adopted and not convertible:
                 # The donor's evidence is gone (its file expired past
-                # RegistrationStore.stale_s, or simply vanished) -- an
+                # RegistrationStore.stale_s, simply vanished, or no longer
+                # converts into this counter -- Task 7 fix round 1) -- an
                 # adopted plane with nothing left to corroborate it is an
                 # ORPHAN, not a disagreement between channels.  CONFLICT
                 # would misreport "channels disagree" when nothing does,
@@ -938,7 +947,7 @@ class MetrologyService:
                 self._publish_registration(None, [], label_s0, None, epoch)
                 return dataclasses.replace(buffer_timing, origin_source="label",
                                            counter_epoch_id=epoch)
-            elif sibs:
+            elif convertible:
                 # A genuine disagreement between channels on one radiod
                 # run -- CONFLICT requires siblings to disagree WITH.
                 # Task 7: each sibling's delta is read in THIS channel's
