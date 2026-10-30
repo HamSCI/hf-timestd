@@ -48,7 +48,10 @@ class _Summary:
     def __init__(self, summary):
         self.summary = summary
 
+    reads = 0
+
     def read_summary(self):
+        self.reads += 1
         return self.summary
 
 
@@ -74,7 +77,7 @@ def reg_state(monkeypatch):
     """The published registration block; tests set ``box['state']``."""
     box = {"state": "ACQUIRED"}
 
-    def block():
+    def block(*_a, **_k):
         return {"source": "label", "state": box["state"], "sigma_ms": 0.8,
                 "counter_epoch_id": "ep-1", "raw_pair_residual_ms": None,
                 "contributing": ["WWV_10_MHz"], "stations": [], "age_s": 3.0}
@@ -153,7 +156,7 @@ def test_row_carries_registration_judge_and_verdict(tmp_path, reg_state):
         "state": "ACQUIRED", "sigma_ms": 0.8, "contributing": ["WWV_10_MHz"],
         "waiting": ["WWV_5_MHz"], "n_minutes": 12, "verified": True,
         "whole_second_unresolved": False, "rtp_domain": "WWV_10_MHz",
-        "counter_epoch_id": "ep-1",
+        "counter_epoch_id": "ep-1", "age_s": 3.0,
     }
     assert row["t3_shadow"] == JUDGE["t3_shadow"]
     assert row["t3_vs_adopted"] == JUDGE["shadow_residuals"]["T3"]
@@ -330,3 +333,166 @@ def test_a_bad_t3_shadow_table_costs_only_the_rows(tmp_path):
         fusion_status_path=tmp_path / "fusion_status.json",
         authority_output_path=tmp_path / "authority.json")
     assert r.manager.t3_shadow_record is None
+
+
+# ── fix round 1 ───────────────────────────────────────────────────────
+
+
+def test_offset_signs_name_every_field_and_t2_error_is_reading_minus_truth(
+        tmp_path, reg_state):
+    """I-1: chrony's offsets run local - source, so T2's error against T4
+    (reading - truth, like T6 and t3_minus_t6) is t4 - t2, not t2 - t4."""
+    m = _manager(tmp_path)
+    m.tick()
+    (row,) = _rows(tmp_path)
+    signs = row["offset_signs"]
+    for key in ("t6_offset_ms", "t4_offset_ms", "t2_offset_ms",
+                "t3_minus_t6_ms", "t3_vs_adopted", "t4_vs_adopted",
+                "t5_vs_adopted", "t2_error", "t3_minus_t4"):
+        assert isinstance(signs.get(key), str) and signs[key], key
+    assert "t4_offset_ms - t2_offset_ms" in signs["t2_error"]
+    assert "host minus" in signs["t4_offset_ms"]
+    assert "host minus" in signs["t2_offset_ms"]
+    src = Path(am.__file__).read_text()
+    assert "t2_offset_ms - t4_offset_ms" not in src
+
+
+def test_row_carries_t4_and_t5_against_the_adopted_bench(tmp_path, reg_state):
+    """I-2: T3 against T4 = difference of two same-sign judge residuals."""
+    judge = {"t3_shadow": None, "shadow_residuals": {
+        "T3": {"shadow_residual_ns": 900000.0, "sigma_ns": 1.0, "vs_tier": "T6"},
+        "T4": {"shadow_residual_ns": 150000.0, "sigma_ns": 2.0, "vs_tier": "T6"},
+        "T5": {"shadow_residual_ns": -2000.0, "sigma_ns": 3.0, "vs_tier": "T6"}}}
+    m = _manager(tmp_path, judge=judge)
+    m.tick()
+    (row,) = _rows(tmp_path)
+    assert row["t4_vs_adopted"] == judge["shadow_residuals"]["T4"]
+    assert row["t5_vs_adopted"] == judge["shadow_residuals"]["T5"]
+
+
+def test_absent_t4_and_t5_residuals_are_null(tmp_path, reg_state):
+    m = _manager(tmp_path)
+    m.tick()
+    (row,) = _rows(tmp_path)
+    assert row["t4_vs_adopted"] is None and row["t5_vs_adopted"] is None
+
+
+def test_template_says_where_the_signs_live():
+    template = Path(__file__).resolve().parents[2] / "config" / "timestd-config.toml.template"
+    text = template.read_text()
+    assert "offset_signs" in text
+    assert "t3_vs_adopted.shadow_residual_ns - t4_vs_adopted.shadow_residual_ns" in text
+
+
+def test_a_failure_streak_logs_one_error(tmp_path, reg_state, caplog):
+    """I-3: the first failure of a streak logs an ERROR; the rest DEBUG;
+    a success ends the streak."""
+    clock = _Clock(M0)
+    m = _manager(tmp_path, clock=clock)
+    real = m._t3_shadow_minute_row
+
+    def boom(*a, **k):
+        raise RuntimeError("row builder bug")
+    with caplog.at_level(logging.DEBUG):
+        m._t3_shadow_minute_row = boom
+        for _ in range(3):
+            m.tick()
+            clock.advance(60)
+        m._t3_shadow_minute_row = real
+        m.tick()
+        clock.advance(60)
+        m._t3_shadow_minute_row = boom
+        m.tick()
+    errors = [r for r in caplog.records
+              if r.levelno >= logging.WARNING and "T3 shadow" in r.getMessage()]
+    assert len(errors) == 2
+    assert "row builder bug" in errors[0].getMessage()
+
+
+def test_one_summary_read_per_tick_feeds_block_and_row(tmp_path):
+    """Minor 4: one read; the row carries the block's staleness and age."""
+    from hf_timestd.core.registration_store import RegistrationStore
+    summary_path = tmp_path / "registration.json"
+    summary_path.write_text(json.dumps({**SUMMARY, "written_at": 1000.0}))
+
+    class Counting(RegistrationStore):
+        reads = 0
+
+        def read_summary(self):
+            Counting.reads += 1
+            return super().read_summary()
+    st = Counting(tmp_path / "reg", summary_path, time_fn=lambda: 1000.0 + 10_000)
+    judge_path = tmp_path / "offset_judge.json"
+    m = AuthorityManager(
+        probes=_probes(), output_path=tmp_path / "authority.json",
+        a_level_provider=lambda: "A1", upgrade_hysteresis=1, now_fn=_Clock(M0),
+        t3_shadow_record=T3ShadowRecord("minutes", tmp_path / "t3_shadow"),
+        judge_status_path=judge_path, registration_store=st)
+    m.tick()
+    assert Counting.reads == 1
+    (row,) = _rows(tmp_path)
+    assert row["t3"]["state"] == "STALE"
+    assert row["t3"]["age_s"] == pytest.approx(10_000.0)
+    assert row["t3"]["n_minutes"] == 12
+    published = json.loads((tmp_path / "authority.json").read_text())
+    assert published["registration"]["state"] == "STALE"
+
+
+def test_rows_carry_seq_and_process_id(tmp_path, reg_state):
+    """Minor 5: duplicates, gaps and restarts become visible."""
+    clock = _Clock(M0)
+    m = _manager(tmp_path, clock=clock)
+    m.tick()
+    clock.advance(60)
+    m.tick()
+    clock.advance(-60)    # host clock steps back: the minute repeats
+    m.tick()
+    rows = _rows(tmp_path)
+    assert [r["seq"] for r in rows] == [0, 1, 2]
+    assert [r["utc_minute"] for r in rows] == [M0_EPOCH, M0_EPOCH + 60, M0_EPOCH]
+    assert len({r["process_id"] for r in rows}) == 1
+    (tmp_path / "other").mkdir()
+    m2 = _manager(tmp_path / "other", clock=_Clock(M0))
+    assert m2._t3_shadow_process_id != m._t3_shadow_process_id
+
+
+def test_chrony_last_rx_reaches_the_row(tmp_path, reg_state):
+    """Minor 6: the chrony sample's age rides beside its offset."""
+    import subprocess
+    from hf_timestd.core.chrony_tracking_probe import ChronyTrackingProbe
+
+    def runner(line):
+        return lambda *a, **k: subprocess.CompletedProcess(a, 0, line + "\n", "")
+    t4 = ChronyTrackingProbe(
+        "T4", source_matcher=lambda r: True,
+        runner=runner("^,*,192.168.1.10,1,6,377,23,-0.000012,-0.000013,0.000250"))
+    t2 = ChronyTrackingProbe(
+        "T2", source_matcher=lambda r: True,
+        runner=runner("^,+,203.0.113.5,2,10,377,812,0.006400,0.006500,0.020000"))
+    r4 = t4.poll()
+    assert r4.detail["last_rx_s"] == 23
+    m = _manager(tmp_path, probes=[t4, t2])
+    m.tick()
+    (row,) = _rows(tmp_path)
+    assert row["t4_last_rx_s"] == 23
+    assert row["t2_last_rx_s"] == 812
+
+
+def test_enabled_must_be_a_real_boolean(tmp_path, caplog):
+    """Minor 7: the string "false" disables; garbage logs once and keeps
+    the default."""
+    from hf_timestd.core.authority_runner import build_authority_runner_from_config
+    kw = dict(fusion_status_path=tmp_path / "fusion_status.json",
+              authority_output_path=tmp_path / "authority.json")
+    off = build_authority_runner_from_config(
+        config={"timing": {"t3_shadow": {"enabled": "false"}}}, **kw)
+    assert off.manager.t3_shadow_record is None
+    on = build_authority_runner_from_config(
+        config={"timing": {"t3_shadow": {"enabled": "TRUE"}}}, **kw)
+    assert on.manager.t3_shadow_record is not None
+    with caplog.at_level(logging.WARNING):
+        odd = build_authority_runner_from_config(
+            config={"timing": {"t3_shadow": {"enabled": "nope"}}}, **kw)
+    assert odd.manager.t3_shadow_record is not None
+    bad = [r for r in caplog.records if "nope" in r.getMessage()]
+    assert len(bad) == 1

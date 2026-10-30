@@ -217,6 +217,10 @@ class ChronyTrackingProbe:
                 "state": chosen.get("state"),
                 "reach": chosen.get("reach"),
                 "error_ms": error_ms,
+                # Seconds since chrony last heard this source (LastRx), so
+                # a consumer can tell a fresh sample from one a poll
+                # interval old.  None when chronyc prints no number.
+                "last_rx_s": _last_rx_s(chosen.get("last_rx")),
             },
         )
 
@@ -242,10 +246,19 @@ class ChronyTrackingProbe:
                 "name": parts[self._IDX_NAME],
                 "stratum": parts[self._IDX_STRATUM],
                 "reach": parts[self._IDX_REACH],
+                "last_rx": parts[self._IDX_LAST_RX],
                 "offset_s": parts[self._IDX_OFFSET],
                 "error_s": parts[self._IDX_ERROR],
             })
         return rows
+
+
+def _last_rx_s(raw: object) -> Optional[int]:
+    """chronyc's LastRx column as whole seconds, or None."""
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
 
 
 def _reach_last_poll_ok(reach: object) -> bool:

@@ -26,6 +26,7 @@ import math
 import os
 import subprocess
 import tempfile
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -300,10 +301,11 @@ class AuthorityManager:
         # Task 15: the per-minute T3 shadow row (stream ``minutes``).  None =
         # no rows and no station transition counter.  ``judge_status_path``
         # is the offset judge's publication, read once per minute row for its
-        # ``t3_shadow`` block and T3 shadow residual.  ``registration_store``
-        # supplies the summary's detail fields (waiting, n_minutes, ...) that
-        # authority.json's registration block does not carry; None builds the
-        # default store on first use.
+        # ``t3_shadow`` block and the T3/T4/T5 shadow residuals.
+        # ``registration_store`` is the store _write_state reads the T3
+        # summary from, ONCE per tick: authority.json's registration block and
+        # the row's detail fields (waiting, n_minutes, ...) both come from that
+        # one read.  None builds the default store on first use.
         self.t3_shadow_record = t3_shadow_record
         self.judge_status_path = Path(judge_status_path)
         self._registration_store = registration_store
@@ -314,6 +316,17 @@ class AuthorityManager:
             )
             self._t3_station_transitions = StateTransitionCounter("station")
         self._t3_shadow_last_minute: Optional[int] = None
+        # The summary _write_state read this tick, beside the block it built.
+        self._published_summary: Optional[dict] = None
+        # Row bookkeeping: ``seq`` counts this process's minute rows and
+        # ``process_id`` names the process, so a reader can tell a repeated
+        # minute (host-clock step back), a gap and a restart apart.  A random
+        # id, not a clock read.
+        self._t3_shadow_seq = 0
+        self._t3_shadow_process_id = uuid.uuid4().hex[:12]
+        # True while minute-row failures run in a streak: the first logs an
+        # ERROR, the rest DEBUG, and a success ends the streak.
+        self._t3_shadow_failing = False
         # Host-clock integrity (host_clock_integrity.py).  Three witnesses
         # feed one verdict: the cross-check's own sysclock-vs-rtp pair
         # numbers, the LB-1421 host-versus-GPS gap riding in T5's detail,
@@ -491,10 +504,12 @@ class AuthorityManager:
         day file, and the transition counter's log window, and it enters no
         timing arithmetic.  Nothing computed from it reaches authority.json,
         the snapshot, chrony or any tier decision.  A host-clock step at
-        worst repeats or skips one row.
+        worst repeats or skips one row; ``seq`` and ``process_id`` let a
+        reader see it.
 
         Never raises: the record is diagnostic, and the tick has already
-        published authority.json.
+        published authority.json.  A failure streak logs one ERROR, so a bug
+        in the row cannot silently cost the whole record.
         """
         if self.t3_shadow_record is None:
             return
@@ -513,10 +528,17 @@ class AuthorityManager:
             if utc_minute == self._t3_shadow_last_minute:
                 return
             self._t3_shadow_last_minute = utc_minute
-            self.t3_shadow_record.append(
-                self._t3_shadow_minute_row(state, results, utc_minute))
+            row = self._t3_shadow_minute_row(state, results, utc_minute)
+            self.t3_shadow_record.append(row)
+            self._t3_shadow_seq += 1
+            self._t3_shadow_failing = False
         except Exception as exc:  # noqa: BLE001 -- diagnostic only
-            log.debug("T3 shadow minute row failed: %r", exc)
+            if not self._t3_shadow_failing:
+                log.error("T3 shadow minute row failed: %r; the minutes "
+                          "record is incomplete until a row succeeds", exc)
+            else:
+                log.debug("T3 shadow minute row failed: %r", exc)
+            self._t3_shadow_failing = True
 
     def _t3_shadow_minute_row(
         self,
@@ -526,12 +548,16 @@ class AuthorityManager:
     ) -> Dict[str, Any]:
         reg = self._published_registration if isinstance(
             self._published_registration, dict) else {}
-        summary = self._read_registration_summary() or {}
+        summary = self._published_summary or {}
         judge = self._read_judge_status() or {}
         t3_shadow = judge.get("t3_shadow")
         residuals = judge.get("shadow_residuals")
-        t3_vs_adopted = (residuals.get("T3")
-                         if isinstance(residuals, dict) else None)
+        if not isinstance(residuals, dict):
+            residuals = {}
+
+        def vs_adopted(tier: str) -> Optional[dict]:
+            v = residuals.get(tier)
+            return v if isinstance(v, dict) else None
 
         def offset(level: str) -> Optional[float]:
             r = results.get(level)
@@ -545,10 +571,19 @@ class AuthorityManager:
             r = results.get(level)
             return None if r is None or r.offset_ms is None else r.frame
 
+        def last_rx(level: str) -> Optional[float]:
+            r = results.get(level)
+            v = None if r is None else (r.detail or {}).get("last_rx_s")
+            if not isinstance(v, (int, float)) or isinstance(v, bool):
+                return None
+            return v if math.isfinite(v) else None
+
         counter = self._t3_station_transitions
         return {
             "kind": "minute",
             "utc_minute": utc_minute,
+            "seq": self._t3_shadow_seq,
+            "process_id": self._t3_shadow_process_id,
             # T3's registration as this tick published it (authority.json's
             # block), with the summary's detail fields beside it.
             "t3": {
@@ -562,44 +597,53 @@ class AuthorityManager:
                     "whole_second_unresolved"),
                 "rtp_domain": summary.get("rtp_domain"),
                 "counter_epoch_id": reg.get("counter_epoch_id"),
+                # The block's own age; with state STALE it marks detail
+                # fields a dead writer left behind.
+                "age_s": reg.get("age_s"),
             },
             "t3_shadow": t3_shadow if isinstance(t3_shadow, dict) else None,
-            "t3_vs_adopted": (t3_vs_adopted
-                              if isinstance(t3_vs_adopted, dict) else None),
+            # The judge's shadow residuals, raw, from the same single read:
+            # each bench's UTC estimate minus the adopted bench's, at one
+            # instant (offset_judge._cross_bench_delta_ns).  T4 reaches the
+            # sample plane only through this host link, so T3 against T4 is
+            # t3_vs_adopted - t4_vs_adopted when both name one vs_tier.
+            "t3_vs_adopted": vs_adopted("T3"),
+            "t4_vs_adopted": vs_adopted("T4"),
+            "t5_vs_adopted": vs_adopted("T5"),
             # All three offsets come from THIS tick's probe results, so T2
             # and T4 describe the same instant.  Sign conventions, raw:
             #   t6: BpskPpsProbe local_minus_source_ns / 1e6 -- the anchor's
             #       label of the PPS edge minus the GPS second it marks
-            #       (frame "rtp"; host-clock-independent).
-            #   t4, t2: ChronyTrackingProbe, chrony's last-sample offset for
-            #       the source, local clock minus source (frame "sysclock").
-            # T4 and T2 share one convention, so T2's error against T4 as
-            # truth is t2_offset_ms - t4_offset_ms.  ``offset_frames`` names
-            # each probe's frame in the row itself.
+            #       (reading minus truth; frame "rtp").
+            #   t4, t2: ChronyTrackingProbe, chrony's last-sample offset,
+            #       local clock minus source (chrony: "Positive offsets
+            #       indicate that the local clock is ahead of the source").
+            # So t2 = host - S2 and t4 = host - S4.  T2's error with T4 as
+            # truth, reading minus truth like T6 and t3_minus_t6_ms, is
+            # S2 - S4 = t4_offset_ms - t2_offset_ms.  ``offset_signs`` says
+            # all of this in the row itself.
             "t6_offset_ms": offset("T6"),
             "t4_offset_ms": offset("T4"),
             "t2_offset_ms": offset("T2"),
             "offset_frames": {"t6": frame("T6"), "t4": frame("T4"),
                               "t2": frame("T2")},
+            "offset_signs": T3_SHADOW_OFFSET_SIGNS,
+            # Seconds since chrony last heard the source (chronyc LastRx):
+            # a WAN sample can sit up to a poll interval old.
+            "t4_last_rx_s": last_rx("T4"),
+            "t2_last_rx_s": last_rx("T2"),
             "host_clock_verdict": (state.host_clock or {}).get("verdict"),
             "t3_transitions_total": (counter.count
                                      if counter is not None else None),
         }
 
-    def _read_registration_summary(self) -> Optional[dict]:
-        """The T3 summary, read once for the minute row.  None on any
-        failure."""
-        try:
-            if self._registration_store is None:
-                from hf_timestd.core.registration_store import (
-                    RegistrationStore as _RegistrationStore,
-                )
-                self._registration_store = _RegistrationStore()
-            s = self._registration_store.read_summary()
-            return s if isinstance(s, dict) else None
-        except Exception as exc:  # noqa: BLE001
-            log.debug("T3 shadow: registration summary unreadable: %r", exc)
-            return None
+    def _registration_store_or_default(self) -> "RegistrationStore":
+        if self._registration_store is None:
+            from hf_timestd.core.registration_store import (
+                RegistrationStore as _RegistrationStore,
+            )
+            self._registration_store = _RegistrationStore()
+        return self._registration_store
 
     def _read_judge_status(self) -> Optional[dict]:
         """offset_judge.json, read once.  None when missing or malformed."""
@@ -1273,10 +1317,16 @@ class AuthorityManager:
         # file, unreadable JSON, unwritable /run) must never block
         # authority.json itself, so it's caught and the block just falls
         # back to its no-summary shape.
+        # One summary read per tick feeds both this block and the T3 shadow
+        # row's detail fields, so the two never describe different files.
         self._published_registration = None
+        self._published_summary = None
         try:
-            payload["registration"] = registration_block()
+            store = self._registration_store_or_default()
+            summary = store.read_summary()
+            payload["registration"] = registration_block(store, summary=summary)
             self._published_registration = payload["registration"]
+            self._published_summary = summary if isinstance(summary, dict) else None
         except Exception as e:
             log.debug("registration_block raised: %s", e)
 
@@ -1476,13 +1526,32 @@ def _flatten_t3(snapshot: Dict[str, Any], r: Optional[ProbeResult]) -> None:
 
 
 _UNANNOUNCED = object()
+_UNREAD = object()
+
+# The sign of every offset in a T3 shadow minute row, carried in each row so
+# the analysis never has to guess.  "Reading minus truth" throughout.
+T3_SHADOW_OFFSET_SIGNS: Dict[str, str] = {
+    "t6_offset_ms": "T6 label of the PPS edge minus the GPS second",
+    "t4_offset_ms": "host minus LAN GPS source (chrony local - source)",
+    "t2_offset_ms": "host minus WAN source (chrony local - source)",
+    "t2_error": "T2 error with T4 as truth = t4_offset_ms - t2_offset_ms",
+    "t3_minus_t6_ms": "T3 label minus T6 label",
+    "t3_vs_adopted": "T3 UTC estimate minus adopted bench's, ns",
+    "t4_vs_adopted": "T4 UTC estimate minus adopted bench's, ns",
+    "t5_vs_adopted": "T5 UTC estimate minus adopted bench's, ns",
+    "t3_minus_t4": ("t3_vs_adopted.shadow_residual_ns - "
+                    "t4_vs_adopted.shadow_residual_ns, same vs_tier"),
+}
 
 
 def _iso_z(dt: datetime) -> str:
     return dt.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
-def registration_block(store: Optional["RegistrationStore"] = None) -> dict:
+def registration_block(
+    store: Optional["RegistrationStore"] = None,
+    summary: Any = _UNREAD,
+) -> dict:
     """The T3 origin's provenance for authority.json (spec §7).
 
     ACQUIRED names the tick train itself as the source
@@ -1511,7 +1580,9 @@ def registration_block(store: Optional["RegistrationStore"] = None) -> dict:
     from .registration_store import RegistrationStore as _RegistrationStore
 
     st = store or _RegistrationStore()
-    s = st.read_summary()
+    # ``summary`` lets a caller that already read the file pass it in, so
+    # one read serves several consumers (the T3 shadow row).
+    s = st.read_summary() if summary is _UNREAD else summary
     if not s:
         return {
             "source": "label",

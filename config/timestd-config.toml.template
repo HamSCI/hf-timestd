@@ -335,6 +335,11 @@ anchor_closure = false
 #                                  the host-clock verdict, and T3 state changes
 #   broadcasts-<channel>-<day>.jsonl  one row per measured broadcast per minute
 #                                  from metrology, plus channel state changes
+# Each minute row names the sign of every offset it holds in its own
+# `offset_signs` field (reading minus truth throughout).  T3 against T4 comes
+# from two judge residuals of one sign, read in the same row:
+#   t3_vs_adopted.shadow_residual_ns - t4_vs_adopted.shadow_residual_ns
+# valid when both name the same vs_tier.
 # The station only writes these rows; no analysis runs on the station.  Copy
 # the directory off and analyse it elsewhere.  Nothing here feeds chrony or
 # any tier decision.

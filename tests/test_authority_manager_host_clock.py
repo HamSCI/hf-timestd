@@ -271,7 +271,7 @@ def test_snapshot_row_carries_the_published_counter_epoch_id(tmp_path, monkeypat
     from hf_timestd.core import authority_manager as am
     epochs = iter(["ep-1", "ep-2"])
     monkeypatch.setattr(am, "registration_block",
-                        lambda: {"state": "ACQUIRED", "counter_epoch_id": next(epochs)})
+                        lambda *_a, **_k: {"state": "ACQUIRED", "counter_epoch_id": next(epochs)})
     store = _RecordingStore()
     m = _manager(tmp_path, [FakeProbe("T6", _rtp("T6", 0.0, 0.004))], snapshot_store=store)
     m.tick()
@@ -288,7 +288,7 @@ def test_snapshot_counter_epoch_id_is_none_when_registration_fails(tmp_path, mon
     tick's epoch."""
     calls = iter([{"counter_epoch_id": "ep-1"}, OSError("no summary")])
 
-    def block():
+    def block(*_a, **_k):
         v = next(calls)
         if isinstance(v, Exception):
             raise v

@@ -416,7 +416,16 @@ def build_authority_runner_from_config(
     t3s_cfg = {"enabled": True, "directory": str(T3ShadowRecord.DEFAULT_DIR),
                "retention_days": 14,
                **(_timing.get("t3_shadow") if isinstance(_timing.get("t3_shadow"), dict) else {})}
-    if bool(t3s_cfg["enabled"]):
+    # A real boolean, or the strings "true"/"false".  bool("false") reads
+    # True, so anything else logs once and keeps the default (enabled).
+    _t3s_enabled = t3s_cfg["enabled"]
+    if isinstance(_t3s_enabled, str) and _t3s_enabled.strip().lower() in ("true", "false"):
+        _t3s_enabled = _t3s_enabled.strip().lower() == "true"
+    elif not isinstance(_t3s_enabled, bool):
+        log.error("[timing.t3_shadow] enabled = %r is not true or false; "
+                  "keeping the default, enabled", _t3s_enabled)
+        _t3s_enabled = True
+    if _t3s_enabled:
         try:
             t3_shadow_record = T3ShadowRecord(
                 "minutes", Path(t3s_cfg["directory"]),
