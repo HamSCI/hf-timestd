@@ -56,6 +56,8 @@ from hf_timestd.core.ring_buffer_reader import RingBufferReader
 from hf_timestd.core.counter_epoch_tracker import CounterEpochTracker
 from hf_timestd.core.buffer_timing import resolve_buffer_timing
 from hf_timestd.core.registration_acquirer import (
+    NON_REGISTERING_STATIONS,
+    ORIGIN_SIGMA_FLOOR_MS,
     MinuteArrival,
     Registration,
     RegistrationAcquirer,
@@ -260,9 +262,12 @@ class MetrologyService:
         # Task 10: inside an episode with no raw radiod pair in the ring
         # (one WARNING per episode).
         self._raw_pair_missing = False
-        # Fix round 1 (I-2): (donor channels, their plane) this channel's
-        # own ticks condemned; refused until the plane moves.
+        # Fix round 1 (I-2): the donor plane this channel's own ticks
+        # condemned (see _refuse_donors); refused until it comes onto the
+        # own-implied plane, the counter epoch changes, or 30 minutes pass.
         self._refused_donors = None
+        self._refused_kept: List[str] = []
+        self._minute_now: Optional[int] = None
         # Fix round 1: the involved set of the CONFLICT episode already
         # logged, so a persisting conflict logs one WARNING.
         self._conflict_logged = None
@@ -837,7 +842,14 @@ class MetrologyService:
             and self._donors_refused(fused, kept, int(start_rtp))
         )
         if refused:
+            self._refused_kept = list(kept)
             fused, kept, waiting = None, [], []
+        elif (fused is not None and len(kept) > 1 and self.channel_name in kept
+                and getattr(self, "_refused_donors", None) is not None):
+            # This channel's own plane now fuses WITH siblings (fusion
+            # drops a member more than FUSE_OUTLIER_MS out), so the
+            # disagreement is over: the same test lifts the refusal.
+            self._donors_refused(fused, kept, int(start_rtp))
         if fused is not None and (own is None or own_unverified_with_siblings):
             # `fused` here is built purely from siblings.  read_siblings
             # returns ACQUIRED and WITNESS files only, and only a VERIFIED
@@ -851,27 +863,55 @@ class MetrologyService:
             own_is_adopted = True
         return own, own_is_adopted, fused, kept, waiting, refused
 
-    # Fix round 1 (I-2): how far a refused donor set's plane must move,
-    # at this minute's RTP, before this channel may adopt it again: the
-    # acquirer's ORIGIN_SIGMA_FLOOR_MS.  The donors' own corroboration
-    # moves them by far less than this per minute.
-    DONOR_REFUSAL_TOLERANCE_MS = 1.0
+    # Fix round 2 (MINOR 3): a refused donor plane is let back in only
+    # once it sits within CORRECT_K_SIGMA x ORIGIN_SIGMA_FLOOR_MS (3 ms) of
+    # the plane this channel's own residuals implied when they condemned
+    # it -- the threshold corroborate itself condemns on.  A move of a
+    # millisecond or so (a young donor still converging) cures nothing;
+    # it would only buy one more condemnation.
+    DONOR_REFUSAL_LIFT_MS = (
+        RegistrationAcquirer.CORRECT_K_SIGMA * ORIGIN_SIGMA_FLOOR_MS)
+    # ... and a refusal older than this lifts anyway, as a backstop.
+    DONOR_REFUSAL_MAX_S = 30 * 60
+
+    def _refuse_donors(self, kept, fused, epoch, minute_utc: int) -> None:
+        """Record the plane this channel's own ticks just condemned, and
+        the plane its own residuals implied instead: the condemned plane
+        less the median residual (a positive residual means the plane
+        labels late).  Without a residual only the backstop lifts it."""
+        res = sorted(a.residual_ms for st, a in self._last_arrivals.items()
+                     if st not in NON_REGISTERING_STATIONS)
+        residual_s = None if not res else res[len(res) // 2] / 1000.0
+        self._refused_donors = {
+            "names": frozenset(kept), "plane": fused, "residual_s": residual_s,
+            "epoch": epoch, "minute": int(minute_utc),
+        }
 
     def _donors_refused(self, fused, kept, start_rtp: int) -> bool:
-        """Is ``fused`` (a plane from siblings ``kept`` alone) the plane
-        this channel's own ticks already condemned?  A different donor
-        set, or a plane that has moved, lifts the refusal."""
-        refusal = getattr(self, "_refused_donors", None)
-        if refusal is None:
+        """Is ``fused`` (a plane from siblings alone) still the plane this
+        channel's own ticks condemned?  Which siblings carry it does not
+        matter: the plane does.  Lifts, with one INFO line, when the
+        plane has come within DONOR_REFUSAL_LIFT_MS of the own-implied
+        plane, or when the refusal is DONOR_REFUSAL_MAX_S old."""
+        r = getattr(self, "_refused_donors", None)
+        if r is None:
             return False
-        names, plane = refusal
-        moved_ms = abs(fused.sample0_utc_for(start_rtp)
-                       - plane.sample0_utc_for(start_rtp)) * 1000.0
-        if frozenset(kept) == names and moved_ms <= self.DONOR_REFUSAL_TOLERANCE_MS:
+        now = getattr(self, "_minute_now", None)
+        if now is not None and now - r["minute"] >= self.DONOR_REFUSAL_MAX_S:
+            logger.info(
+                f"[{self.channel_name}] refusal of {sorted(r['names'])}'s plane "
+                f"lifted after 30 minutes; adoption allowed again")
+            self._refused_donors = None
+            return False
+        if r["residual_s"] is None:
+            return True
+        implied = r["plane"].sample0_utc_for(start_rtp) - r["residual_s"]
+        off_ms = abs(fused.sample0_utc_for(start_rtp) - implied) * 1000.0
+        if off_ms > self.DONOR_REFUSAL_LIFT_MS:
             return True
         logger.info(
-            f"[{self.channel_name}] the donor plane this channel's ticks "
-            f"condemned has changed ({sorted(kept)}, moved {moved_ms:.1f} ms); "
+            f"[{self.channel_name}] the siblings' plane ({sorted(kept)}) now sits "
+            f"{off_ms:.1f} ms from the plane this channel's own ticks implied; "
             f"adoption allowed again")
         self._refused_donors = None
         return False
@@ -879,12 +919,25 @@ class MetrologyService:
     def _publish_conflict(self, others, label_s0, epoch, message: str,
                           extra_extra: Optional[Dict[str, Any]]) -> None:
         """Publish a per-channel CONFLICT naming ``others`` beside this
-        channel, with one WARNING per episode (one involved set).  The
-        episode ends at the first publish that names no conflict."""
+        channel, with one WARNING per episode.
+
+        Fix round 2 (MINOR 2): the episode is the CONDITION -- this
+        channel in conflict, minute after minute -- not the member list.
+        The paths name different sets (a refusal names the donors fusion
+        kept; the own-vs-siblings CONFLICT names every convertible
+        sibling), and a donor clearing the corroboration floor changes
+        the set mid-episode; keying on the set logged a second WARNING
+        for one disagreement.  A changed set logs at INFO.  The episode
+        ends at the first publish that names no conflict."""
         involved = sorted({self.channel_name, *others})
-        if getattr(self, "_conflict_logged", None) != tuple(involved):
+        logged = getattr(self, "_conflict_logged", None)
+        if logged is None:
             logger.warning(message)
-            self._conflict_logged = tuple(involved)
+        elif logged != tuple(involved):
+            logger.info(
+                f"[{self.channel_name}] the conflict now names {involved} "
+                f"(was {list(logged)})")
+        self._conflict_logged = tuple(involved)
         # I6: CONFLICT is a PER-CHANNEL verdict.  It belongs in this
         # channel's file; the station summary carries the channels
         # involved under `conflicts` and keeps a state derived from the
@@ -932,6 +985,15 @@ class MetrologyService:
         epoch = self.epoch_tracker.observe(
             metadata.get("raw_gps_time_ns"), metadata.get("raw_rtp_timesnap"),
             metadata.get("sample_rate", self.engine.sample_rate))
+        self._minute_now = int(minute_utc)
+        refusal = getattr(self, "_refused_donors", None)
+        if refusal is not None and refusal["epoch"] != epoch:
+            # Fix round 2 (MINOR 3): the refused plane was measured in
+            # another counter; nothing it says carries over.
+            logger.info(
+                f"[{self.channel_name}] counter epoch {refusal['epoch']} -> "
+                f"{epoch}: refusal of {sorted(refusal['names'])}'s plane cleared")
+            self._refused_donors = None
         label_s0 = float(raw.sample0_utc)
         audio = self.engine.prepare_audio(iq_samples)
         delays = self.engine.expected_delays_s(label_s0, int(minute_utc))
@@ -977,7 +1039,10 @@ class MetrologyService:
             # channel's counter through both counter maps.
             sib_plane = fuse_registrations(convertible, at_rtp=int(start_rtp),
                                            at_map=at_map, domain=self.channel_name)
-            if sib_plane is not None:
+            # Fix round 2: a plane this channel's ticks condemned names
+            # no hypothesis either.
+            if sib_plane is not None and not self._donors_refused(
+                    sib_plane, [], int(start_rtp)):
                 own = self.acquirer.resolve_ambiguity(sib_plane, int(start_rtp), label_s0,
                                                       epoch_offset_s=epoch_offset_s)
                 resolved_via_sibling_this_minute = own is not None
@@ -1012,7 +1077,7 @@ class MetrologyService:
                 # donors, not a bootstrap: name them, once per episode,
                 # and refuse the same plane until it moves, or the next
                 # minute re-adopts it and the cycle repeats.
-                self._refused_donors = (frozenset(kept), fused)
+                self._refuse_donors(kept, fused, epoch, minute_utc)
                 own_ms = ", ".join(
                     f"{st} {a.residual_ms:+.1f} ms"
                     for st, a in sorted(self._last_arrivals.items()))
@@ -1022,6 +1087,18 @@ class MetrologyService:
                     f"with the plane adopted from {sorted(kept)} ({own_ms}); "
                     f"not adopting it again until the donors' plane moves",
                     t6_extra)
+                return fallback
+            if refused:
+                # Fix round 2 (IMPORTANT 1): no own plane this minute (a
+                # slow re-acquisition, a candidate verify rejected), but the
+                # refusal holds and its donors are still on offer.  The
+                # conflict goes on; a plain BOOTSTRAP here ended the
+                # episode and the next refused minute logged a second
+                # WARNING.
+                self._publish_conflict(
+                    self._refused_kept, label_s0, epoch,
+                    f"[{self.channel_name}] still refusing the plane of "
+                    f"{sorted(self._refused_kept)}", t6_extra)
                 return fallback
             # task 16b: the measurement just gave the plane up.  Stand
             # every surface down in this minute's publish rather than
@@ -1047,9 +1124,9 @@ class MetrologyService:
             # The donors this channel's ticks condemned are still the only
             # plane on offer: the conflict goes on (no new WARNING).
             self._publish_conflict(
-                self._refused_donors[0], label_s0, epoch,
+                self._refused_kept, label_s0, epoch,
                 f"[{self.channel_name}] still refusing the plane of "
-                f"{sorted(self._refused_donors[0])}", t6_extra)
+                f"{sorted(self._refused_kept)}", t6_extra)
             return fallback
 
         # I2: this channel already has its own ACQUIRED plane, but nothing

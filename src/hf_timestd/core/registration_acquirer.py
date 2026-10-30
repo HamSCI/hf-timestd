@@ -1923,10 +1923,14 @@ class RegistrationAcquirer:
         whole = {int(round(e / 1000.0)) for e in bad.values()}
         if self._acq_k_int is not None and len(whole) == 1:
             fix = self._acq_k_int - whole.pop()
+        # Fix round 2 (MINOR 4): on an ADOPTED plane the service names the
+        # event a CONFLICT with the donors, a line that carries these
+        # ~±1000 ms residuals; the reset stays at INFO there, as in
+        # ``corroborate``, so the event logs one WARNING.
         self.reset(
             "held plane a whole second off: "
             + ", ".join(f"{s} {e:+.1f} ms" for s, e in sorted(bad.items())),
-            loud=True,
+            loud=self._reg.method != "adopted",
         )
         self._overruling_second = fix
         return True

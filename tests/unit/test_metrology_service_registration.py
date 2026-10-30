@@ -1304,3 +1304,147 @@ def test_a_donor_its_adopter_s_ticks_disagree_with_is_one_conflict(tmp_path, cap
     assert first <= 2, seen
     assert len(set(seen[first:])) == 1, seen
     assert seen[-1] == ("CONFLICT", "BOOTSTRAP", ("SHARED_10000", "WWV_20000"))
+
+
+# ── Task 10 fix round 2: one refusal, one episode ─────────────────────
+
+
+def _run_refusal(svc, tmp_path, n, audio_for=None, donor_for=None, raw_for=None,
+                 before=None):
+    """Run n minutes of a channel whose ticks sit at truth beside donor
+    WWV_20000.  ``audio_for(k)`` may replace a minute's audio,
+    ``donor_for(k)`` rewrites the donor's utc_ref before minute k, and
+    ``raw_for(k)`` may replace the minute's metadata; ``before(k)`` runs
+    first.  Returns each
+    minute's channel-file state and the WARNING messages."""
+    states, loud = [], []
+
+    class _H(logging.Handler):
+        def emit(self, r):
+            if r.levelno >= logging.WARNING:
+                loud.append(r.getMessage())
+
+    h = _H()
+    root = logging.getLogger()
+    root.addHandler(h)
+    try:
+        for k in range(n):
+            if before is not None:
+                before(k)
+            if donor_for is not None and donor_for(k) is not None:
+                _witness_sibling(svc, donor_for(k), state="ACQUIRED")
+            audio = audio_for(k) if audio_for is not None else None
+            if raw_for is not None and raw_for(k) is not None:
+                label = label_timing(T0 + 60 * k, 0.0, SR)
+                svc.apply_registration(label, _ticks(k) if audio is None else audio,
+                                       1_000_000 + k * 60 * SR, MIN + 60 * k, raw_for(k))
+            else:
+                _minute(svc, k, walk=0.0, raw_walk=0.0, audio=audio)
+            ch = json.loads((tmp_path / "reg" / "SHARED_10000.json").read_text())
+            states.append(ch["state"])
+    finally:
+        root.removeHandler(h)
+    return states, loud
+
+
+def test_a_gap_in_the_own_plane_does_not_end_the_refusal_episode(tmp_path):
+    """Fix round 2, IMPORTANT 1: after the donors are condemned, minutes
+    with no own plane (four of noise here, then a slow re-acquisition)
+    used to take the plain stand-down, publish BOOTSTRAP with no
+    conflict, end the episode, and log a second WARNING when the
+    candidate returned.  The refusal still holds, so the conflict does."""
+    svc = _service(tmp_path)
+    _witness_sibling(svc, T0 + 0.010, state="ACQUIRED")
+    states, loud = _run_refusal(
+        svc, tmp_path, 16,
+        audio_for=lambda k: _noise_minute(k) if 2 <= k <= 5 else None)
+    assert len(loud) == 1, loud
+    first = states.index("CONFLICT")
+    assert first <= 1 and set(states[first:]) == {"CONFLICT"}, states
+
+
+def test_the_conflict_episode_survives_a_change_of_named_channels(tmp_path, caplog):
+    """Fix round 2, MINOR 2: two donors at +10 ms, one held back by the
+    corroboration floor, so the conflict names only the donor fusion
+    kept.  At minute 5 the young donor clears the floor and joins: the
+    named channels change mid-episode.  One episode, one WARNING (the
+    change of channels logs at INFO)."""
+    from hf_timestd.core.registration_acquirer import Registration
+
+    svc = _service(tmp_path)
+    _witness_sibling(svc, T0 + 0.010, state="ACQUIRED")
+    young = Registration(
+        svc.epoch_tracker.observe(**_pair(0)), rtp_ref=1_000_000, utc_ref=T0 + 0.010,
+        sample_rate=SR, sigma_ms=0.9, n_minutes=0, channel="WWV_25000",
+        counter_map=_SIB_MAP, stations=("WWV",), verified=True,
+    )
+    svc.reg_store.write_channel(young, "ACQUIRED", {})
+
+    def mature(k):
+        if k == 5:
+            young.n_minutes = 5
+            svc.reg_store.write_channel(young, "ACQUIRED", {})
+            assert svc.reg_store.read_summary()["conflicts"] == [
+                "SHARED_10000", "WWV_20000"], "the young donor waited until now"
+
+    states, loud = _run_refusal(svc, tmp_path, 10, before=mature)
+    assert len(loud) == 1, loud
+    assert states[-1] == "CONFLICT"
+    assert svc.reg_store.read_summary()["conflicts"] == [
+        "SHARED_10000", "WWV_20000", "WWV_25000"]
+
+
+def test_the_refusal_lifts_only_onto_the_own_plane(tmp_path, caplog):
+    """Fix round 2, MINOR 3: a young donor drifting a millisecond a minute
+    away from this channel's own plane keeps the refusal (a 1 ms move
+    used to lift it and buy one more condemnation); the donor moving
+    onto the plane this channel's own residuals implied lifts it, once,
+    at INFO."""
+    svc = _service(tmp_path)
+    caplog.set_level(logging.INFO)
+
+    def donor(k):
+        if k < 2:
+            return T0 + 0.010
+        if k < 8:
+            return T0 + 0.010 + 0.001 * (k - 1)  # drifting away
+        return T0  # onto the own plane
+
+    states, loud = _run_refusal(svc, tmp_path, 11, donor_for=donor)
+    assert len(loud) == 1, loud
+    assert set(states[1:8]) == {"CONFLICT"}, states
+    lifted = [r for r in caplog.records if "adoption allowed" in r.getMessage()]
+    assert len(lifted) == 1 and lifted[0].levelno == logging.INFO
+    assert states[-1] == "ACQUIRED", states
+    assert svc.reg_store.read_summary()["conflicts"] == []
+
+
+def test_the_refusal_expires_after_thirty_minutes(tmp_path, caplog):
+    """Fix round 2, MINOR 3 backstop: a refusal older than 30 minutes
+    lifts, with one INFO line."""
+    svc = _service(tmp_path)
+    _witness_sibling(svc, T0 + 0.010, state="ACQUIRED")
+    _run_refusal(svc, tmp_path, 3)
+    assert svc._refused_donors is not None
+    caplog.set_level(logging.INFO)
+    k = 3 + 30
+    _minute(svc, k, walk=0.0, raw_walk=0.0)
+    lifted = [r for r in caplog.records if "30 minutes" in r.getMessage()]
+    assert len(lifted) == 1 and lifted[0].levelno == logging.INFO
+
+
+def test_a_new_counter_epoch_clears_the_refusal(tmp_path, caplog):
+    """Fix round 2, MINOR 3: the refusal belongs to one counter epoch."""
+    svc = _service(tmp_path)
+    _witness_sibling(svc, T0 + 0.010, state="ACQUIRED")
+    _run_refusal(svc, tmp_path, 3)
+    assert svc._refused_donors is not None
+    caplog.set_level(logging.INFO)
+    meta = dict(_meta(3, 0.0))
+    meta["raw_gps_time_ns"] += int(69732e9)  # radiod re-anchors 19.4 h away
+    svc.apply_registration(label_timing(T0 + 180, 0.0, SR), _ticks(3),
+                           1_000_000 + 3 * 60 * SR, MIN + 180, meta)
+    assert svc._refused_donors is None
+    cleared = [r for r in caplog.records if "counter epoch" in r.getMessage()
+               and "refus" in r.getMessage()]
+    assert len(cleared) == 1 and cleared[0].levelno == logging.INFO

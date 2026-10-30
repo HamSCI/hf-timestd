@@ -432,3 +432,18 @@ def test_sixty_second_buffers_recover_a_raw_pair_one_second_late():
     assert acq.state == acq.STATE_ACQUIRED and acq.registration.verified, states
     assert acq.registration.sample0_utc_for(1_000_000 + 7 * 60 * SR) == pytest.approx(
         MIN + 420, abs=0.002)
+
+
+def test_a_whole_second_on_an_adopted_plane_resets_quietly(caplog):
+    """Fix round 2, MINOR 4: the service names an adopted plane's
+    condemnation as a CONFLICT with its donors, which carries the
+    event's one WARNING; the guard's own reset stays at INFO there."""
+    acq, _ = _acquired()
+    reg = acq.registration
+    reg.verified = True  # adopted planes are verified (their donors were)
+    acq.adopt(reg)
+    assert acq.registration.method == "adopted"
+    caplog.set_level(logging.INFO)
+    assert acq.corroborate({"WWV": (+1000.0, 1.0)}) == "reacquire"
+    assert acq.state == acq.STATE_BOOTSTRAP
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
