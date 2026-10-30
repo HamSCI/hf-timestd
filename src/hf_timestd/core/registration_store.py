@@ -1,10 +1,15 @@
 """RegistrationStore — the acquired registration crosses processes.
 
 Metrology runs one process per channel (timestd-metrology@<channel>).
-Every channel on one radiod shares one ADC and one RTP counter, so they
-share one origin (spec §4.6).  Each process writes its own estimate to
-<dir>/<channel>.json and reads its siblings; ``fuse_registrations``
-gives every reader the same answer.  The last writer also refreshes the
+Every channel on one radiod shares one ADC, but since ka9q-radio e5f790dd
+each channel starts its OWN RTP counter: ND measured start blocks
+k0 = 51, 51, 51, 51, 50 on its 24 kHz channels on 2026-10-06, so one
+channel's raw RTP sits 20 ms off the others'.  Two channels' RTP values
+therefore never compare directly.  Each process writes its own estimate
+to <dir>/<channel>.json, naming the counter it was measured in and that
+counter's map to radiod's input-sample index; ``fuse_registrations``
+converts every sibling into the caller's counter through both maps and
+drops any it cannot convert.  The last writer also refreshes the
 station summary /run/hf-timestd/registration.json (spec §7), which the
 Offset Judge's HfAcquiredBench and the provenance sidecar read.
 """
@@ -18,11 +23,12 @@ import os
 import tempfile
 import time
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 
-from .counter_epoch_tracker import COUNTER_EPOCH_STEP_S
+from hamsci_dsp.counter_map import CounterMap
+
 from .registration_acquirer import ORIGIN_SIGMA_FLOOR_MS, Registration
 
 logger = logging.getLogger(__name__)
@@ -145,62 +151,35 @@ def registration_is_authoritative(
     )
 
 
-def _same_counter_space(regs: List[Registration]) -> List[Registration]:
-    """The registrations that share one physical counter epoch.
-
-    Grouped by the MEASURED epoch offset, not by ``counter_epoch_id``
-    (final review, C1).  One metrology process per channel means each
-    channel runs its own ``CounterEpochTracker``, sampling the ring's
-    anchor at its own phase, so two channels in one epoch routinely carry
-    two different id strings -- and the old majority-string filter then saw
-    every count tied at 1, took whichever key ``max`` reached first, and
-    discarded every other channel.  Inverse-variance combination across
-    channels (spec §4.6) silently became "pick one channel", and the
-    ``FUSE_OUTLIER_MS`` median test that exists to reject a wrong sibling
-    plane never saw a second plane to compare against.
-
-    Every channel on one radiod observes the same pair stream, so their
-    offsets agree to the pair skew (1.937 ms measured across ND's six
-    24 kHz channels, ``cross_channel_rtp.py``).  Cluster within
-    ``COUNTER_EPOCH_STEP_S``; the largest cluster wins, and a tie goes to
-    the cluster holding the tightest plane rather than to insertion order.
-
-    Falls back to the id string only when some offset is unknown (NaN) --
-    a file written before this field existed, or by a tracker that never
-    saw a valid pair.
-    """
-    offsets = [float(getattr(r, "epoch_offset_s", float("nan"))) for r in regs]
-    if not all(math.isfinite(o) for o in offsets):
-        epochs: Dict[str, int] = {}
-        for r in regs:
-            epochs[r.counter_epoch_id] = epochs.get(r.counter_epoch_id, 0) + 1
-        epoch = max(epochs, key=lambda k: epochs[k])
-        return [r for r in regs if r.counter_epoch_id == epoch]
-    best: List[Registration] = []
-    best_sigma = float("inf")
-    for centre in offsets:
-        members = [
-            r for r, o in zip(regs, offsets) if abs(o - centre) <= COUNTER_EPOCH_STEP_S
-        ]
-        sigma = min(r.sigma_ms for r in members)
-        if len(members) > len(best) or (
-            len(members) == len(best) and sigma < best_sigma
-        ):
-            best, best_sigma = members, sigma
-    return best
-
-
 def fuse_registrations_with_members(
-    regs: List[Registration], at_rtp: int
+    regs: List[Registration],
+    at_rtp: int,
+    at_map: Optional[CounterMap] = None,
+    domain: str = "",
 ) -> Tuple[Optional[Registration], List[str], List[str]]:
     """``(fused, channels_kept, channels_waiting)``.
 
-    ``channels_kept`` is what fusion ACTUALLY combined -- the channels
-    inside the winning counter-space cluster that survived the outlier
-    test and the corroboration floor.  ``metrology_service`` publishes it
-    as the summary's ``contributing``, which previously named every
-    sibling read from disk and so claimed corroboration the station had
-    not performed (final review, C1).
+    ``at_rtp`` is a value in channel ``domain``'s counter, and ``at_map``
+    maps that counter to radiod's input-sample index.  Fusion first
+    converts every member into that counter (``Registration.in_domain``):
+    a member measured in ``domain`` projects directly; any other member
+    converts through both counter maps, and only within one radiod run.
+    A member that cannot convert -- no map, or a map from another run --
+    drops out before the outlier test ever sees it.  This replaces the old
+    clustering on ``epoch_offset_s``, which assumed every channel shares
+    one counter origin; since ka9q-radio e5f790dd none does.
+
+    A caller that names neither ``domain`` nor ``at_map`` (every caller
+    before Task 7) gets the first member's counter as ``domain``, so that
+    one channel still projects in its own counter and no two channels
+    ever combine without maps.  The fused plane carries ``rtp_domain`` and
+    ``counter_map`` exactly as the caller passed them.
+
+    ``channels_kept`` is what fusion ACTUALLY combined -- the converted
+    members that survived the outlier test and the corroboration floor.
+    ``metrology_service`` publishes it as the summary's ``contributing``,
+    which previously named every sibling read from disk and so claimed
+    corroboration the station had not performed (final review, C1).
 
     ``channels_waiting`` names the members held back by the corroboration
     floor alone (task 16c).  When ANY member clears
@@ -215,10 +194,14 @@ def fuse_registrations_with_members(
     """
     if not regs:
         return None, [], []
-    same = _same_counter_space(regs)
+    convert_domain = domain
+    if not domain and at_map is None:
+        convert_domain = regs[0].domain
+    converted = [r.in_domain(at_rtp, at_map, convert_domain) for r in regs]
+    same = [c for c in converted if c is not None]
     if not same:
         return None, [], []
-    utc = np.array([r.sample0_utc_for(at_rtp) for r in same])
+    utc = np.array([c.utc_ref for c in same])
     med = np.median(utc)
     keep = [
         (r, u) for r, u in zip(same, utc) if abs(u - med) * 1000.0 <= FUSE_OUTLIER_MS
@@ -270,8 +253,9 @@ def fuse_registrations_with_members(
         # member's origin could be a fold-lattice phantom and
         # inverse-variance combination cannot detect that.
         verified=all(bool(r.verified) for r, _ in keep),
-        # the cluster's own offset: its members agree to the pair skew, so
-        # the minimum (the least-late pair anyone saw) is the truest
+        # provenance only since Task 6 (fusion converts through the
+        # counter maps instead of clustering on it); the minimum is the
+        # least-late pair any kept member saw
         epoch_offset_s=min(finite) if finite else float("nan"),
         # task 17b: ``any``, as ``verified`` takes the weakest
         # provenance.  One member whose second rests on the label frame
@@ -281,14 +265,21 @@ def fuse_registrations_with_members(
         whole_second_unresolved=any(
             bool(getattr(r, "whole_second_unresolved", False)) for r, _ in keep
         ),
+        counter_map=at_map,
+        rtp_domain=domain,
     )
     return fused, [r.channel for r, _ in keep], waiting
 
 
-def fuse_registrations(regs: List[Registration], at_rtp: int) -> Optional[Registration]:
+def fuse_registrations(
+    regs: List[Registration],
+    at_rtp: int,
+    at_map: Optional[CounterMap] = None,
+    domain: str = "",
+) -> Optional[Registration]:
     """The fused plane alone -- see :func:`fuse_registrations_with_members`
     for the channels it kept and the ones still waiting."""
-    return fuse_registrations_with_members(regs, at_rtp)[0]
+    return fuse_registrations_with_members(regs, at_rtp, at_map, domain)[0]
 
 
 class RegistrationStore:
@@ -344,6 +335,8 @@ class RegistrationStore:
                 "verified": None,
                 "epoch_offset_s": None,
                 "whole_second_unresolved": None,
+                "counter_map": None,
+                "rtp_domain": None,
             }
         # strict JSON: a BOOTSTRAP channel file carries sigma inf -> null
         sigma = float(reg.sigma_ms) if math.isfinite(reg.sigma_ms) else None
@@ -373,6 +366,13 @@ class RegistrationStore:
             # frame.  Provenance for the offline analysis; no gate reads
             # it, because the plane is exactly the one c7b2106 published.
             "whole_second_unresolved": bool(reg.whole_second_unresolved),
+            # Task 6: the counter rtp_ref lives in, and its map to radiod's
+            # input-sample index, so a sibling process can convert this
+            # plane into its own counter instead of reading raw RTP.
+            "counter_map": (
+                reg.counter_map.to_dict() if reg.counter_map is not None else None
+            ),
+            "rtp_domain": str(reg.rtp_domain),
         }
 
     def write_channel(self, reg: Registration, state: str, extra: dict) -> None:
@@ -418,7 +418,9 @@ class RegistrationStore:
                 continue
             if now - float(d.get("written_at", 0)) > self.stale_s:
                 continue
-            if d.get("state") != "ACQUIRED":
+            # Task 6: a T6 station publishes its verified T3 plane as
+            # WITNESS; it is as much a measurement as an ACQUIRED one.
+            if d.get("state") not in ("ACQUIRED", "WITNESS"):
                 continue
             if d.get("method") == "adopted":
                 # A purely derived plane (this channel echoing a sibling
@@ -453,6 +455,11 @@ class RegistrationStore:
                         whole_second_unresolved=bool(
                             d.get("whole_second_unresolved") or False
                         ),
+                        # Task 6: absent (an older file) reads as no map
+                        # and the writer's own channel, so such a plane
+                        # never combines with another channel's.
+                        counter_map=CounterMap.from_dict(d.get("counter_map")),
+                        rtp_domain=str(d.get("rtp_domain") or ""),
                     )
                 )
             except (KeyError, TypeError, ValueError):

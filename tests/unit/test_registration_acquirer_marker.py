@@ -533,6 +533,7 @@ def test_the_fused_plane_inherits_an_unresolved_second(tmp_path):
     the fused plane's second rest on it too."""
     from hf_timestd.core.registration_acquirer import Registration
     from hf_timestd.core.registration_store import fuse_registrations
+    from synth_origins import counter_map_for
 
     def _r(channel, unresolved):
         return Registration(
@@ -546,11 +547,15 @@ def test_the_fused_plane_inherits_an_unresolved_second(tmp_path):
             verified=True,
             epoch_offset_s=0.0,
             whole_second_unresolved=unresolved,
+            counter_map=m51,
         )
 
-    clean = fuse_registrations([_r("a", False), _r("b", False)], 1_000_000)
+    # Task 6: each channel starts its own RTP counter; state a shared
+    # origin (start block 51) so the two channels can combine.
+    m51 = counter_map_for(51, SR)
+    clean = fuse_registrations([_r("a", False), _r("b", False)], 1_000_000, m51, "a")
     assert clean.whole_second_unresolved is False
-    mixed = fuse_registrations([_r("a", False), _r("b", True)], 1_000_000)
+    mixed = fuse_registrations([_r("a", False), _r("b", True)], 1_000_000, m51, "a")
     assert mixed.whole_second_unresolved is True
 
 

@@ -11,10 +11,23 @@ from hf_timestd.core.registration_store import (
     fuse_registrations_with_members,
 )
 
+from synth_origins import EPOCH_GPS_S, counter_map_for
+
 SR = 24000
+# Task 6: every channel starts its own RTP counter (ka9q-radio e5f790dd), so a
+# test that fuses several channels must say how their counters relate.  Each
+# member here gets the map of a channel that started at block 51: one shared
+# origin, stated explicitly instead of assumed.
+M51 = counter_map_for(51, SR)
 
 
-def _reg(ch, utc_ref, sigma, epoch="ep-1", rtp_ref=1000, epoch_offset_s=float("nan")):
+def _run_map(offset_s):
+    """A k0 = 51 map from a radiod run that started `offset_s` later."""
+    return counter_map_for(51, SR, epoch_gps_s=EPOCH_GPS_S + offset_s)
+
+
+def _reg(ch, utc_ref, sigma, epoch="ep-1", rtp_ref=1000, epoch_offset_s=float("nan"),
+         cmap=M51):
     return Registration(
         counter_epoch_id=epoch,
         rtp_ref=rtp_ref,
@@ -23,12 +36,13 @@ def _reg(ch, utc_ref, sigma, epoch="ep-1", rtp_ref=1000, epoch_offset_s=float("n
         sigma_ms=sigma,
         channel=ch,
         epoch_offset_s=epoch_offset_s,
+        counter_map=cmap,
     )
 
 
 def test_fuse_inverse_variance_and_outlier():
     regs = [_reg("a", 100.000, 1.0), _reg("b", 100.0005, 0.5), _reg("c", 100.0100, 0.5)]
-    f = fuse_registrations(regs, at_rtp=1000)
+    f = fuse_registrations(regs, at_rtp=1000, at_map=M51, domain="a")
     # c is 10 ms off the median -> rejected; a,b weighted 1:4
     assert f.utc_ref == pytest.approx(100.0004, abs=2e-5)
     assert f.sigma_ms == pytest.approx(1 / (1 + 4) ** 0.5, abs=1e-3)
@@ -37,12 +51,15 @@ def test_fuse_inverse_variance_and_outlier():
 
 def test_fuse_unions_stations_and_roundtrips_them(tmp_path):
     regs = [
-        Registration("ep-1", 1000, 100.0, SR, 1.0, channel="a", stations=("WWV",)),
         Registration(
-            "ep-1", 1000, 100.0, SR, 1.0, channel="b", stations=("WWVH", "WWV")
+            "ep-1", 1000, 100.0, SR, 1.0, channel="a", stations=("WWV",), counter_map=M51
+        ),
+        Registration(
+            "ep-1", 1000, 100.0, SR, 1.0, channel="b", stations=("WWVH", "WWV"),
+            counter_map=M51,
         ),
     ]
-    assert fuse_registrations(regs, 1000).stations == ("WWV", "WWVH")
+    assert fuse_registrations(regs, 1000, M51, "a").stations == ("WWV", "WWVH")
     st = RegistrationStore(tmp_path / "reg", tmp_path / "registration.json")
     st.write_channel(regs[1], "ACQUIRED", {})
     assert st.read_siblings()[0].stations == ("WWVH", "WWV")
@@ -50,17 +67,21 @@ def test_fuse_unions_stations_and_roundtrips_them(tmp_path):
 
 def test_fuse_rebases_to_common_rtp():
     regs = [_reg("a", 100.0, 1.0, rtp_ref=0), _reg("a2", 101.0, 1.0, rtp_ref=SR)]
-    f = fuse_registrations(regs, at_rtp=2 * SR)
+    f = fuse_registrations(regs, at_rtp=2 * SR, at_map=M51, domain="a")
     assert f.utc_ref == pytest.approx(102.0)
+    assert f.sigma_ms == pytest.approx(1.0 / 2**0.5, abs=1e-6)  # a2 took part
 
 
-def test_fuse_majority_epoch_wins_and_empty_is_none():
+def test_fuse_callers_run_wins_and_empty_is_none():
+    """Was ``majority_epoch_wins``: a plane from another radiod run (here
+    ep-1, an earlier run) cannot convert into the caller's counter and
+    drops, however its RTP happens to read."""
     regs = [
+        _reg("c", 5.0, 1.0, "ep-1", cmap=_run_map(-7200.0)),
         _reg("a", 100.0, 1.0, "ep-2"),
         _reg("b", 100.0, 1.0, "ep-2"),
-        _reg("c", 5.0, 1.0, "ep-1"),
     ]
-    assert fuse_registrations(regs, 1000).counter_epoch_id == "ep-2"
+    assert fuse_registrations(regs, 1000, M51, "b").counter_epoch_id == "ep-2"
     assert fuse_registrations([], 1000) is None
 
 
@@ -180,7 +201,7 @@ def test_write_failure_is_counted(tmp_path):
     assert st.write_failures == 1
 
 
-# ── C1: cluster by IMPLIED OFFSET, not by epoch id string ─────────────
+# ── C1, then Task 6: one run by the counter maps, not by epoch id string ─
 
 
 def test_fuse_clusters_by_offset_across_differently_named_epochs():
@@ -197,49 +218,64 @@ def test_fuse_clusters_by_offset_across_differently_named_epochs():
         _reg("a", 100.0, 1.0, epoch="ep-A", epoch_offset_s=off),
         _reg("b", 100.0, 1.0, epoch="ep-B", epoch_offset_s=off + 0.0019),
     ]
-    f = fuse_registrations(regs, at_rtp=1000)
+    f = fuse_registrations(regs, at_rtp=1000, at_map=M51, domain="a")
     assert f.sigma_ms == pytest.approx(1.0 / 2**0.5, abs=1e-6)
     assert f.utc_ref == pytest.approx(100.0)
 
 
 def test_fuse_rejects_a_channel_from_a_different_counter_space():
-    """The other half of C1: an offset a full counter epoch away (hours) is
-    a different RTP counter space and must NOT be fused in, however its id
+    """The other half of C1: a counter map from a radiod run hours away is a
+    different RTP counter space and must NOT be fused in, however its id
     string happens to be spelled."""
     off = 1_000_000_000.0
     regs = [
         _reg("a", 100.0, 1.0, epoch="ep-A", epoch_offset_s=off),
         _reg("b", 100.0, 1.0, epoch="ep-A", epoch_offset_s=off + 0.0019),
-        _reg("c", 100.0, 0.2, epoch="ep-A", epoch_offset_s=off + 69732.0),
+        _reg("c", 100.0, 0.2, epoch="ep-A", epoch_offset_s=off + 69732.0,
+             cmap=_run_map(69732.0)),
     ]
-    fused, kept, _waiting = fuse_registrations_with_members(regs, at_rtp=1000)
+    fused, kept, _waiting = fuse_registrations_with_members(
+        regs, at_rtp=1000, at_map=M51, domain="a"
+    )
     assert [r for r in kept] == ["a", "b"]
     assert fused.sigma_ms == pytest.approx(1.0 / 2**0.5, abs=1e-6)
 
 
-def test_fuse_offset_tie_goes_to_the_cluster_with_the_smallest_sigma():
-    """Two clusters of equal size: prefer the one holding the tightest
-    plane rather than whichever landed first in insertion order (the
-    defect the string-id ``max`` had)."""
+def test_fuse_keeps_the_callers_run_not_insertion_order():
+    """Was ``offset_tie_goes_to_the_cluster_with_the_smallest_sigma``.  Two
+    planes from two radiod runs: fusion keeps the one in the CALLER's run,
+    whichever landed first in insertion order (the defect the string-id
+    ``max`` had) and whichever is tighter -- the other run's counter cannot
+    be converted into the caller's at all."""
     off = 1_000_000_000.0
+    run_b = _run_map(4000.0)
     regs = [
         _reg("a", 100.0, 1.0, epoch_offset_s=off),
-        _reg("b", 200.0, 0.25, epoch_offset_s=off + 4000.0),
+        _reg("b", 200.0, 0.25, epoch_offset_s=off + 4000.0, cmap=run_b),
     ]
-    fused, kept, _waiting = fuse_registrations_with_members(regs, at_rtp=1000)
+    fused, kept, _waiting = fuse_registrations_with_members(
+        regs, at_rtp=1000, at_map=run_b, domain="b"
+    )
     assert kept == ["b"] and fused.utc_ref == pytest.approx(200.0)
+    fused_a, kept_a, _ = fuse_registrations_with_members(
+        regs, at_rtp=1000, at_map=M51, domain="a"
+    )
+    assert kept_a == ["a"] and fused_a.utc_ref == pytest.approx(100.0)
 
 
-def test_fuse_falls_back_to_the_id_string_when_offsets_are_unknown():
-    """A registration written before ``epoch_offset_s`` existed (or by a
-    tracker that never saw a valid pair) carries NaN.  Then the only thing
-    left to group by is the id string, which is the pre-C1 behaviour."""
+def test_fuse_needs_no_epoch_offset_when_the_maps_name_the_run():
+    """Was ``falls_back_to_the_id_string_when_offsets_are_unknown``.  A
+    registration with an unknown ``epoch_offset_s`` (NaN) used to group by
+    its id string.  Since Task 6 the counter maps name the run, so the
+    offset no longer matters: c, from another run, drops."""
     regs = [
         _reg("a", 100.0, 1.0, "ep-2"),
         _reg("b", 100.0, 1.0, "ep-2"),
-        _reg("c", 5.0, 1.0, "ep-1"),
+        _reg("c", 5.0, 1.0, "ep-1", cmap=_run_map(3600.0)),
     ]
-    fused, kept, _waiting = fuse_registrations_with_members(regs, at_rtp=1000)
+    fused, kept, _waiting = fuse_registrations_with_members(
+        regs, at_rtp=1000, at_map=M51, domain="a"
+    )
     assert fused.counter_epoch_id == "ep-2" and kept == ["a", "b"]
 
 
@@ -254,7 +290,9 @@ def test_fuse_members_are_what_fusion_actually_kept():
         _reg("b", 100.0005, 0.5, epoch_offset_s=off),
         _reg("c", 100.0100, 0.5, epoch_offset_s=off),
     ]
-    fused, kept, _waiting = fuse_registrations_with_members(regs, at_rtp=1000)
+    fused, kept, _waiting = fuse_registrations_with_members(
+        regs, at_rtp=1000, at_map=M51, domain="a"
+    )
     assert kept == ["a", "b"]  # c is 10 ms off the median
     assert fused.epoch_offset_s == pytest.approx(off)
 
@@ -298,6 +336,7 @@ def _member(ch, utc_ref, n_minutes, sigma=1.0):
         channel=ch,
         verified=True,
         epoch_offset_s=OFF,
+        counter_map=M51,
     )
 
 
@@ -307,12 +346,12 @@ def test_fused_n_minutes_is_the_minimum_over_the_kept_members():
     ``n_minutes`` must too.  Taking the MAXIMUM let one channel's long
     history vouch for a sibling with a shorter one."""
     regs = [_member("a", 100.0, 17), _member("b", 100.0005, 5)]
-    fused, kept, waiting = fuse_registrations_with_members(regs, at_rtp=1000)
+    fused, kept, waiting = fuse_registrations_with_members(regs, 1000, M51, "a")
     assert kept == ["a", "b"] and waiting == []
     assert fused.n_minutes == 5
     # an outlier fusion DROPS cannot hold the number down
     regs.append(_member("c", 100.010, 3))  # 10 ms off the median
-    fused2, kept2, _w2 = fuse_registrations_with_members(regs, at_rtp=1000)
+    fused2, kept2, _w2 = fuse_registrations_with_members(regs, 1000, M51, "a")
     assert kept2 == ["a", "b"] and fused2.n_minutes == 5
 
 
@@ -342,7 +381,9 @@ def test_an_uncorroborated_newcomer_waits_outside_the_fused_plane():
     # the newcomer sits 2 ms away -- inside FUSE_OUTLIER_MS, so only the
     # corroboration floor keeps it out, and its absence is measurable
     newcomer = _member("f", 100.002, 0)
-    fused, kept, waiting = fuse_registrations_with_members(five + [newcomer], 1000)
+    fused, kept, waiting = fuse_registrations_with_members(
+        five + [newcomer], 1000, M51, "a"
+    )
     assert kept == ["a", "b", "c", "d", "e"]
     assert waiting == ["f"]
     assert fused.utc_ref == pytest.approx(100.0, abs=1e-9)
@@ -360,7 +401,7 @@ def test_an_uncorroborated_newcomer_waits_outside_the_fused_plane():
 
     # two minutes later the newcomer qualifies and joins
     joined, kept2, waiting2 = fuse_registrations_with_members(
-        five + [_member("f", 100.002, ADOPT_MIN_CORROBORATED_MINUTES)], 1000
+        five + [_member("f", 100.002, ADOPT_MIN_CORROBORATED_MINUTES)], 1000, M51, "a"
     )
     assert kept2 == ["a", "b", "c", "d", "e", "f"] and waiting2 == []
     assert joined.utc_ref > fused.utc_ref  # its plane now moves the answer
@@ -373,6 +414,6 @@ def test_when_nobody_clears_the_floor_every_member_still_fuses():
     ``n_minutes`` anyway, so the fused plane stays a candidate rather
     than vanishing."""
     regs = [_member("a", 100.0, 0), _member("b", 100.0005, 1)]
-    fused, kept, waiting = fuse_registrations_with_members(regs, at_rtp=1000)
+    fused, kept, waiting = fuse_registrations_with_members(regs, 1000, M51, "a")
     assert kept == ["a", "b"] and waiting == []
     assert fused.n_minutes == 0

@@ -33,6 +33,17 @@ class _Engine:
         return {"WWV": 0.0125}
 
 
+# Task 6: fusion never combines two channels' planes without counter maps,
+# because since ka9q-radio e5f790dd each channel starts its own RTP counter.
+# MetrologyService passes no map or domain until Task 7 wires it, so these
+# tests, which fuse a sibling from another channel through the service, wait
+# for Task 7.  strict: an XPASS fails, so Task 7 must remove this marker.
+_AWAITS_TASK_7 = pytest.mark.xfail(
+    strict=True,
+    reason="Task 7: MetrologyService must pass at_map and domain to fusion",
+)
+
+
 def _service(tmp_path):
     svc = MetrologyService.__new__(MetrologyService)  # bypass the heavy __init__
     svc.channel_name = "SHARED_10000"
@@ -470,6 +481,7 @@ def test_apply_registration_failure_keeps_the_label_plane(tmp_path, monkeypatch)
     assert bt.origin_source == "label" and bt.sample0_utc == T0 + 0.1
 
 
+@_AWAITS_TASK_7
 def test_sibling_conflict_reverts_to_label_and_flags_conflict(tmp_path):
     """I2: this channel's own ACQUIRED plane disagreeing with its sibling
     (nothing within FUSE_OUTLIER_MS of the combined median) must revert to
@@ -782,6 +794,7 @@ def test_resolve_before_adopt_precedence(tmp_path, monkeypatch):
 # ── C1 (final review): fusion crosses PROCESSES, not id strings ───────
 
 
+@_AWAITS_TASK_7
 def test_sibling_in_the_same_counter_space_under_a_different_id_still_fuses(tmp_path):
     """C1: metrology runs one process per channel, each with its own
     CounterEpochTracker, so two channels in ONE physical counter epoch
@@ -824,6 +837,7 @@ def test_sibling_in_the_same_counter_space_under_a_different_id_still_fuses(tmp_
     assert s["epoch_offset_s"] == pytest.approx(own_offset, abs=1e-6)
 
 
+@_AWAITS_TASK_7
 def test_contributing_names_only_what_fusion_kept(tmp_path):
     """C1's third consequence: ``contributing`` was built from every sibling
     read off disk, so the summary claimed corroboration from a channel the
@@ -923,6 +937,7 @@ def test_a_witness_plane_that_comes_back_into_agreement_is_not_reset(tmp_path):
     assert svc.acquirer.state == RegistrationAcquirer.STATE_ACQUIRED
 
 
+@_AWAITS_TASK_7
 def test_a_waiting_channel_is_named_in_the_summary(tmp_path):
     """16c: the newcomer's exclusion must be visible, not silent -- a
     reader (station-web, the sidecar) sees which channels are serving

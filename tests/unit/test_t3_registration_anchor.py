@@ -17,9 +17,13 @@ from hf_timestd.core.registration_store import (
     RegistrationStore,
 )
 from hf_timestd.core.t3_registration_anchor import T3RegistrationAnchor
+from synth_origins import counter_map_for
 
 SR = 24000
 WALL0 = 1_800_000_000.0
+# Task 6: each channel starts its own RTP counter; tests that fuse several
+# channels state a shared origin explicitly (start block 51 for all).
+M51 = counter_map_for(51, SR)
 
 
 def _store(tmp_path, clock):
@@ -291,20 +295,21 @@ def test_fusion_carries_verified_from_every_member_it_keeps():
             channel=channel,
             verified=verified,
             epoch_offset_s=0.0,
+            counter_map=M51,
         )
 
     both, kept, _w = fuse_registrations_with_members(
-        [reg("a", True), reg("b", True)], 0
+        [reg("a", True), reg("b", True)], 0, M51, "a"
     )
     assert len(kept) == 2 and both.verified is True
 
     mixed, kept, _w = fuse_registrations_with_members(
-        [reg("a", True), reg("b", False)], 0
+        [reg("a", True), reg("b", False)], 0, M51, "a"
     )
     assert len(kept) == 2 and mixed.verified is False
 
     neither, _k, _w = fuse_registrations_with_members(
-        [reg("a", False), reg("b", False)], 0
+        [reg("a", False), reg("b", False)], 0, M51, "a"
     )
     assert neither.verified is False
 
@@ -327,10 +332,14 @@ def test_the_summary_round_trips_a_verified_fused_plane(tmp_path):
             channel=c,
             verified=True,
             epoch_offset_s=0.0,
+            counter_map=M51,
         )
         for c in ("SHARED_10000", "WWV_15000")
     ]
-    fused, kept, _w = fuse_registrations_with_members(members, 1000)
+    fused, kept, _w = fuse_registrations_with_members(
+        members, 1000, M51, "SHARED_10000"
+    )
+    assert kept == ["SHARED_10000", "WWV_15000"]
     store.write_summary(fused, kept, "ACQUIRED", {"counter_epoch_id": "ep-1"})
     assert store.read_summary()["verified"] is True
     holder = T3RegistrationAnchor(

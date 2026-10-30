@@ -25,10 +25,11 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+from hamsci_dsp.counter_map import CounterMap
 from scipy.signal import butter, sosfiltfilt
 
 from .counter_epoch_tracker import COUNTER_EPOCH_STEP_S
@@ -823,9 +824,9 @@ class Registration:
     verified: bool = False
     # The counter epoch as a MEASURED quantity: UTC of RTP sample 0 under
     # radiod's pair (CounterEpochTracker.epoch_offset_s).  ``fuse_registrations``
-    # clusters on this, because one process per channel means two channels in
-    # one physical epoch can spell ``counter_epoch_id`` differently (final
-    # review, C1).  NaN when the writer never saw a valid pair.
+    # clustered on this until Task 6 (final review, C1); it now converts
+    # through ``counter_map`` instead, and this field stays as provenance.
+    # NaN when the writer never saw a valid pair.
     epoch_offset_s: float = float("nan")
     # task 17b: the minute marker implied a non-zero whole second and a
     # gate refused it, so this plane's SECOND rests on the label frame
@@ -837,6 +838,66 @@ class Registration:
     # offline analysis and the operator can both see which planes carry a
     # second nothing independent has confirmed.
     whole_second_unresolved: bool = False
+    # Task 6: the counter ``rtp_ref`` lives in.  Since ka9q-radio e5f790dd
+    # every radiod channel starts its own RTP counter (ND, 2026-10-06:
+    # k0 = 51, 51, 51, 51, 50 on its 24 kHz channels, one channel 20 ms
+    # off the rest), so a plane says nothing about another channel's RTP
+    # until both counters are mapped to radiod's input-sample index.
+    # ``rtp_domain`` names the channel whose counter ``rtp_ref`` is in;
+    # empty means "this registration's own ``channel``", which is what
+    # every acquirer before Task 7 wrote.  ``counter_map`` maps that
+    # counter to the input-sample index; None when nobody measured it.
+    counter_map: Optional[CounterMap] = None
+    rtp_domain: str = ""
+
+    @property
+    def domain(self) -> str:
+        """The channel whose counter ``rtp_ref`` is in: ``rtp_domain``, or
+        this registration's own ``channel`` when the writer named none."""
+        return self.rtp_domain or self.channel
+
+    def in_domain(
+        self, rtp: int, cmap: Optional[CounterMap], domain: str
+    ) -> Optional["Registration"]:
+        """This plane re-expressed at ``rtp`` in channel ``domain``'s counter,
+        or None when nothing can relate the two counters.
+
+        Same counter (``domain`` names this plane's own): the plain
+        projection, ``sample0_utc_for``.  Another counter: through both
+        counter maps, ``utc_ref + (cmap.input_index(rtp) -
+        self.counter_map.input_index(rtp_ref)) / input_samprate``, and only
+        when both maps exist and name one radiod run.  ``same_run``
+        compares the maps' epochs alone; radiod's GPS_TIME can arrive up to
+        816 ms late, but each map holds the least-late epoch its probe saw,
+        so the 0.5 s tolerance separates runs that are hours apart.
+
+        Never raw RTP across channels: two channels' counters start at
+        different blocks, and the difference reads as a timing offset."""
+        if domain and domain == self.domain:
+            return replace(
+                self,
+                rtp_ref=int(rtp) & 0xFFFFFFFF,
+                utc_ref=self.sample0_utc_for(rtp),
+                counter_map=cmap if cmap is not None else self.counter_map,
+                rtp_domain=domain,
+            )
+        if cmap is None or self.counter_map is None:
+            return None
+        if not self.counter_map.same_run(cmap):
+            return None
+        delta_in = cmap.input_index(rtp) - self.counter_map.input_index(self.rtp_ref)
+        rate_num = cmap.olen * cmap.input_samprate
+        return replace(
+            self,
+            rtp_ref=int(rtp) & 0xFFFFFFFF,
+            utc_ref=self.utc_ref + delta_in / float(cmap.input_samprate),
+            # the caller's counter ticks at the caller's output rate
+            sample_rate=(
+                rate_num // cmap.ilen if rate_num % cmap.ilen == 0 else self.sample_rate
+            ),
+            counter_map=cmap,
+            rtp_domain=domain,
+        )
 
     def sample0_utc_for(self, start_rtp: int) -> float:
         """UTC of the sample at ``start_rtp``, across a counter wrap.
@@ -964,9 +1025,10 @@ class RegistrationAcquirer:
     ) -> Optional[Registration]:
         """``epoch_offset_s``: the counter epoch as a MEASURED quantity
         (``CounterEpochTracker.epoch_offset_s``).  The id string is
-        per-process and cannot be compared across channels, so this is what
-        every registration carries for ``fuse_registrations`` to cluster on
-        (final review, C1).  NaN keeps the pre-C1 id-string behaviour."""
+        per-process and cannot be compared across channels, so every
+        registration carries this offset as well (final review, C1).  Since
+        Task 6 fusion converts through counter maps rather than clustering
+        on it.  NaN keeps the pre-C1 id-string behaviour."""
         if self._epoch is not None and counter_epoch_id != self._epoch:
             self.reset(f"counter epoch {self._epoch} -> {counter_epoch_id}")
         elif self._epoch_stepped(epoch_offset_s):

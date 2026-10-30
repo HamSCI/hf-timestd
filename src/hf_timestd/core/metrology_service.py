@@ -743,8 +743,9 @@ class MetrologyService:
         # it will not replace T6's origin below.
         # C1: hand the acquirer the epoch as a MEASURED offset as well as a
         # name.  The name is this process's own; the offset is what the
-        # other channels' processes agree on, and it is what fusion clusters
-        # by (registration_store._same_counter_space).
+        # other channels' processes agree on.  Since Task 6 fusion no longer
+        # clusters on it: it converts siblings through their counter maps
+        # (Registration.in_domain), which Task 7 hands it.
         epoch_offset_s = self.epoch_tracker.epoch_offset_s
         own = self.acquirer.offer_minute(audio, buffer_timing, int(start_rtp), int(minute_utc),
                                          delays, epoch, epoch_offset_s=epoch_offset_s)
@@ -808,9 +809,11 @@ class MetrologyService:
             # `fused` here is built purely from `sibs` (own contributed
             # nothing to fusion_inputs in either case above) -- every one
             # of those siblings came from read_siblings, which only
-            # returns state=="ACQUIRED" files, and (task-11b) only a
-            # VERIFIED registration is ever published as ACQUIRED.  So a
-            # plane fused entirely from ACQUIRED siblings is itself
+            # returns ACQUIRED and (since Task 6) WITNESS files, and
+            # (task-11b) only a VERIFIED registration is ever published
+            # under either state: a T6 station writes WITNESS only for a
+            # plane that agrees with T6, CANDIDATE otherwise.  So a
+            # plane fused entirely from such siblings is itself
             # verified; fuse_registrations doesn't carry that through on
             # its own (its output defaults verified=False like any fresh
             # Registration), so it is stamped here rather than by
