@@ -210,7 +210,7 @@ def test_refresh_counter_maps_caps_its_time_and_rotates():
     seen = []
 
     class Probe:
-        def refresh(self, ch, ssrc, rate):
+        def refresh(self, ch, ssrc, rate, time_left_s=None):
             seen.append((ch, rate))
             clk.t += 2.0
             return None
@@ -228,6 +228,7 @@ def test_refresh_counter_maps_caps_its_time_and_rotates():
     core._counter_maps = {}
     core._t6_counter_map = None
     core._counter_rr = 0
+    core._counter_pub_failing = set()
     core._counter_mono = clk
     core._refresh_counter_maps()
     assert [c for c, _ in seen] == ["C0", "C1", "C2"]      # 2 s each, 5 s cap
@@ -235,3 +236,120 @@ def test_refresh_counter_maps_caps_its_time_and_rotates():
     seen.clear()
     core._refresh_counter_maps()
     assert [c for c, _ in seen][0] == "C3"                  # skipped ones go first
+
+
+def late(r, seconds):
+    r.gps_time += int(seconds * 1e9)
+    return r
+
+
+def test_a_late_poll_is_not_a_new_run(caplog):
+    c = FakeControl()
+    p = CounterMapProbe(c)
+    held = p.refresh("X", 1, 24000)
+    c.make = lambda b: late(reply(b), 0.8)
+    before = c.calls
+    with caplog.at_level(logging.INFO):
+        cmap = p.refresh("X", 1, 24000)
+    assert c.calls - before == 1
+    assert not [r for r in caplog.records if "new radiod run" in r.getMessage()]
+    assert cmap is not None
+    assert cmap.input_epoch_gps_s == held.input_epoch_gps_s
+    assert cmap.input_index(rtp_of(c.block)) == c.block * ILEN
+
+
+def test_a_late_poll_with_no_map_is_not_a_new_run(caplog):
+    q = CounterMapProbe(FakeControl(lambda b: late(reply(b), 0.8)
+                                    if (b // 3000) % 2 else reply(b)))
+    with caplog.at_level(logging.INFO):
+        cmap = q.refresh("Y", 1, 24000)
+    assert not [r for r in caplog.records if "new radiod run" in r.getMessage()]
+    assert cmap is not None and cmap.n_agree == 5
+
+
+def test_a_real_step_with_a_late_poll_still_counts(caplog):
+    c = FakeControl()
+    p = CounterMapProbe(c)
+    p.refresh("S", 1, 24000)
+    n = {"i": 0}
+
+    def make(b):
+        n["i"] += 1
+        r = reply(b, shift_blocks=1)
+        return late(r, 0.8) if n["i"] == 2 else r
+    c.make = make
+    with caplog.at_level(logging.INFO):
+        for _ in range(3):
+            p.refresh("S", 1, 24000)
+    assert p.steps["S"] == 1
+    assert len([r for r in caplog.records if r.levelno == logging.ERROR
+                and "COUNTER MAP STEP S" in r.getMessage()]) == 1
+
+
+def test_a_burst_stops_when_the_time_runs_out():
+    clk = Clock()
+
+    class SlowControl(FakeControl):
+        def poll_status(self, ssrc, timeout):
+            clk.t += 2.0
+            return super().poll_status(ssrc, timeout)
+
+    c = SlowControl()
+    p = CounterMapProbe(c, mono_fn=clk)
+    p.refresh("X", 1, 24000, time_left_s=5.0)
+    assert c.calls == 3                      # polls at 0, 2, 4 s; stops at 6 s
+    p.refresh("X", 1, 24000)
+    p.refresh("X", 1, 24000)
+    assert p.refresh("X", 1, 24000) is not None   # partial history completes
+
+
+def test_recovery_logs_only_on_an_accepted_poll(caplog):
+    c = FakeControl()
+    p = CounterMapProbe(c)
+    p.refresh("X", 1, 24000)
+    c.fail = True
+    p.refresh("X", 1, 24000)
+    c.fail = False
+    good = c.make
+    c.make = lambda b: reply(b, rtp=False)           # a ghost answers
+    with caplog.at_level(logging.INFO):
+        p.refresh("X", 1, 24000)
+    assert not [r for r in caplog.records if "recovered" in r.getMessage()]
+    c.make = good
+    with caplog.at_level(logging.INFO):
+        p.refresh("X", 1, 24000)
+    assert len([r for r in caplog.records if "recovered" in r.getMessage()]) == 1
+
+
+def test_a_publish_error_does_not_starve_later_channels(caplog):
+    from hf_timestd.core.core_recorder_v2 import CoreRecorderV2
+    seen = []
+
+    class Probe:
+        def refresh(self, ch, ssrc, rate, time_left_s=None):
+            seen.append(ch)
+            return None
+
+    def boom(m):
+        raise OSError("disk full")
+
+    def rec(pub):
+        return types.SimpleNamespace(
+            channel_info=types.SimpleNamespace(ssrc=1, sample_rate=24000),
+            config=types.SimpleNamespace(sample_rate=24000),
+            publish_counter_map=pub)
+
+    core = CoreRecorderV2.__new__(CoreRecorderV2)
+    core.recorders = {"A": rec(boom), "B": rec(lambda m: None)}
+    core._t6_channel_info = None
+    core._counter_probe = Probe()
+    core._counter_maps = {}
+    core._t6_counter_map = None
+    core._counter_rr = 0
+    core._counter_pub_failing = set()
+    core._counter_mono = Clock()
+    with caplog.at_level(logging.INFO):
+        core._refresh_counter_maps()
+        core._refresh_counter_maps()
+    assert seen == ["A", "B", "A", "B"]
+    assert len([r for r in caplog.records if r.levelno == logging.ERROR]) == 1

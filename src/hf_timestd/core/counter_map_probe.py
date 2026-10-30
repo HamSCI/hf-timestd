@@ -84,23 +84,29 @@ class CounterMapProbe:
     def steps(self) -> Dict[str, int]:
         return dict(self._steps)
 
-    def refresh(self, channel: str, ssrc: int, output_samprate: int) -> Optional[CounterMap]:
+    def refresh(self, channel: str, ssrc: int, output_samprate: int,
+                time_left_s: Optional[float] = None) -> Optional[CounterMap]:
+        """`time_left_s` bounds the polling: a burst stops when it runs out and
+        the partial history completes on later ticks."""
         try:
-            return self._refresh(channel, ssrc, output_samprate)
+            return self._refresh(channel, ssrc, output_samprate, time_left_s)
         except Exception:  # noqa: BLE001 - the recorder must never lose a loop pass
             logger.exception("counter map refresh for %s failed", channel)
             return None
 
-    def _refresh(self, channel, ssrc, rate) -> Optional[CounterMap]:
+    def _refresh(self, channel, ssrc, rate, time_left_s=None) -> Optional[CounterMap]:
         st = self._ch.get(channel)
         if st is None:
             st = self._ch[channel] = _Channel(polls=deque(maxlen=self.HISTORY))
         now = self._mono()
+        deadline = None if time_left_s is None else now + time_left_s
         remaining = self.POLLS_AT_START if not st.started else 1
         st.started = True       # stays True after a drop: relearning costs one poll a tick
         burst_extended = False
         fresh = 0
         while remaining > 0:
+            if deadline is not None and self._mono() >= deadline:
+                break
             remaining -= 1
             try:
                 reply = self._control.poll_status(ssrc, self._timeout)
@@ -111,15 +117,13 @@ class CounterMapProbe:
                                    channel, exc)
                     st.failing = True
                 continue
-            if st.failing:
-                logger.info("counter map poll of %s recovered", channel)
-                st.failing = False
             poll = counter_poll_from_reply(reply, rate)
             if poll is None:
                 continue
-            ref_epoch = (st.held.input_epoch_gps_s if st.held is not None
-                         else (_epoch(st.polls[-1]) if st.polls else None))
-            if ref_epoch is not None and abs(_epoch(poll) - ref_epoch) > self.RUN_TOL_S:
+            if st.failing:
+                logger.info("counter map poll of %s recovered", channel)
+                st.failing = False
+            if self._is_new_run(st, poll):
                 logger.info("counter map for %s: new radiod run, map replaced", channel)
                 st.polls.clear()
                 st.held = None
@@ -154,6 +158,36 @@ class CounterMapProbe:
         if st.held is not None and st.last_rtp is not None:
             st.held = st.held.rolled_forward(st.last_rtp)
         return st.held
+
+    def _is_new_run(self, st: "_Channel", poll: CounterPoll) -> bool:
+        """A new radiod run moves the epoch AND breaks the counter grid.
+
+        GPS_TIME is read live while INPUT_SAMPLES is cached, so a late status
+        packet moves the epoch alone (B4 logged up to 816 ms).  RTP and
+        INPUT_SAMPLES carry no lateness: a late poll stays on the held map's
+        grid, a restarted counter does not.
+        """
+        if st.held is not None:
+            if abs(_epoch(poll) - st.held.input_epoch_gps_s) <= self.RUN_TOL_S:
+                return False
+            m = st.held
+            if (poll.filter_blocksize, poll.input_samprate) != (m.ilen, m.input_samprate):
+                return True
+            return abs(m.input_index(poll.rtp_timesnap) - poll.input_samples) > m.ilen
+        if not st.polls:
+            return False
+        ref = min(st.polls, key=_epoch)       # the least-late poll
+        if abs(_epoch(poll) - _epoch(ref)) <= self.RUN_TOL_S:
+            return False
+        ilen = ref.filter_blocksize
+        if (poll.filter_blocksize, poll.input_samprate) != (ilen, ref.input_samprate):
+            return True
+        olen = ref.output_samprate * ilen // ref.input_samprate
+        if olen <= 0:
+            return True
+        d = (poll.rtp_timesnap - ref.rtp_timesnap + 2**31) % 2**32 - 2**31
+        expect = ref.input_samples + d * ilen / olen
+        return abs(expect - poll.input_samples) > ilen
 
     def _adopt(self, channel: str, st: _Channel, new: CounterMap) -> None:
         held = st.held

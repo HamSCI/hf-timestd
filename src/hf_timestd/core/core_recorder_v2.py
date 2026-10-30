@@ -462,6 +462,7 @@ class CoreRecorderV2:
         self._counter_maps: Dict[str, CounterMap] = {}   # by channel description
         self._t6_counter_map: Optional[CounterMap] = None
         self._counter_rr = 0
+        self._counter_pub_failing: set = set()
         self._counter_mono = time.monotonic
 
         # Station config
@@ -1414,30 +1415,41 @@ class CoreRecorderV2:
             t0 = self._counter_mono()
             done = 0
             for k in range(n):
-                if k and self._counter_mono() - t0 >= self.COUNTER_REFRESH_BUDGET_S:
+                left = self.COUNTER_REFRESH_BUDGET_S - (self._counter_mono() - t0)
+                if k and left <= 0:
                     break
                 desc, rec = items[(start + k) % n]
                 done += 1
-                if rec is None:
-                    ci = self._t6_channel_info
-                    self._t6_counter_map = self._counter_probe.refresh(
-                        "T6", ci.ssrc, ci.sample_rate)
-                    continue
-                ci = getattr(rec, "channel_info", None)
-                ssrc = getattr(ci, "ssrc", None)
-                if ssrc is None:
-                    continue
-                # the rate radiod granted, as for T6; the request may differ
-                rate = getattr(ci, "sample_rate", None) or rec.config.sample_rate
-                cmap = self._counter_probe.refresh(desc, ssrc, rate)
-                rec.publish_counter_map(cmap)
-                if cmap is None:
-                    self._counter_maps.pop(desc, None)
-                else:
-                    self._counter_maps[desc] = cmap
+                try:
+                    self._refresh_one_counter_map(desc, rec, max(left, 0.0))
+                    self._counter_pub_failing.discard(desc)
+                except Exception as exc:
+                    if desc not in self._counter_pub_failing:
+                        self._counter_pub_failing.add(desc)
+                        logger.error("counter map publish for %s failed: %s "
+                                     "(silent until it recovers)", desc, exc)
             self._counter_rr = (start + done) % n
         except Exception:
             logger.exception("counter map refresh failed")
+
+    def _refresh_one_counter_map(self, desc, rec, time_left_s: float) -> None:
+        if rec is None:
+            ci = self._t6_channel_info
+            self._t6_counter_map = self._counter_probe.refresh(
+                "T6", ci.ssrc, ci.sample_rate, time_left_s=time_left_s)
+            return
+        ci = getattr(rec, "channel_info", None)
+        ssrc = getattr(ci, "ssrc", None)
+        if ssrc is None:
+            return
+        # the rate radiod granted, as for T6; the request may differ
+        rate = getattr(ci, "sample_rate", None) or rec.config.sample_rate
+        cmap = self._counter_probe.refresh(desc, ssrc, rate, time_left_s=time_left_s)
+        if cmap is None:
+            self._counter_maps.pop(desc, None)
+        else:
+            self._counter_maps[desc] = cmap
+        rec.publish_counter_map(cmap)
 
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals."""
