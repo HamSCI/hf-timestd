@@ -525,41 +525,54 @@ class MetrologyEngine:
         return {s: d["delay_s"]
                 for s, d in self.expected_delay_details(system_time, minute_utc).items()}
 
-    # Closed vocabulary for the stored ionospheric-source label.  Raw
-    # strings come from hamsci-dsp (data_service / arrival_matrix / model)
-    # and from this module's vacuum path.  Normalised in ONE place, here.
-    #   fallback              -> static: hamsci-dsp's default tag when no
-    #                            ionospheric data arrived (invalid grid, or
-    #                            iono_params without a source).
-    #   climatological_fallback -> parametric: the internal parametric
-    #                            climatology (data_service docstring).
-    #   legacy                -> static: arrival_matrix legacy path, zero
-    #                            ionospheric delay, no live data.
-    #   vacuum_fallback       -> vacuum: this module's no-ionosphere path.
-    _IONO_SOURCES = frozenset({"wamipe", "wamipe+giro", "giro", "iri",
-                               "parametric", "static", "vacuum", "unknown"})
+    # Closed vocabulary for the stored ionospheric-source label, normalised
+    # in ONE place.  Raw strings come from hamsci-dsp (data_service,
+    # arrival_matrix, model) and from this module's vacuum path.
+    # ``iono_source`` is the BASE model; hamsci-dsp appends "+giro" to any
+    # base when GIRO data adjusted it, and that suffix becomes the separate
+    # boolean ``iono_giro``.  What each label means physically:
+    #   wamipe      WAM-IPE assimilative model
+    #   iri         IRI-2020 climatology
+    #   parametric  hamsci-dsp's internal parametric climatology
+    #               (also its "climatological_fallback")
+    #   static      fixed-constants tier; also "fallback", hamsci-dsp's
+    #               default tag when no ionospheric data arrived
+    #   ionex       IONEX TEC product
+    #   calibrated  calibrated model
+    #   none        no ionospheric term at all: pure geometric delay
+    #               (arrival_matrix "legacy", iono_delay_ms = 0)
+    #   vacuum      this module's last-resort path (raw "vacuum_fallback"):
+    #               a nominal climatological TEC term, not a model
+    #   unknown     absent, "matrix" (a provider, not an ionosphere), or a
+    #               string not listed here (logged once)
+    _IONO_SOURCES = frozenset({"wamipe", "iri", "parametric", "static", "ionex",
+                               "calibrated", "vacuum", "none", "unknown"})
     _IONO_SOURCE_ALIASES = {
         "fallback": "static",
         "climatological_fallback": "parametric",
-        "legacy": "static",
+        "legacy": "none",
         "vacuum_fallback": "vacuum",
         "matrix": "unknown",
     }
     _iono_source_logged: set = set()
 
     @classmethod
-    def _normalize_iono_source(cls, raw: Optional[str]) -> str:
+    def _normalize_iono_source(cls, raw: Optional[str]) -> Tuple[str, bool]:
+        """Return ``(base_source, giro_flag)`` for a raw source string."""
         if raw is None:
-            return "unknown"
+            return "unknown", False
         key = str(raw).strip().lower()
+        giro = key.endswith("+giro")
+        if giro:
+            key = key[:-len("+giro")]
         if key in cls._IONO_SOURCES:
-            return key
+            return key, giro
         if key in cls._IONO_SOURCE_ALIASES:
-            return cls._IONO_SOURCE_ALIASES[key]
-        if key not in cls._iono_source_logged:
-            cls._iono_source_logged.add(key)
+            return cls._IONO_SOURCE_ALIASES[key], giro
+        if str(raw) not in cls._iono_source_logged:
+            cls._iono_source_logged.add(str(raw))
             logger.warning("Unrecognised ionospheric data source %r; recorded as unknown", raw)
-        return "unknown"
+        return "unknown", giro
 
     def expected_delay_details(self, system_time: float,
                                minute_utc: int) -> Dict[str, Dict[str, Any]]:
@@ -567,10 +580,11 @@ class MetrologyEngine:
         on this frequency, with the mode and ionospheric source that made it.
 
         Each value: ``{"delay_s", "sigma_ms", "mode", "iono_source",
-        "iono_source_raw"}``.  ``mode`` and the raw source come from
+        "iono_giro", "iono_source_raw"}``.  ``mode`` and the raw source come from
         ``_last_prediction_meta`` (``propagation_mode``, ``data_source``)
         read right after that station's own prediction; ``iono_source`` is
-        the raw string in the closed vocabulary; absent values read
+        the base model in the closed vocabulary and ``iono_giro`` flags a
+        "+giro" suffix; absent values read
         ``unknown``.
         ``minute_utc`` is the minute boundary in Unix seconds;
         ``eligible_candidates`` wants minute-of-hour and hour-of-day,
@@ -586,10 +600,12 @@ class MetrologyEngine:
                 delays_ms[station] = expected_delay_ms
                 meta = getattr(self, '_last_prediction_meta', None) or {}
                 raw = meta.get('data_source')
+                base, giro = self._normalize_iono_source(raw)
                 extras[station] = {
                     "sigma_ms": float(unc_ms),
                     "mode": meta.get('propagation_mode') or 'unknown',
-                    "iono_source": self._normalize_iono_source(raw),
+                    "iono_source": base,
+                    "iono_giro": giro,
                     "iono_source_raw": raw,
                 }
         # ONE minute-boundary derivation (review M1): round to the nearest

@@ -34,7 +34,8 @@ def test_details_carry_mode_and_source():
                    "WWVH": (60.0, 0.9, "2F", "iri")})
     d = eng.expected_delay_details(float(MINUTE), MINUTE)
     assert d["WWV"] == {"delay_s": 0.0125, "sigma_ms": 0.5, "mode": "1F",
-                        "iono_source": "wamipe+giro", "iono_source_raw": "wamipe+giro"}
+                        "iono_source": "wamipe", "iono_giro": True,
+                        "iono_source_raw": "wamipe+giro"}
     assert "WWVH" in d
     assert d["WWVH"]["mode"] == "2F" and d["WWVH"]["iono_source"] == "iri"
 
@@ -74,18 +75,24 @@ def test_meta_does_not_leak_between_stations():
     assert d["WWVH"]["iono_source_raw"] is None
 
 
-@pytest.mark.parametrize("raw,norm", [
-    ("wamipe", "wamipe"), ("wamipe+giro", "wamipe+giro"), ("giro", "giro"),
-    ("iri", "iri"), ("parametric", "parametric"), ("static", "static"),
-    ("fallback", "static"), ("legacy", "static"),
-    ("climatological_fallback", "parametric"),
-    ("vacuum_fallback", "vacuum"), ("matrix", "unknown"), (None, "unknown"),
-    ("brand-new-source", "unknown"),
+@pytest.mark.parametrize("raw,norm,giro", [
+    ("wamipe", "wamipe", False), ("wamipe+giro", "wamipe", True),
+    ("iri", "iri", False), ("iri+giro", "iri", True),
+    ("parametric", "parametric", False), ("parametric+giro", "parametric", True),
+    ("static", "static", False), ("ionex", "ionex", False),
+    ("calibrated", "calibrated", False),
+    ("fallback", "static", False), ("legacy", "none", False),
+    ("climatological_fallback", "parametric", False),
+    ("climatological_fallback+giro", "parametric", True),
+    ("vacuum_fallback", "vacuum", False), ("matrix", "unknown", False),
+    (None, "unknown", False), ("brand-new-source", "unknown", False),
+    ("giro", "unknown", False),
 ])
-def test_iono_source_vocabulary(raw, norm):
-    assert MetrologyEngine._normalize_iono_source(raw) == norm
+def test_iono_source_vocabulary(raw, norm, giro):
+    assert MetrologyEngine._normalize_iono_source(raw) == (norm, giro)
     d = _engine({"WWV": (12.5, 0.5, "1F", raw)}).expected_delay_details(float(MINUTE), MINUTE)
     assert d["WWV"]["iono_source"] == norm
+    assert d["WWV"]["iono_giro"] is giro
     assert d["WWV"]["iono_source_raw"] == raw
 
 
@@ -96,6 +103,14 @@ def test_unrecognised_source_logs_once(caplog):
         MetrologyEngine._normalize_iono_source("zzz-new")
     msgs = [r for r in caplog.records if "zzz-new" in r.getMessage()]
     assert len(msgs) == 1
+
+
+def test_unknown_with_giro_suffix_logs_once(caplog):
+    MetrologyEngine._iono_source_logged.discard("zzz-new+giro")
+    with caplog.at_level("WARNING"):
+        assert MetrologyEngine._normalize_iono_source("zzz-new+giro") == ("unknown", True)
+        MetrologyEngine._normalize_iono_source("zzz-new+giro")
+    assert len([r for r in caplog.records if "zzz-new+giro" in r.getMessage()]) == 1
 
 
 def _real_engine():
@@ -120,7 +135,8 @@ def test_matrix_path_meta():
         get_expected_arrivals=lambda dt: types.SimpleNamespace(
             get_arrival=lambda st, f: arrival))
     w = _details(eng)["WWV"]
-    assert (w["mode"], w["iono_source"], w["iono_source_raw"]) == ("2F", "wamipe+giro", "wamipe+giro")
+    assert (w["mode"], w["iono_source"], w["iono_source_raw"]) == ("2F", "wamipe", "wamipe+giro")
+    assert w["iono_giro"] is True
     assert w["sigma_ms"] == 1.0
 
 
@@ -143,6 +159,7 @@ def test_propagation_model_path_meta():
     eng._prop_model_fallback = types.SimpleNamespace(predict=lambda st, f, dt: pred)
     w = _details(eng)["WWV"]
     assert (w["mode"], w["iono_source"], w["iono_source_raw"]) == ("1E", "static", "fallback")
+    assert w["iono_giro"] is False
 
 
 def test_vacuum_path_meta():
