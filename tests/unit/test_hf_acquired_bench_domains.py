@@ -140,3 +140,90 @@ def test_t3_label_anchor_refused_on_another_channel_of_the_same_rate():
     rec.config.description = "WWV_20000"
     rec._label_anchor_provider = lambda: t6
     assert rec._label_anchor_state() is t6
+
+
+# ── Final review I-5: the bench refuses across a radiod restart ──────
+
+
+def _map(k0, epoch_shift_s=0.0):
+    from synth_origins import EPOCH_GPS_S, counter_map_for
+
+    return counter_map_for(k0, SR, epoch_gps_s=EPOCH_GPS_S + epoch_shift_s)
+
+
+def _write_mapped(st, cmap):
+    st.write_summary(
+        Registration(
+            "ep-1", rtp_ref=rtp_at(100, 51, OLEN), utc_ref=100.0,
+            sample_rate=SR, sigma_ms=0.8, channel="fused", verified=True,
+            rtp_domain="SHARED_10000",
+            counter_map=None if cmap is None else cmap.rolled_forward(
+                rtp_at(100, 51, OLEN)),
+        ),
+        ["SHARED_10000", "WWV_20000"], "ACQUIRED", {},
+    )
+
+
+def _bench(st, clock, arrival):
+    return HfAcquiredBench(provider=lambda: {"SHARED_10000": arrival},
+                           store=st, mono_fn=lambda: 42.5,
+                           time_fn=lambda: clock[0])
+
+
+def test_old_runs_summary_against_a_new_runs_arrival_is_refused(tmp_path):
+    """radiod restarted an hour later.  The summary still holds the old
+    run's rtp_ref, fresh; the arrival tap already counts in the new run's
+    counter.  delta_rtp spans two counters: the bench must stay silent."""
+    clock = [5000.0]
+    st = _store(tmp_path, clock)
+    _write_mapped(st, _map(51))
+    arrive = rtp_at(150, 51, OLEN)
+    assert _bench(st, clock, (arrive, 42.0, SR, _map(51, 3600.0))).poll() is None
+
+
+def test_bench_with_one_run_on_both_sides_answers(tmp_path):
+    """Control: the same run, 0.8 s apart (a late GPS_TIME), answers."""
+    clock = [5000.0]
+    st = _store(tmp_path, clock)
+    _write_mapped(st, _map(51))
+    arrive = rtp_at(150, 51, OLEN)
+    r = _bench(st, clock, (arrive, 42.0, SR, _map(51, 0.8))).poll()
+    assert r is not None
+    assert r.utc == pytest.approx(100.0 + 50 * BLOCK_S, abs=1e-6)
+
+
+def test_a_missing_map_on_either_side_is_refused(tmp_path):
+    """The provider offers a run identity: without a map on either side
+    the bench cannot show the two counters are one, so it says nothing."""
+    clock = [5000.0]
+    st = _store(tmp_path, clock)
+    arrive = rtp_at(150, 51, OLEN)
+    _write_mapped(st, None)
+    assert _bench(st, clock, (arrive, 42.0, SR, _map(51))).poll() is None
+    _write_mapped(st, _map(51))
+    assert _bench(st, clock, (arrive, 42.0, SR, None)).poll() is None
+
+
+def test_provider_withholds_a_live_map_that_lags_the_raw_pair():
+    """The recorder's live map refreshes on a 60 s tick, the channel's
+    raw pair at once.  In between, the live map is the old run's and must
+    not vouch for the arrival."""
+    from synth_origins import F_IN as _F_IN
+
+    rec = CoreRecorderV2.__new__(CoreRecorderV2)
+    s = _FakeStream()
+    rec._wire_t5_fallback_arrival("SHARED_10000", s, SR)
+    s.tap([0.0] * 240, types.SimpleNamespace(
+        last_rtp_timestamp=1000, delivered_rtp_start=1000,
+        batch_samples_delivered=240))
+    live = _map(51)
+    raw_rtp = rtp_at(120, 51, OLEN)
+    raw_gps_ns = int(round((live.input_epoch_gps_s
+                            + live.input_index(raw_rtp) / _F_IN) * 1e9))
+    rec._counter_maps = {"SHARED_10000": live}
+    ci = types.SimpleNamespace(gps_time=raw_gps_ns, rtp_timesnap=raw_rtp)
+    rec.recorders = {"SHARED_10000": types.SimpleNamespace(channel_info=ci)}
+    assert rec._hf_acquired_bench_state()["SHARED_10000"][3] == live
+    # radiod restarts an hour on: the raw pair moves, the map has not yet
+    ci.gps_time = raw_gps_ns + 3600 * 10**9
+    assert rec._hf_acquired_bench_state()["SHARED_10000"][3] is None

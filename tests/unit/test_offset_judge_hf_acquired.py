@@ -271,7 +271,7 @@ def test_wire_t5_fallback_arrival_feeds_hf_arrival_from_the_real_tap():
     arrivals = recorder._hf_acquired_bench_state()
     assert set(arrivals) == {"SHARED_10000"}
     arrival = arrivals["SHARED_10000"]
-    arrival_rtp, arrival_mono, arrival_sr = arrival
+    arrival_rtp, arrival_mono, arrival_sr = arrival[:3]
     assert arrival_rtp == 1000 + 240
     assert arrival_sr == SR
     assert isinstance(arrival_mono, float) and arrival_mono > 0
@@ -299,7 +299,7 @@ def test_arrival_tap_labels_from_the_delivered_stream_not_the_received_header():
             batch_samples_delivered=240,
         ),
     )
-    arrival_rtp, _mono, _sr = recorder._hf_acquired_bench_state()["SHARED_10000"]
+    arrival_rtp, _mono, _sr = recorder._hf_acquired_bench_state()["SHARED_10000"][:3]
     assert arrival_rtp == 1240
     assert arrival_rtp != (1000 + 4800) + 240  # the hand-rolled label
 
@@ -311,7 +311,7 @@ def test_arrival_tap_falls_back_for_a_producer_without_the_delivered_field():
     fake_stream = _FakeStreamRecorder()
     recorder._wire_t5_fallback_arrival("SHARED_10000", fake_stream, SR)
     fake_stream.tap([0.0] * 240, _FakeQuality(last_rtp_timestamp=1000))
-    arrival_rtp, _mono, _sr = recorder._hf_acquired_bench_state()["SHARED_10000"]
+    arrival_rtp, _mono, _sr = recorder._hf_acquired_bench_state()["SHARED_10000"][:3]
     assert arrival_rtp == 1000
 
 

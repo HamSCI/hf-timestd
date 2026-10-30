@@ -2901,8 +2901,10 @@ class CoreRecorderV2:
 
     def _hf_acquired_bench_state(self):
         """HfAcquiredBench provider (T3): a copy of ``_hf_arrivals``,
-        ``{channel: (arrival_rtp, arrival_mono, arrival_sample_rate)}``,
-        or None before any archive batch arrives.
+        ``{channel: (arrival_rtp, arrival_mono, arrival_sample_rate,
+        counter_map)}``, or None before any archive batch arrives.
+        ``counter_map`` is the channel's live map when it fits the
+        channel's raw radiod pair, else None.
 
         Each radiod channel starts its own RTP counter, so an arrival means
         something only in its own channel's counter.  The bench picks the
@@ -2920,7 +2922,26 @@ class CoreRecorderV2:
         offset this bench does not have. Silence beats a wrong ``utc``.
         """
         arrivals = getattr(self, '_hf_arrivals', None)
-        return dict(arrivals) if arrivals else None
+        if not arrivals:
+            return None
+        # Final review I-5 (2026-10-30): each arrival also names its run,
+        # as the channel's live counter map, so the bench can refuse a
+        # summary from another run.  The map refreshes on the 60 s tick
+        # while the channel's raw pair follows radiod at once; a map that
+        # does not fit the raw pair is the old run's and vouches for
+        # nothing, so it goes as None.
+        from .counter_epoch_tracker import map_fits_raw_pair
+        maps = getattr(self, '_counter_maps', None) or {}
+        recorders = getattr(self, 'recorders', None) or {}
+        out = {}
+        for desc, arrival in arrivals.items():
+            cmap = maps.get(desc)
+            ci = getattr(recorders.get(desc), 'channel_info', None)
+            if not map_fits_raw_pair(cmap, getattr(ci, 'gps_time', None),
+                                     getattr(ci, 'rtp_timesnap', None)):
+                cmap = None
+            out[desc] = (*tuple(arrival)[:3], cmap)
+        return out
 
     # ── T3 against T6 in the sample plane (T3 foundations, task 14) ──
 

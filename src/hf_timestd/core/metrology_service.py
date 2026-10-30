@@ -53,7 +53,11 @@ from hf_timestd.core.ring_buffer import (
     RingBufferOverrunError,
 )
 from hf_timestd.core.ring_buffer_reader import RingBufferReader
-from hf_timestd.core.counter_epoch_tracker import CounterEpochTracker
+from hf_timestd.core.counter_epoch_tracker import (
+    COUNTER_EPOCH_SKEW_ALLOWANCE_S,
+    CounterEpochTracker,
+    counter_map_run_mismatch_s,
+)
 from hf_timestd.core.buffer_timing import resolve_buffer_timing
 from hf_timestd.core.state_transition_counter import StateTransitionCounter
 from hf_timestd.core.t3_shadow_record import T3ShadowRecord
@@ -94,25 +98,6 @@ def resync_minute_after(exc: Exception, head_utc: float, jump_min: int) -> int:
     if first_valid is not None:
         return int(math.ceil(float(first_valid) / 60.0)) * 60
     return (int(head_utc) // 60) * 60 - int(jump_min) * 60
-
-
-def counter_map_run_mismatch_s(cmap, raw_gps_time_ns: int,
-                               raw_rtp_timesnap: int) -> float:
-    """How far, in seconds, radiod's raw pair puts its run's epoch from
-    ``cmap``'s ``input_epoch_gps_s``.  Zero for one run; hours for two.
-
-    The raw pair's own epoch is ``gps_s - input_index(rtp) / f_in``, the
-    quantity the map's epoch names.  RTP is a 32-bit counter, and a
-    steady raw pair is never refreshed, so ``input_index`` may read the
-    pair's RTP one wrap away; the difference is taken modulo that wrap
-    (``2**32`` output samples), which cannot hide a second run unless it
-    started a whole number of wraps (49.7 h at 24 kHz) after the first,
-    to within the tolerance.  Final review I-4, 2026-10-30."""
-    wrap_s = 2**32 * cmap.ilen / cmap.olen / cmap.input_samprate
-    implied = (int(raw_gps_time_ns) / 1e9
-               - cmap.input_index(int(raw_rtp_timesnap)) / cmap.input_samprate)
-    d = implied - cmap.input_epoch_gps_s
-    return (d + wrap_s / 2.0) % wrap_s - wrap_s / 2.0
 
 
 class MetrologyService:
@@ -905,9 +890,6 @@ class MetrologyService:
         raw_rtp = metadata.get("raw_rtp_timesnap")
         if cmap is None or raw_gps is None or raw_rtp is None:
             return cmap
-        from hf_timestd.core.counter_epoch_tracker import (
-            COUNTER_EPOCH_SKEW_ALLOWANCE_S,
-        )
         miss_s = counter_map_run_mismatch_s(cmap, raw_gps, raw_rtp)
         streak = getattr(self, "_map_mismatch_minutes", 0)
         if abs(miss_s) <= COUNTER_EPOCH_SKEW_ALLOWANCE_S:

@@ -70,6 +70,35 @@ COUNTER_EPOCH_STEP_S = 0.5
 COUNTER_EPOCH_SKEW_ALLOWANCE_S = 2.0
 
 
+def counter_map_run_mismatch_s(cmap, raw_gps_time_ns: int,
+                               raw_rtp_timesnap: int) -> float:
+    """How far, in seconds, radiod's raw pair puts its run's epoch from
+    ``cmap``'s ``input_epoch_gps_s``.  Zero for one run; hours for two.
+
+    The raw pair's own epoch is ``gps_s - input_index(rtp) / f_in``, the
+    quantity the map's epoch names.  RTP is a 32-bit counter, and a
+    steady raw pair is never refreshed, so ``input_index`` may read the
+    pair's RTP one wrap away; the difference is taken modulo that wrap
+    (``2**32`` output samples), which cannot hide a second run unless it
+    started a whole number of wraps (49.7 h at 24 kHz) after the first,
+    to within the tolerance.  Final review I-4, 2026-10-30."""
+    wrap_s = 2**32 * cmap.ilen / cmap.olen / cmap.input_samprate
+    implied = (int(raw_gps_time_ns) / 1e9
+               - cmap.input_index(int(raw_rtp_timesnap)) / cmap.input_samprate)
+    d = implied - cmap.input_epoch_gps_s
+    return (d + wrap_s / 2.0) % wrap_s - wrap_s / 2.0
+
+
+def map_fits_raw_pair(cmap, raw_gps_time_ns, raw_rtp_timesnap) -> bool:
+    """Do ``cmap`` and radiod's raw pair name one radiod run (within
+    ``COUNTER_EPOCH_SKEW_ALLOWANCE_S``)?  False when either is missing."""
+    if cmap is None or raw_gps_time_ns is None or raw_rtp_timesnap is None:
+        return False
+    return (abs(counter_map_run_mismatch_s(cmap, raw_gps_time_ns,
+                                           raw_rtp_timesnap))
+            <= COUNTER_EPOCH_SKEW_ALLOWANCE_S)
+
+
 class CounterEpochTracker:
     """Live-ring twin of ``binary_archive_writer``'s per-channel epoch state."""
 

@@ -904,8 +904,10 @@ class HfAcquiredBench:
     decision" — resolved: label plane, T6 precedent, fix round 1 F4).
 
     provider() -> Optional[{channel: (arrival_rtp, arrival_mono,
-    arrival_sample_rate)}], the latest arrival of each archive channel in
-    that channel's own RTP counter.  Every radiod channel starts its own
+    arrival_sample_rate[, counter_map])}], the latest arrival of each
+    archive channel in that channel's own RTP counter.  With the fourth
+    element the bench answers only when the summary's map and that live
+    map name one radiod run (final review I-5).  Every radiod channel starts its own
     counter, so the bench takes the arrival of the channel the summary's
     ``rtp_domain`` names -- the counter ``rtp_ref`` is in -- and no
     other.  A summary naming no domain, or a domain with no arrival,
@@ -933,6 +935,23 @@ class HfAcquiredBench:
         self._mono = mono_fn
         self._time = time_fn
 
+    @staticmethod
+    def _one_run(summary_map, live_map) -> bool:
+        """Do the summary's map (a dict) and the arrival's live map name
+        one radiod run, within the 2 s skew allowance?  False when either
+        is missing."""
+        if summary_map is None or live_map is None:
+            return False
+        from hamsci_dsp.counter_map import CounterMap
+        from .counter_epoch_tracker import COUNTER_EPOCH_SKEW_ALLOWANCE_S
+        try:
+            m = (summary_map if isinstance(summary_map, CounterMap)
+                 else CounterMap.from_dict(summary_map))
+        except (KeyError, TypeError, ValueError):
+            return False
+        return m is not None and m.same_run(
+            live_map, tol_s=COUNTER_EPOCH_SKEW_ALLOWANCE_S)
+
     def poll(self) -> Optional[BenchReading]:
         try:
             state = self._provider()
@@ -950,7 +969,18 @@ class HfAcquiredBench:
         arrival = state.get(str(domain))
         if arrival is None:
             return None
-        arrival_rtp, arrival_mono, arrival_sample_rate = arrival
+        arrival_rtp, arrival_mono, arrival_sample_rate = tuple(arrival)[:3]
+        # Final review I-5 (2026-10-30): after a radiod restart the summary
+        # keeps the old run's rtp_ref, fresh, while the arrival already
+        # counts in the new run's counter; delta_rtp would span two
+        # counters and land hours off.  A provider that names the
+        # arrival's run (a fourth element: the channel's live map, or None
+        # when it has none that fits the raw pair) makes the bench refuse
+        # unless the summary's map names the same run.  A three-element
+        # arrival offers no run identity and keeps the older rule.
+        if len(tuple(arrival)) > 3:
+            if not self._one_run(s.get("counter_map"), tuple(arrival)[3]):
+                return None
         age = self._mono() - float(arrival_mono)
         if age < 0 or age > self.ARRIVAL_MAX_AGE_S:
             return None
