@@ -1103,7 +1103,9 @@ class OffsetJudge:
     # T3 slot only after its shadow run beside T6 on B4 (Michael's ruling
     # 4; step 7 of the ruled order).  Until then its readings feed the
     # shadow residuals and the label-plane anchor, and never correct a
-    # label.  Step 7 removes it from this set.
+    # label.  Nor do they vote in witness dissent (final review I-1,
+    # 2026-10-30), which reaches chrony through the HPPS precision.
+    # Step 7 removes it from this set.
     SHADOW_ONLY_BENCHES = frozenset({"hf_acquired"})
 
     def __init__(
@@ -3191,17 +3193,29 @@ class OffsetJudge:
         is a first-class diagnostic (it measures the displaced peak
         directly)."""
         shadows: Dict[str, Dict] = {}
+        # The dissent witnesses: the same rows, less every shadow-only
+        # bench.  Final review I-1 (2026-10-30): the stand-alone T3
+        # registration may sit any distance from T6 until stage 0 settles
+        # the chain delay, and two witnesses can convict.  Joined by T4,
+        # it widened the HPPS precision chrony sees.  Michael's ruling:
+        # T3 votes nowhere until step 7 admits it.  Its row stays in
+        # shadow_residuals for the record.
+        voters: Dict[str, Dict] = {}
         if adopted is not None:
             for r in readings:
                 if r.tier == adopted.tier:
                     continue
-                shadows[r.tier] = {
+                row = {
                     "shadow_residual_ns": round(
                         self._cross_bench_delta_ns(r, adopted, mono_now), 1
                     ),
                     "sigma_ns": round(r.sigma_ns, 1),
                     "vs_tier": adopted.tier,
                 }
+                shadows[r.tier] = row
+                if (r.detail or {}).get("bench") in self.SHADOW_ONLY_BENCHES:
+                    continue
+                voters[r.tier] = row
         self._shadow_residuals = shadows
         # hf-timestd#29: give the witnesses an actuator.  The shadow
         # channel has been RIGHT and IGNORED repeatedly (~5,000
@@ -3214,7 +3228,7 @@ class OffsetJudge:
         if adopted is not None:
             try:
                 from .witness_dissent import from_shadow_residuals
-                d = from_shadow_residuals(shadows, float(adopted.sigma_ns))
+                d = from_shadow_residuals(voters, float(adopted.sigma_ns))
                 self._dissent = self._dissent_watch.observe(d, mono_now)
             except Exception:  # noqa: BLE001 — a guard must not crash the judge
                 self._dissent = None
