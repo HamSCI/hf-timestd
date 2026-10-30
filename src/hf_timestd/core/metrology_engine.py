@@ -525,15 +525,53 @@ class MetrologyEngine:
         return {s: d["delay_s"]
                 for s, d in self.expected_delay_details(system_time, minute_utc).items()}
 
+    # Closed vocabulary for the stored ionospheric-source label.  Raw
+    # strings come from hamsci-dsp (data_service / arrival_matrix / model)
+    # and from this module's vacuum path.  Normalised in ONE place, here.
+    #   fallback              -> static: hamsci-dsp's default tag when no
+    #                            ionospheric data arrived (invalid grid, or
+    #                            iono_params without a source).
+    #   climatological_fallback -> parametric: the internal parametric
+    #                            climatology (data_service docstring).
+    #   legacy                -> static: arrival_matrix legacy path, zero
+    #                            ionospheric delay, no live data.
+    #   vacuum_fallback       -> vacuum: this module's no-ionosphere path.
+    _IONO_SOURCES = frozenset({"wamipe", "wamipe+giro", "giro", "iri",
+                               "parametric", "static", "vacuum", "unknown"})
+    _IONO_SOURCE_ALIASES = {
+        "fallback": "static",
+        "climatological_fallback": "parametric",
+        "legacy": "static",
+        "vacuum_fallback": "vacuum",
+        "matrix": "unknown",
+    }
+    _iono_source_logged: set = set()
+
+    @classmethod
+    def _normalize_iono_source(cls, raw: Optional[str]) -> str:
+        if raw is None:
+            return "unknown"
+        key = str(raw).strip().lower()
+        if key in cls._IONO_SOURCES:
+            return key
+        if key in cls._IONO_SOURCE_ALIASES:
+            return cls._IONO_SOURCE_ALIASES[key]
+        if key not in cls._iono_source_logged:
+            cls._iono_source_logged.add(key)
+            logger.warning("Unrecognised ionospheric data source %r; recorded as unknown", raw)
+        return "unknown"
+
     def expected_delay_details(self, system_time: float,
                                minute_utc: int) -> Dict[str, Dict[str, Any]]:
         """Expected delay per station that can be on the air at this minute
         on this frequency, with the mode and ionospheric source that made it.
 
-        Each value: ``{"delay_s", "sigma_ms", "mode", "iono_source"}``.
-        ``mode`` and ``iono_source`` come from ``_last_prediction_meta``
-        (``propagation_mode``, ``data_source``) read right after that
-        station's own prediction; None when the model recorded none.
+        Each value: ``{"delay_s", "sigma_ms", "mode", "iono_source",
+        "iono_source_raw"}``.  ``mode`` and the raw source come from
+        ``_last_prediction_meta`` (``propagation_mode``, ``data_source``)
+        read right after that station's own prediction; ``iono_source`` is
+        the raw string in the closed vocabulary; absent values read
+        ``unknown``.
         ``minute_utc`` is the minute boundary in Unix seconds;
         ``eligible_candidates`` wants minute-of-hour and hour-of-day,
         derived here.
@@ -547,10 +585,12 @@ class MetrologyEngine:
             if expected_delay_ms > 0:
                 delays_ms[station] = expected_delay_ms
                 meta = getattr(self, '_last_prediction_meta', None) or {}
+                raw = meta.get('data_source')
                 extras[station] = {
                     "sigma_ms": float(unc_ms),
-                    "mode": meta.get('propagation_mode'),
-                    "iono_source": meta.get('data_source'),
+                    "mode": meta.get('propagation_mode') or 'unknown',
+                    "iono_source": self._normalize_iono_source(raw),
+                    "iono_source_raw": raw,
                 }
         # ONE minute-boundary derivation (review M1): round to the nearest
         # whole minute rather than trusting the caller's minute_utc to
