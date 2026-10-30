@@ -90,3 +90,49 @@ def test_aux_update_does_not_bump_the_anchor_epoch(ring):
     buf.update_counter_map(_map())
     assert int(buf._hot[HOT_EPOCH_COUNTER]) == before
     assert reader.get_anchor()["epoch"] == before
+
+
+# ── final review I-3: a producer killed in the middle of an aux write ──
+
+def _kill_mid_aux_write(buf):
+    """What a producer killed between _aux_begin and _aux_end leaves."""
+    from hf_timestd.core.ring_buffer import HOT_AUX_SEQ
+    buf._hot[HOT_AUX_SEQ] = int(buf._hot[HOT_AUX_SEQ]) | 1
+
+
+def test_stuck_aux_never_stops_the_extract(ring, caplog):
+    """An odd aux sequence used to make every extract raise, and
+    metrology logged that at DEBUG: the channel went silent, unseen."""
+    import logging
+    buf, reader = ring
+    _fill(buf, reader, _judged(reader))
+    buf.update_raw_pair(5, 6)
+    _kill_mid_aux_write(buf)
+    with caplog.at_level(logging.WARNING):
+        samples, meta = reader.extract_interval(UTC0 + 1.0, 1.0)
+        reader.extract_interval(UTC0 + 1.0, 1.0)
+        reader.extract_samples(100)
+    assert len(samples) == 24000
+    # The block reads as absent, so T3 waits and the minute goes on.
+    assert meta["raw_gps_time_ns"] is None
+    assert meta["counter_map"] is None
+    stuck = [r for r in caplog.records
+             if r.levelno >= logging.WARNING and "aux" in r.getMessage()]
+    assert len(stuck) == 1, [r.getMessage() for r in stuck]
+
+
+def test_adopting_producer_clears_a_stuck_aux_sequence(ring):
+    """The restarted recorder adopts the segment; its writes must leave
+    the sequence even again, or the parity stays inverted for good."""
+    from hf_timestd.core.ring_buffer import HOT_AUX_SEQ
+    buf, reader = ring
+    _fill(buf, reader, _judged(reader))
+    _kill_mid_aux_write(buf)
+    adopter = RingBuffer.create(buf.channel_name, sample_rate=24000,
+                                ring_seconds=4)
+    assert int(adopter._hot[HOT_AUX_SEQ]) % 2 == 0
+    adopter.update_raw_pair(7_000_000_000, 8)
+    assert int(adopter._hot[HOT_AUX_SEQ]) % 2 == 0
+    _, meta = reader.extract_samples(100)
+    assert meta["raw_gps_time_ns"] == 7_000_000_000
+    assert meta["raw_rtp_timesnap"] == 8

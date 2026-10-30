@@ -439,6 +439,18 @@ class RingBuffer:
         counter from a re-based one, and content written by the previous
         producer stays addressable in a numbering it never had (AC0G-ND,
         2026-09-10 23:19Z)."""
+        # A producer killed between _aux_begin and _aux_end left the aux
+        # sequence odd.  Every later write would leave it odd again, and
+        # every reader would see a write that never ends (final review
+        # I-3, 2026-10-30).  No write runs now, so close the dead one.
+        aux_seq = int(self._hot[HOT_AUX_SEQ])
+        if aux_seq & 1:
+            self._hot[HOT_AUX_SEQ] = aux_seq + 1
+            logger.warning(
+                f"RingBuffer[{self._config.channel_name}]: adopted a ring "
+                f"whose aux block was left mid-write (sequence {aux_seq}); "
+                f"closed it.  The raw pair and counter map it holds may be "
+                f"torn until this producer rewrites them.")
         cursor = int(self._hot[HOT_WRITE_CURSOR])
         if cursor == 0:
             return

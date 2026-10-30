@@ -145,6 +145,8 @@ class RingBufferReader:
         self._ring_size_samples = int(ring_size_samples)
         self._leap = get_current_gps_leap_seconds()
         self._closed = False
+        # One WARNING per stuck-aux episode (read_aux).
+        self._aux_stuck_logged = False
 
         self._hot = np.frombuffer(
             shm, dtype=np.uint64, count=_HOT_COUNT, offset=_HOT_OFFSET
@@ -275,7 +277,9 @@ class RingBufferReader:
 
         Returns ``raw_gps_time_ns``, ``raw_rtp_timesnap`` and
         ``counter_map``; each is None when the producer never set it
-        (an old producer leaves the whole block zero).
+        (an old producer leaves the whole block zero).  A sequence stuck
+        odd reads as absent too, with one WARNING per episode; it never
+        raises, so the optional block cannot stop a minute.
         """
         def s64(u: int) -> int:
             return u - (1 << 64) if u >= (1 << 63) else u
@@ -302,11 +306,27 @@ class RingBufferReader:
                     rtp_ref=f[0] & 0xFFFFFFFF, input_ref=s64(f[1]),
                     ilen=f[2], olen=f[3], input_samprate=f[4],
                     input_epoch_gps_s=s64(f[5]) / 1000.0, n_agree=f[6])
+            if self._aux_stuck_logged:
+                logger.info(
+                    f"RingBufferReader[{self._channel_name}]: aux block "
+                    f"readable again")
+                self._aux_stuck_logged = False
             return out
-        raise RingBufferError(
-            f"RingBufferReader[{self._channel_name}]: aux seqlock stuck "
-            f"after {_MAX_SEQLOCK_RETRIES} retries"
-        )
+        # Final review I-3 (2026-10-30): a producer killed mid-write
+        # leaves the sequence odd for good.  Raising here made every
+        # extract fail, and the channel went silent with no sign.  The
+        # block is optional: read it as absent, so the minute goes on
+        # and T3 waits, and say so loudly, once per episode.
+        if not self._aux_stuck_logged:
+            logger.warning(
+                f"RingBufferReader[{self._channel_name}]: aux seqlock stuck "
+                f"odd (sequence {int(self._hot[HOT_AUX_SEQ])}) after "
+                f"{_MAX_SEQLOCK_RETRIES} retries; the producer likely died "
+                f"mid-write.  Reading the raw pair and counter map as "
+                f"absent until a producer restart clears it.")
+            self._aux_stuck_logged = True
+        return {"raw_gps_time_ns": None, "raw_rtp_timesnap": None,
+                "counter_map": None}
 
     def get_anchor(self) -> dict:
         """Snapshot of all timing fields (for diagnostics / tests)."""
