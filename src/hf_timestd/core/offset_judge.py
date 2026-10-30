@@ -903,9 +903,13 @@ class HfAcquiredBench:
     (review task-9-review.md, finding "Minor, needs an explicit
     decision" — resolved: label plane, T6 precedent, fix round 1 F4).
 
-    provider() -> Optional[(arrival_rtp, arrival_mono, arrival_sample_rate)]
-    of the most recently arrived sample, in the SAME RTP counter domain
-    the registration's ``rtp_ref``/``sample_rate`` were stamped in.
+    provider() -> Optional[{channel: (arrival_rtp, arrival_mono,
+    arrival_sample_rate)}], the latest arrival of each archive channel in
+    that channel's own RTP counter.  Every radiod channel starts its own
+    counter, so the bench takes the arrival of the channel the summary's
+    ``rtp_domain`` names -- the counter ``rtp_ref`` is in -- and no
+    other.  A summary naming no domain, or a domain with no arrival,
+    leaves the bench silent.
     Fix round 1 (task 9 review F1/F2): the RTP counter is per-channel
     and NOT interchangeable across channels running at different
     configured rates (``cross_channel_rtp.py``) — the provider must
@@ -919,7 +923,8 @@ class HfAcquiredBench:
     _LIVE_STATES = ("ACQUIRED", "WITNESS")
 
     def __init__(self,
-                 provider: Callable[[], Optional[Tuple[int, float, int]]],
+                 provider: Callable[
+                     [], Optional[Dict[str, Tuple[int, float, int]]]],
                  store=None, mono_fn: Callable[[], float] = time.monotonic,
                  time_fn: Callable[[], float] = time.time):
         from .registration_store import RegistrationStore
@@ -933,14 +938,21 @@ class HfAcquiredBench:
             state = self._provider()
         except Exception:  # noqa: BLE001 — provider trouble ≠ judge trouble
             return None
-        if state is None:
-            return None
-        arrival_rtp, arrival_mono, arrival_sample_rate = state
-        age = self._mono() - float(arrival_mono)
-        if age < 0 or age > self.ARRIVAL_MAX_AGE_S:
+        if not state:
             return None
         s = self._store.read_summary()
         if not s or s.get("state") not in self._LIVE_STATES or s.get("utc_ref") is None:
+            return None
+        # The arrival must be in the counter rtp_ref is in.
+        domain = s.get("rtp_domain")
+        if not domain:
+            return None
+        arrival = state.get(str(domain))
+        if arrival is None:
+            return None
+        arrival_rtp, arrival_mono, arrival_sample_rate = arrival
+        age = self._mono() - float(arrival_mono)
+        if age < 0 or age > self.ARRIVAL_MAX_AGE_S:
             return None
         # Fix round 1 (C-1): an unverified plane is not a reading at all.
         # It used to reach chrony through label_plane_anchor while the

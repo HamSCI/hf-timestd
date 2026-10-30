@@ -437,7 +437,7 @@ def test_t6_authoritative_large_residual_vs_t6_is_candidate_not_witness(tmp_path
     assert svc.acquirer.registration.verified is False
 
     bench = HfAcquiredBench(
-        provider=lambda: (1_000_000, 1000.0, SR),
+        provider=lambda: {"SHARED_10000": (1_000_000, 1000.0, SR)},
         store=svc.reg_store,
         mono_fn=lambda: 1000.0,
     )
@@ -1065,7 +1065,7 @@ def test_conflict_does_not_hide_the_summary_state_from_the_bench(tmp_path):
         None, [], "BOOTSTRAP", {"conflicts": ["SHARED_10000", "WWV_20000"]}
     )
     bench = HfAcquiredBench(
-        provider=lambda: (1_000_000, 1000.0, SR),
+        provider=lambda: {"SHARED_10000": (1_000_000, 1000.0, SR)},
         store=svc.reg_store,
         mono_fn=lambda: 1000.0,
     )

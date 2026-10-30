@@ -76,6 +76,10 @@ class T3AnchorDecision:
     # model -- common-mode across channels, so fusing N does not shrink
     # it (the same floor HfAcquiredBench applies).
     sigma_ns: float = 0.0
+    # The channel whose counter ``anchor_rtp`` is in, from the summary's
+    # ``rtp_domain``.  "" when the summary names none: the anchor then labels
+    # no channel at all, because nothing says which counter it belongs to.
+    rtp_domain: Optional[str] = None
 
     @property
     def in_force(self) -> bool:
@@ -135,6 +139,7 @@ class T3RegistrationAnchor:
             epoch_id=d.epoch_id,
             tier="T3",
             sigma_ns=float(d.sigma_ns),
+            rtp_domain=d.rtp_domain,
         )
 
     # ── evaluation ──────────────────────────────────────────────────
@@ -205,7 +210,9 @@ class T3RegistrationAnchor:
             captured_at_utc_ns=int(round(written_at * 1e9)),
             captured_via_tier="T3",
         )
-        return T3AnchorDecision(anchor, epoch_id, "acquired", sigma_ns=sigma_ms * 1e6)
+        return T3AnchorDecision(anchor, epoch_id, "acquired", sigma_ns=sigma_ms * 1e6,
+            rtp_domain=str(summary.get("rtp_domain") or ""),
+        )
 
     # ── logging ─────────────────────────────────────────────────────
 

@@ -71,6 +71,7 @@ def _store(
             sigma_ms=sigma_ms,
             n_minutes=n_minutes,
             channel="fused",
+            rtp_domain="SHARED_10000",
             verified=verified,
         ),
         ["SHARED_10000", "WWV_15000"],
@@ -174,7 +175,7 @@ def _anchor_surface(store, clock):
 def _fuse_surface(store, clock, tmp_path):
     """Surface 4: the judge's label_plane_anchor -> the chrony sample."""
     bench = HfAcquiredBench(
-        provider=lambda: (RTP_REF, 1000.0, SR),
+        provider=lambda: {"SHARED_10000": (RTP_REF, 1000.0, SR)},
         store=store,
         mono_fn=lambda: 1000.0,
         time_fn=lambda: clock[0],

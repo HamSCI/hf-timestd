@@ -6,18 +6,19 @@ the anchor's absolute error cancels.  The ticks and the PPS live in
 DIFFERENT channels, so this module answers the precondition: what is the
 constant relating two channels' counters?
 
-MEASURED ON AC0G-B4 2026-08-25 (six sidecars, one minute_boundary):
+SUPERSEDED PREMISE (2026-08-25 measurement, void since e5f790dd): six sidecars
+on AC0G-B4 seemed to show that the 24 kHz channels share ONE counter space,
+their implied epochs (``gps_time - rtp_timesnap/fs``) agreeing to 1.937 ms.
+That held because the build then forced a common origin.  Since e5f790dd each
+radiod channel starts its own RTP counter at its own block (ND: k0 = 51, 51,
+51, 51, 50; B4 origins spread over 6 s), so same-rate channels do NOT share a
+counter and counter arithmetic alone cannot relate them.  What relates two
+channels is each channel's ``CounterMap`` to radiod's input-sample index.
+The T6 channel (96 kHz) has always carried a distinct, measured offset.
 
-* The six 24 kHz metrology channels share ONE counter space.  Their
-  implied epochs (``gps_time - rtp_timesnap/fs``) agree to **1.937 ms** —
-  which is the (GPS_TIME, RTP_TIMESNAP) non-atomicity, not an origin
-  difference.  Randomised per-channel origins would differ by hours.
-* The T6 channel (96 kHz) does NOT simply scale.  Against WWV_20000 the
-  residual after removing one 2**32 wrap is 362,095,021 samples ≈ 3772 s
-  — neither zero nor a wrap multiple.
-
-⇒ Same-rate sibling channels can be related by counter arithmetic alone.
-T6 cannot: it carries a distinct offset that must be MEASURED.
+The one known remaining user of the old premise is ``_t6_peer_rtp`` in
+``core_recorder_v2.py``.  The judge's T3 bench and the label anchor no longer
+rely on it: both stay in one channel's counter (``rtp_domain``).
 
 ## Why a floor, not a mean
 

@@ -817,7 +817,8 @@ class StreamRecorderV2:
 
         Refuses an anchor stamped in another counter domain: ``rtp_ref``
         and this channel's RTP counter are only the same ruler at the
-        same configured rate (``cross_channel_rtp.py``).
+        same configured rate AND when the anchor names this very channel
+        (each radiod channel starts its own counter).
         """
         provider = getattr(self, '_label_anchor_provider', None)
         if provider is None:
@@ -833,6 +834,9 @@ class StreamRecorderV2:
         if state is None:
             return None
         if not state.matches_rate(self.config.sample_rate):
+            return None
+        # Same rate is not same counter: each radiod channel starts its own.
+        if not state.matches_domain(self.config.description):
             return None
         return state
 

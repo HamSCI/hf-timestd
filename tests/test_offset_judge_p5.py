@@ -620,7 +620,7 @@ class TestT5BenchDecoupling:
         assert pairing.source == "stream:CHU_7_MHz"
         assert len(rec.taps) == 1
         # task 9 review fix round 1 (F1/F2): the tap now ALSO feeds
-        # HfAcquiredBench's _hf_arrival with (newest_sample_rtp, mono,
+        # HfAcquiredBench's _hf_arrivals[channel] with (newest_sample_rtp, mono,
         # sample_rate).  final review I1: that label comes from the
         # DELIVERED batch (delivered_rtp_start + batch_samples_delivered),
         # not from last_rtp_timestamp + len(samples) -- the received
@@ -634,8 +634,8 @@ class TestT5BenchDecoupling:
             ),
         )
         assert pairing.latest_arrival[0] == 1234
-        assert cr._hf_acquired_bench_state()[0] == 1234 + 100
-        assert cr._hf_acquired_bench_state()[2] == SR
+        assert cr._hf_acquired_bench_state()["CHU_7_MHz"][0] == 1234 + 100
+        assert cr._hf_acquired_bench_state()["CHU_7_MHz"][2] == SR
         # quality without an RTP timestamp is a no-op, not a crash
         rec.taps[0]([0] * 100, types.SimpleNamespace(last_rtp_timestamp=None))
         assert pairing.latest_arrival[0] == 1234

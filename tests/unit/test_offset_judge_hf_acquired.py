@@ -30,6 +30,7 @@ def test_bench_projects_the_registration_to_the_arrival(tmp_path):
             sample_rate=SR,
             sigma_ms=0.8,
             channel="fused",
+            rtp_domain="SHARED_10000",
             verified=True,
         ),
         ["SHARED_10000"],
@@ -37,7 +38,7 @@ def test_bench_projects_the_registration_to_the_arrival(tmp_path):
         {"raw_pair_residual_ms": 16.7},
     )
     bench = HfAcquiredBench(
-        provider=lambda: (1000 + 10 * SR, 42.0, SR),
+        provider=lambda: {"SHARED_10000": (1000 + 10 * SR, 42.0, SR)},
         store=st,
         mono_fn=lambda: 42.5,
         time_fn=lambda: clock[0],
@@ -69,6 +70,7 @@ def test_bench_answers_on_witness_state_too(tmp_path):
             sample_rate=SR,
             sigma_ms=0.8,
             channel="fused",
+            rtp_domain="SHARED_10000",
             verified=True,
         ),
         ["SHARED_10000"],
@@ -76,7 +78,7 @@ def test_bench_answers_on_witness_state_too(tmp_path):
         {"raw_pair_residual_ms": 4.2},
     )
     bench = HfAcquiredBench(
-        provider=lambda: (1000 + 10 * SR, 42.0, SR),
+        provider=lambda: {"SHARED_10000": (1000 + 10 * SR, 42.0, SR)},
         store=st,
         mono_fn=lambda: 42.5,
         time_fn=lambda: clock[0],
@@ -95,14 +97,15 @@ def test_bench_silent_in_bootstrap_or_when_stale(tmp_path):
     st = _store(tmp_path, clock)
     st.write_summary(None, [], "BOOTSTRAP", {})
     bench = HfAcquiredBench(
-        provider=lambda: (1, 1.0, SR),
+        provider=lambda: {"SHARED_10000": (1, 1.0, SR)},
         store=st,
         mono_fn=lambda: 1.0,
         time_fn=lambda: clock[0],
     )
     assert bench.poll() is None
     st.write_summary(
-        Registration("ep-1", 1000, 100.0, SR, 0.8, channel="fused", verified=True),
+        Registration("ep-1", 1000, 100.0, SR, 0.8, channel="fused", verified=True,
+                     rtp_domain="SHARED_10000"),
         ["x"],
         "ACQUIRED",
         {},
@@ -129,6 +132,7 @@ def test_bench_silent_on_sample_rate_mismatch(tmp_path):
             sample_rate=SR,
             sigma_ms=0.8,
             channel="fused",
+            rtp_domain="SHARED_10000",
             verified=True,
         ),
         ["SHARED_10000"],
@@ -137,7 +141,7 @@ def test_bench_silent_on_sample_rate_mismatch(tmp_path):
     )
     # WWVB-shaped arrival: same nominal rtp delta, WRONG (4 kHz) domain.
     bench = HfAcquiredBench(
-        provider=lambda: (1000 + 10 * SR, 42.0, 4000),
+        provider=lambda: {"SHARED_10000": (1000 + 10 * SR, 42.0, 4000)},
         store=st,
         mono_fn=lambda: 42.5,
         time_fn=lambda: clock[0],
@@ -146,7 +150,7 @@ def test_bench_silent_on_sample_rate_mismatch(tmp_path):
 
     # T6-shaped arrival: WRONG (96 kHz) domain.
     bench_t6 = HfAcquiredBench(
-        provider=lambda: (1000 + 10 * SR, 42.0, 96000),
+        provider=lambda: {"SHARED_10000": (1000 + 10 * SR, 42.0, 96000)},
         store=st,
         mono_fn=lambda: 42.5,
         time_fn=lambda: clock[0],
@@ -155,7 +159,7 @@ def test_bench_silent_on_sample_rate_mismatch(tmp_path):
 
     # Sanity: the SAME arrival at the matching rate does answer.
     bench_ok = HfAcquiredBench(
-        provider=lambda: (1000 + 10 * SR, 42.0, SR),
+        provider=lambda: {"SHARED_10000": (1000 + 10 * SR, 42.0, SR)},
         store=st,
         mono_fn=lambda: 42.5,
         time_fn=lambda: clock[0],
@@ -264,8 +268,9 @@ def test_wire_t5_fallback_arrival_feeds_hf_arrival_from_the_real_tap():
         ),
     )
 
-    arrival = recorder._hf_acquired_bench_state()
-    assert arrival is not None
+    arrivals = recorder._hf_acquired_bench_state()
+    assert set(arrivals) == {"SHARED_10000"}
+    arrival = arrivals["SHARED_10000"]
     arrival_rtp, arrival_mono, arrival_sr = arrival
     assert arrival_rtp == 1000 + 240
     assert arrival_sr == SR
@@ -294,7 +299,7 @@ def test_arrival_tap_labels_from_the_delivered_stream_not_the_received_header():
             batch_samples_delivered=240,
         ),
     )
-    arrival_rtp, _mono, _sr = recorder._hf_acquired_bench_state()
+    arrival_rtp, _mono, _sr = recorder._hf_acquired_bench_state()["SHARED_10000"]
     assert arrival_rtp == 1240
     assert arrival_rtp != (1000 + 4800) + 240  # the hand-rolled label
 
@@ -306,7 +311,7 @@ def test_arrival_tap_falls_back_for_a_producer_without_the_delivered_field():
     fake_stream = _FakeStreamRecorder()
     recorder._wire_t5_fallback_arrival("SHARED_10000", fake_stream, SR)
     fake_stream.tap([0.0] * 240, _FakeQuality(last_rtp_timestamp=1000))
-    arrival_rtp, _mono, _sr = recorder._hf_acquired_bench_state()
+    arrival_rtp, _mono, _sr = recorder._hf_acquired_bench_state()["SHARED_10000"]
     assert arrival_rtp == 1000
 
 
@@ -332,6 +337,7 @@ def _acquired_summary(tmp_path, clock, sigma_ms, utc_ref=100.0):
             sample_rate=SR,
             sigma_ms=sigma_ms,
             channel="fused",
+            rtp_domain="SHARED_10000",
             verified=True,
         ),
         ["SHARED_10000", "WWV_20000"],
@@ -363,7 +369,7 @@ def test_bench_sigma_is_floored_at_the_delay_model_bound(
     clock = [5000.0]
     st = _acquired_summary(tmp_path, clock, sigma_ms)
     bench = HfAcquiredBench(
-        provider=lambda: (0, 42.0, SR),
+        provider=lambda: {"SHARED_10000": (0, 42.0, SR)},
         store=st,
         mono_fn=lambda: 42.0,
         time_fn=lambda: clock[0],
@@ -395,7 +401,7 @@ def test_floored_hf_acquired_does_not_displace_a_tighter_fusion_bench(tmp_path):
     )
     judge.add_bench(
         HfAcquiredBench(
-            provider=lambda: (0, 1000.0, SR),
+            provider=lambda: {"SHARED_10000": (0, 1000.0, SR)},
             store=st,
             mono_fn=lambda: 1000.0,
             time_fn=lambda: wall0,

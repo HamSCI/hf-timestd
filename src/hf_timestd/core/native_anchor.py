@@ -114,13 +114,19 @@ class LabelAnchor:
 
     Every consumer applies the same domain guard before using one: an
     anchor is a ruler for ONE counter domain (``cross_channel_rtp.py``),
-    so ``sample_rate_hz`` must match the channel being labelled.
+    so ``sample_rate_hz`` must match the channel being labelled, and a T3
+    anchor's ``rtp_domain`` must name it: same-rate channels still start
+    their counters at different blocks.
     """
 
     anchor: NativeAnchor
     epoch_id: Optional[str]
     tier: str                # "T3" | "T6" -- the plane's provenance tier
     sigma_ns: float          # what the plane honestly claims
+    # The channel whose RTP counter ``anchor_rtp`` is in.  A T3 anchor names
+    # it: every radiod channel starts its own counter, so the anchor labels
+    # that channel alone.  A T6 anchor leaves it None and keeps the rate guard.
+    rtp_domain: Optional[str] = None
 
     @property
     def sample_rate_hz(self) -> int:
@@ -132,6 +138,14 @@ class LabelAnchor:
 
     def matches_rate(self, sample_rate: int) -> bool:
         return int(self.anchor.sample_rate_hz) == int(sample_rate)
+
+    def matches_domain(self, channel: str) -> bool:
+        """True when this anchor may label ``channel``'s counter.
+
+        An anchor with no named domain (T6) claims none, so the rate guard
+        alone decides for it.
+        """
+        return self.rtp_domain is None or self.rtp_domain == str(channel)
 
 
 def utc_ns_at_rtp(
