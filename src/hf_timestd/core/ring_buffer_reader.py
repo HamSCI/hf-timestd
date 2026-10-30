@@ -92,6 +92,13 @@ BILLION = 1_000_000_000
 # four stores, so 128 retries is enormous slack.
 _MAX_SEQLOCK_RETRIES = 128
 
+# The aux block's seqlock counts as stuck only when ONE odd value has
+# persisted this long (final re-review M-1, 2026-10-30).  128 retries took
+# 13-25 ms, short enough for a producer descheduled mid-write to read as
+# dead.  A second outlasts any scheduling delay; a killed producer leaves
+# the value odd for good.
+_AUX_STUCK_S = 1.0
+
 # Safety margin for overrun detection.  When the producer's cursor
 # advances enough that (w2 - s_start) > (ring_size - margin), the copy
 # may be torn and we declare overrun.  The margin is set per-reader at
@@ -147,6 +154,9 @@ class RingBufferReader:
         self._closed = False
         # One WARNING per stuck-aux episode (read_aux).
         self._aux_stuck_logged = False
+        # The odd sequence value read_aux declared stuck, so later reads
+        # of the same value return at once (M-1).
+        self._aux_stuck_seq: Optional[int] = None
 
         self._hot = np.frombuffer(
             shm, dtype=np.uint64, count=_HOT_COUNT, offset=_HOT_OFFSET
@@ -284,10 +294,25 @@ class RingBufferReader:
         def s64(u: int) -> int:
             return u - (1 << 64) if u >= (1 << 63) else u
 
-        for _ in range(_MAX_SEQLOCK_RETRIES):
+        odd_seq: Optional[int] = None
+        odd_since = 0.0
+        tries = 0
+        while True:
             s1 = int(self._hot[HOT_AUX_SEQ])
             if s1 & 1:
-                time.sleep(0.0001)
+                # M-1: stuck means one odd value for _AUX_STUCK_S, not a
+                # count of retries.  A value already declared stuck gives
+                # up at once, so a dead producer costs the wait once.
+                if s1 == self._aux_stuck_seq:
+                    break
+                now = time.monotonic()
+                if s1 != odd_seq:
+                    odd_seq, odd_since = s1, now
+                elif now - odd_since >= _AUX_STUCK_S:
+                    self._aux_stuck_seq = s1
+                    break
+                tries += 1
+                time.sleep(0.0001 if tries < _MAX_SEQLOCK_RETRIES else 0.001)
                 continue
             raw_gps = int(self._hot[HOT_RAW_GPS_NS])
             raw_rtp = int(self._hot[HOT_RAW_RTP_SNAP])
@@ -295,7 +320,14 @@ class RingBufferReader:
                 HOT_CMAP_RTP, HOT_CMAP_INPUT, HOT_CMAP_ILEN, HOT_CMAP_OLEN,
                 HOT_CMAP_INPUT_RATE, HOT_CMAP_EPOCH_GPS_MS, HOT_CMAP_N_AGREE)]
             if int(self._hot[HOT_AUX_SEQ]) != s1:
+                tries += 1
+                if tries > 100 * _MAX_SEQLOCK_RETRIES:
+                    # Torn on every try: a writer far faster than this
+                    # reader.  Absent this once; never a spin forever.
+                    return {"raw_gps_time_ns": None, "raw_rtp_timesnap": None,
+                            "counter_map": None}
                 continue
+            self._aux_stuck_seq = None
             out = {"raw_gps_time_ns": None, "raw_rtp_timesnap": None,
                    "counter_map": None}
             if raw_gps:
@@ -320,8 +352,8 @@ class RingBufferReader:
         if not self._aux_stuck_logged:
             logger.warning(
                 f"RingBufferReader[{self._channel_name}]: aux seqlock stuck "
-                f"odd (sequence {int(self._hot[HOT_AUX_SEQ])}) after "
-                f"{_MAX_SEQLOCK_RETRIES} retries; the producer likely died "
+                f"odd (sequence {int(self._hot[HOT_AUX_SEQ])}) for "
+                f"{_AUX_STUCK_S:.0f} s; the producer likely died "
                 f"mid-write.  Reading the raw pair and counter map as "
                 f"absent until a producer restart clears it.")
             self._aux_stuck_logged = True

@@ -73,3 +73,43 @@ def test_changes_ninety_minutes_apart_are_two_warnings_no_summary(caplog):
     assert [lv for lv, _ in logs] == [logging.WARNING, logging.WARNING]
     assert not any("transitions in the last" in m for _, m in logs)
     assert c.count == 2
+
+
+# ── Ruling C (2026-10-30), N-2: a quiet window stays quiet ───────────
+
+
+def _warns(caplog):
+    return [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_a_quiet_change_and_its_recovery_summarise_at_info(caplog):
+    """A radiod restart: ACQUIRED -> BOOTSTRAP (quiet) -> CANDIDATE ->
+    ACQUIRED.  The restart's own line already warned; an hour later the
+    window must not warn again."""
+    c = StateTransitionCounter("WWV_10000")
+    c.observe("ACQUIRED", "start", 0)
+    with caplog.at_level(logging.INFO):
+        c.observe("BOOTSTRAP", "new run", 60, quiet=True)
+        c.observe("CANDIDATE", "acquirer", 120)
+        c.observe("ACQUIRED", "acquirer", 180)
+        c.observe("ACQUIRED", "acquirer", 3700)        # past the hour
+    assert _warns(caplog) == []
+    assert c.count == 3
+    assert any("3 transitions" in r.getMessage() and r.levelno == logging.INFO
+               for r in caplog.records)
+
+
+def test_a_fault_after_the_recovery_still_warns(caplog):
+    """Control: once the scope is back where it was, a new change is a new
+    event.  It warns, and the window's summary warns."""
+    c = StateTransitionCounter("WWV_10000")
+    c.observe("ACQUIRED", "start", 0)
+    with caplog.at_level(logging.INFO):
+        c.observe("BOOTSTRAP", "new run", 60, quiet=True)
+        c.observe("ACQUIRED", "acquirer", 120)
+        c.observe("CONFLICT", "siblings disagree", 600)
+        c.observe("CONFLICT", "siblings disagree", 3700)
+    warns = _warns(caplog)
+    assert len(warns) == 2, warns
+    assert "ACQUIRED -> CONFLICT" in warns[0]
+    assert "3 transitions" in warns[1]

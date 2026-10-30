@@ -136,3 +136,50 @@ def test_adopting_producer_clears_a_stuck_aux_sequence(ring):
     _, meta = reader.extract_samples(100)
     assert meta["raw_gps_time_ns"] == 7_000_000_000
     assert meta["raw_rtp_timesnap"] == 8
+
+
+def test_a_slow_writer_is_not_a_stuck_one(ring, caplog):
+    """Final re-review M-1 (ruling C, 2026-10-30).  The reader declared the
+    aux seqlock stuck after 128 retries, 13-25 ms.  A producer descheduled
+    for 50 ms mid-write is slow, not dead: the read must wait it out and
+    return the values it wrote, with no WARNING."""
+    import logging
+    import threading
+    import time
+
+    from hf_timestd.core.ring_buffer import HOT_AUX_SEQ
+    buf, reader = ring
+    _fill(buf, reader, _judged(reader))
+    buf.update_raw_pair(5, 6)
+    buf._aux_begin()                                  # odd: a write in flight
+
+    def finish():
+        time.sleep(0.05)
+        buf._hot[HOT_AUX_SEQ] = int(buf._hot[HOT_AUX_SEQ]) + 1   # even
+
+    t = threading.Thread(target=finish)
+    with caplog.at_level(logging.WARNING):
+        t.start()
+        aux = reader.read_aux()
+        t.join()
+    assert aux["raw_gps_time_ns"] == 5 and aux["raw_rtp_timesnap"] == 6
+    assert not [r for r in caplog.records
+                if r.levelno >= logging.WARNING and "aux" in r.getMessage()]
+
+
+def test_a_stuck_sequence_costs_the_wait_once_per_episode(ring):
+    """Once declared stuck at one odd value, later reads of the same value
+    return at once instead of waiting another second each."""
+    import time
+
+    buf, reader = ring
+    _fill(buf, reader, _judged(reader))
+    _kill_mid_aux_write(buf)
+    t0 = time.monotonic()
+    reader.read_aux()
+    first = time.monotonic() - t0
+    t0 = time.monotonic()
+    reader.read_aux()
+    second = time.monotonic() - t0
+    assert first >= 0.9
+    assert second < 0.1

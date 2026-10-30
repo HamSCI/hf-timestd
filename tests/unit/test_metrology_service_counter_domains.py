@@ -545,3 +545,51 @@ def test_dropped_is_empty_when_everyone_fuses(tmp_path):
         label_timing(T0 + 60, 0.250, SR), _ticks(1, seed=9), _start(51, 1),
         MIN + 60, _meta(51, 1, walk=0.250))
     assert svc.reg_store.read_summary()["dropped"] == []
+
+
+def _drop_minutes(svc, minutes, late_s):
+    """Run ``minutes`` with the two siblings ``late_s(k)`` seconds late."""
+    for k in minutes:
+        truth = svc.acquirer.registration.sample0_utc_for(_start(51, k))
+        for ch in ("WWV_15000", "WWV_25000"):
+            svc.reg_store.write_channel(
+                _sibling(ch, 51, k, truth + late_s(k)), "ACQUIRED", {})
+        svc.apply_registration(
+            label_timing(T0 + 60 * k, 0.250, SR), _ticks(k, seed=8 + k),
+            _start(51, k), MIN + 60 * k, _meta(51, k, walk=0.250))
+
+
+def test_a_plane_flickering_at_the_outlier_bound_warns_once(tmp_path, caplog):
+    """Final re-review M-3 (ruling C, 2026-10-30): an own plane sitting near
+    FUSE_OUTLIER_MS falls out of fusion one minute and back in the next.
+    Without hysteresis each re-entry closed the episode and the next drop
+    warned again: a WARNING every other minute."""
+    svc = _channel(tmp_path, "SHARED_10000")
+    _acquire(svc, 51)
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=SVC_LOG):
+        _drop_minutes(svc, range(1, 9), lambda k: 0.010 if k % 2 else 0.0)
+    drops = [r for r in caplog.records
+             if r.levelno == logging.WARNING and "dropped" in r.getMessage()]
+    assert len(drops) == 1, [r.getMessage() for r in caplog.records]
+    assert not [r for r in caplog.records if "keeps this channel" in r.getMessage()]
+
+
+def test_a_drop_episode_ends_after_the_plane_stays_kept(tmp_path, caplog):
+    """Control: kept long enough, the episode closes once at INFO, and a
+    later drop is a new episode with its own WARNING."""
+    from hf_timestd.core.metrology_service import MetrologyService
+
+    n = MetrologyService._OWN_DROP_CLEAR_MIN
+    svc = _channel(tmp_path, "SHARED_10000")
+    _acquire(svc, 51)
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=SVC_LOG):
+        _drop_minutes(svc, [1], lambda k: 0.010)
+        _drop_minutes(svc, range(2, 2 + n), lambda k: 0.0)
+        _drop_minutes(svc, [2 + n], lambda k: 0.010)
+    msgs = [(r.levelno, r.getMessage()) for r in caplog.records]
+    drops = [m for lv, m in msgs if lv == logging.WARNING and "dropped" in m]
+    keeps = [m for lv, m in msgs if lv == logging.INFO and "keeps this channel" in m]
+    assert len(drops) == 2, msgs
+    assert len(keeps) == 1, msgs

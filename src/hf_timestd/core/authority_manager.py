@@ -552,10 +552,15 @@ class AuthorityManager:
             reg = self._published_registration
             counter = self._t3_station_transitions
             if counter is not None and isinstance(reg, dict):
+                # Ruling C (N-2): a summary written in a minute that saw a
+                # radiod run change belongs to the restart that metrology
+                # already announced, once, at WARNING.
+                summary = self._published_summary or {}
                 t_row = counter.observe(
                     str(reg.get("state")),
                     f"published registration, source {reg.get('source')}",
-                    utc_minute)
+                    utc_minute,
+                    quiet=summary.get("run_change") is True)
                 if t_row is not None:
                     self.t3_shadow_record.append(t_row)
             if utc_minute == self._t3_shadow_last_minute:

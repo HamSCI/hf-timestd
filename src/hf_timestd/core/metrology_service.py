@@ -1087,6 +1087,13 @@ class MetrologyService:
             own_is_adopted = True
         return own, own_is_adopted, fused, kept, waiting, refused
 
+    # Final re-review M-3 (ruling C, 2026-10-30): a drop episode ends only
+    # after the own plane has stayed in fusion this many minutes running.
+    # A plane sitting near FUSE_OUTLIER_MS falls out and back in from
+    # minute to minute; without hysteresis each return closed the episode
+    # and the next drop warned again.
+    _OWN_DROP_CLEAR_MIN = 10
+
     def _note_fusion_drops(self, own, fusion_inputs, fused, kept, waiting,
                            start_rtp: int, at_map) -> None:
         """Name the members fusion converted but set aside as outliers, and
@@ -1113,10 +1120,16 @@ class MetrologyService:
         )
         if not own_dropped:
             if getattr(self, "_own_drop_logged", False):
-                logger.info(f"[{self.channel_name}] fusion keeps this "
-                            f"channel's own plane again")
-            self._own_drop_logged = False
+                streak = getattr(self, "_own_kept_streak", 0) + 1
+                self._own_kept_streak = streak
+                if streak >= self._OWN_DROP_CLEAR_MIN:
+                    logger.info(f"[{self.channel_name}] fusion keeps this "
+                                f"channel's own plane again ({streak} "
+                                f"minutes running)")
+                    self._own_drop_logged = False
+                    self._own_kept_streak = 0
             return
+        self._own_kept_streak = 0
         if getattr(self, "_own_drop_logged", False):
             return
         self._own_drop_logged = True
@@ -1681,7 +1694,12 @@ class MetrologyService:
                  # aside as outliers -- always present.
                  "dropped": dropped,
                  # Task 10: always present; None while T3 runs.
-                 "standalone_reason": standalone_reason}
+                 "standalone_reason": standalone_reason,
+                 # Ruling C (N-2): this minute saw a radiod run change,
+                 # whose one WARNING another line carries.  The authority
+                 # manager's station counter logs the summary's change at
+                 # INFO when it reads this.
+                 "run_change": bool(getattr(self, "_run_change_minute", False))}
         if extra_extra:
             extra.update(extra_extra)
         if not conflicts:
