@@ -865,6 +865,15 @@ class CoreRecorderV2:
                 logger.error(
                     f"OffsetJudge label-anchor wiring failed (§18 keeps "
                     f"the judged radiod pair): {e}")
+            # Task 14 (T3 foundations): T3 against T6 in the sample plane,
+            # published as offset_judge.json ``t3_shadow``.  Own guard: a
+            # wiring failure costs only the shadow block.
+            try:
+                self._offset_judge.set_t3_shadow_provider(self._t3_shadow_state)
+                logger.info("OffsetJudge: T3-vs-T6 sample-plane shadow "
+                            "wired (task 14)")
+            except Exception as e:
+                logger.error(f"OffsetJudge t3 shadow wiring failed: {e}")
             # P3: the T6 residual-walk rate observable rides its own
             # guard — bench failure above must not cost the rate feed.
             if self._t6_rate_est is not None:
@@ -2912,6 +2921,63 @@ class CoreRecorderV2:
         """
         arrivals = getattr(self, '_hf_arrivals', None)
         return dict(arrivals) if arrivals else None
+
+    # ── T3 against T6 in the sample plane (T3 foundations, task 14) ──
+
+    def _t6_map_for_anchor(self, anchor, current: Optional[CounterMap]
+                           ) -> Optional[CounterMap]:
+        """The T6 counter map held at the anchor's own RTP.
+
+        The 60 s refresh keeps ``_t6_counter_map`` near the live counter,
+        while the anchor stays where first lock put it.  At 96 kHz the two
+        drift out of ``COUNTER_MAP_REACH`` (2**30 samples) in about 3 h, and
+        past 2**31 a map read at the anchor would alias by a whole wrap.  So
+        the first refreshed map that lies within reach of the anchor rolls
+        to ``anchor_rtp`` and stays pinned there for that anchor, as long as
+        the live map names the same radiod run.  A new anchor or a new run
+        re-pins.  Until a map within reach exists, the live map goes through
+        and the comparator refuses it.
+        """
+        if anchor is None or current is None:
+            return None
+        from .counter_epoch_tracker import COUNTER_EPOCH_SKEW_ALLOWANCE_S
+        from .registration_acquirer import COUNTER_MAP_REACH, _rtp_gap
+        pin = getattr(self, '_t3_shadow_t6_pin', None)
+        if (pin is not None and pin[0] == anchor
+                and pin[1].same_run(current, tol_s=COUNTER_EPOCH_SKEW_ALLOWANCE_S)):
+            return pin[1]
+        if _rtp_gap(anchor.anchor_rtp, current.rtp_ref) <= COUNTER_MAP_REACH:
+            pinned = current.rolled_forward(anchor.anchor_rtp)
+            self._t3_shadow_t6_pin = (anchor, pinned)
+            return pinned
+        return current
+
+    def _t3_shadow_state(self) -> Optional[dict]:
+        """OffsetJudge ``t3_shadow`` provider: T3's registration summary
+        against T6's native anchor, through both channels' counter maps.
+
+        Reads the summary from the registration store, takes
+        ``_t6_native_anchor`` and the T6 counter map, and carries the
+        judge's learned chain delay in ms beside the raw difference.  None
+        when neither a summary nor an anchor exists."""
+        from .registration_store import RegistrationStore
+        from .t3_shadow_comparator import T3ShadowComparator
+        store = getattr(self, '_t3_shadow_store', None)
+        if store is None:
+            store = self._t3_shadow_store = RegistrationStore()
+        summary = store.read_summary()
+        anchor = getattr(self, '_t6_native_anchor', None)
+        if summary is None and anchor is None:
+            return None
+        t6_map = self._t6_map_for_anchor(
+            anchor, getattr(self, '_t6_counter_map', None))
+        chain_ms = None
+        judge = getattr(self, '_offset_judge', None)
+        cstore = getattr(judge, 'chain_delay_store', None)
+        record = getattr(cstore, 'record', None)
+        if record is not None:
+            chain_ms = float(record.offset_ns) / 1e6
+        return T3ShadowComparator.block(summary, anchor, t6_map, chain_ms)
 
     # ── T3 label-plane anchor (spec §11, 2026-09-07) ─────────────────
 

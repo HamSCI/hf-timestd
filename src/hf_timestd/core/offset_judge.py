@@ -1435,6 +1435,12 @@ class OffsetJudge:
         # set_t6_rate_provider; None until/unless T6 is active).
         self._t6_rate_provider: Optional[Callable[[], Optional[RateEstimate]]] = None
         self._t6_rate: Optional[RateEstimate] = None    # cached each tick
+        # Task 14 (T3 foundations): T3 against T6 in the sample plane.  The
+        # recorder wires a provider returning the ``t3_shadow`` block
+        # (T3ShadowComparator.block); polled outside the lock each tick.
+        # Published only: nothing in the judge acts on it.
+        self._t3_shadow_provider: Optional[Callable[[], Optional[Dict]]] = None
+        self._t3_shadow: Optional[Dict] = None          # cached each tick
 
         # P3: GPSDO discipline honesty — measurement metadata ONLY
         # (never gates recording or verdicts).  Reads gpsdo-monitor's
@@ -1545,6 +1551,19 @@ class OffsetJudge:
         """
         with self._lock:
             self._t6_rate_provider = provider
+
+    def set_t3_shadow_provider(
+        self, provider: Optional[Callable[[], Optional[Dict]]]
+    ) -> None:
+        """Wire the T3-against-T6 shadow block (task 14).
+
+        ``provider`` is polled once per tick, outside the lock; it must be
+        thread-safe and return the ``t3_shadow`` dict or None.  A provider
+        that raises publishes ``t3_shadow: null`` for that tick.  None
+        unwires it.
+        """
+        with self._lock:
+            self._t3_shadow_provider = provider
 
     # ── registration (spec §7: per-source, never global) ─────────────
 
@@ -1727,6 +1746,14 @@ class OffsetJudge:
                 t6_rate = provider()
             except Exception as e:  # noqa: BLE001 — observable trouble ≠ judge trouble
                 logger.debug(f"OffsetJudge t6 rate provider failed: {e}")
+        t3_shadow = None
+        shadow_provider = self._t3_shadow_provider
+        if shadow_provider is not None:
+            try:
+                t3_shadow = shadow_provider()
+            except Exception as e:  # noqa: BLE001 — a shadow row ≠ judge trouble
+                logger.debug(f"OffsetJudge t3 shadow provider failed: {e}")
+                t3_shadow = None
         gpsdo_state, gpsdo_detail = self._poll_gpsdo()
         # An operator request the CLI left beside the chain-delay record
         # (seed / accept / relearn).  Read and deleted here, outside the
@@ -1738,6 +1765,7 @@ class OffsetJudge:
         mono_now = self._mono()
         with self._lock:
             self._t6_rate = t6_rate
+            self._t3_shadow = t3_shadow
             self._gpsdo_discipline = gpsdo_state
             self._gpsdo_detail = gpsdo_detail
             if chain_request is not None:
@@ -4009,6 +4037,13 @@ class OffsetJudge:
                 }
                 if t6r is not None else None
             ),
+            # Task 14 (T3 foundations): T3's registration against T6's
+            # anchor at one input sample, through both channels' counter
+            # maps (T3ShadowComparator).  ``t3_minus_t6_ms`` and
+            # ``t6_chain_delay_ms`` both stay raw.  Null without a provider
+            # or when it fails.  Read-only: nothing acts on it.
+            "t3_shadow": (dict(self._t3_shadow)
+                          if self._t3_shadow is not None else None),
             # P4 ladder summary (spec §9): step-2/3 policy + the current
             # restart-request artifact state (request only — hf-timestd
             # never restarts radiod; the sigmond watchdog decides).
