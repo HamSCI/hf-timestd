@@ -1048,6 +1048,71 @@ def _handle_chain_delay(args, parser):
     return 0
 
 
+def _build_hf_chain_delay_probe(config, args):
+    """The real probe, wired to radiod.  Tests replace this with fakes."""
+    from ka9q import RadiodControl
+    from .config_utils import resolve_ka9q_status
+    from .core.hf_chain_delay_probe import HfChainDelayProbe, ka9q_stream_factory
+
+    control = RadiodControl(resolve_ka9q_status(config, default='239.192.152.141'),
+                            client_id='hf-timestd-hfchain')
+    return HfChainDelayProbe(control, ka9q_stream_factory(control))
+
+
+def _learned_chain_delay_ms(config_path: Path):
+    """The stored T6 chain delay in ms, or None.  Read-only: it parses the
+    record with the store's own parser and never opens a ChainDelayStore,
+    whose load() may move a file aside or rewrite it."""
+    from .core.chain_delay_store import ChainDelayRecord
+
+    record_path, _ = _chain_delay_paths(config_path)
+    raw = _read_json(record_path)
+    if not isinstance(raw, dict) or 'offset_ns' not in raw:
+        return None
+    try:
+        return ChainDelayRecord.from_dict(raw).offset_ns / 1e6
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def _handle_hf_chain_delay(args):
+    """Handle 'hf-timestd hf-chain-delay'.  Returns the exit code."""
+    import dataclasses
+    from .core.hf_chain_delay_analysis import analyze, format_report
+    from .core.hf_chain_delay_probe import HfChainDelayProbe, REFERENCE_LABEL
+
+    config_path = Path(args.config)
+    try:
+        try:
+            import tomllib
+            with open(config_path, 'rb') as f:
+                config = tomllib.load(f)
+        except ModuleNotFoundError:
+            import toml
+            config = toml.load(str(config_path))
+        specs = HfChainDelayProbe.plan_channels(config)
+    except (OSError, ValueError) as exc:
+        print(f"hf-chain-delay: {exc}", file=sys.stderr)
+        return 2
+
+    probe = _build_hf_chain_delay_probe(config, args)
+    captures, pair_epochs = probe.run(specs, args.duration_s)
+    report = analyze(captures, REFERENCE_LABEL, pair_epochs,
+                     _learned_chain_delay_ms(config_path))
+    as_json = json.dumps(dataclasses.asdict(report), indent=2)
+    if args.json:
+        print(as_json)
+    else:
+        print(format_report(report), end='')
+    if args.output:
+        try:
+            Path(args.output).write_text(as_json + "\n", encoding='utf-8')
+        except OSError as exc:
+            print(f"hf-chain-delay: cannot write {args.output}: {exc}", file=sys.stderr)
+            return 1
+    return 0
+
+
 def _handle_profile(args, parser):
     """Handle 'hf-timestd profile' subcommands."""
     from .service_profile import (
@@ -2023,6 +2088,20 @@ Per-service overrides in [services] take precedence over the profile.
         _p.add_argument('--config', '-c', default=_cfg_default,
             help='Configuration file path')
 
+    # ── hf-chain-delay: stage-0 probe (T3 foundations) ────────────────
+    hfcd_parser = subparsers.add_parser('hf-chain-delay',
+        help='Stage 0: clone the HF channels onto the TS-1 pilot and measure '
+             'each configuration\'s delay against the T6 clone',
+        description='CREATES radiod channels (removed again on exit).  Run only '
+                    'as an announced operator step.')
+    hfcd_parser.add_argument('--duration-s', type=float, default=600.0,
+        help='Capture length in seconds (default 600)')
+    hfcd_parser.add_argument('--config', '-c', default='/etc/hf-timestd/timestd-config.toml',
+        help='Configuration file path')
+    hfcd_parser.add_argument('--output', help='Write the report as JSON to this path')
+    hfcd_parser.add_argument('--json', action='store_true',
+        help='Print JSON instead of the table')
+
     args = parser.parse_args(argv)
 
     # If no command specified, show help
@@ -2279,6 +2358,10 @@ Per-service overrides in [services] take precedence over the profile.
         _handle_service(args, locals().get('service_parser'))
     elif args.command == 'chain-delay':
         rc = _handle_chain_delay(args, chain_parser)
+        if rc:
+            sys.exit(rc)
+    elif args.command == 'hf-chain-delay':
+        rc = _handle_hf_chain_delay(args)
         if rc:
             sys.exit(rc)
     elif args.command == 'calibrate':
