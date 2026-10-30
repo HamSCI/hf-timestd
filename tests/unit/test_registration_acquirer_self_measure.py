@@ -121,7 +121,8 @@ def test_a_one_second_plane_resets_corroboration():
     outcomes = [
         acq.corroborate(ra.residuals_for_verify(_measure(acq, k))) for k in (3, 4, 5, 6)
     ]
-    assert outcomes[-1] == "reacquire", outcomes
+    # The minute that confirms the whole second resets at once (minute 5).
+    assert outcomes[:3] == ["tightened", "tightened", "reacquire"], outcomes
     assert acq.state == acq.STATE_BOOTSTRAP
 
 
@@ -168,3 +169,112 @@ def test_a_counter_map_step_clears_the_fold_history():
     acq.note_counter_map(counter_map_for(50, SR))  # one block: a step
     assert acq.state == acq.STATE_BOOTSTRAP
     assert _history_len(acq) == 0
+
+
+# ── fix round 1 ───────────────────────────────────────────────────────
+
+D_SHARED = {"WWV": 0.0125, "WWVH": 0.0370}
+
+
+def _shared_minute(k, walk_s=0.250):
+    """WWV with its minute marker, WWVH without (as at most US sites)."""
+    t0 = T0 + 60 * k
+    audio = make_tick_audio(62, SR, t0, {"WWV": D_SHARED["WWV"]}, snr_db=20.0,
+                            seed=7 + k, marker=True)
+    audio += make_tick_audio(62, SR, t0, {"WWVH": D_SHARED["WWVH"]}, snr_db=20.0,
+                             seed=100 + k, marker=False)
+    return audio, label_timing(t0, walk_s, SR), 1_000_000 + k * 60 * SR, MIN + 60 * k
+
+
+def test_a_whole_second_on_one_station_condemns_the_whole_plane():
+    """CRITICAL 1 (review): WWV's marker confirms the plane 1 s late, WWVH
+    has none.  The plane must reset, and must never move on the way."""
+    acq = RegistrationAcquirer("SHARED_10000", SR)
+    for k in range(3):
+        audio, label, rtp, m = _shared_minute(k)
+        acq.offer_minute(audio, label, rtp, m, D_SHARED, "ep-1")
+        if acq.state == acq.STATE_ACQUIRED:
+            break
+    assert acq.state == acq.STATE_ACQUIRED
+    assert set(acq.registration.stations) == {"WWV", "WWVH"}
+    acq.registration.utc_ref += 1.0
+    held = acq.registration.utc_ref
+    seen_whole_second = False
+    for k in range(3, 9):
+        audio, _label, rtp, m = _shared_minute(k)
+        got = acq.measure_minute(audio, rtp, m, D_SHARED)
+        if got and abs(got["WWV"].residual_ms) > 500:
+            seen_whole_second = True
+            assert got["WWVH"].residual_ms == pytest.approx(
+                got["WWV"].residual_ms, abs=1.0
+            ), "a whole second belongs to the plane, not to one station"
+        acq.corroborate(ra.residuals_for_verify(got))
+        if acq.registration is None:
+            break
+        assert abs(acq.registration.utc_ref - held) < 0.005, (
+            f"minute {k}: plane moved {1000 * (acq.registration.utc_ref - held):+.1f} ms"
+        )
+    assert seen_whole_second
+    assert acq.state == acq.STATE_BOOTSTRAP
+
+
+def test_conflicting_whole_seconds_measure_nothing(monkeypatch, caplog):
+    acq, _ = _acquired(stations=D_SHARED)
+    votes = {"WWV": -1, "WWVH": +1}
+    monkeypatch.setattr(
+        acq, "_confirmed_whole_second", lambda station, *a, **kw: votes.get(station, 0)
+    )
+    caplog.set_level(logging.WARNING)
+    assert _measure(acq, 3, stations=D_SHARED) == {}
+    assert _measure(acq, 4, stations=D_SHARED) == {}
+    conflicts = [r for r in caplog.records if "disagree" in r.getMessage()]
+    assert len(conflicts) == 1, [r.getMessage() for r in caplog.records]
+
+
+@pytest.mark.parametrize("verified", [True, False])
+def test_a_residual_past_half_a_second_resets_at_once(verified, caplog):
+    """The hard guard alone: one station at +1000 ms among good ones."""
+    acq, _ = _acquired()
+    acq.registration.verified = verified
+    acq.registration.stations = ("WWV", "WWVH")
+    held = acq.registration.utc_ref
+    reg = acq.registration
+    caplog.set_level(logging.WARNING)
+    out = acq.corroborate({"WWV": (+1000.2, 1.0), "WWVH": (0.1, 1.0), "BPM": (0.0, 1.0)})
+    assert out in ("reacquire", "rejected")
+    assert acq.state == acq.STATE_BOOTSTRAP
+    assert reg.utc_ref == held, "the whole second never enters the mean"
+    assert any(r.levelno >= logging.WARNING for r in caplog.records)
+
+
+def test_the_rolling_fold_follows_a_plane_move():
+    """IMPORTANT 2 (review): after corroborate moves the plane 5 ms, the
+    next minute reads the move in full, not a blend with older profiles."""
+    acq, _ = _acquired()
+    acq.registration.verified = True
+    acq.registration.sigma_ms = 3.0  # 5 ms stays inside 3 sigma
+    assert abs(_measure(acq, 3)["WWV"].residual_ms) < 0.5
+    assert abs(_measure(acq, 4)["WWV"].residual_ms) < 0.5
+    before = acq.registration.utc_ref
+    assert acq.corroborate({"WWV": (+5.0, 1.0)}) == "tightened"
+    assert acq.registration.utc_ref == pytest.approx(before - 0.005, abs=1e-6)
+    assert _measure(acq, 5)["WWV"].residual_ms == pytest.approx(-5.0, abs=0.3)
+
+
+def test_the_confirming_minute_logs_the_warning(caplog):
+    """Minor 5: the first sighting is quiet; the confirmation is loud."""
+    acq, _ = _acquired()
+    acq.registration.utc_ref += 1.0
+    caplog.set_level(logging.INFO)
+    _measure(acq, 3)
+    _measure(acq, 4)  # first sighting
+    first = [r for r in caplog.records if "whole second" in r.getMessage()]
+    assert first and all(r.levelno < logging.WARNING for r in first)
+    caplog.clear()
+    _measure(acq, 5)  # confirmation
+    loud = [r for r in caplog.records
+            if "whole second" in r.getMessage() and r.levelno >= logging.WARNING]
+    assert len(loud) == 1
+    caplog.clear()
+    _measure(acq, 6)
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
