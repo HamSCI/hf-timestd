@@ -658,7 +658,8 @@ def test_b4_shared_channel_resolved_by_real_wwv20000_sibling():
         print(
             f"  SHARED_10000 vs WWV_20000 acquired-plane difference: {diff_ms:+.3f} ms"
         )
-        fused = fuse_registrations([gotS, got20], rtpS)
+        # Task 6 fix round 1: rtpS is in SHARED_10000's counter; name it.
+        fused = fuse_registrations([gotS, got20], rtpS, domain=gotS.channel)
         print(f"  fuse_registrations([shared, wwv20000]) -> {fused}")
         assert (
             fused is not None
@@ -1051,7 +1052,9 @@ def test_nd_shared_channel_resolved_by_real_same_site_siblings(chunk):
     # ── Step 3: fuse.  First literally everything that acquired (the task's
     # own wording), then the trusted subset the design would actually offer. ──
     every_reg = [r for r in [gotS10] + [g for _n, g in acquired_siblings] if r]
-    every_fused = fuse_registrations(every_reg, common_rtp)
+    # Task 6 fix round 1: common_rtp is in the shared channel's counter.
+    shared_domain = str(meta_shared["channel_name"])
+    every_fused = fuse_registrations(every_reg, common_rtp, domain=shared_domain)
     print(
         f"  fuse_registrations(ALL acquired {[r.channel for r in every_reg]}) -> "
         f"{'None' if every_fused is None else f'sigma={every_fused.sigma_ms:.3f}'}"
@@ -1066,7 +1069,7 @@ def test_nd_shared_channel_resolved_by_real_same_site_siblings(chunk):
                 f"{'kept' if abs(u - med_all) * 1000.0 <= FUSE_OUTLIER_MS else 'REJECTED'}"
             )
     all_regs = [r for r in [gotS10] + [g for _n, g, _m in trusted] if r is not None]
-    fused = fuse_registrations(all_regs, common_rtp)
+    fused = fuse_registrations(all_regs, common_rtp, domain=shared_domain)
     print(
         f"  fuse_registrations({[r.channel for r in all_regs]}) -> "
         f"{'None' if fused is None else f'sigma={fused.sigma_ms:.3f} stations={fused.stations}'}"

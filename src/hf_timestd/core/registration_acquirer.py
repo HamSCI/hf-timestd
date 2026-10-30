@@ -871,6 +871,11 @@ class Registration:
         816 ms late, but each map holds the least-late epoch its probe saw,
         so the 0.5 s tolerance separates runs that are hours apart.
 
+        Channels at different output rates (24 kHz against 96 kHz) never
+        convert: ``same_run`` also requires equal ``olen`` and
+        ``input_samprate``, so the converted plane always ticks at this
+        plane's own rate.
+
         Never raw RTP across channels: two channels' counters start at
         different blocks, and the difference reads as a timing offset."""
         if domain and domain == self.domain:
@@ -886,15 +891,10 @@ class Registration:
         if not self.counter_map.same_run(cmap):
             return None
         delta_in = cmap.input_index(rtp) - self.counter_map.input_index(self.rtp_ref)
-        rate_num = cmap.olen * cmap.input_samprate
         return replace(
             self,
             rtp_ref=int(rtp) & 0xFFFFFFFF,
             utc_ref=self.utc_ref + delta_in / float(cmap.input_samprate),
-            # the caller's counter ticks at the caller's output rate
-            sample_rate=(
-                rate_num // cmap.ilen if rate_num % cmap.ilen == 0 else self.sample_rate
-            ),
             counter_map=cmap,
             rtp_domain=domain,
         )

@@ -759,7 +759,12 @@ class MetrologyService:
         resolved_via_sibling_this_minute = False
         if own is None and sibs:
             # a shared channel's open hypotheses: let the siblings' plane name the station
-            sib_plane = fuse_registrations(sibs, at_rtp=int(start_rtp))
+            # fix round 1 (Task 6): name this channel's counter.  Siblings
+            # with no counter map cannot convert into it and drop, so
+            # until Task 7 wires the maps this yields no plane -- never a
+            # sibling's plane read at this channel's raw RTP.
+            sib_plane = fuse_registrations(sibs, at_rtp=int(start_rtp),
+                                           domain=self.channel_name)
             if sib_plane is not None:
                 own = self.acquirer.resolve_ambiguity(sib_plane, int(start_rtp),
                                                       float(buffer_timing.sample0_utc),
@@ -803,8 +808,9 @@ class MetrologyService:
         # held back -- a channel that just re-acquired sits outside the
         # fused plane for two minutes instead of dragging the station's
         # own n_minutes to zero with it.
-        fused, kept, waiting = fuse_registrations_with_members(fusion_inputs,
-                                                              at_rtp=int(start_rtp))
+        fused, kept, waiting = fuse_registrations_with_members(
+            fusion_inputs, at_rtp=int(start_rtp), domain=self.channel_name
+        )
         if fused is not None and (own is None or own_unverified_with_siblings):
             # `fused` here is built purely from `sibs` (own contributed
             # nothing to fusion_inputs in either case above) -- every one

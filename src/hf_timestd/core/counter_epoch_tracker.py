@@ -15,9 +15,12 @@ instant the epoch it was registered in closes.
 
 **The epoch is a MEASURED QUANTITY, not a name** (final review, C1).
 ``epoch_offset_s`` — ``gps_time_ns/1e9 − rtp_timesnap/sample_rate``, the
-UTC of RTP sample 0 — is what every channel on one radiod agrees on, and
-it is what ``registration_store.fuse_registrations`` clusters by.  The id
-string is informational: metrology runs one process per channel, each
+UTC of RTP sample 0 in THIS channel's counter.  Channels on one radiod do
+not share an origin: since ka9q-radio e5f790dd each starts its own RTP
+counter (ND, 2026-10-06: one 24 kHz channel 20 ms off the rest), so two
+channels' offsets need not agree, and ``registration_store`` fusion no
+longer clusters by this value; it converts through each channel's counter
+map instead (Task 6).  The id string is informational: metrology runs one process per channel, each
 tracker samples the ring's anchor at its own phase, so two channels in one
 physical epoch can name it differently and nothing downstream may depend
 on the strings matching.

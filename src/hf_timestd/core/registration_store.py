@@ -169,10 +169,12 @@ def fuse_registrations_with_members(
     clustering on ``epoch_offset_s``, which assumed every channel shares
     one counter origin; since ka9q-radio e5f790dd none does.
 
-    A caller that names neither ``domain`` nor ``at_map`` (every caller
-    before Task 7) gets the first member's counter as ``domain``, so that
-    one channel still projects in its own counter and no two channels
-    ever combine without maps.  The fused plane carries ``rtp_domain`` and
+    The caller must name its counter: ``domain``, ``at_map`` or both.
+    Neither raises ``ValueError``.  Fix round 1 removed a default that took
+    the first member's counter: on a siblings-only call that projected one
+    sibling's plane at the caller's raw RTP, alone, where before three
+    agreeing siblings out-voted a wrong one.  A missing plane is safe; a
+    wrong plane is not.  The fused plane carries ``rtp_domain`` and
     ``counter_map`` exactly as the caller passed them.
 
     ``channels_kept`` is what fusion ACTUALLY combined -- the converted
@@ -192,12 +194,13 @@ def fuse_registrations_with_members(
     clears the floor -- the station bootstrapping -- every member fuses as
     before and the summary's own gate holds the plane back instead.
     """
+    if not domain and at_map is None:
+        raise ValueError(
+            "fusion needs the caller's counter: pass domain, at_map or both"
+        )
     if not regs:
         return None, [], []
-    convert_domain = domain
-    if not domain and at_map is None:
-        convert_domain = regs[0].domain
-    converted = [r.in_domain(at_rtp, at_map, convert_domain) for r in regs]
+    converted = [r.in_domain(at_rtp, at_map, domain) for r in regs]
     same = [c for c in converted if c is not None]
     if not same:
         return None, [], []
@@ -402,7 +405,18 @@ class RegistrationStore:
         self._atomic_write(self.summary_path, payload)
 
     # ── reading ────────────────────────────────────────────────────
-    def read_siblings(self, exclude_channel: str = "") -> List[Registration]:
+    def read_siblings(
+        self,
+        exclude_channel: str = "",
+        states: Tuple[str, ...] = ("ACQUIRED",),
+    ) -> List[Registration]:
+        """Fresh sibling planes whose file state is in ``states``.
+
+        The default keeps live behaviour: ACQUIRED only.  On a T6 station
+        every verified channel writes WITNESS, so accepting WITNESS by
+        default would hand each channel siblings it never had and push it
+        into the sibling-only path; Task 10's shadow record asks for
+        WITNESS explicitly."""
         out: List[Registration] = []
         if not self.directory.is_dir():
             return out
@@ -418,9 +432,7 @@ class RegistrationStore:
                 continue
             if now - float(d.get("written_at", 0)) > self.stale_s:
                 continue
-            # Task 6: a T6 station publishes its verified T3 plane as
-            # WITNESS; it is as much a measurement as an ACQUIRED one.
-            if d.get("state") not in ("ACQUIRED", "WITNESS"):
+            if d.get("state") not in states:
                 continue
             if d.get("method") == "adopted":
                 # A purely derived plane (this channel echoing a sibling

@@ -82,7 +82,7 @@ def test_fuse_callers_run_wins_and_empty_is_none():
         _reg("b", 100.0, 1.0, "ep-2"),
     ]
     assert fuse_registrations(regs, 1000, M51, "b").counter_epoch_id == "ep-2"
-    assert fuse_registrations([], 1000) is None
+    assert fuse_registrations([], 1000, M51, "b") is None
 
 
 def test_store_roundtrip_and_staleness(tmp_path):

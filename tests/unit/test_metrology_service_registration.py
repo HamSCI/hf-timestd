@@ -35,9 +35,9 @@ class _Engine:
 
 # Task 6: fusion never combines two channels' planes without counter maps,
 # because since ka9q-radio e5f790dd each channel starts its own RTP counter.
-# MetrologyService passes no map or domain until Task 7 wires it, so these
-# tests, which fuse a sibling from another channel through the service, wait
-# for Task 7.  strict: an XPASS fails, so Task 7 must remove this marker.
+# MetrologyService names its own channel as the domain but passes no map
+# until Task 7 wires it, so these tests, which adopt, resolve with or fuse a
+# sibling from another channel through the service, wait for Task 7.  strict: an XPASS fails, so Task 7 must remove this marker.
 _AWAITS_TASK_7 = pytest.mark.xfail(
     strict=True,
     reason="Task 7: MetrologyService must pass at_map and domain to fusion",
@@ -251,6 +251,7 @@ def test_bootstrap_leaves_the_label_plane_marked(tmp_path):
     assert svc.reg_store.read_summary()["state"] == "BOOTSTRAP"
 
 
+@_AWAITS_TASK_7
 def test_sibling_registration_is_adopted(tmp_path):
     svc = _service(tmp_path)
     from hf_timestd.core.registration_acquirer import Registration
@@ -274,6 +275,39 @@ def test_sibling_registration_is_adopted(tmp_path):
     )
 
 
+def test_sibling_only_fusion_without_maps_yields_no_plane(tmp_path):
+    """Task 6 fix round 1.  This channel hears nothing, and one sibling on
+    another channel holds an ACQUIRED plane with no counter map.  Its
+    rtp_ref lives in WWV_20000's counter, which starts at its own block
+    (ka9q-radio e5f790dd), so read at this channel's raw RTP it lands
+    wherever the two origins differ -- here 20 ms, ND's k0 51 against 50.
+    Nothing can convert it, so the service must publish no plane rather
+    than adopt that one."""
+    svc = _service(tmp_path)
+    from hf_timestd.core.registration_acquirer import Registration
+
+    sib = Registration(
+        counter_epoch_id=svc.epoch_tracker.observe(**_meta(0)),
+        rtp_ref=1_000_000,
+        utc_ref=T0 + 0.020,
+        sample_rate=SR,
+        sigma_ms=0.9,
+        channel="WWV_20000",
+        verified=True,
+        n_minutes=5,
+    )
+    svc.reg_store.write_channel(sib, "ACQUIRED", {})
+    rng = np.random.default_rng(3)
+    noise = 0.1 * rng.standard_normal(62 * SR)  # this channel hears nothing
+    bt = svc.apply_registration(
+        label_timing(T0, 0.3, SR), noise, 1_000_000, MIN, _meta(0)
+    )
+    assert bt.origin_source == "label"
+    assert svc.acquirer.registration is None
+    assert svc.reg_store.read_summary()["state"] == "BOOTSTRAP"
+
+
+@_AWAITS_TASK_7
 def test_shared_channel_ambiguity_resolved_by_same_site_sibling(tmp_path):
     svc = _service(tmp_path)
 
@@ -429,6 +463,7 @@ def test_missing_authority_json_is_not_authoritative(tmp_path):
     assert bt.origin_source == "acquired"
 
 
+@_AWAITS_TASK_7
 def test_adopted_plane_does_not_re_enter_fusion(tmp_path):
     """C1: adopt() must stamp this channel's own name and method="adopted",
     and an adopted plane must never contribute back into its own fusion
@@ -542,6 +577,7 @@ def test_sibling_conflict_reverts_to_label_and_flags_conflict(tmp_path):
     assert s["contributing"] == []
 
 
+@_AWAITS_TASK_7
 def test_candidate_own_defers_to_verified_sibling_no_conflict(tmp_path):
     """task-11b fix round 1 (I1): an own CANDIDATE (unverified) plane is not
     independent evidence to fuse against a real sibling -- unlike the
@@ -583,6 +619,7 @@ def test_candidate_own_defers_to_verified_sibling_no_conflict(tmp_path):
     assert s["state"] == "ACQUIRED"
 
 
+@_AWAITS_TASK_7
 def test_adopted_plane_with_expired_donor_returns_to_bootstrap(tmp_path, caplog):
     """New Important (re-review, fix round 2): CONFLICT requires siblings
     to disagree WITH.  The C1 fix (excluding an adopted `own` from
@@ -751,6 +788,7 @@ def test_no_timing_buffer_returns_unchanged_with_no_store_write(
     assert not any(r.levelno >= logging.ERROR for r in caplog.records)
 
 
+@_AWAITS_TASK_7
 def test_resolve_before_adopt_precedence(tmp_path, monkeypatch):
     """I3: resolve-before-adopt precedence -- monkeypatch adopt to raise;
     the ambiguity-resolution test must still pass because adopt is never

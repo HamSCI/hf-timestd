@@ -121,4 +121,24 @@ def test_witness_files_are_siblings_too(tmp_path):
     st.write_channel(_plane("SHARED_5000", 51), "WITNESS", {})
     st.write_channel(_plane("WWV_2500", 51), "CANDIDATE", {})
     st.write_channel(_plane("X", 51), "ACQUIRED", {})
-    assert [r.channel for r in st.read_siblings("X")] == ["SHARED_5000"]
+    sibs = st.read_siblings("X", states=("ACQUIRED", "WITNESS"))
+    assert [r.channel for r in sibs] == ["SHARED_5000"]
+
+
+def test_read_siblings_default_excludes_witness(tmp_path):
+    # fix round 1: live T6 behaviour stays as it was until Task 10 asks
+    # for WITNESS; a default that took it would hand every channel on a
+    # T6 station siblings it never had
+    st = RegistrationStore(tmp_path / "reg", tmp_path / "registration.json")
+    st.write_channel(_plane("SHARED_5000", 51), "WITNESS", {})
+    st.write_channel(_plane("WWV_2500", 51), "ACQUIRED", {})
+    assert [r.channel for r in st.read_siblings("X")] == ["WWV_2500"]
+
+
+def test_fusion_without_a_named_counter_raises():
+    # fix round 1: with no domain and no map, a default once took the first
+    # member's counter, so a siblings-only call read one sibling's plane at
+    # the caller's raw RTP.  Fail safe instead.
+    regs = [_plane("SHARED_10000", 51, cmap=None), _plane("WWV_20000", 50, cmap=None)]
+    with pytest.raises(ValueError):
+        fuse_registrations(regs, at_rtp=rtp_at(200, 51, OLEN), domain="")
