@@ -32,7 +32,7 @@ import numpy as np
 from hamsci_dsp.counter_map import CounterMap
 from scipy.signal import butter, sosfiltfilt
 
-from .counter_epoch_tracker import COUNTER_EPOCH_STEP_S
+from .counter_epoch_tracker import COUNTER_EPOCH_SKEW_ALLOWANCE_S, COUNTER_EPOCH_STEP_S
 from .tick_edge_detector import TickEdgeDetector
 
 logger = logging.getLogger(__name__)
@@ -970,6 +970,10 @@ class RegistrationAcquirer:
         # second.  Both live only inside one BOOTSTRAP episode.
         self._marker_k_seen: Optional[Tuple[int, int]] = None
         self._marker_k_holds = 0
+        # Task 7: this channel's counter map, as the recorder last
+        # published it (``note_counter_map``).  It survives ``reset``: the
+        # map describes the counter, not the plane.
+        self._cmap: Optional[CounterMap] = None
 
     @property
     def state(self) -> str:
@@ -979,8 +983,18 @@ class RegistrationAcquirer:
     def registration(self) -> Optional[Registration]:
         return self._reg
 
-    def reset(self, why: str) -> None:
-        logger.info(f"[{self.channel}] registration reset -> BOOTSTRAP ({why})")
+    @property
+    def counter_map(self) -> Optional[CounterMap]:
+        """This channel's counter map as last noted; None before any."""
+        return self._cmap
+
+    def reset(self, why: str, *, loud: bool = False) -> None:
+        """``loud``: a WARNING rather than INFO, for a reset that means the
+        held plane was wrong (a counter-map step), not merely retired."""
+        logger.log(
+            logging.WARNING if loud else logging.INFO,
+            f"[{self.channel}] registration reset -> BOOTSTRAP ({why})",
+        )
         self._state = self.STATE_BOOTSTRAP
         self._reg = None
         self._buf.clear()
@@ -1003,14 +1017,85 @@ class RegistrationAcquirer:
         the next fusion as if it were independent corroborating evidence,
         understating sigma by sqrt(n_adopters+1) (T3 self-registration
         review, C1, 2026-09-06)."""
-        self._reg = Registration(
+        self._reg = self._stamped(Registration(
             **{**reg.__dict__, "channel": self.channel, "method": "adopted"}
-        )
+        ))
         self._epoch = reg.counter_epoch_id
         self._state = self.STATE_ACQUIRED
         self._buf.clear()
         self._bad_minutes = 0
         self._verify_pending = 0
+
+    # ── counter domain (Task 7) ────────────────────────────────────
+    def note_counter_map(self, cmap: Optional[CounterMap]) -> None:
+        """Take this minute's counter map for this channel.
+
+        Every plane this acquirer holds or creates lives in this channel's
+        own RTP counter.  It carries ``rtp_domain=self.channel`` and this
+        map, rolled forward to the plane's ``rtp_ref`` so that
+        ``Registration.in_domain`` always reads the map within its 2**31
+        sample reach.
+
+        A new map must continue the held one, or the held plane is wrong
+        and resets, loudly.  Continuity is decided from the counters, not
+        from ``CounterMap.same_run``: ``same_run`` compares the maps'
+        epochs to 0.5 s, and a late GPS_TIME packet (B4: up to 816 ms)
+        moves an epoch that far on one radiod run.  So:
+
+        * both maps must give the same input-sample index at a common RTP;
+          a whole-block difference is a counter-map step on this run
+          (``counter map moved N block(s)``), anything else another run;
+        * the epochs must agree within ``COUNTER_EPOCH_SKEW_ALLOWANCE_S``
+          (2 s, the tracker's own allowance for late pairs).  A channel
+          that restarts at the same start block maps its counter exactly
+          as before, and only the epoch, hours away, tells the runs apart.
+
+        None (an old producer, or no map yet) changes nothing."""
+        if cmap is None:
+            return
+        held = self._cmap
+        self._cmap = cmap
+        if held is not None:
+            why = self._counter_map_break(held, cmap)
+            if why is not None:
+                self.reset(why, loud=True)
+                return
+        if self._reg is not None:
+            self._stamped(self._reg)
+
+    @staticmethod
+    def _counter_map_break(held: CounterMap, new: CounterMap) -> Optional[str]:
+        """Why ``new`` does not continue ``held``, or None when it does."""
+        geometry = (new.ilen, new.olen, new.input_samprate)
+        if geometry != (held.ilen, held.olen, held.input_samprate):
+            return (
+                f"counter map geometry {(held.ilen, held.olen, held.input_samprate)} "
+                f"-> {geometry}: another radiod run"
+            )
+        epoch_step = new.input_epoch_gps_s - held.input_epoch_gps_s
+        if abs(epoch_step) > COUNTER_EPOCH_SKEW_ALLOWANCE_S:
+            return f"counter map epoch moved {epoch_step:+.3f} s: another radiod run"
+        at = new.rtp_ref
+        blocks = (new.input_index(at) - held.input_index(at)) / new.ilen
+        whole = round(blocks)
+        if abs(blocks - whole) > 1e-6:
+            return f"counter map moved {blocks:+.6f} blocks: another radiod run"
+        if whole:
+            n = abs(whole)
+            return (
+                f"counter map moved {n} block{'' if n == 1 else 's'} "
+                f"({whole * new.ilen / new.input_samprate * 1000.0:+.1f} ms "
+                f"at rtp {at}) on one radiod run"
+            )
+        return None
+
+    def _stamped(self, reg: Registration) -> Registration:
+        """``reg`` named in this channel's counter, with this channel's map
+        rolled to its ``rtp_ref`` (Task 6 review: map reach)."""
+        reg.rtp_domain = self.channel
+        if self._cmap is not None:
+            reg.counter_map = self._cmap.rolled_forward(reg.rtp_ref)
+        return reg
 
     # ── acquisition ────────────────────────────────────────────────
     def offer_minute(
@@ -1278,6 +1363,7 @@ class RegistrationAcquirer:
             epoch_offset_s=self._epoch_offset_s,
             whole_second_unresolved=whole_second_unresolved,
         )
+        self._stamped(self._reg)
         self._state = self.STATE_ACQUIRED
         self._bad_minutes = 0
         self._verify_pending = 0
@@ -1349,6 +1435,7 @@ class RegistrationAcquirer:
                 else sibling.epoch_offset_s
             ),
         )
+        self._stamped(self._reg)
         self._state = self.STATE_ACQUIRED
         self._open.clear()
         self._bad_minutes = 0

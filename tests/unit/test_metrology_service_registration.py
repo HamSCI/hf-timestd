@@ -14,6 +14,7 @@ from hf_timestd.core.counter_epoch_tracker import CounterEpochTracker
 from hf_timestd.core.metrology_service import MetrologyService
 from hf_timestd.core.registration_acquirer import RegistrationAcquirer
 from hf_timestd.core.registration_store import RegistrationStore
+from tests.unit.synth_origins import ND_K0, counter_map_for
 from tests.unit.synth_ticks import make_tick_audio, label_timing
 
 SR = 24000
@@ -33,15 +34,17 @@ class _Engine:
         return {"WWV": 0.0125}
 
 
-# Task 6: fusion never combines two channels' planes without counter maps,
-# because since ka9q-radio e5f790dd each channel starts its own RTP counter.
-# MetrologyService names its own channel as the domain but passes no map
-# until Task 7 wires it, so these tests, which adopt, resolve with or fuse a
-# sibling from another channel through the service, wait for Task 7.  strict: an XPASS fails, so Task 7 must remove this marker.
-_AWAITS_TASK_7 = pytest.mark.xfail(
-    strict=True,
-    reason="Task 7: MetrologyService must pass at_map and domain to fusion",
-)
+# Task 7: every channel names its own RTP counter through a counter map
+# (ka9q-radio e5f790dd gives each channel its own start block).  This
+# channel's minutes carry _OWN_MAP in their metadata, as the recorder
+# publishes it into the ring.  The siblings below that fuse, adopt or
+# resolve with this channel started on the same block (as four of ND's
+# five 24 kHz channels do, k0 = 51), so their raw RTP equals this
+# channel's and every value in these tests reads as before; they now say
+# so through _SIB_MAP rather than by assumption.  Different start blocks
+# are tested in test_metrology_service_counter_domains.py.
+_OWN_MAP = counter_map_for(ND_K0[0], SR)
+_SIB_MAP = counter_map_for(ND_K0[1], SR)
 
 
 def _service(tmp_path):
@@ -55,12 +58,19 @@ def _service(tmp_path):
     return svc
 
 
-def _meta(k):
+def _pair(k):
+    """Minute k's radiod (GPS_TIME, RTP_TIMESNAP) pair, as the epoch tracker
+    takes it."""
     return {
         "gps_time_ns": 1_000_000_000_000 + k * 60_000_000_000,
         "rtp_timesnap": 1_000_000 + k * 60 * SR,
         "sample_rate": SR,
     }
+
+
+def _meta(k):
+    """Minute k's ring metadata: the pair and this channel's counter map."""
+    return {**_pair(k), "counter_map": _OWN_MAP}
 
 
 def test_first_minute_bootstraps_then_acquires(tmp_path):
@@ -251,18 +261,18 @@ def test_bootstrap_leaves_the_label_plane_marked(tmp_path):
     assert svc.reg_store.read_summary()["state"] == "BOOTSTRAP"
 
 
-@_AWAITS_TASK_7
 def test_sibling_registration_is_adopted(tmp_path):
     svc = _service(tmp_path)
     from hf_timestd.core.registration_acquirer import Registration
 
     sib = Registration(
-        counter_epoch_id=svc.epoch_tracker.observe(**_meta(0)),
+        counter_epoch_id=svc.epoch_tracker.observe(**_pair(0)),
         rtp_ref=1_000_000,
         utc_ref=T0,
         sample_rate=SR,
         sigma_ms=0.9,
         channel="WWV_20000",
+        counter_map=_SIB_MAP,
     )
     svc.reg_store.write_channel(sib, "ACQUIRED", {})
     rng = np.random.default_rng(3)
@@ -287,7 +297,7 @@ def test_sibling_only_fusion_without_maps_yields_no_plane(tmp_path):
     from hf_timestd.core.registration_acquirer import Registration
 
     sib = Registration(
-        counter_epoch_id=svc.epoch_tracker.observe(**_meta(0)),
+        counter_epoch_id=svc.epoch_tracker.observe(**_pair(0)),
         rtp_ref=1_000_000,
         utc_ref=T0 + 0.020,
         sample_rate=SR,
@@ -307,7 +317,6 @@ def test_sibling_only_fusion_without_maps_yields_no_plane(tmp_path):
     assert svc.reg_store.read_summary()["state"] == "BOOTSTRAP"
 
 
-@_AWAITS_TASK_7
 def test_shared_channel_ambiguity_resolved_by_same_site_sibling(tmp_path):
     svc = _service(tmp_path)
 
@@ -318,7 +327,7 @@ def test_shared_channel_ambiguity_resolved_by_same_site_sibling(tmp_path):
     svc.engine = _Eng()
     from hf_timestd.core.registration_acquirer import Registration
 
-    epoch = svc.epoch_tracker.observe(**_meta(0))
+    epoch = svc.epoch_tracker.observe(**_pair(0))
     sib = Registration(
         epoch,
         rtp_ref=1_000_000,
@@ -326,6 +335,7 @@ def test_shared_channel_ambiguity_resolved_by_same_site_sibling(tmp_path):
         sample_rate=SR,
         sigma_ms=0.9,
         channel="WWV_20000",
+        counter_map=_SIB_MAP,
         stations=("WWV",),
     )
     svc.reg_store.write_channel(sib, "ACQUIRED", {})
@@ -463,7 +473,6 @@ def test_missing_authority_json_is_not_authoritative(tmp_path):
     assert bt.origin_source == "acquired"
 
 
-@_AWAITS_TASK_7
 def test_adopted_plane_does_not_re_enter_fusion(tmp_path):
     """C1: adopt() must stamp this channel's own name and method="adopted",
     and an adopted plane must never contribute back into its own fusion
@@ -475,12 +484,13 @@ def test_adopted_plane_does_not_re_enter_fusion(tmp_path):
     from hf_timestd.core.registration_acquirer import Registration
 
     sib = Registration(
-        counter_epoch_id=svc.epoch_tracker.observe(**_meta(0)),
+        counter_epoch_id=svc.epoch_tracker.observe(**_pair(0)),
         rtp_ref=1_000_000,
         utc_ref=T0,
         sample_rate=SR,
         sigma_ms=0.9,
         channel="WWV_20000",
+        counter_map=_SIB_MAP,
     )
     svc.reg_store.write_channel(sib, "ACQUIRED", {})
     rng = np.random.default_rng(3)
@@ -516,7 +526,6 @@ def test_apply_registration_failure_keeps_the_label_plane(tmp_path, monkeypatch)
     assert bt.origin_source == "label" and bt.sample0_utc == T0 + 0.1
 
 
-@_AWAITS_TASK_7
 def test_sibling_conflict_reverts_to_label_and_flags_conflict(tmp_path):
     """I2: this channel's own ACQUIRED plane disagreeing with its sibling
     (nothing within FUSE_OUTLIER_MS of the combined median) must revert to
@@ -558,6 +567,7 @@ def test_sibling_conflict_reverts_to_label_and_flags_conflict(tmp_path):
         sample_rate=SR,
         sigma_ms=0.9,
         channel="WWV_20000",
+        counter_map=_SIB_MAP,
     )
     svc.reg_store.write_channel(sib, "ACQUIRED", {})
     audio1 = make_tick_audio(62, SR, T0 + 60, {"WWV": 0.0125}, snr_db=20.0, seed=8)
@@ -577,7 +587,6 @@ def test_sibling_conflict_reverts_to_label_and_flags_conflict(tmp_path):
     assert s["contributing"] == []
 
 
-@_AWAITS_TASK_7
 def test_candidate_own_defers_to_verified_sibling_no_conflict(tmp_path):
     """task-11b fix round 1 (I1): an own CANDIDATE (unverified) plane is not
     independent evidence to fuse against a real sibling -- unlike the
@@ -602,6 +611,7 @@ def test_candidate_own_defers_to_verified_sibling_no_conflict(tmp_path):
         sample_rate=SR,
         sigma_ms=0.9,
         channel="WWV_20000",
+        counter_map=_SIB_MAP,
         stations=("WWV",),
         verified=True,
     )
@@ -619,7 +629,6 @@ def test_candidate_own_defers_to_verified_sibling_no_conflict(tmp_path):
     assert s["state"] == "ACQUIRED"
 
 
-@_AWAITS_TASK_7
 def test_adopted_plane_with_expired_donor_returns_to_bootstrap(tmp_path, caplog):
     """New Important (re-review, fix round 2): CONFLICT requires siblings
     to disagree WITH.  The C1 fix (excluding an adopted `own` from
@@ -641,12 +650,13 @@ def test_adopted_plane_with_expired_donor_returns_to_bootstrap(tmp_path, caplog)
 
     # minute 1: this channel hears nothing and adopts a sibling's plane.
     sib = Registration(
-        counter_epoch_id=svc.epoch_tracker.observe(**_meta(0)),
+        counter_epoch_id=svc.epoch_tracker.observe(**_pair(0)),
         rtp_ref=1_000_000,
         utc_ref=T0,
         sample_rate=SR,
         sigma_ms=0.9,
         channel="WWV_20000",
+        counter_map=_SIB_MAP,
     )
     svc.reg_store.write_channel(sib, "ACQUIRED", {})
     rng = np.random.default_rng(3)
@@ -788,7 +798,6 @@ def test_no_timing_buffer_returns_unchanged_with_no_store_write(
     assert not any(r.levelno >= logging.ERROR for r in caplog.records)
 
 
-@_AWAITS_TASK_7
 def test_resolve_before_adopt_precedence(tmp_path, monkeypatch):
     """I3: resolve-before-adopt precedence -- monkeypatch adopt to raise;
     the ambiguity-resolution test must still pass because adopt is never
@@ -802,7 +811,7 @@ def test_resolve_before_adopt_precedence(tmp_path, monkeypatch):
     svc.engine = _Eng()
     from hf_timestd.core.registration_acquirer import Registration
 
-    epoch = svc.epoch_tracker.observe(**_meta(0))
+    epoch = svc.epoch_tracker.observe(**_pair(0))
     sib = Registration(
         epoch,
         rtp_ref=1_000_000,
@@ -810,6 +819,7 @@ def test_resolve_before_adopt_precedence(tmp_path, monkeypatch):
         sample_rate=SR,
         sigma_ms=0.9,
         channel="WWV_20000",
+        counter_map=_SIB_MAP,
         stations=("WWV",),
     )
     svc.reg_store.write_channel(sib, "ACQUIRED", {})
@@ -832,7 +842,6 @@ def test_resolve_before_adopt_precedence(tmp_path, monkeypatch):
 # ── C1 (final review): fusion crosses PROCESSES, not id strings ───────
 
 
-@_AWAITS_TASK_7
 def test_sibling_in_the_same_counter_space_under_a_different_id_still_fuses(tmp_path):
     """C1: metrology runs one process per channel, each with its own
     CounterEpochTracker, so two channels in ONE physical counter epoch
@@ -858,6 +867,7 @@ def test_sibling_in_the_same_counter_space_under_a_different_id_still_fuses(tmp_
         sample_rate=SR,
         sigma_ms=1.0,
         channel="WWV_20000",
+        counter_map=_SIB_MAP,
         stations=("WWV",),
         verified=True,
         epoch_offset_s=own_offset + 0.0019,  # the measured cross-channel spread
@@ -875,7 +885,6 @@ def test_sibling_in_the_same_counter_space_under_a_different_id_still_fuses(tmp_
     assert s["epoch_offset_s"] == pytest.approx(own_offset, abs=1e-6)
 
 
-@_AWAITS_TASK_7
 def test_contributing_names_only_what_fusion_kept(tmp_path):
     """C1's third consequence: ``contributing`` was built from every sibling
     read off disk, so the summary claimed corroboration from a channel the
@@ -896,6 +905,7 @@ def test_contributing_names_only_what_fusion_kept(tmp_path):
                 sample_rate=SR,
                 sigma_ms=1.0,
                 channel=ch,
+                counter_map=_SIB_MAP,
                 stations=("WWV",),
                 verified=True,
                 epoch_offset_s=own_offset,
@@ -975,7 +985,6 @@ def test_a_witness_plane_that_comes_back_into_agreement_is_not_reset(tmp_path):
     assert svc.acquirer.state == RegistrationAcquirer.STATE_ACQUIRED
 
 
-@_AWAITS_TASK_7
 def test_a_waiting_channel_is_named_in_the_summary(tmp_path):
     """16c: the newcomer's exclusion must be visible, not silent -- a
     reader (station-web, the sidecar) sees which channels are serving
@@ -995,13 +1004,14 @@ def test_a_waiting_channel_is_named_in_the_summary(tmp_path):
     # NOW a long-corroborated sibling appears, same counter space
     svc.reg_store.write_channel(
         Registration(
-            svc.epoch_tracker.observe(**_meta(0)),
+            svc.epoch_tracker.observe(**_pair(0)),
             rtp_ref=1_000_000,
             utc_ref=T0,
             sample_rate=SR,
             sigma_ms=1.0,
             n_minutes=17,
             channel="WWV_20000",
+            counter_map=_SIB_MAP,
             stations=("WWV",),
             verified=True,
         ),

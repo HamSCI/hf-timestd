@@ -745,8 +745,19 @@ class MetrologyService:
         # name.  The name is this process's own; the offset is what the
         # other channels' processes agree on.  Since Task 6 fusion no longer
         # clusters on it: it converts siblings through their counter maps
-        # (Registration.in_domain), which Task 7 hands it.
+        # (Registration.in_domain).
         epoch_offset_s = self.epoch_tracker.epoch_offset_s
+        # Task 7: since ka9q-radio e5f790dd each channel starts its own RTP
+        # counter, so start_rtp means nothing to a sibling without this
+        # channel's map to radiod's input-sample index.  The acquirer
+        # stamps the map on every plane it holds or makes, and resets a
+        # plane whose counter no longer continues (a map step), before it
+        # is offered this minute.  `at_map` names start_rtp's counter for
+        # every fusion call below; None (an old producer) leaves fusion to
+        # this channel's own planes.
+        self.acquirer.note_counter_map(metadata.get("counter_map"))
+        held_map = self.acquirer.counter_map
+        at_map = None if held_map is None else held_map.rolled_forward(int(start_rtp))
         own = self.acquirer.offer_minute(audio, buffer_timing, int(start_rtp), int(minute_utc),
                                          delays, epoch, epoch_offset_s=epoch_offset_s)
         sibs = self.reg_store.read_siblings(exclude_channel=self.channel_name)
@@ -759,12 +770,12 @@ class MetrologyService:
         resolved_via_sibling_this_minute = False
         if own is None and sibs:
             # a shared channel's open hypotheses: let the siblings' plane name the station
-            # fix round 1 (Task 6): name this channel's counter.  Siblings
-            # with no counter map cannot convert into it and drop, so
-            # until Task 7 wires the maps this yields no plane -- never a
-            # sibling's plane read at this channel's raw RTP.
+            # Task 7: every sibling converts into this channel's counter
+            # through both counter maps; one without a map, or from
+            # another radiod run, drops -- never a sibling's plane read at
+            # this channel's raw RTP.
             sib_plane = fuse_registrations(sibs, at_rtp=int(start_rtp),
-                                           domain=self.channel_name)
+                                           at_map=at_map, domain=self.channel_name)
             if sib_plane is not None:
                 own = self.acquirer.resolve_ambiguity(sib_plane, int(start_rtp),
                                                       float(buffer_timing.sample0_utc),
@@ -809,16 +820,16 @@ class MetrologyService:
         # fused plane for two minutes instead of dragging the station's
         # own n_minutes to zero with it.
         fused, kept, waiting = fuse_registrations_with_members(
-            fusion_inputs, at_rtp=int(start_rtp), domain=self.channel_name
+            fusion_inputs, at_rtp=int(start_rtp), at_map=at_map,
+            domain=self.channel_name,
         )
         if fused is not None and (own is None or own_unverified_with_siblings):
             # `fused` here is built purely from `sibs` (own contributed
             # nothing to fusion_inputs in either case above) -- every one
-            # of those siblings came from read_siblings, which only
-            # returns ACQUIRED and (since Task 6) WITNESS files, and
-            # (task-11b) only a VERIFIED registration is ever published
-            # under either state: a T6 station writes WITNESS only for a
-            # plane that agrees with T6, CANDIDATE otherwise.  So a
+            # of those siblings came from read_siblings, which by default
+            # returns ACQUIRED files only (WITNESS only when a caller asks,
+            # as Task 10's shadow record will), and (task-11b) only a
+            # VERIFIED registration is ever published as ACQUIRED.  So a
             # plane fused entirely from such siblings is itself
             # verified; fuse_registrations doesn't carry that through on
             # its own (its output defaults verified=False like any fresh
@@ -928,18 +939,29 @@ class MetrologyService:
                 return dataclasses.replace(buffer_timing, origin_source="label",
                                            counter_epoch_id=epoch)
             elif sibs:
-                # A genuine disagreement between channels sharing one
-                # origin -- CONFLICT requires siblings to disagree WITH.
+                # A genuine disagreement between channels on one radiod
+                # run -- CONFLICT requires siblings to disagree WITH.
+                # Task 7: each sibling's delta is read in THIS channel's
+                # counter (through both maps); at raw RTP a sibling on
+                # another start block reads 20 ms per block off.  A
+                # sibling that cannot convert took no part in fusion, so
+                # it is named as such and not among the channels involved.
                 own_s0 = own.sample0_utc_for(int(start_rtp))
-                deltas = ", ".join(
-                    f"{r.channel}={(r.sample0_utc_for(int(start_rtp)) - own_s0) * 1000.0:+.1f}ms"
-                    for r in sibs
-                )
+                parts = []
+                involved_sibs = []
+                for r in sibs:
+                    c = r.in_domain(int(start_rtp), at_map, self.channel_name)
+                    if c is None:
+                        parts.append(f"{r.channel}=not in this counter")
+                        continue
+                    involved_sibs.append(r.channel)
+                    parts.append(f"{r.channel}={(c.utc_ref - own_s0) * 1000.0:+.1f}ms")
+                deltas = ", ".join(parts)
                 logger.warning(
                     f"[{self.channel_name}] sibling registrations disagree with this "
                     f"channel's own plane ({deltas}); reverting to the label plane "
                     f"this minute")
-                involved = sorted({self.channel_name, *(r.channel for r in sibs)})
+                involved = sorted({self.channel_name, *involved_sibs})
                 # I6: CONFLICT is a PER-CHANNEL verdict.  It belongs in this
                 # channel's file; the station summary carries the channels
                 # involved under `conflicts` and keeps a state derived from
