@@ -50,6 +50,10 @@ def counter_poll_from_reply(reply, output_samprate: int) -> Optional[CounterPoll
                        output_samprate=int(output_samprate), gps_time_ns=int(gps))
 
 
+def _epoch(p: CounterPoll) -> float:
+    return p.gps_time_ns / 1e9 - p.input_samples / p.input_samprate
+
+
 @dataclass
 class _Channel:
     polls: Deque[CounterPoll]
@@ -58,6 +62,7 @@ class _Channel:
     last_fresh_mono: Optional[float] = None
     started: bool = False
     dropped_logged: bool = False
+    failing: bool = False
 
 
 class CounterMapProbe:
@@ -66,6 +71,7 @@ class CounterMapProbe:
     MIN_AGREE = 3
     # Well inside the signed-32 reach (24 h 51 m at 24 kHz).
     MAX_STALE_S = 12 * 3600.0
+    RUN_TOL_S = 0.5          # same tolerance as CounterMap.same_run
 
     def __init__(self, control, poll_timeout: float = 1.0, mono_fn=time.monotonic):
         self._control = control
@@ -90,18 +96,37 @@ class CounterMapProbe:
         if st is None:
             st = self._ch[channel] = _Channel(polls=deque(maxlen=self.HISTORY))
         now = self._mono()
-        n = self.POLLS_AT_START if not st.started else 1
-        st.started = True
+        remaining = self.POLLS_AT_START if not st.started else 1
+        st.started = True       # stays True after a drop: relearning costs one poll a tick
+        burst_extended = False
         fresh = 0
-        for _ in range(n):
+        while remaining > 0:
+            remaining -= 1
             try:
                 reply = self._control.poll_status(ssrc, self._timeout)
             except Exception as exc:  # noqa: BLE001
-                logger.warning("counter map poll of %s failed: %s", channel, exc)
+                if not st.failing:
+                    logger.warning("counter map poll of %s failed: %s "
+                                   "(further failures this streak are silent)",
+                                   channel, exc)
+                    st.failing = True
                 continue
+            if st.failing:
+                logger.info("counter map poll of %s recovered", channel)
+                st.failing = False
             poll = counter_poll_from_reply(reply, rate)
             if poll is None:
                 continue
+            ref_epoch = (st.held.input_epoch_gps_s if st.held is not None
+                         else (_epoch(st.polls[-1]) if st.polls else None))
+            if ref_epoch is not None and abs(_epoch(poll) - ref_epoch) > self.RUN_TOL_S:
+                logger.info("counter map for %s: new radiod run, map replaced", channel)
+                st.polls.clear()
+                st.held = None
+                st.last_rtp = None
+                if not burst_extended:        # gather the new run's polls at once
+                    burst_extended = True
+                    remaining = max(remaining, self.POLLS_AT_START - 1)
             st.polls.append(poll)
             st.last_rtp = poll.rtp_timesnap
             fresh += 1
@@ -118,7 +143,6 @@ class CounterMapProbe:
                              self.MAX_STALE_S / 3600)
             st.held = None
             st.polls.clear()
-            st.started = False                # relearn with a full start burst
             st.last_rtp = None
             st.dropped_logged = True
             return None
@@ -137,7 +161,6 @@ class CounterMapProbe:
             st.held = new
             return
         if not new.same_run(held):
-            logger.info("counter map for %s: new radiod run, map replaced", channel)
             st.held = new
             return
         blocks = new.intercept_blocks_from(held.rolled_forward(new.rtp_ref))

@@ -461,6 +461,8 @@ class CoreRecorderV2:
         self._counter_probe = CounterMapProbe(self.control)
         self._counter_maps: Dict[str, CounterMap] = {}   # by channel description
         self._t6_counter_map: Optional[CounterMap] = None
+        self._counter_rr = 0
+        self._counter_mono = time.monotonic
 
         # Station config
         self.station_config = config.get('station', {})
@@ -1391,28 +1393,49 @@ class CoreRecorderV2:
         finally:
             self._shutdown()
     
+    COUNTER_REFRESH_BUDGET_S = 5.0
+
     def _refresh_counter_maps(self) -> None:
         """Re-learn every channel's counter map and publish it to its ring.
 
         Runs on the 60 s tick.  A channel whose map is unavailable publishes
-        None, so readers see no map rather than a stale one.
+        None, so readers see no map rather than a stale one.  The pass stops
+        after COUNTER_REFRESH_BUDGET_S so a silent radiod cannot stall the
+        loop; channels it skipped go first next tick (round-robin).
         """
         try:
-            for desc, rec in list(self.recorders.items()):
+            items = list(self.recorders.items())
+            if self._t6_channel_info is not None:
+                items.append(("T6", None))
+            n = len(items)
+            if not n:
+                return
+            start = self._counter_rr % n
+            t0 = self._counter_mono()
+            done = 0
+            for k in range(n):
+                if k and self._counter_mono() - t0 >= self.COUNTER_REFRESH_BUDGET_S:
+                    break
+                desc, rec = items[(start + k) % n]
+                done += 1
+                if rec is None:
+                    ci = self._t6_channel_info
+                    self._t6_counter_map = self._counter_probe.refresh(
+                        "T6", ci.ssrc, ci.sample_rate)
+                    continue
                 ci = getattr(rec, "channel_info", None)
                 ssrc = getattr(ci, "ssrc", None)
                 if ssrc is None:
                     continue
-                cmap = self._counter_probe.refresh(desc, ssrc, rec.config.sample_rate)
+                # the rate radiod granted, as for T6; the request may differ
+                rate = getattr(ci, "sample_rate", None) or rec.config.sample_rate
+                cmap = self._counter_probe.refresh(desc, ssrc, rate)
                 rec.publish_counter_map(cmap)
                 if cmap is None:
                     self._counter_maps.pop(desc, None)
                 else:
                     self._counter_maps[desc] = cmap
-            ci = self._t6_channel_info
-            if ci is not None:
-                self._t6_counter_map = self._counter_probe.refresh(
-                    "T6", ci.ssrc, ci.sample_rate)
+            self._counter_rr = (start + done) % n
         except Exception:
             logger.exception("counter map refresh failed")
 

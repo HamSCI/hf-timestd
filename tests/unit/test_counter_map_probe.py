@@ -140,3 +140,98 @@ def test_map_is_dropped_before_it_can_alias(caplog):
     for _ in range(3):
         cmap = p.refresh("X", 1, 24000)
     assert cmap is not None
+
+
+def test_restart_never_publishes_the_old_map_on_the_new_counter():
+    c = FakeControl()
+    p = CounterMapProbe(c)
+    old = p.refresh("X", 1, 24000)
+    assert old is not None
+    c.make = lambda b: reply(b - 90, k0=K0 + 7, epoch_s=EPOCH_S + 3600)
+    for _ in range(4):
+        cmap = p.refresh("X", 1, 24000)
+        assert cmap is None or abs(cmap.input_epoch_gps_s - (EPOCH_S + 3600)) < 1
+    assert cmap is not None
+
+
+def test_new_run_starts_a_full_burst_at_once():
+    c = FakeControl()
+    p = CounterMapProbe(c)
+    p.refresh("X", 1, 24000)
+    c.make = lambda b: reply(b - 90, k0=K0 + 7, epoch_s=EPOCH_S + 3600)
+    before = c.calls
+    cmap = p.refresh("X", 1, 24000)
+    assert c.calls - before == 5
+    assert cmap is not None and cmap.input_epoch_gps_s > EPOCH_S + 3000
+
+
+def test_dead_channel_polls_once_per_tick_after_a_drop():
+    c = FakeControl()
+    clk = Clock()
+    p = CounterMapProbe(c, mono_fn=clk)
+    p.refresh("X", 1, 24000)
+    c.fail = True
+    clk.t += 13 * 3600
+    assert p.refresh("X", 1, 24000) is None
+    before = c.calls
+    for _ in range(3):
+        clk.t += 60
+        assert p.refresh("X", 1, 24000) is None
+    assert c.calls - before == 3
+
+
+def test_failed_polls_log_once_per_streak_and_once_on_recovery(caplog):
+    c = FakeControl()
+    p = CounterMapProbe(c)
+    p.refresh("X", 1, 24000)
+    c.fail = True
+    with caplog.at_level(logging.INFO):
+        for _ in range(3):
+            p.refresh("X", 1, 24000)
+    warns = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warns) == 1
+    caplog.clear()
+    c.fail = False
+    with caplog.at_level(logging.INFO):
+        p.refresh("X", 1, 24000)
+        p.refresh("X", 1, 24000)
+    rec = [r for r in caplog.records if "recovered" in r.getMessage()]
+    assert len(rec) == 1
+    c.fail = True
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        p.refresh("X", 1, 24000)
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+
+
+def test_refresh_counter_maps_caps_its_time_and_rotates():
+    from hf_timestd.core.core_recorder_v2 import CoreRecorderV2
+    clk = Clock()
+    seen = []
+
+    class Probe:
+        def refresh(self, ch, ssrc, rate):
+            seen.append((ch, rate))
+            clk.t += 2.0
+            return None
+
+    def rec(rate):
+        return types.SimpleNamespace(
+            channel_info=types.SimpleNamespace(ssrc=1, sample_rate=rate),
+            config=types.SimpleNamespace(sample_rate=rate + 1),
+            publish_counter_map=lambda m: None)
+
+    core = CoreRecorderV2.__new__(CoreRecorderV2)
+    core.recorders = {f"C{i}": rec(24000) for i in range(5)}
+    core._t6_channel_info = None
+    core._counter_probe = Probe()
+    core._counter_maps = {}
+    core._t6_counter_map = None
+    core._counter_rr = 0
+    core._counter_mono = clk
+    core._refresh_counter_maps()
+    assert [c for c, _ in seen] == ["C0", "C1", "C2"]      # 2 s each, 5 s cap
+    assert all(r == 24000 for _, r in seen)                # granted rate
+    seen.clear()
+    core._refresh_counter_maps()
+    assert [c for c, _ in seen][0] == "C3"                  # skipped ones go first
