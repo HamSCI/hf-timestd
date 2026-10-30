@@ -117,7 +117,7 @@ def test_no_counter_map_writes_a_null_input_index(tmp_path):
 
 def test_channel_state_changes_are_rows_and_warnings(tmp_path, caplog):
     svc = _shadow_service(tmp_path)
-    caplog.set_level(logging.WARNING)
+    caplog.set_level(logging.INFO)
     # BOOTSTRAP: an old producer's minute, no raw radiod pair.
     meta = _meta(0, 0.0)
     del meta["raw_gps_time_ns"], meta["raw_rtp_timesnap"]
@@ -134,9 +134,13 @@ def test_channel_state_changes_are_rows_and_warnings(tmp_path, caplog):
     assert rows[0]["reason"] == "startup"
     assert [r["utc_minute"] for r in rows] == [MIN, MIN + 60, MIN + 120]
     assert all(r["scope"] == "SHARED_10000" for r in rows)
-    warns = [r for r in caplog.records
-             if r.levelno == logging.WARNING and "T3 STATE" in r.getMessage()]
-    assert len(warns) == 2
+    # Fix round 1: both changes fall in one 60-minute window, so the first
+    # is the WARNING and the second logs at INFO.
+    logs = [(r.levelno, r.getMessage()) for r in caplog.records
+            if r.levelno >= logging.INFO and "T3 STATE" in r.getMessage()]
+    assert [lv for lv, _ in logs] == [logging.WARNING, logging.INFO]
+    assert "BOOTSTRAP -> CANDIDATE" in logs[0][1]
+    assert "CANDIDATE -> WITNESS" in logs[1][1]
     assert svc._shadow_transitions.count == 2
     assert rows[-1]["count"] == 2
 
@@ -160,3 +164,15 @@ def test_config_defaults_and_overrides(tmp_path):
         "directory": str(tmp_path), "retention_days": 3}}})
     assert svc._shadow_record.directory == tmp_path
     assert svc._shadow_record.retention_days == 3
+
+
+def test_fractional_rtp_counts_input_samples_between_outputs(tmp_path):
+    """Fix round 1: half an output sample is half an output block's share
+    of input samples."""
+    svc = _shadow_service(tmp_path)
+    x = 1_000_000 + 60 * SR + 12_345
+    svc.acquirer.note_counter_map(_OWN_MAP)
+    got = svc._arrival_input_index(x + 0.5)
+    assert got == pytest.approx(
+        _OWN_MAP.input_index(x) + 0.5 * _OWN_MAP.ilen / _OWN_MAP.olen, abs=1e-6)
+    assert got != pytest.approx(_OWN_MAP.input_index(x), abs=1.0)
