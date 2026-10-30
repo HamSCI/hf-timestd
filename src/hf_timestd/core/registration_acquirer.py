@@ -937,6 +937,47 @@ class Registration:
         return self.utc_ref + delta / float(self.sample_rate)
 
 
+@dataclass(frozen=True)
+class MinuteArrival:
+    """One station, this minute, measured on the acquirer's own held plane
+    (Task 9, "T3 stands alone").
+
+    ``residual_ms`` = fold peak position - expected delay, wrapped to
+    ±500 ms, minus 1000 ms per whole second the minute marker confirmed.
+    Its sign is that of ``TickEdgeDetector.timing_error_ms``: positive
+    means the plane's labels run LATE, and ``corroborate`` subtracts it.
+    ``arrival_rtp`` names the peak in the first full label second of the
+    minute's audio, in this channel's own counter."""
+
+    station: str
+    residual_ms: float
+    sigma_ms: float
+    arrival_rtp: float
+    fold_snr_db: float
+
+
+def residuals_for_verify(
+    arrivals: Dict[str, MinuteArrival],
+) -> Dict[str, Tuple[float, float]]:
+    """``measure_minute``'s answer in the shape ``verify`` and
+    ``corroborate`` take: station -> (residual ms, sigma ms)."""
+    return {s: (a.residual_ms, a.sigma_ms) for s, a in arrivals.items()}
+
+
+# Task 9: the rolling self-measurement fold.  Up to three minutes per tone
+# band, the same depth bootstrap folds to (FOLD_LENGTHS_S), so a channel
+# that acquired on a 180 s fold can still see its station on the held plane.
+SELF_FOLD_MINUTES = 3
+# Run-up kept from the previous minute's audio so the marker search
+# (±MARKER_SEARCH_HALF_S around the label minute) fits when the live ring
+# hands over [minute, minute + 60 s).  2.5 s covers the 1.5 s half-window
+# plus a margin for the band filter's edge.
+SELF_RUNUP_S = 2.5
+# How much of the previous minute's tail to keep: enough to find
+# SELF_RUNUP_S before the next start even when consecutive buffers overlap.
+SELF_TAIL_KEEP_S = 5.0
+
+
 class RegistrationAcquirer:
     """Acquire from the signal, hold on the ruler, corroborate or correct
     every minute (spec §2 rules 1-3)."""
@@ -988,6 +1029,22 @@ class RegistrationAcquirer:
         # published it (``note_counter_map``).  It survives ``reset``: the
         # map describes the counter, not the plane.
         self._cmap: Optional[CounterMap] = None
+        # Task 9: the self-measurement on the held plane.  All of it
+        # belongs to ONE plane and clears with it (``_clear_self_measure``).
+        self._fold_history: Dict[str, List[Tuple[int, np.ndarray, int]]] = {}
+        self._self_tail: Optional[Tuple[np.ndarray, int]] = None
+        self._acq_minute: Optional[int] = None
+        self._self_marker_k: Dict[str, Tuple[int, int]] = {}
+        self._self_marker_logged: Dict[str, str] = {}
+
+    def _clear_self_measure(self) -> None:
+        """Forget every minute measured on the plane being retired: a fold
+        history smeared across two planes would measure neither."""
+        self._fold_history = {}
+        self._self_tail = None
+        self._acq_minute = None
+        self._self_marker_k = {}
+        self._self_marker_logged = {}
 
     @property
     def state(self) -> str:
@@ -1017,6 +1074,7 @@ class RegistrationAcquirer:
         self._verify_pending = 0
         self._marker_k_seen = None
         self._marker_k_holds = 0
+        self._clear_self_measure()
 
     def adopt(self, reg: Registration) -> None:
         """Adopt a sibling's (usually fused) plane as this channel's own.
@@ -1039,6 +1097,7 @@ class RegistrationAcquirer:
         self._buf.clear()
         self._bad_minutes = 0
         self._verify_pending = 0
+        self._clear_self_measure()
 
     # ── counter domain (Task 7) ────────────────────────────────────
     def note_counter_map(self, cmap: Optional[CounterMap]) -> None:
@@ -1421,6 +1480,9 @@ class RegistrationAcquirer:
         self._state = self.STATE_ACQUIRED
         self._bad_minutes = 0
         self._verify_pending = 0
+        # Task 9: the minutes that built this plane must not also check it.
+        self._clear_self_measure()
+        self._acq_minute = max(int(m) for _a, _l, _r, m in self._buf)
         # I2: the plane is held in the RTP frame from here on; three
         # promoted float64 minutes (35.7 MB) were kept for the life of the
         # process, and `offer_minute` short-circuits on ACQUIRED so they
@@ -1494,12 +1556,234 @@ class RegistrationAcquirer:
         self._open.clear()
         self._bad_minutes = 0
         self._verify_pending = 0
+        self._clear_self_measure()
+        if self._buf:
+            # Task 9: the buffered minutes chose this hypothesis.
+            self._acq_minute = max(int(m) for _a, _l, _r, m in self._buf)
         self._buf.clear()  # I2: see _try_acquire
         logger.info(
             f"[{self.channel}] ACQUIRED via sibling {sibling.channel}: "
             f"hypothesis {h.assignments[0][0]} agrees within {abs(frac)*1000:.2f} ms"
         )
         return self._reg
+
+    # ── self-measurement (Task 9) ──────────────────────────────────
+    def measure_minute(
+        self,
+        audio: np.ndarray,
+        start_rtp: int,
+        minute_utc: int,
+        expected_delays_s: Dict[str, float],
+    ) -> Dict[str, MinuteArrival]:
+        """Measure the held plane against this channel's own ticks and
+        minute marker, never against another tier's labels ("T3 stands
+        alone", Task 9).
+
+        Folds this minute's band envelopes on the held plane (``label =
+        registration.sample0_utc_for(start_rtp)``), adds each band's profile
+        to a rolling history of up to ``SELF_FOLD_MINUTES`` minutes, finds
+        the peaks, and gives each station its peak position minus its
+        expected delay, wrapped to ±500 ms.  A positive residual means the
+        plane labels the tick late, the sign of
+        ``TickEdgeDetector.timing_error_ms``, which ``corroborate``
+        subtracts.
+
+        Ticks repeat every second, so no fold can see a plane that is off
+        by a whole second.  The minute marker, searched on the same plane,
+        can.  A whole second the marker implies on two consecutive minutes,
+        at ``MARKER_INT_SECOND_MIN_SNR_DB`` or better and no larger than
+        ``MARKER_INT_SECOND_MAX_K``, becomes 1000 ms per second on that
+        station's residual, so ``verify`` rejects and ``corroborate``
+        resets.  The marker never moves the plane here: expose, never
+        correct.  A marker that disagrees logs one WARNING per episode.
+
+        Returns {} while no plane is held, and for any minute at or before
+        the last one the acquisition folded: those minutes built the plane
+        and would only agree with it."""
+        if self._reg is None or self._state != self.STATE_ACQUIRED:
+            return {}
+        m = int(minute_utc)
+        sr = self.sample_rate
+        audio = np.asarray(audio, dtype=np.float64)
+        start_rtp = int(start_rtp) & 0xFFFFFFFF
+        runup = self._runup_for(start_rtp)
+        # Keep this minute's tail even when the minute itself goes
+        # unmeasured, so the first measured minute has its marker run-up.
+        keep = int(SELF_TAIL_KEEP_S * sr)
+        tail = audio[-keep:].copy()
+        self._self_tail = (tail, (start_rtp + len(audio) - len(tail)) & 0xFFFFFFFF)
+        if self._acq_minute is not None and m <= self._acq_minute:
+            return {}
+        n_run = len(runup)
+        full = np.concatenate([runup, audio]) if n_run else audio
+        label0 = self._reg.sample0_utc_for((start_rtp - n_run) & 0xFFFFFFFF)
+        envelopes = band_envelopes(full, sr)
+        n_full = len(full)
+        del full
+        offset_s = n_run / sr
+        n_seconds = len(audio) // sr
+
+        # Fold EVERY band, as acquisition does: a 1200 Hz tick leaks into
+        # the 1000 Hz band and only the comparison recognises the leak.
+        by_band: Dict[str, List[FoldPeak]] = {}
+        for band, env in envelopes.items():
+            profile, rows = fold_envelope(env, sr, label0, n_seconds, offset_s)
+            hist = [
+                h
+                for h in self._fold_history.get(band, [])
+                if 0 < m - h[0] < SELF_FOLD_MINUTES * 60
+            ]
+            if rows:
+                hist.append((m, profile, rows))
+            self._fold_history[band] = hist
+            total = sum(r for _m, _p, r in hist)
+            if total == 0:
+                continue
+            acc = sum(p * r for _m, p, r in hist) / total
+            by_band[band] = find_fold_peaks(acc, sr, band)
+        peaks = arbitrate_bands(by_band)
+
+        # Each peak reads as at most one station, nearest first, so a WWV
+        # tick cannot also answer for BPM on a shared channel.  BPM takes
+        # its own peak and then drops out (NON_REGISTERING_STATIONS).
+        pairs = []
+        for s, d in expected_delays_s.items():
+            band = BAND_OF_STATION.get(s)
+            if band is None:
+                continue
+            for i, p in enumerate(peaks):
+                if p.band == band:
+                    pairs.append((abs(wrap_half_second(p.position_s - d)), s, i))
+        pairs.sort()
+        chosen: Dict[str, FoldPeak] = {}
+        used = set()
+        for _dist, s, i in pairs:
+            if s in chosen or i in used:
+                continue
+            chosen[s] = peaks[i]
+            used.add(i)
+
+        # The first full label second of THIS minute's audio, for arrival_rtp.
+        lbl_audio0 = label0 + offset_s
+        i0 = int(round((math.ceil(lbl_audio0) - lbl_audio0) * sr))
+        out: Dict[str, MinuteArrival] = {}
+        for s, p in chosen.items():
+            if s in NON_REGISTERING_STATIONS:
+                continue
+            d = float(expected_delays_s[s])
+            r_s = wrap_half_second(p.position_s - d)
+            k = self._confirmed_whole_second(
+                s, envelopes.get(p.band), label0, n_full, m, d, r_s
+            )
+            out[s] = MinuteArrival(
+                station=s,
+                residual_ms=r_s * 1000.0 - 1000.0 * k,
+                sigma_ms=_sigma_ms_from_snr(p.snr_db),
+                arrival_rtp=float((start_rtp + i0 + p.position_s * sr) % 2**32),
+                fold_snr_db=p.snr_db,
+            )
+        return out
+
+    def _runup_for(self, start_rtp: int) -> np.ndarray:
+        """Up to ``SELF_RUNUP_S`` of the previous minute's audio that
+        immediately precedes ``start_rtp`` in this channel's counter, or
+        nothing when the previous minute does not reach it."""
+        if self._self_tail is None:
+            return np.zeros(0)
+        tail, tail_start = self._self_tail
+        d = (int(start_rtp) - int(tail_start)) & 0xFFFFFFFF
+        if d >= 2**31:
+            d -= 2**32
+        if d <= 0 or d > len(tail):
+            return np.zeros(0)
+        return tail[max(0, d - int(SELF_RUNUP_S * self.sample_rate)) : d]
+
+    def _confirmed_whole_second(
+        self,
+        station: str,
+        env: Optional[np.ndarray],
+        label0: float,
+        n_samples: int,
+        minute_utc: int,
+        delay_s: float,
+        residual_s: float,
+    ) -> int:
+        """The whole second the minute marker says the held plane sits
+        off, once two consecutive minutes confirm it; else 0.
+
+        ``whole_second_from_marker`` cannot serve here.  It guards
+        ACQUISITION, where its unwrapped agreement test refuses a marker
+        that stands a whole second from the fold, so that nothing moves
+        the plane by a second.  On a held plane that marker is exactly
+        the fault to expose.  So agreement here is fractional (the marker
+        stands on this station's ticks), and the same SNR, magnitude and
+        two-minute bars govern the whole second it implies."""
+        if station not in MARKER_STATIONS or env is None:
+            return 0
+        sr = self.sample_rate
+        first_min = int(math.ceil(label0 / 60.0)) * 60
+        last_label = label0 + n_samples / sr
+        candidates = [minute_utc] + [
+            mm for mm in range(first_min, int(last_label) + 1, 60) if mm != minute_utc
+        ]
+        mk = None
+        for mm in candidates:
+            mk = marker_in_envelope(env, sr, label0, mm)
+            if mk is not None:
+                break
+        if mk is None:
+            return 0
+        mk_off, mk_snr = mk
+        predicted_s = delay_s + residual_s
+        miss_ms = wrap_half_second(mk_off - predicted_s) * 1000.0
+        if abs(miss_ms) > MARKER_HYPOTHESIS_AGREE_MS:
+            self._self_marker_k.pop(station, None)
+            self._log_marker_once(
+                station,
+                "off_ticks",
+                f"[{self.channel}] minute marker at {mk_off * 1000:+.1f} ms "
+                f"(SNR {mk_snr:.1f} dB) does not stand on {station}'s ticks "
+                f"on the held plane ({predicted_s * 1000:+.1f} ms, "
+                f"{miss_ms:+.1f} ms off); ignored, never applied",
+            )
+            return 0
+        k = integer_second_correction(mk_off, delay_s, -residual_s)
+        prev = self._self_marker_k.get(station)
+        self._self_marker_k[station] = (minute_utc, k)
+        if k == 0:
+            self._self_marker_logged.pop(station, None)
+            return 0
+        confirmed = prev is not None and prev == (minute_utc - 60, k)
+        if not (float(mk_snr) >= MARKER_INT_SECOND_MIN_SNR_DB):
+            why = f"SNR {mk_snr:.1f} dB under {MARKER_INT_SECOND_MIN_SNR_DB:.0f} dB"
+        elif abs(k) > MARKER_INT_SECOND_MAX_K:
+            why = f"more than {MARKER_INT_SECOND_MAX_K} s"
+        elif not confirmed:
+            why = "awaiting a second consecutive minute"
+        else:
+            why = ""
+        self._log_marker_once(
+            station,
+            "whole_second",
+            f"[{self.channel}] minute marker at {mk_off * 1000:+.1f} ms "
+            f"(SNR {mk_snr:.1f} dB) puts the held plane a whole second off ({-k:+d} s) on "
+            f"{station}'s ticks; reported as a {-1000 * k:+.0f} ms residual "
+            f"once two consecutive minutes agree, never applied"
+            + (f" ({why})" if why else ""),
+        )
+        if why:
+            return 0
+        logger.info(
+            f"[{self.channel}] minute marker confirms the held plane "
+            f"{-k:+d} s off on {station}: residual {-1000 * k:+.0f} ms"
+        )
+        return k
+
+    def _log_marker_once(self, station: str, kind: str, msg: str) -> None:
+        """One WARNING per disagreement episode (expose, loudly, once)."""
+        if self._self_marker_logged.get(station) != kind:
+            self._self_marker_logged[station] = kind
+            logger.warning(msg)
 
     # ── verification ───────────────────────────────────────────────
     def verify(self, residuals_ms: Dict[str, Tuple[float, float]]) -> str:
