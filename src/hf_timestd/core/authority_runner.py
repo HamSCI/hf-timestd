@@ -31,6 +31,7 @@ from hf_timestd.core.chrony_tracking_probe import (
 from hf_timestd.core.fusion_status_probe import FusionStatusProbe
 from hf_timestd.core.gpsdo_probe import GpsdoProbe
 from hf_timestd.core.lbe_t5_direct_probe import LbeT5DirectProbe
+from hf_timestd.core.t3_shadow_record import T3ShadowRecord
 from hf_timestd.io.authority_snapshot_store import AuthoritySnapshotStore
 
 log = logging.getLogger(__name__)
@@ -406,6 +407,28 @@ def build_authority_runner_from_config(
             )
             snapshot_store = None
 
+    # Task 15 — the per-minute T3 shadow row.  Same table and defaults as
+    # metrology's broadcast rows (Task 13), so both streams land in one
+    # directory.  Built here, written nowhere until the first tick: the
+    # record creates its directory on first append, as the service user
+    # (timestd owns /var/lib/timestd on stations).
+    t3_shadow_record = None
+    t3s_cfg = {"enabled": True, "directory": str(T3ShadowRecord.DEFAULT_DIR),
+               "retention_days": 14,
+               **(_timing.get("t3_shadow") if isinstance(_timing.get("t3_shadow"), dict) else {})}
+    if bool(t3s_cfg["enabled"]):
+        try:
+            t3_shadow_record = T3ShadowRecord(
+                "minutes", Path(t3s_cfg["directory"]),
+                int(t3s_cfg["retention_days"]))
+        except Exception as exc:  # noqa: BLE001 -- a bad table must not cost the authority
+            log.error("[timing.t3_shadow] unusable (%s): no T3 minute rows", exc)
+    else:
+        log.info("[timing.t3_shadow] enabled=false: no T3 minute rows")
+    _judge_cfg = _timing.get("offset_judge") if isinstance(_timing.get("offset_judge"), dict) else {}
+    judge_status_path = Path(
+        _judge_cfg.get("publish_path") or "/run/hf-timestd/offset_judge.json")
+
     # Phase 2C — demote-on-breach ON by default: when T6's drift monitor
     # reports a sustained anchor breach (its SHM feed would mislead
     # chrony), hand the active cycle to T5. Opt out with
@@ -468,5 +491,7 @@ def build_authority_runner_from_config(
         host_clock_fault_ms=host_clock_fault_ms,
         host_clock_rate_suspect_ppm=host_clock_rate_suspect_ppm,
         host_clock_alarm_repeat_sec=host_clock_alarm_repeat_sec,
+        t3_shadow_record=t3_shadow_record,
+        judge_status_path=judge_status_path,
     )
     return AuthorityRunner(manager=manager, interval_sec=interval_sec)

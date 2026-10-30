@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from hf_timestd.io.authority_snapshot_store import AuthoritySnapshotStore
     from hf_timestd.core.frontend_probe import FrontendProbe
     from hf_timestd.core.registration_store import RegistrationStore
+    from hf_timestd.core.t3_shadow_record import T3ShadowRecord
 
 log = logging.getLogger(__name__)
 
@@ -291,8 +292,28 @@ class AuthorityManager:
         host_clock_fault_ms: float = HOST_CLOCK_DEFAULT_FAULT_MS,
         host_clock_rate_suspect_ppm: float = HOST_CLOCK_DEFAULT_RATE_SUSPECT_PPM,
         host_clock_alarm_repeat_sec: float = 3600.0,
+        t3_shadow_record: Optional["T3ShadowRecord"] = None,
+        judge_status_path: Path = Path("/run/hf-timestd/offset_judge.json"),
+        registration_store: Optional["RegistrationStore"] = None,
     ):
         self.probes = list(probes)
+        # Task 15: the per-minute T3 shadow row (stream ``minutes``).  None =
+        # no rows and no station transition counter.  ``judge_status_path``
+        # is the offset judge's publication, read once per minute row for its
+        # ``t3_shadow`` block and T3 shadow residual.  ``registration_store``
+        # supplies the summary's detail fields (waiting, n_minutes, ...) that
+        # authority.json's registration block does not carry; None builds the
+        # default store on first use.
+        self.t3_shadow_record = t3_shadow_record
+        self.judge_status_path = Path(judge_status_path)
+        self._registration_store = registration_store
+        self._t3_station_transitions = None
+        if t3_shadow_record is not None:
+            from hf_timestd.core.state_transition_counter import (
+                StateTransitionCounter,
+            )
+            self._t3_station_transitions = StateTransitionCounter("station")
+        self._t3_shadow_last_minute: Optional[int] = None
         # Host-clock integrity (host_clock_integrity.py).  Three witnesses
         # feed one verdict: the cross-check's own sysclock-vs-rtp pair
         # numbers, the LB-1421 host-versus-GPS gap riding in T5's detail,
@@ -447,8 +468,147 @@ class AuthorityManager:
         state.t3_unavailable_reason = self._note_t3(results)
         self._write_state(state)
         self._write_snapshot(state, results)
+        self._write_t3_shadow_minute(state, results)
         self._apply_mdns_advertiser(state)
         return state
+
+    def _write_t3_shadow_minute(
+        self,
+        state: AuthorityState,
+        results: Dict[str, ProbeResult],
+    ) -> None:
+        """Task 15: one ``minute`` row per UTC minute, plus station-level
+        T3 transition rows, into the ``minutes`` shadow stream.
+
+        The station counter watches the published registration state on
+        EVERY tick, so a change and its reversal between two minute rows
+        still count.  The row itself goes out on the first tick of each
+        new minute: it reads the judge file once and appends once.
+
+        The minute comes from ``now_fn``.  In production that is the host
+        clock (``datetime.now``), and that is acceptable here only because
+        the value is a record stamp: it names the row (``utc_minute``), its
+        day file, and the transition counter's log window, and it enters no
+        timing arithmetic.  Nothing computed from it reaches authority.json,
+        the snapshot, chrony or any tier decision.  A host-clock step at
+        worst repeats or skips one row.
+
+        Never raises: the record is diagnostic, and the tick has already
+        published authority.json.
+        """
+        if self.t3_shadow_record is None:
+            return
+        try:
+            # Record stamp only -- see the docstring.
+            utc_minute = int(self.now_fn().timestamp()) // 60 * 60
+            reg = self._published_registration
+            counter = self._t3_station_transitions
+            if counter is not None and isinstance(reg, dict):
+                t_row = counter.observe(
+                    str(reg.get("state")),
+                    f"published registration, source {reg.get('source')}",
+                    utc_minute)
+                if t_row is not None:
+                    self.t3_shadow_record.append(t_row)
+            if utc_minute == self._t3_shadow_last_minute:
+                return
+            self._t3_shadow_last_minute = utc_minute
+            self.t3_shadow_record.append(
+                self._t3_shadow_minute_row(state, results, utc_minute))
+        except Exception as exc:  # noqa: BLE001 -- diagnostic only
+            log.debug("T3 shadow minute row failed: %r", exc)
+
+    def _t3_shadow_minute_row(
+        self,
+        state: AuthorityState,
+        results: Dict[str, ProbeResult],
+        utc_minute: int,
+    ) -> Dict[str, Any]:
+        reg = self._published_registration if isinstance(
+            self._published_registration, dict) else {}
+        summary = self._read_registration_summary() or {}
+        judge = self._read_judge_status() or {}
+        t3_shadow = judge.get("t3_shadow")
+        residuals = judge.get("shadow_residuals")
+        t3_vs_adopted = (residuals.get("T3")
+                         if isinstance(residuals, dict) else None)
+
+        def offset(level: str) -> Optional[float]:
+            r = results.get(level)
+            v = None if r is None else r.offset_ms
+            if not isinstance(v, (int, float)) or isinstance(v, bool):
+                return None
+            # A NaN would fail the whole row (strict JSON); null keeps it.
+            return float(v) if math.isfinite(v) else None
+
+        def frame(level: str) -> Optional[str]:
+            r = results.get(level)
+            return None if r is None or r.offset_ms is None else r.frame
+
+        counter = self._t3_station_transitions
+        return {
+            "kind": "minute",
+            "utc_minute": utc_minute,
+            # T3's registration as this tick published it (authority.json's
+            # block), with the summary's detail fields beside it.
+            "t3": {
+                "state": reg.get("state"),
+                "sigma_ms": reg.get("sigma_ms"),
+                "contributing": reg.get("contributing"),
+                "waiting": summary.get("waiting"),
+                "n_minutes": summary.get("n_minutes"),
+                "verified": summary.get("verified"),
+                "whole_second_unresolved": summary.get(
+                    "whole_second_unresolved"),
+                "rtp_domain": summary.get("rtp_domain"),
+                "counter_epoch_id": reg.get("counter_epoch_id"),
+            },
+            "t3_shadow": t3_shadow if isinstance(t3_shadow, dict) else None,
+            "t3_vs_adopted": (t3_vs_adopted
+                              if isinstance(t3_vs_adopted, dict) else None),
+            # All three offsets come from THIS tick's probe results, so T2
+            # and T4 describe the same instant.  Sign conventions, raw:
+            #   t6: BpskPpsProbe local_minus_source_ns / 1e6 -- the anchor's
+            #       label of the PPS edge minus the GPS second it marks
+            #       (frame "rtp"; host-clock-independent).
+            #   t4, t2: ChronyTrackingProbe, chrony's last-sample offset for
+            #       the source, local clock minus source (frame "sysclock").
+            # T4 and T2 share one convention, so T2's error against T4 as
+            # truth is t2_offset_ms - t4_offset_ms.  ``offset_frames`` names
+            # each probe's frame in the row itself.
+            "t6_offset_ms": offset("T6"),
+            "t4_offset_ms": offset("T4"),
+            "t2_offset_ms": offset("T2"),
+            "offset_frames": {"t6": frame("T6"), "t4": frame("T4"),
+                              "t2": frame("T2")},
+            "host_clock_verdict": (state.host_clock or {}).get("verdict"),
+            "t3_transitions_total": (counter.count
+                                     if counter is not None else None),
+        }
+
+    def _read_registration_summary(self) -> Optional[dict]:
+        """The T3 summary, read once for the minute row.  None on any
+        failure."""
+        try:
+            if self._registration_store is None:
+                from hf_timestd.core.registration_store import (
+                    RegistrationStore as _RegistrationStore,
+                )
+                self._registration_store = _RegistrationStore()
+            s = self._registration_store.read_summary()
+            return s if isinstance(s, dict) else None
+        except Exception as exc:  # noqa: BLE001
+            log.debug("T3 shadow: registration summary unreadable: %r", exc)
+            return None
+
+    def _read_judge_status(self) -> Optional[dict]:
+        """offset_judge.json, read once.  None when missing or malformed."""
+        try:
+            d = json.loads(self.judge_status_path.read_text(encoding="utf-8"))
+            return d if isinstance(d, dict) else None
+        except Exception as exc:  # noqa: BLE001
+            log.debug("T3 shadow: judge status unreadable: %r", exc)
+            return None
 
     def _apply_mdns_advertiser(self, state: AuthorityState) -> None:
         """Let the mDNS advertiser react to the current state. Publish /

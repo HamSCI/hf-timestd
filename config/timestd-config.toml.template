@@ -326,6 +326,23 @@ enabled = true
 [timing.registration]
 anchor_closure = false
 
+# === T3 shadow record ===
+# Small JSONL rows, one file per stream per UTC day, kept for retention_days:
+#   minutes-<day>.jsonl            one row a minute from the authority manager:
+#                                  T3's registration state, the judge's T3-vs-T6
+#                                  block, T3's residual against the adopted
+#                                  bench, the T6/T4/T2 offsets from one tick,
+#                                  the host-clock verdict, and T3 state changes
+#   broadcasts-<channel>-<day>.jsonl  one row per measured broadcast per minute
+#                                  from metrology, plus channel state changes
+# The station only writes these rows; no analysis runs on the station.  Copy
+# the directory off and analyse it elsewhere.  Nothing here feeds chrony or
+# any tier decision.
+[timing.t3_shadow]
+enabled = true
+directory = "/var/lib/timestd/t3_shadow"
+retention_days = 14
+
 [timing.provenance]
 # measurand_plane = "antenna_terminals"
 # calibration_plane = "ts1_injection_point"
