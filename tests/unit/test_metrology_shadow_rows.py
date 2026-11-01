@@ -176,3 +176,35 @@ def test_fractional_rtp_counts_input_samples_between_outputs(tmp_path):
     assert got == pytest.approx(
         _OWN_MAP.input_index(x) + 0.5 * _OWN_MAP.ilen / _OWN_MAP.olen, abs=1e-6)
     assert got != pytest.approx(_OWN_MAP.input_index(x), abs=1.0)
+
+
+def test_a_held_out_station_is_named_in_its_rows(tmp_path, monkeypatch):
+    """Fix 2: a station corroborate held out of the mean appears in the
+    minute's rows with its residual, and its row counts its hold-outs."""
+    svc = _shadow_service(tmp_path)
+    for k in range(3):
+        _minute(svc, k, audio=_ticks(k, marker=False))
+    assert svc.acquirer.registration.verified
+
+    real = svc.acquirer.corroborate
+
+    def with_far_wwvh(res):
+        return real({**res, "WWVH": (-403.9, 3.0)})
+
+    monkeypatch.setattr(svc.acquirer, "corroborate", with_far_wwvh)
+    _minute(svc, 3, audio=_ticks(3, marker=False))
+    rows = [r for r in _rows(tmp_path)
+            if r["kind"] == "broadcast" and r["utc_minute"] == MIN + 180]
+    assert rows and all(r["held_out"] == {"WWVH": -403.9} for r in rows)
+    assert all(r["held_out_count"] == 0 for r in rows if r["station"] == "WWV")
+    ch = json.loads((tmp_path / "reg" / "SHARED_10000.json").read_text())
+    assert ch["held_out"] == {"WWVH": -403.9}
+    _minute(svc, 4, audio=_ticks(4, marker=False))
+    rows = [r for r in _rows(tmp_path)
+            if r["kind"] == "broadcast" and r["utc_minute"] == MIN + 240]
+    assert rows and all(r["held_out"] == {"WWVH": -403.9} for r in rows)
+    monkeypatch.setattr(svc.acquirer, "corroborate", real)
+    _minute(svc, 5, audio=_ticks(5, marker=False))
+    rows = [r for r in _rows(tmp_path)
+            if r["kind"] == "broadcast" and r["utc_minute"] == MIN + 300]
+    assert rows and all(r["held_out"] == {} for r in rows)

@@ -857,6 +857,12 @@ class MetrologyService:
             "iono_giro": prediction["iono_giro"],
             "iono_source_raw": det.get("iono_source_raw"),
             "t3_state": getattr(self, "_shadow_state", None),
+            # Fix 2: every station corroborate held out of this minute's
+            # mean, with its residual (ms); and how many minutes this row's
+            # station has been held out in this process.
+            "held_out": dict(getattr(self, "_last_held_out", None) or {}),
+            "held_out_count": int(
+                getattr(self.acquirer, "held_out_counts", {}).get(station, 0)),
             # MinuteArrival.arrival_rtp lives in this channel's own counter.
             "rtp_domain": self.channel_name,
             # Room for more than one model (a PHaRLAP ray trace, later);
@@ -1362,6 +1368,9 @@ class MetrologyService:
             self.acquirer.verify(res)
         else:
             self.acquirer.corroborate(res)
+            # Fix 2: the stations held out of this minute's mean, named
+            # with their residuals in the shadow rows and the channel file.
+            self._last_held_out = dict(self.acquirer.last_held_out)
 
     def _apply_registration_unsafe(self, buffer_timing, iq_samples: np.ndarray,
                                    start_rtp: int, minute_utc: int,
@@ -1371,6 +1380,7 @@ class MetrologyService:
         # this channel's own fold and marker, and treats T6, where T6
         # governs, as a recorded diagnostic only.
         self._last_arrivals = {}
+        self._last_held_out = {}
         t6_authoritative = self._t6_authoritative(buffer_timing)
         raw = self._raw_label(metadata, int(start_rtp))
         if raw is None:
@@ -1742,7 +1752,8 @@ class MetrologyService:
             self.reg_store.write_channel(current, state, {
                 "label_sample0_utc": label_s0,
                 "correction_ms": None if residual_ms is None else round(residual_ms, 3),
-                "dropped": dropped, "summary_left_to": left_to})
+                "dropped": dropped, "summary_left_to": left_to,
+                "held_out": dict(getattr(self, "_last_held_out", None) or {})})
         else:
             self.reg_store.write_channel(
                 Registration(counter_epoch_id=epoch, rtp_ref=0, utc_ref=0.0,

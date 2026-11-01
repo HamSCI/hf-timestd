@@ -1066,6 +1066,13 @@ class RegistrationAcquirer:
         self._acq_minute: Optional[int] = None
         self._self_marker_k: Dict[str, Tuple[int, int]] = {}
         self._self_marker_logged: Dict[str, str] = {}
+        # Fix 2 (B4 shadow record, 2026-11-01): the stations ``corroborate``
+        # held out of this minute's mean, with their residuals (ms); how
+        # many minutes each has been held out in this process; and the
+        # stations inside a hold-out episode, for one log line each way.
+        self.last_held_out: Dict[str, float] = {}
+        self.held_out_counts: Dict[str, int] = {}
+        self._held_out_logged: Dict[str, float] = {}
 
     def _clear_self_measure(self) -> None:
         """Forget every minute measured on the plane being retired: a fold
@@ -2098,6 +2105,7 @@ class RegistrationAcquirer:
         per minute and the effective memory was about five minutes -- short
         enough to follow the ionosphere's path-delay wander into the
         origin, which is spec §10's last risk row."""
+        self.last_held_out = {}
         if self._reg is None:
             return "held"
         if not self._reg.verified:
@@ -2133,13 +2141,22 @@ class RegistrationAcquirer:
                 return "reacquire"
             return "held"
         self._bad_minutes = 0
+        # Fix 2 (B4 shadow record, 2026-11-01 06:16Z, SHARED_5000): a lone
+        # far station among agreeing ones is neither acted on above nor
+        # evidence for the plane.  It used to JOIN the mean: a 13.7 dB WWVH
+        # fold peak at -403.9 ms, weight ~0.11 against n = 2, moved the
+        # plane +13.9 ms.  Average only the stations that agree with the
+        # held plane, and never blend two sites into one correction unless
+        # they agree with each other within CROSS_SITE_AGREE_MS.
+        near = self._agreeing(good, thr)
+        self._note_held_out({s: good[s][0] for s in good if s not in near}, near)
         # slow filter: running weighted mean with long memory (the true origin
         # is constant on the GPSDO; this is a smoother, not a tracker)
         w_new = sum(
-            1.0 / max(sig, ORIGIN_SIGMA_FLOOR_MS) ** 2 for _, sig in good.values()
+            1.0 / max(sig, ORIGIN_SIGMA_FLOOR_MS) ** 2 for _, sig in near.values()
         )
         e_new = (
-            sum(e / max(sig, ORIGIN_SIGMA_FLOOR_MS) ** 2 for e, sig in good.values())
+            sum(e / max(sig, ORIGIN_SIGMA_FLOOR_MS) ** 2 for e, sig in near.values())
             / w_new
         )
         n = min(self._reg.n_minutes, self.FILTER_MEMORY_MINUTES)
@@ -2160,3 +2177,45 @@ class RegistrationAcquirer:
             max(ORIGIN_SIGMA_FLOOR_MS, min(self._reg.sigma_ms, new_sigma))
         )
         return "tightened"
+
+    @staticmethod
+    def _agreeing(good: Dict[str, Tuple[float, float]], thr_ms: float
+                  ) -> Dict[str, Tuple[float, float]]:
+        """The stations whose residual may enter this minute's mean.
+
+        First, only those within ``thr_ms`` of the held plane.  Then one
+        site's correction never blends with another's unless the two agree
+        within ``CROSS_SITE_AGREE_MS``: the station nearest the held plane
+        anchors the set, and a station of another site joins only when it
+        agrees with that one.  Each station of one channel comes from its
+        own site (WWV Fort Collins, WWVH Kauai; BPM never reaches here), so
+        a station name stands for its site.  ``corroborate`` only calls
+        this with at least one station inside ``thr_ms``."""
+        near = {s: r for s, r in good.items() if abs(r[0]) <= thr_ms}
+        if len(near) < 2:
+            return near
+        anchor = min(near, key=lambda s: (abs(near[s][0]), s))
+        e0 = near[anchor][0]
+        return {s: r for s, r in near.items()
+                if s == anchor or abs(r[0] - e0) <= CROSS_SITE_AGREE_MS}
+
+    def _note_held_out(self, held: Dict[str, float], joined) -> None:
+        """Record this minute's held-out stations, count them, and log each
+        station's hold-out once on entry and once on exit (expose, never
+        silently correct).  The episode ends when the station enters the
+        mean again (``joined``); a minute that did not measure it ends
+        nothing."""
+        self.last_held_out = {s: round(float(e), 3) for s, e in held.items()}
+        for s, e in held.items():
+            self.held_out_counts[s] = self.held_out_counts.get(s, 0) + 1
+            if s not in self._held_out_logged:
+                self._held_out_logged[s] = e
+                logger.info(
+                    f"[{self.channel}] {s} held out of corroboration: residual "
+                    f"{e:+.1f} ms disagrees with the held plane or with the "
+                    f"station that corroborates it")
+        for s in [s for s in self._held_out_logged if s in joined]:
+            del self._held_out_logged[s]
+            logger.info(
+                f"[{self.channel}] {s} corroborates again after "
+                f"{self.held_out_counts.get(s, 0)} held-out minute(s) in all")
