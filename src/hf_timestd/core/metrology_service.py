@@ -876,22 +876,66 @@ class MetrologyService:
         return cmap.input_index(int(whole) % 2**32) + (
             float(arrival_rtp) - whole) * cmap.ilen / cmap.olen
 
-    def _t6_authoritative(self, buffer_timing) -> bool:
-        """Is T6 the active timing authority right now?
+    # Consecutive once-a-minute reads without T6 before T3 leaves the T6
+    # path.  The authority manager ticks every 30 s and re-picks T6 only
+    # after ``upgrade_hysteresis`` = 3 available ticks, so ONE bad probe
+    # tick holds t_level_active off T6 for up to 90 s: the bad tick and
+    # the two after it.  A 90 s window holds at most two minute reads, so
+    # a third read without T6 means T6 really stayed away.  On B4
+    # (2026-10-31/11-01) such one-tick blinks at the 10-minute archive
+    # boundary sent every channel down the non-T6 path at once: 36 of 37
+    # WITNESS->ACQUIRED drops in the shadow record.
+    T6_ABSENT_READS_TO_LEAVE = 3
 
-        Preferred: ``buffer_timing.judge_tier`` (populated from a sidecar's
-        Offset Judge block -- Task 11's replay path, and any future direct
-        caller).  The live ring path never sets it, so fall back to reading
-        AuthorityManager's own publication."""
+    def _t6_authoritative(self, buffer_timing) -> bool:
+        """Is T6 the active timing authority right now, debounced?
+
+        The tier comes from ``buffer_timing.judge_tier`` when set (a
+        sidecar's Offset Judge block -- Task 11's replay path, and any
+        future direct caller); the live ring path never sets it, so it
+        falls back to reading AuthorityManager's own publication.
+
+        Leaving the T6 path waits for ``T6_ABSENT_READS_TO_LEAVE``
+        consecutive reads without T6; returning to it happens at once,
+        because the manager publishes T6 again only after its own upgrade
+        hysteresis, so a return is already debounced upstream.  The first
+        read of a process takes what it reads.  ``_t6_absent_reads`` counts
+        the current run of reads without T6, and rides in the T6 path's
+        summary so an absorbed blink stays visible."""
         tier = getattr(buffer_timing, "judge_tier", None)
         if tier is not None:
-            return tier == "T6"
-        try:
-            with open(self._AUTHORITY_JSON_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            return data.get("t_level_active") == "T6"
-        except Exception:
+            now_t6 = tier == "T6"
+        else:
+            try:
+                with open(self._AUTHORITY_JSON_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                now_t6 = data.get("t_level_active") == "T6"
+            except Exception:
+                now_t6 = False
+        on_path = getattr(self, "_t6_path", None)
+        if now_t6:
+            if on_path is False:
+                logger.info(f"[{self.channel_name}] T6 active again; T3 returns "
+                            f"to the T6 path")
+            self._t6_absent_reads = 0
+            self._t6_path = True
+            return True
+        if not on_path:
+            self._t6_absent_reads = 0
+            self._t6_path = False
             return False
+        self._t6_absent_reads = getattr(self, "_t6_absent_reads", 0) + 1
+        if self._t6_absent_reads < self.T6_ABSENT_READS_TO_LEAVE:
+            logger.debug(f"[{self.channel_name}] T6 absent from the authority "
+                         f"for {self._t6_absent_reads} read(s); T3 stays on the "
+                         f"T6 path")
+            return True
+        logger.info(
+            f"[{self.channel_name}] T6 absent from the authority for "
+            f"{self._t6_absent_reads} consecutive reads; T3 leaves the T6 path")
+        self._t6_absent_reads = 0
+        self._t6_path = False
+        return False
 
     # Minutes a map may disagree with the raw pair before the INFO line
     # becomes a WARNING.  The recorder refreshes maps every 60 s, so a
@@ -1434,7 +1478,8 @@ class MetrologyService:
         # Fix round 1 (I-1): every station runs the same orphan, CONFLICT
         # and stand-down logic below; T6 changes only which plane the
         # engine gets back and how a surviving plane is named.
-        t6_extra = ({"witness_of": "T6", "residual_vs_t6_ms": None}
+        t6_extra = ({"witness_of": "T6", "residual_vs_t6_ms": None,
+                     "t6_absent_reads": getattr(self, "_t6_absent_reads", 0)}
                     if t6_authoritative else None)
         if t6_authoritative:
             fallback = dataclasses.replace(buffer_timing, counter_epoch_id=epoch)
@@ -1605,6 +1650,8 @@ class MetrologyService:
                     "residual_vs_t6_ms": (
                         None if residual_vs_t6_ms is None else round(residual_vs_t6_ms, 3)
                     ),
+                    # Fix 5: reads without T6 the debounce absorbed so far.
+                    "t6_absent_reads": getattr(self, "_t6_absent_reads", 0),
                 },
             )
             return fallback

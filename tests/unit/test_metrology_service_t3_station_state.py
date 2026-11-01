@@ -146,3 +146,68 @@ def test_a_channel_withdraws_its_own_plane_from_the_summary(tmp_path):
     assert s["state"] == "BOOTSTRAP" and s["writer"] == "SHARED_10000"
     ch = json.loads((tmp_path / "reg" / "SHARED_10000.json").read_text())
     assert ch["summary_left_to"] is None
+
+
+# ── fix 5: one authority tick without T6 does not switch the path ────
+
+
+def _auth(tmp_path, svc):
+    path = tmp_path / "authority.json"
+    svc._AUTHORITY_JSON_PATH = path
+
+    def say(level):
+        path.write_text(json.dumps({"t_level_active": level}))
+    return say
+
+
+def test_t6_blinks_shorter_than_the_debounce_keep_the_t6_path(tmp_path):
+    """B4 shadow record: 36 of 37 WITNESS->ACQUIRED drops came from T6
+    leaving authority.json for one probe tick at a 10-minute archive
+    boundary.  The manager's upgrade hysteresis (3 ticks of 30 s) keeps
+    t_level_active off T6 for up to 90 s after one bad tick, so a
+    once-a-minute reader sees at most two consecutive reads without it.
+    Two such reads stay on the T6 path; the third switches."""
+    svc = _service(tmp_path)
+    say = _auth(tmp_path, svc)
+    bt = label_timing(T0, 0.0, SR)
+    say("T6")
+    assert svc._t6_authoritative(bt) is True
+    say("T4")
+    assert svc._t6_authoritative(bt) is True
+    assert svc._t6_authoritative(bt) is True
+    say("T6")
+    assert svc._t6_authoritative(bt) is True  # the blink ended: count resets
+    say("T4")
+    reads = [svc._t6_authoritative(bt) for _ in range(svc.T6_ABSENT_READS_TO_LEAVE)]
+    assert reads == [True] * (svc.T6_ABSENT_READS_TO_LEAVE - 1) + [False]
+    assert svc._t6_authoritative(bt) is False
+
+
+def test_t6_return_switches_back_at_once(tmp_path):
+    """The return needs no debounce here: the authority manager publishes
+    T6 again only after its own upgrade hysteresis."""
+    svc = _service(tmp_path)
+    say = _auth(tmp_path, svc)
+    bt = label_timing(T0, 0.0, SR)
+    say("T4")
+    assert svc._t6_authoritative(bt) is False  # startup takes what it reads
+    say("T6")
+    assert svc._t6_authoritative(bt) is True
+
+
+def test_a_t6_blink_keeps_the_station_witness(tmp_path):
+    """End to end: a verified WITNESS plane stays WITNESS through a
+    one-minute T6 blink, and the summary counts the absent read."""
+    svc = _service(tmp_path)
+    say = _auth(tmp_path, svc)
+    say("T6")
+    for k in (0, 1):
+        svc.apply_registration(label_timing(T0 + 60 * k, 0.0, SR), _ticks(k),
+                               1_000_000 + k * 60 * SR, MIN + 60 * k, _meta(k, 0.0))
+    assert svc.reg_store.read_summary()["state"] == "WITNESS"
+    say("T4")
+    svc.apply_registration(label_timing(T0 + 120, 0.0, SR), _ticks(2),
+                           1_000_000 + 120 * SR, MIN + 120, _meta(2, 0.0))
+    s = svc.reg_store.read_summary()
+    assert s["state"] == "WITNESS"
+    assert s["t6_absent_reads"] == 1
