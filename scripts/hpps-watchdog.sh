@@ -140,10 +140,10 @@ hpps_publishing() {
 
 # Does T6 report a refusal that a recorder restart cannot cure?
 #
-# T6 refuses to acquire when its edge implies a chain delay outside the
-# physical bound.  Before acquisition that value reads radiod's RTP
-# counter, and the counter outlives a recorder restart, so a restart
-# draws the same refusal.  On AC0G-ND 2026-10-27..31 this script
+# T6 refuses to acquire when the best placement of its edge falls outside
+# the physical bound.  Without T5 or a qualified T4 that placement rests on
+# radiod's RTP->UTC pair, which outlives a recorder restart, so a restart
+# meets the same refusal.  On AC0G-ND 2026-10-27..31 this script
 # restarted the recorder ~41 times a day for 4.5 days that way, curing
 # nothing and opening a data gap each time.  The recorder now publishes
 # the refusal in its status file with `acquisition_refusal_restart_cures`
@@ -164,10 +164,10 @@ incurable_refusal() {
     reason="$(grep -o '"acquisition_refusal_reason"[[:space:]]*:[[:space:]]*"[^"]*"' \
               "$RECORDER_STATUS_FILE" 2>/dev/null | head -1 \
               | sed 's/.*:[[:space:]]*"\([^"]*\)"/\1/')"
-    effective="$(grep -o '"acquisition_refusal_effective_ms"[[:space:]]*:[[:space:]]*[-0-9.]*' \
+    effective="$(grep -o '"acquisition_refusal_placement_ms"[[:space:]]*:[[:space:]]*[-0-9.]*' \
                  "$RECORDER_STATUS_FILE" 2>/dev/null | head -1 \
                  | sed 's/.*:[[:space:]]*//')"
-    printf '%s (implied chain delay %s ms)\n' "${reason:-unspecified}" "${effective:-?}"
+    printf '%s (edge placed %s ms from its second)\n' "${reason:-unspecified}" "${effective:-?}"
 }
 
 # The refusal is a persistent condition: say so once on entry, once on
@@ -220,7 +220,7 @@ main() {
     local refusal
     if refusal="$(incurable_refusal)"; then
         if [ ! -f "$REFUSAL_FILE" ]; then
-            log "HPPS dark (LastRx=${lastrx}s) because T6 refuses acquisition: ${refusal}.  A recorder restart keeps radiod's RTP counter and cannot cure this, so not restarting while the refusal stays current.  A radiod restart, a live T5 or a qualified T4 clears it; see the recorder journal.  Logged once; the exit is logged too."
+            log "HPPS dark (LastRx=${lastrx}s) because T6 refuses acquisition: ${refusal}.  A recorder restart keeps radiod's RTP->UTC pair and cannot cure this, so not restarting while the refusal stays current.  A radiod restart, a live T5 or a qualified T4 clears it; see the recorder journal.  Logged once; the exit is logged too."
             mkdir -p "$STATE_DIR" 2>/dev/null || true
             date -u +%s > "$REFUSAL_FILE" 2>/dev/null || true
         fi

@@ -90,7 +90,8 @@ def _recorder(named=NAMED_SECOND, battery=None):
     r = SimpleNamespace()
     for name in ("_t6_disambiguate_via_external_reference",
                  "_t6_evaluate_battery", "_t6_say_once",
-                 "_t6_reported_sigma_ms", "_t6_battery_forget_run"):
+                 "_t6_reported_sigma_ms", "_t6_battery_forget_run",
+                 "_t6_pre_acquisition_placement"):
         setattr(r, name, getattr(CoreRecorderV2, name).__get__(r))
     r.T6_REPEAT_PERIOD_SEC = CoreRecorderV2.T6_REPEAT_PERIOD_SEC
     r._t6_say_once_at = {}
@@ -101,6 +102,9 @@ def _recorder(named=NAMED_SECOND, battery=None):
         (lambda _rtp: None) if named is None else
         (lambda rtp: named + int(round((rtp - EDGE_RTP) / SR)))
     )
+    # The namer above stands in for a GPS second-namer's NMEA answer.
+    r._t6_naming_source = "nmea"
+    r._lb1421_probe = None
     r._t6_battery = battery or T6Battery(sample_rate=SR, fold_seconds=K)
     r._t6_last_verdict = None
     r._t6_disambiguation_ns = 0
@@ -143,7 +147,7 @@ def _wall_of(rtp, wall_error_sec=0.0):
 _KEEP = object()   # "caller said nothing", as distinct from "caller said None"
 
 
-def _feed_blocks(r, n=BLOCKS, result=_KEEP, **over):
+def _feed_blocks(r, n=BLOCKS, result=_KEEP, wall_error_sec=0.0, **over):
     """Fold blocks arriving at the fine stage's cadence.
 
     This is what the recorder does at `_t6_on_samples`: one estimate per
@@ -151,14 +155,21 @@ def _feed_blocks(r, n=BLOCKS, result=_KEEP, **over):
     fold apart.  Leaves `_t6_last_fine_est` on the last block, as the
     recorder does.  `result=None` models the matched filter unlocked --
     `_maybe_result` returns None unless it is locked WITH an estimate.
+
+    Criterion 7 places each edge through radiod's pair before acquisition
+    (`_t6_pre_acquisition_placement`), so the pair is mocked here as in
+    `_acquire`; `wall_error_sec` displaces it.
     """
     result = _result() if result is _KEEP else result
-    for _ in range(n):
-        i = r._fixture_next_block
-        r._fixture_next_block = i + 1
-        est = _estimate(EDGE_RTP + i * SR * K, **over)
-        r._t6_last_fine_est = est
-        r._t6_evaluate_battery(est, result)
+    with mock.patch("ka9q.rtp_recorder.rtp_to_utc",
+                    side_effect=lambda rtp, _ci: _wall_of(
+                        rtp, wall_error_sec)):
+        for _ in range(n):
+            i = r._fixture_next_block
+            r._fixture_next_block = i + 1
+            est = _estimate(EDGE_RTP + i * SR * K, **over)
+            r._t6_last_fine_est = est
+            r._t6_evaluate_battery(est, result)
 
 
 def _acquire(r, result=None, wall_error_sec=0.0, times=1):
@@ -526,11 +537,21 @@ class TestSigmaEvidence(unittest.TestCase):
         _acquire(r)
         self.assertIsNone(r._t6_native_anchor)
 
-    def test_no_chain_delay_measurement_fails_plausibility(self):
-        """result is None unless the MF is locked WITH an estimate."""
+    def test_no_placement_fails_plausibility(self):
+        """Nothing named the second, so nothing can place the edge in it.
+        Criterion 7 then has no evidence and fails -- it does not fall
+        back to the matched filter's raw counter phase."""
+        r = _recorder(named=None)
+        _feed_blocks(r)
+        self.assertIn("plausibility", r._t6_last_verdict.failures)
+        self.assertIsNone(r._t6_battery_plausibility_ref)
+
+    def test_an_unlocked_mf_does_not_starve_criterion_7(self):
+        """Before acquisition criterion 7 judges the fold's edge placed by
+        a reference, which needs no matched-filter estimate."""
         r = _recorder()
         _feed_blocks(r, result=None)
-        self.assertIn("plausibility", r._t6_last_verdict.failures)
+        self.assertNotIn("plausibility", r._t6_last_verdict.failures)
 
 
 class TestTheBatteryForgetsARepudiatedRun(unittest.TestCase):

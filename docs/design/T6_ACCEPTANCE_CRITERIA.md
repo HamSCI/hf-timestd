@@ -584,30 +584,42 @@ detector and the acceptance rule in one step, and a regression in either would
 then hide the other. That sequencing lesson belongs to
 `T6_FOLDED_SELF_ACQUISITION.md` §4, and it applies here unchanged.
 
-### 4.8 Criterion 7 before acquisition, and T4
+### 4.8 Criterion 7 before acquisition: a placement, never the counter phase
 
-Before acquisition no disambiguation exists, so criterion 7 judges the matched
-filter's raw chain delay. That value reads the edge's phase in radiod's RTP
-counter (`idx = rtp % sr`). It equals the chain delay only while radiod draws a
-counter origin near UTC, and a radiod start need not. On AC0G-ND, after an
-RX888 stall on 2026-10-27, each radiod start drew an origin 0.3–0.5 s off.
-Criterion 7 then judged −462.6, +438.4, −284.0 and +473.4 ms and refused every
-time. ND has no T5, so nothing else could place the edge, and the station ran
-on T4 for 4.5 days. Its T4, a LAN GPS + PPS server, held about 0.2 ms.
+Before acquisition no disambiguation exists. Criterion 7 used to judge the
+matched filter's raw chain delay then, and that value reads the edge's
+position in radiod's RTP counter (`idx = rtp % sr`). radiod draws the
+counter's origin afresh at each start, so the value equals the chain delay
+only by luck. AC0G-ND read −462.6, +438.4, −284.0 and +473.4 ms after an RX888
+stall on 2026-10-27, and WB6CXC-7 read 203.7, 430.0 and 341.1 ms on
+2026-11-01. Criterion 7 refused every one, though T6's labels, built by the
+authority from the named second, stayed right. ND ran on T4 for 4.5 days and
+WB6CXC-7 on T2.
 
-So when no T5 reading exists, a qualified T4 places the edge for criterion 7.
-The recorder pairs the T6 stream's latest arrival with the offset judge's
-chrony reading, as the T5 naming path pairs it with NMEA, and carries the
-counter to the edge. `t4_reference.py` decides whether the host qualifies:
-chrony must follow a LAN peer or local refclock (T4, never T2), hold at most
-1 ms (the judge's own disciplined-host bar in `label_plane.py`), sit at
-stratum 2 or better, and not follow HPPS or FUSE. The same placement backs
-up the acquisition path's ±250 ms check when radiod's RTP→UTC pair places
-the edge implausibly; there T4 must also name the second the cascade named.
-The arrival reads late by one transport latency, so a T4 placement carries
-the arrival-pairing floor (25 ms) in its sigma. That settles a ±250 ms
-question and nothing finer, and the T6 authority's own anchor supersedes the
-capture.
+Criterion 7 now judges the best placement of the fold's edge available, in
+this order (`_t6_pre_acquisition_placement`):
+
+1. **T5**: radiod's per-channel `(GPS_TIME, RTP_TIMESNAP)` pair against the
+   second T5's NMEA named, the residual the T5 path computes.
+2. **T4**, when it qualifies and no T5 reads: the recorder pairs the T6
+   stream's latest arrival with the offset judge's chrony reading, as the T5
+   naming path pairs it with NMEA. `t4_reference.py` sets the gates: chrony
+   must follow a LAN peer or local refclock (T4, never T2), hold at most 1 ms
+   (the judge's disciplined-host bar in `label_plane.py`), sit at stratum 2
+   or better, and not follow HPPS or FUSE. The arrival reads late by one
+   transport latency, so this placement carries the 25 ms arrival-pairing
+   floor in its sigma.
+3. **The named second with radiod's pair**: a GPS second-namer (`namer_pair`),
+   or failing one the pair's own naming (`radiod_pair`). The pair's GPS_TIME
+   read the host clock when radiod created the channel, so this placement
+   carries that clock's error then, plus the pair's slack.
+
+With none of these, criterion 7 gets NaN, the battery refuses, and the
+recorder says so once. The initial-accept guard judges only a placement a
+capture path committed. `t6_pps.acquisition_reference.battery_plausibility`
+records which reference criterion 7 judged, the placement and, for T4, the
+host's sigma and chrony reference; `placed_by` and `placement_t4` record what
+placed the accepted edge.
 
 The same T4 also names the second. ND's LBE-Mini publishes no PPS second, so
 its namer never answered and naming fell to radiod's pair. A pair 0.45 s off
@@ -620,11 +632,11 @@ the pair beyond 0.25 s once when it starts and once when it ends, and never
 lets it veto. The slip check against the previous anchor still follows every
 branch, and `t6_pps.naming_source` records which source named.
 
-With neither T5 nor a qualified T4, the raw phase stands and so does the
-refusal. The recorder then publishes it as `t6_pps.acquisition_refusal_*` in
-its status file, with `restart_cures` false: the counter belongs to radiod
-and outlives a recorder restart. hpps-watchdog reads that and stops
-restarting the recorder, which on ND had happened about 41 times a day.
+A placement past ±250 ms still refuses. The recorder then publishes it as
+`t6_pps.acquisition_refusal_*` in its status file, with `restart_cures`
+false: the pair belongs to radiod and outlives a recorder restart.
+hpps-watchdog reads that and stops restarting the recorder, which on ND had
+happened about 41 times a day.
 
 ---
 

@@ -150,6 +150,11 @@ def resolve_batch_rtp(quality, _warned=[False]):
 # delegates absolute resolution to the disambiguation logic here.
 _T6_PPS_PERIOD_NS = 1_000_000_000
 
+# Where in its second a PPS edge may fall and still be physical: the
+# TS-1 -> coax -> RX888 -> radiod chain spans milliseconds to ~150 ms
+# (docs/TSL3_COSTAS_DRIFT_2026-05-18.md, "Layer B").
+_T6_PLACEMENT_MAX_NS = 250_000_000
+
 
 def format_native_anchor_log(anchor, tier) -> str:
     """The one anchor-capture log shape, shared by every capture path.
@@ -281,7 +286,8 @@ def t6_refusal_status_keys(refusal: Optional[dict]) -> dict:
     refusal = refusal or {}
     return {f'acquisition_refusal_{k}': refusal.get(k)
             for k in ('reason', 'since_utc', 'duration_s', 'refusals',
-                      'effective_ms', 't4_reference', 'restart_cures')}
+                      'placement_ms', 'placed_by', 't4_reference',
+                      'restart_cures')}
 
 
 def wrap_chain_delay_ns(effective_ns: int) -> int:
@@ -4803,8 +4809,9 @@ class CoreRecorderV2:
             self._t6_rate_reset("native anchor captured via T5")
             # Provenance, same shape as the external-reference path's.
             self._t6_acquisition_reference = {
-                'placed_by': 'T5', 'anchor_tier': 'T5',
-                'battery_plausibility': None, 't4': None}
+                'second_named_by': 'nmea', 'placed_by': 'T5',
+                'anchor_tier': 'T5', 'battery_plausibility': None,
+                'placement_t4': None}
             # getattr'd: test harnesses borrow this method onto bare
             # fakes that have neither the helper nor a ledger.
             _led = getattr(self, '_t6_ledger_append', None)
@@ -4870,68 +4877,68 @@ class CoreRecorderV2:
                     sample_rate=int(self._t6_calibrator.sample_rate),
                     fold_seconds=int(est.n_seconds_folded),
                 )
-            # Criterion 7 wants the chain delay this edge implies, and
-            # before acquisition no disambiguated value exists — the anchor
-            # that would carry one is the thing the battery is being asked
-            # to authorise.  So hand over the best measurement that DOES
-            # exist, in order of preference:
+            # Criterion 7 wants where in its second this edge fell.  Two
+            # cases, and neither ever reads radiod's raw counter phase:
             #
-            #   1. the calibrator's current raw delay plus whatever
-            #      disambiguation is already committed (``result`` is None
-            #      unless the MF is locked WITH an estimate — see
-            #      ``BpskPpsCalibratorMF._maybe_result``);
-            #   2. the last accepted effective delay, if one was ever
-            #      accepted;
-            #   3. NaN.
+            #   * Before acquisition (the gate open): the best PLACEMENT
+            #     available -- T5, then a qualified T4, then the named
+            #     second with radiod's per-channel pair.  See
+            #     ``_t6_pre_acquisition_placement``.  With none, NaN, and
+            #     the refusal stands and says so.
+            #   * After acquisition: the raw delay plus the committed
+            #     disambiguation, which IS a placement (the one acquisition
+            #     accepted), or the last accepted one when the MF has no
+            #     estimate this block.
             #
-            # ⚠ In case 1 before first acquisition the disambiguation term
-            # is still zero, so criterion 7 is judging the matched filter's
-            # RAW estimate, not the effective delay the acquisition path
-            # guards.  That is a different number and a weaker claim.  It is
-            # still the right question — a raw delay past ±250 ms is a
-            # phantom either way — and both bounds must clear before an
-            # anchor is captured, because the ±250 ms guard in the
-            # acquisition path tests the effective value independently.
+            # ⛔ WHY NOT THE RAW PHASE.  The matched filter's raw delay
+            # reads the edge's position in radiod's RTP counter
+            # (``idx = rtp % sr``), and radiod draws that counter's origin
+            # afresh at each start.  It equals the chain delay only by
+            # luck.  AC0G-ND read -462.6, +438.4, -284.0, +473.4 ms
+            # (2026-10-27..31) and WB6CXC-7 read 203.7, 430.0, 341.1 ms
+            # (2026-11-01) on sound edges; criterion 7 refused them all,
+            # while T6's labels -- built by the authority from the named
+            # second -- were right.
             #
-            # ⛔ Case 3 is NaN, not a plausible-looking stand-in.  Evidence
-            # the station could not compute must never read as evidence that
+            # ⛔ NaN, not a plausible-looking stand-in.  Evidence the
+            # station could not compute must never read as evidence that
             # it is healthy; ``T6Battery._fails`` treats any non-finite
-            # input as an automatic failure, so a block with no chain-delay
-            # measurement at all refuses rather than passes.
+            # input as an automatic failure.
             raw_ns = getattr(result, 'chain_delay_ns', None)
-            self._t6_battery_plausibility_ref = 'raw'
-            if raw_ns is not None:
+            if getattr(self, '_t6_last_chain_delay_ns', None) is None:
+                _place = getattr(self, '_t6_pre_acquisition_placement', None)
+                placed_ns, info = (
+                    _place(est) if _place is not None
+                    else (None, {'reference': None,
+                                 'refused': "no placement path"}))
+                self._t6_battery_placement = info
+                self._t6_battery_plausibility_ref = info.get('reference')
+                implied_ns = (float('nan') if placed_ns is None
+                              else float(placed_ns))
+                if placed_ns is None:
+                    if self._t6_say_once('criterion7_no_placement'):
+                        logger.warning(
+                            "T6 criterion 7 has no placement to judge: %s.  "
+                            "It never judges radiod's raw counter phase, so "
+                            "the battery refuses and T6 does not assert.  "
+                            "(Repeated at most every %.0f s.)",
+                            info.get('refused'), self.T6_REPEAT_PERIOD_SEC)
+                elif abs(placed_ns) > _T6_PLACEMENT_MAX_NS:
+                    # Loud, and published for hpps-watchdog: the placement
+                    # rests on radiod's tie (or T4), which a recorder
+                    # restart does not redraw.
+                    _note = getattr(
+                        self, '_t6_note_acquisition_refusal', None)
+                    if _note is not None:
+                        _note(int(placed_ns), info.get('t4_refused'),
+                              reference=info.get('reference'))
+            elif raw_ns is not None:
+                self._t6_battery_plausibility_ref = 'acquired'
                 implied_ns = float(wrap_chain_delay_ns(
                     int(raw_ns) + int(self._t6_disambiguation_ns)))
-                # ⛔ Before acquisition that "raw" value reads the edge's
-                # phase in radiod's RTP counter, which matches the chain
-                # delay only while the counter's origin sits near UTC.
-                # A radiod start can draw an origin 0.3-0.5 s off, and
-                # then criterion 7 refuses a sound edge on every block
-                # (AC0G-ND 2026-10-27..31: -462.6, +438.4, -284.0,
-                # +473.4 ms; 4.5 days on T4).  With no T5, a qualified
-                # T4 places the edge instead -- see t4_reference.py.
-                # Without one, the raw phase stands and so does the
-                # refusal.
-                _via_t4 = getattr(
-                    self, '_t6_implied_chain_delay_via_t4', None)
-                if (_via_t4 is not None
-                        and getattr(self, '_t6_last_chain_delay_ns',
-                                    None) is None
-                        and not self._t6_disambiguation_ns):
-                    t4_ns, _t4_info = _via_t4(
-                        int(est.edge_rtp), float(est.edge_subsample))
-                    # Kept for the refusal record: why T4 could not
-                    # stand in, when it could not.
-                    self._t6_battery_t4_why = (_t4_info or {}).get(
-                        'refused')
-                    if t4_ns is not None:
-                        implied_ns = float(t4_ns)
-                        self._t6_battery_plausibility_ref = 'T4'
-            elif getattr(self, '_t6_last_chain_delay_ns', None) is not None:
-                implied_ns = float(self._t6_last_chain_delay_ns)
             else:
-                implied_ns = float('nan')
+                self._t6_battery_plausibility_ref = 'acquired'
+                implied_ns = float(self._t6_last_chain_delay_ns)
             # ⛔ NaN, never 0.0, when the sigma is unavailable.  ``or 0.0``
             # made criterion 5 inert below two history samples (0.0 clears
             # every ceiling) and swallowed a legitimate 0.0 besides.  §4.7
@@ -5204,6 +5211,76 @@ class CoreRecorderV2:
         info = dict(info, named_second=named)
         return wrap_chain_delay_ns(int(round((t - named) * 1e9))), info
 
+    def _t6_pre_acquisition_placement(self, est):
+        """Where in its second the fold's edge fell, before acquisition.
+
+        Returns ``(placement_ns, info)``; ``placement_ns`` is None when no
+        reference can place the edge, and ``info['refused']`` says why.
+        ``info['reference']`` names what placed it:
+
+        * ``'T4'``: a qualified T4 host clock through the T6 arrival
+          pairing (``_t6_implied_chain_delay_via_t4``).  It refuses while
+          T5 reads, so T5 keeps the first word.
+        * ``'T5'``: radiod's per-channel (GPS_TIME, RTP_TIMESNAP) pair
+          against the second T5's NMEA named -- the residual the T5 path
+          computes.
+        * ``'namer_pair'``: the pair against the second a GPS second-namer
+          (an LBE-Mini) named.
+        * ``'radiod_pair'``: the pair against the second the pair itself
+          named, the cascade's last resort.
+
+        The pair's GPS_TIME reads the host clock when radiod created the
+        channel (MEASUREMENT_MODEL.md §0.3), so this places the edge to
+        the host clock's accuracy then, plus the pair's own slack.  That
+        settles a ±250 ms question; a pair worse than that refuses, and
+        says so.  Never the raw counter phase.
+        """
+        sr = float(self._t6_calibrator.sample_rate)
+        edge_rtp = int(est.edge_rtp)
+        sub = float(est.edge_subsample)
+        t4_refused = None
+        _via_t4 = getattr(self, '_t6_implied_chain_delay_via_t4', None)
+        if _via_t4 is not None:
+            t4_ns, t4_info = _via_t4(edge_rtp, sub)
+            if t4_ns is not None:
+                return int(t4_ns), {
+                    'reference': 'T4', 'placement_ms': round(t4_ns / 1e6, 3),
+                    't4': {k: t4_info.get(k) for k in (
+                        'host_sigma_ns', 'sigma_ns', 'reference_id',
+                        'stratum', 'arrival_age_s')}}
+            t4_refused = (t4_info or {}).get('refused')
+        cached = getattr(self, '_t6_block_named', None)
+        if cached is not None and cached[0] == edge_rtp:
+            named = cached[1]
+        else:
+            named = self._t6_name_integer_second(edge_rtp)
+        if named is None:
+            return None, {'reference': None, 't4_refused': t4_refused,
+                          'refused': "no source named the edge's second"}
+        try:
+            from ka9q.rtp_recorder import rtp_to_utc
+            self._t6_channel_info.chain_delay_correction_ns = None
+            wall = rtp_to_utc(edge_rtp & 0xFFFFFFFF, self._t6_channel_info)
+        except Exception:  # noqa: BLE001 — no pair is an answer, not a crash
+            wall = None
+        if wall is None:
+            return None, {'reference': None, 't4_refused': t4_refused,
+                          'refused': "radiod's RTP->UTC pair is unavailable"}
+        placed = wrap_chain_delay_ns(
+            int(round((float(wall) + sub / sr - int(named)) * 1e9)))
+        source = getattr(self, '_t6_naming_source', None)
+        probe = getattr(self, '_lb1421_probe', None)
+        if source == 'nmea':
+            t5 = probe is not None and probe.get_latest() is not None
+            reference = 'T5' if t5 else 'namer_pair'
+        elif source == 'radiod_pair':
+            reference = 'radiod_pair'
+        else:
+            reference = f"{source}_pair"
+        return placed, {'reference': reference, 'named_second': int(named),
+                        'placement_ms': round(placed / 1e6, 3),
+                        't4_refused': t4_refused}
+
     def _t6_refusal_record(self):
         rec = getattr(self, '_t6_acquisition_refusal', None)
         if rec is None:
@@ -5212,28 +5289,32 @@ class CoreRecorderV2:
         return rec
 
     def _t6_note_acquisition_refusal(self, effective_ns,
-                                     t4_why: Optional[str]) -> None:
-        """Record a chain-delay refusal; log on entry only.
+                                     t4_why: Optional[str],
+                                     reference: Optional[str] = None
+                                     ) -> None:
+        """Record an implausible placement; log on entry only.
 
-        The refusal itself already logs, throttled, from its own path.
-        This line answers the operator's next question once: will
-        anything clear it on its own?
+        ``effective_ns`` names where the best available reference put the
+        edge in its second -- a placement, not a delay.  This line answers
+        the operator's next question once: will anything clear it on its
+        own?
         """
-        from .t6_acquisition_refusal import REFUSAL_CHAIN_DELAY_IMPLAUSIBLE
+        from .t6_acquisition_refusal import REFUSAL_PLACEMENT_IMPLAUSIBLE
         rec = self._t6_refusal_record()
-        if rec.note(REFUSAL_CHAIN_DELAY_IMPLAUSIBLE, effective_ns,
-                    time.monotonic(), time.time(), t4_why):
+        if rec.note(REFUSAL_PLACEMENT_IMPLAUSIBLE, effective_ns,
+                    time.monotonic(), time.time(), t4_why, reference):
             logger.warning(
                 "T6 acquisition REFUSED and a recorder restart cannot "
-                "cure it: the edge implies a chain delay of %+.1f ms, "
-                "outside the physical bound, and that value reads "
-                "radiod's RTP counter, which outlives the recorder.  No "
-                "T5, and T4 could not place the edge (%s).  A radiod "
-                "restart, a live T5, or a qualified T4 clears it.  "
-                "Published as t6_pps.acquisition_refusal_* so "
-                "hpps-watchdog stops restarting the recorder for it.  "
+                "cure it: %s places the edge %+.1f ms from its second, "
+                "outside the +-%.0f ms physical bound.  Without T5 or a "
+                "qualified T4 that placement rests on radiod's "
+                "RTP->UTC pair, which outlives the recorder (T4: %s).  "
+                "radiod redrawing its tie, a live T5, or a qualified T4 "
+                "clears it.  Published as t6_pps.acquisition_refusal_* "
+                "so hpps-watchdog stops restarting the recorder for it.  "
                 "Logged once; the exit is logged too.",
-                (effective_ns or 0) / 1e6, t4_why or "not consulted")
+                reference or "the pair", (effective_ns or 0) / 1e6,
+                _T6_PLACEMENT_MAX_NS / 1e6, t4_why or "not consulted")
 
     def _t6_clear_acquisition_refusal(self, why: str) -> None:
         """Close the refusal record; log on exit only."""
@@ -5514,7 +5595,8 @@ class CoreRecorderV2:
                     _note = getattr(
                         self, '_t6_note_acquisition_refusal', None)
                     if _note is not None:
-                        _note(effective_chain_delay_ns, t4_why)
+                        _note(effective_chain_delay_ns, t4_why,
+                              reference="radiod's pair")
             # Layer B physical-plausibility guard — same rationale as
             # the T5 path; see ``_t6_disambiguate_via_t5_lb1421``.  This
             # is also the battery's criterion 7, kept here and ahead of
@@ -5546,14 +5628,19 @@ class CoreRecorderV2:
             # which reference placed the edge's sub-second, and which
             # one criterion 7 judged.  A T4 resolution carries the host
             # clock's sigma and the arrival-pairing floor beside it.
+            # ``placement_t4`` belongs to the PLACEMENT; criterion 7's own
+            # reference and its T4 detail ride in ``battery_plausibility``.
+            # (One ``t4`` key served both before, so ND published
+            # battery_plausibility "T4" beside t4: null whenever the pair
+            # placed the edge after T4 had cleared criterion 7.)
             self._t6_acquisition_reference = {
                 'second_named_by': getattr(
                     self, '_t6_naming_source', None),
                 'placed_by': 'T4' if ref_tier == 'T4' else 'radiod_pair',
                 'anchor_tier': str(ref_tier),
-                'battery_plausibility': getattr(
-                    self, '_t6_battery_plausibility_ref', None),
-                't4': (None if t4_info is None else {
+                'battery_plausibility': dict(getattr(
+                    self, '_t6_battery_placement', None) or {}) or None,
+                'placement_t4': (None if t4_info is None else {
                     k: t4_info.get(k) for k in (
                         'host_sigma_ns', 'sigma_ns', 'reference_id',
                         'stratum', 'arrival_age_s')}),
@@ -5981,12 +6068,18 @@ class CoreRecorderV2:
                     samples, resolve_batch_rtp(quality))
                 if fine is not None:
                     self._t6_last_fine_est = fine
+                    # Named once per block: the battery's placement and
+                    # the authority below both need the second, and
+                    # naming twice would report its disagreements twice.
+                    self._t6_block_named = (
+                        int(fine.edge_rtp),
+                        self._t6_name_integer_second(fine.edge_rtp))
                     # A fold block just landed: this is the ONLY cadence
                     # at which the battery's run-of-blocks criteria can
                     # be assembled.  See _t6_evaluate_battery.
                     self._t6_evaluate_battery(fine, result)
                 if fine is not None and self._t6_authority is not None:
-                    named = self._t6_name_integer_second(fine.edge_rtp)
+                    named = self._t6_block_named[1]
                     # §5.3: a functional T6 is the bench, the namer the
                     # thing checked.  This is advisory — same shape as
                     # `_t6_evaluate_battery` above — so it gets its OWN
@@ -6212,7 +6305,32 @@ class CoreRecorderV2:
                         _dpath = "external-ref:T4"
                 self._t6_disambig_path = _dpath
                 self._t6_disambig_detail = ""
-                # Apply disambiguation (set above either way) and lock in.
+                _captured = (self._t6_native_anchor is not None
+                             and self._t6_native_anchor is not _anchor_before)
+                # ⛔ NOTHING TO JUDGE WITHOUT AN ACQUISITION.  This guard
+                # used to run on every walk, and when the walk captured
+                # nothing the disambiguation stood at zero, so it judged
+                # the matched filter's RAW phase -- the edge's position in
+                # radiod's RTP counter, whose origin radiod draws afresh at
+                # each start.  WB6CXC-7 (2026-11-01) logged "effective
+                # +341.1 ms exceeds +-250 ms" on a sound edge and ran on T2.
+                # Criterion 7 now judges a real placement (see
+                # _t6_pre_acquisition_placement) and records its own
+                # refusals; an uncaptured walk simply holds.
+                if not _captured:
+                    if self._t6_say_once('acquisition_holding'):
+                        logger.info(
+                            "T6 acquisition holding: the disambiguation "
+                            "walk captured no anchor this cycle, so the "
+                            "gate stays OPEN and the walk retries every "
+                            "%.0f s.  The reason is logged separately by "
+                            "the walk itself (no fine estimate, no battery "
+                            "verdict, a refused battery, or an unnamed "
+                            "second).  (Repeated at most every %.0f s.)",
+                            self.T6_DISAMBIG_RETRY_INTERVAL_SEC,
+                            self.T6_REPEAT_PERIOD_SEC)
+                    return
+                # Apply the committed disambiguation and lock in.
                 effective = wrap_chain_delay_ns(
                     result.chain_delay_ns + self._t6_disambiguation_ns)
                 # ---- #7 defect 2 instrumentation ----
@@ -6260,58 +6378,28 @@ class CoreRecorderV2:
                 except Exception:
                     pass
                 # ---- end instrumentation ----
-                # Layer B physical-plausibility guard at initial accept —
-                # the last unguarded entry point into the lock.  When no
-                # usable reference tier is available (T5 unwired, T4
-                # sigma over gate, T3 absent) the disambiguation walk
-                # falls through with shift 0, and the raw MF value —
-                # ambiguous modulo the template period — used to be
-                # accepted AND persisted verbatim.  Observed on B4
-                # 2026-07-24 (boot #1 and again after a clean restart):
-                # boot-race chrony left T4 at sigma 1.8-4.4 ms, and the
-                # MF's deterministic sidelobe at +708.5 ms was locked in
-                # and persisted twice in a row, keeping T6/HPPS out of
-                # the authority cascade with no operator-visible retry.
-                # Refuse instead: leave _t6_last_chain_delay_ns unset so
-                # every subsequent locked cycle re-enters initial-accept
-                # and re-walks the tier hierarchy — references improve
-                # as chrony settles — and nothing implausible is locked,
-                # persisted, pushed to SHM, or written to archive
-                # metadata meanwhile.  Same 250 ms bound and rationale
-                # as the guards in _t6_disambiguate_via_t5_lb1421 /
-                # _t6_disambiguate_via_external_reference; see
-                # docs/TSL3_COSTAS_DRIFT_2026-05-18.md §"Layer B".
-                T6_PHYSICAL_CHAIN_DELAY_MAX_NS = 250_000_000  # 250 ms
-                if abs(effective) > T6_PHYSICAL_CHAIN_DELAY_MAX_NS:
+                # Physical-plausibility guard at initial accept, on the
+                # PLACEMENT acquisition just committed -- the last check
+                # before anything is locked, pushed to SHM, or written to
+                # archive metadata.  Both capture paths already refuse an
+                # implausible placement, so this firing means one of them
+                # let one through.
+                if abs(effective) > _T6_PLACEMENT_MAX_NS:
                     self._t6_initial_accept_rejections += 1
                     n = self._t6_initial_accept_rejections
                     if n == 1 or n % 60 == 0:
                         logger.warning(
-                            f"T6 chain_delay initial accept REFUSED: "
-                            f"effective {effective/1e6:+.1f} ms exceeds "
-                            f"physical-plausibility bound ±"
-                            f"{T6_PHYSICAL_CHAIN_DELAY_MAX_NS/1e6:.0f} ms "
+                            f"T6 initial accept REFUSED: the captured "
+                            f"placement {effective/1e6:+.1f} ms exceeds "
+                            f"the physical-plausibility bound ±"
+                            f"{_T6_PLACEMENT_MAX_NS/1e6:.0f} ms "
                             f"(raw={result.chain_delay_ns} ns, "
                             f"disambig={self._t6_disambiguation_ns} ns, "
-                            f"consecutive refusals={n}).  Sidelobe capture "
-                            f"with no usable disambiguation reference — "
-                            f"not locking, not persisting; will retry "
-                            f"disambiguation on the next locked cycle."
+                            f"consecutive refusals={n}).  A capture path "
+                            f"let an implausible placement through; not "
+                            f"locking, retrying on the next walk."
                         )
                     self._t6_disambiguation_ns = 0
-                    # The raw value reads radiod's RTP counter, which a
-                    # recorder restart keeps; say so where hpps-watchdog
-                    # reads it (t6_acquisition_refusal.py).  Only once
-                    # the battery has judged criterion 7 on that raw
-                    # value: before its first block it has judged
-                    # nothing, and when T4 stood in the raw value blocks
-                    # nothing -- whatever holds acquisition then is some
-                    # other condition, which this record must not claim.
-                    if getattr(self, '_t6_battery_plausibility_ref',
-                               None) == 'raw':
-                        self._t6_note_acquisition_refusal(
-                            effective,
-                            getattr(self, '_t6_battery_t4_why', None))
                     return
                 self._t6_initial_accept_rejections = 0
                 effective_chain_delay = effective
@@ -6338,8 +6426,7 @@ class CoreRecorderV2:
                 # disambiguation path has taken an anchor on it -- which
                 # is what T6_ACCEPTANCE_CRITERIA.md §3.2.1 has claimed
                 # all along.
-                if (self._t6_native_anchor is not None
-                        and self._t6_native_anchor is not _anchor_before):
+                if _captured:
                     self._t6_last_chain_delay_ns = effective
                     self._t6_clear_acquisition_refusal(
                         "T6 acquired (anchor via "
@@ -6350,17 +6437,6 @@ class CoreRecorderV2:
                         f"{result.chain_delay_ns} ns "
                         f"(effective with disambiguation: {effective} ns)"
                     )
-                elif self._t6_say_once('acquisition_holding'):
-                    logger.info(
-                        "T6 acquisition holding: the disambiguation walk "
-                        "captured no anchor this cycle, so the gate "
-                        "stays OPEN and the walk retries every %.0f s. "
-                        "The reason is logged separately by the walk "
-                        "itself (no fine estimate, no battery verdict, a "
-                        "refused battery, or an unnamed second).  "
-                        "(Repeated at most every %.0f s.)",
-                        self.T6_DISAMBIG_RETRY_INTERVAL_SEC,
-                        self.T6_REPEAT_PERIOD_SEC)
             elif abs(wrap_chain_delay_ns(
                     (result.chain_delay_ns + self._t6_disambiguation_ns)
                     - self._t6_last_chain_delay_ns)) > WRAP_THRESHOLD_NS:

@@ -212,6 +212,9 @@ def _nd_recorder(host=None, base=ND_BASE):
     r._t6_name_integer_second = (
         lambda rtp: gate.NAMED_BASE + int(round(
             (rtp - base - gate.EDGE) / gate.SR)))
+    # That namer stands in for a GPS second-namer (ND's LBE-Mini,
+    # WB6CXC-7's GPS-mini).
+    r._t6_naming_source = "nmea"
     # The stream clock _drive installs is crv2.time.monotonic, read at
     # call time so the pairing and the judge share it.
     mono = lambda: crv2.time.monotonic()            # noqa: E731
@@ -232,69 +235,92 @@ def _drive_nd(r, utc, base=ND_BASE, seconds=125.0):
 
 
 class TestThroughTheRealCallback(unittest.TestCase):
+    """The counter origin displaced as ND's and WB6CXC-7's were.
 
-    def test_the_fixture_reproduces_nds_refusal(self):
-        """No T4: criterion 7 judges the raw phase and refuses, exactly
-        the value ND logged, and the refusal is published as one a
-        recorder restart cannot cure."""
+    Since v3.85 item 6 criterion 7 never judges that raw phase, so a sane
+    radiod pair places the edge and T6 acquires with or without T4.  The
+    refusal needs radiod's pair itself off: then only T4 can place the
+    edge, and without it the refusal stands, published as incurable.
+    """
+
+    PAIR_OFF_S = 0.46
+
+    def test_a_displaced_counter_alone_no_longer_refuses(self):
         r, utc = _nd_recorder(host=None)
         r = _drive_nd(r, utc)
+        self.assertIsNotNone(r._t6_last_chain_delay_ns,
+                             r._t6_last_verdict.failures)
+        self.assertEqual(
+            r._t6_acquisition_reference["battery_plausibility"]["reference"],
+            "namer_pair")
+        self.assertIsNone(_refusal(r))
+
+    def test_a_pair_off_without_t4_refuses_and_is_published(self):
+        r, utc = _nd_recorder(host=None)
+        r = _drive_nd(r, _off(utc, self.PAIR_OFF_S))
         self.assertIsNone(r._t6_last_chain_delay_ns)
         self.assertIn("plausibility", r._t6_last_verdict.failures)
-        self.assertGreater(r._t6_initial_accept_rejections, 0)
         rec = _refusal(r)
         self.assertIsNotNone(rec)
-        self.assertEqual(rec["reason"], "chain_delay_implausible")
+        self.assertEqual(rec["reason"], "placement_implausible")
+        self.assertEqual(rec["placed_by"], "namer_pair")
         self.assertFalse(rec["restart_cures"])
-        self.assertAlmostEqual(rec["effective_ms"], -462.6, delta=0.2)
+        self.assertAlmostEqual(rec["placement_ms"],
+                               (gate.CHAIN_DELAY_SEC + self.PAIR_OFF_S)
+                               * 1e3, delta=0.5)
 
-    def test_a_qualified_t4_lets_nd_acquire(self):
+    def test_a_qualified_t4_lets_the_station_acquire(self):
         r, utc = _nd_recorder(host=_host())
-        r = _drive_nd(r, utc)
+        r = _drive_nd(r, _off(utc, self.PAIR_OFF_S))
         self.assertIsNotNone(
             r._t6_last_chain_delay_ns,
             f"T4 at 0.2 ms did not let T6 acquire; verdict "
             f"{r._t6_last_verdict.failures}")
-        # radiod's pair is sound here, so it places the sub-second; T4
-        # only stood in for the raw phase in criterion 7.
-        self.assertAlmostEqual(r._t6_last_chain_delay_ns / 1e9,
-                               gate.CHAIN_DELAY_SEC, places=4)
         ref = r._t6_acquisition_reference
-        self.assertEqual(ref["battery_plausibility"], "T4")
-        self.assertEqual(ref["placed_by"], "radiod_pair")
+        self.assertEqual(ref["battery_plausibility"]["reference"], "T4")
+        self.assertEqual(ref["battery_plausibility"]["t4"]["host_sigma_ns"],
+                         ND_HOST_SIGMA_NS)
+        self.assertEqual(ref["placed_by"], "T4")
+        self.assertIsNotNone(ref["placement_t4"])
         self.assertIsNone(_refusal(r))
+
+    def test_t4_judged_but_the_pair_placed_says_so_consistently(self):
+        """ND after the e408422 deploy published battery_plausibility
+        "T4" beside t4: null.  T4 judged criterion 7, the sane pair
+        placed the edge; each fact now carries its own detail."""
+        r, utc = _nd_recorder(host=_host())
+        r = _drive_nd(r, utc)
+        ref = r._t6_acquisition_reference
+        self.assertEqual(ref["battery_plausibility"]["reference"], "T4")
+        self.assertIsNotNone(ref["battery_plausibility"]["t4"])
+        self.assertEqual(ref["placed_by"], "radiod_pair")
+        self.assertIsNone(ref["placement_t4"])
 
     def test_wan_time_leaves_the_refusal_standing(self):
         r, utc = _nd_recorder(host=_host(tier="T2", sigma_ns=55e6))
-        r = _drive_nd(r, utc)
+        r = _drive_nd(r, _off(utc, self.PAIR_OFF_S))
         self.assertIsNone(r._t6_last_chain_delay_ns)
-        rec = _refusal(r)
-        self.assertIsNotNone(rec)
-        self.assertIn("T2", rec["t4_reference"])
+        self.assertIn("T2", _refusal(r)["t4_reference"])
 
     def test_a_loose_lan_clock_leaves_the_refusal_standing(self):
         r, utc = _nd_recorder(host=_host(sigma_ns=1.5e6))
-        r = _drive_nd(r, utc)
+        r = _drive_nd(r, _off(utc, self.PAIR_OFF_S))
         self.assertIsNone(r._t6_last_chain_delay_ns)
-        self.assertIn("sigma",
-                      _refusal(r)["t4_reference"])
+        self.assertIn("sigma", _refusal(r)["t4_reference"])
 
-    def test_a_hold_t4_cannot_explain_is_not_published_as_incurable(self):
-        """T4 clears criterion 7, but the cascade cannot name the second.
-        The raw phase still trips the initial-accept guard on every walk,
-        yet it no longer blocks anything, so the record must not tell
-        hpps-watchdog that a chain-delay refusal holds the station."""
-        r, utc = _nd_recorder(host=_host())
+    def test_no_named_second_is_not_published_as_incurable(self):
+        """Nothing named the second: criterion 7 has no placement and the
+        battery refuses, but nothing says a recorder restart is futile."""
+        r, utc = _nd_recorder(host=None)
         r._t6_name_integer_second = lambda rtp: None
         r = _drive_nd(r, utc)
         self.assertIsNone(r._t6_last_chain_delay_ns)
-        self.assertEqual(r._t6_battery_plausibility_ref, "T4")
-        self.assertGreater(r._t6_initial_accept_rejections, 0)
+        self.assertIsNone(r._t6_battery_plausibility_ref)
         self.assertIsNone(_refusal(r))
 
     def test_a_healthy_station_acquires_as_before(self):
         """The counter origin on UTC: T4 present or not, the same
-        anchor."""
+        acquisition."""
         plain, utc0 = _nd_recorder(host=None, base=gate.RTP0)
         plain = _drive_nd(plain, utc0, base=gate.RTP0)
         with_t4, utc1 = _nd_recorder(host=_host(), base=gate.RTP0)
@@ -302,6 +328,10 @@ class TestThroughTheRealCallback(unittest.TestCase):
         self.assertIsNotNone(plain._t6_last_chain_delay_ns)
         self.assertEqual(plain._t6_last_chain_delay_ns,
                          with_t4._t6_last_chain_delay_ns)
+
+
+def _off(utc, err):
+    return lambda rtp, ci=None: utc(rtp, ci) + err
 
 
 # ── the fold harness: radiod's pair itself off ────────────────────────
@@ -354,7 +384,9 @@ def _feed(r, n=fold.BLOCKS):
         r._t5_pairing.arrive_after(edge)
         est = fold._estimate(edge)
         r._t6_last_fine_est = est
-        r._t6_evaluate_battery(est, fold._result())
+        with mock.patch("ka9q.rtp_recorder.rtp_to_utc",
+                        side_effect=lambda rtp, _ci: fold._wall_of(rtp)):
+            r._t6_evaluate_battery(est, fold._result())
 
 
 class TestRadiodsPairOff(unittest.TestCase):
@@ -389,10 +421,11 @@ class TestRadiodsPairOff(unittest.TestCase):
                                places=4)
         ref = r._t6_acquisition_reference
         self.assertEqual(ref["placed_by"], "T4")
-        self.assertEqual(ref["t4"]["host_sigma_ns"], ND_HOST_SIGMA_NS)
-        self.assertGreaterEqual(ref["t4"]["sigma_ns"],
+        self.assertEqual(ref["placement_t4"]["host_sigma_ns"],
+                         ND_HOST_SIGMA_NS)
+        self.assertGreaterEqual(ref["placement_t4"]["sigma_ns"],
                                 T5RtpPairing.SIGMA_FLOOR_NS)
-        self.assertEqual(ref["t4"]["reference_id"], LAN_REF)
+        self.assertEqual(ref["placement_t4"]["reference_id"], LAN_REF)
 
     def test_t4_naming_a_different_second_refuses(self):
         """The cascade names the wrong second (one too late).  T4 names
@@ -437,7 +470,7 @@ class TestTheBatteryJudgesT4OnlyBeforeAcquisition(unittest.TestCase):
         self.assertIsNotNone(r._t6_native_anchor)
         r._t6_last_chain_delay_ns = 1          # the caller's latch
         _feed(r, n=1)
-        self.assertEqual(r._t6_battery_plausibility_ref, "raw")
+        self.assertEqual(r._t6_battery_plausibility_ref, "acquired")
 
 
 if __name__ == "__main__":

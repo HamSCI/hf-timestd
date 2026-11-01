@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from hf_timestd.core.core_recorder_v2 import (
     CoreRecorderV2, t6_refusal_status_keys)
 from hf_timestd.core.t6_acquisition_refusal import (
-    REFUSAL_CHAIN_DELAY_IMPLAUSIBLE, T6AcquisitionRefusal)
+    REFUSAL_PLACEMENT_IMPLAUSIBLE, T6AcquisitionRefusal)
 
 SCRIPT = (Path(__file__).resolve().parent.parent / "scripts"
           / "hpps-watchdog.sh")
@@ -41,19 +41,19 @@ class TestTheRefusalRecord(unittest.TestCase):
 
     def test_entry_is_reported_once(self):
         rec = T6AcquisitionRefusal()
-        self.assertTrue(rec.note(REFUSAL_CHAIN_DELAY_IMPLAUSIBLE,
+        self.assertTrue(rec.note(REFUSAL_PLACEMENT_IMPLAUSIBLE,
                                  -462_600_000, 0.0, 1.7e9))
         for t in (5.0, 10.0, 15.0):
-            self.assertFalse(rec.note(REFUSAL_CHAIN_DELAY_IMPLAUSIBLE,
+            self.assertFalse(rec.note(REFUSAL_PLACEMENT_IMPLAUSIBLE,
                                       -462_600_000, t, 1.7e9 + t))
         cur = rec.current(15.0)
         self.assertEqual(cur["refusals"], 4)
         self.assertEqual(cur["since_utc"], 1.7e9)
-        self.assertEqual(cur["effective_ms"], -462.6)
+        self.assertEqual(cur["placement_ms"], -462.6)
 
     def test_a_chain_delay_refusal_is_not_cured_by_a_restart(self):
         rec = T6AcquisitionRefusal()
-        rec.note(REFUSAL_CHAIN_DELAY_IMPLAUSIBLE, 1, 0.0, 0.0)
+        rec.note(REFUSAL_PLACEMENT_IMPLAUSIBLE, 1, 0.0, 0.0)
         self.assertIs(rec.current(0.0)["restart_cures"], False)
 
     def test_an_unknown_reason_claims_nothing(self):
@@ -64,13 +64,13 @@ class TestTheRefusalRecord(unittest.TestCase):
 
     def test_a_refusal_nothing_refreshes_stops_being_current(self):
         rec = T6AcquisitionRefusal()
-        rec.note(REFUSAL_CHAIN_DELAY_IMPLAUSIBLE, 1, 0.0, 0.0)
+        rec.note(REFUSAL_PLACEMENT_IMPLAUSIBLE, 1, 0.0, 0.0)
         self.assertIsNotNone(rec.current(rec.CURRENT_FOR_S))
         self.assertIsNone(rec.current(rec.CURRENT_FOR_S + 1.0))
 
     def test_exit_is_reported_once(self):
         rec = T6AcquisitionRefusal()
-        rec.note(REFUSAL_CHAIN_DELAY_IMPLAUSIBLE, 1, 0.0, 0.0)
+        rec.note(REFUSAL_PLACEMENT_IMPLAUSIBLE, 1, 0.0, 0.0)
         self.assertIsNone(rec.expire(10.0))
         self.assertIsNotNone(rec.expire(rec.CURRENT_FOR_S + 1.0))
         self.assertIsNone(rec.expire(rec.CURRENT_FOR_S + 2.0))
@@ -166,7 +166,7 @@ esac
 
 def _nd_refusal():
     rec = T6AcquisitionRefusal()
-    rec.note(REFUSAL_CHAIN_DELAY_IMPLAUSIBLE, -462_600_000, 0.0, 1.7e9,
+    rec.note(REFUSAL_PLACEMENT_IMPLAUSIBLE, -462_600_000, 0.0, 1.7e9,
              "host-clock sigma 55.000 ms exceeds 1.000 ms")
     return rec.current(0.0)
 
@@ -198,7 +198,7 @@ class TestTheWatchdogScript(unittest.TestCase):
         later = [self.st.run() for _ in range(5)]
         self.assertEqual(len(first), 1, first)
         self.assertIn("cannot cure", first[0])
-        self.assertIn("chain_delay_implausible", first[0])
+        self.assertIn("placement_implausible", first[0])
         self.assertIn("-462.6", first[0])
         self.assertEqual(later, [[]] * 5, "the hold logged on every run")
 
