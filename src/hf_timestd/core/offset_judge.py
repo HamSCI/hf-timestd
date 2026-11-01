@@ -1411,6 +1411,11 @@ class OffsetJudge:
         self._lock = threading.Lock()
         self._sources: Dict[SourceKey, _SourceState] = {}
         self._best: Optional[BenchReading] = None       # active bench reading
+        # The host clock as chrony disciplines it (ChronyBench: T4 or
+        # T2), from the latest tick; None when that tick had none.  The
+        # recorder reads it to let a qualified T4 place T6's edge before
+        # T6 can (t4_reference.py), so no second chronyc caller exists.
+        self._host_clock_reading: Optional[BenchReading] = None
         self._candidate_tier: Optional[str] = None      # upgrade hysteresis
         self._candidate_count: int = 0
         self._publish_error_logged = False
@@ -1537,6 +1542,16 @@ class OffsetJudge:
             except Exception as e:  # noqa: BLE001 — judge must never die silently
                 logger.error(f"OffsetJudge tick failed: {e}", exc_info=True)
             self._stop.wait(self.tick_seconds)
+
+    def latest_host_clock_reading(self) -> Optional[BenchReading]:
+        """The chrony-disciplined host clock as of the latest tick.
+
+        T4 when chrony follows a LAN peer or local refclock, T2 when it
+        follows WAN NTP, None when chrony did not answer.  Callers judge
+        its age from ``mono``.
+        """
+        with self._lock:
+            return self._host_clock_reading
 
     def add_bench(self, bench) -> None:
         """Append a bench (P2: T6/T5 substrate benches wired by the
@@ -1811,6 +1826,8 @@ class OffsetJudge:
 
         mono_now = self._mono()
         with self._lock:
+            self._host_clock_reading = next(
+                (r for r in readings if r.tier in ("T4", "T2")), None)
             self._t6_rate = t6_rate
             self._t3_shadow = t3_shadow
             self._gpsdo_discipline = gpsdo_state

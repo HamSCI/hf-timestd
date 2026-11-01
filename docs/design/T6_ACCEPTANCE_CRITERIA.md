@@ -584,6 +584,37 @@ detector and the acceptance rule in one step, and a regression in either would
 then hide the other. That sequencing lesson belongs to
 `T6_FOLDED_SELF_ACQUISITION.md` §4, and it applies here unchanged.
 
+### 4.8 Criterion 7 before acquisition, and T4
+
+Before acquisition no disambiguation exists, so criterion 7 judges the matched
+filter's raw chain delay. That value reads the edge's phase in radiod's RTP
+counter (`idx = rtp % sr`). It equals the chain delay only while radiod draws a
+counter origin near UTC, and a radiod start need not. On AC0G-ND, after an
+RX888 stall on 2026-10-27, each radiod start drew an origin 0.3–0.5 s off.
+Criterion 7 then judged −462.6, +438.4, −284.0 and +473.4 ms and refused every
+time. ND has no T5, so nothing else could place the edge, and the station ran
+on T4 for 4.5 days. Its T4, a LAN GPS + PPS server, held about 0.2 ms.
+
+So when no T5 reading exists, a qualified T4 places the edge for criterion 7.
+The recorder pairs the T6 stream's latest arrival with the offset judge's
+chrony reading, as the T5 naming path pairs it with NMEA, and carries the
+counter to the edge. `t4_reference.py` decides whether the host qualifies:
+chrony must follow a LAN peer or local refclock (T4, never T2), hold at most
+1 ms (the judge's own disciplined-host bar in `label_plane.py`), sit at
+stratum 2 or better, and not follow HPPS or FUSE. The same placement backs
+up the acquisition path's ±250 ms check when radiod's RTP→UTC pair places
+the edge implausibly; there T4 must also name the second the cascade named.
+The arrival reads late by one transport latency, so a T4 placement carries
+the arrival-pairing floor (25 ms) in its sigma. That settles a ±250 ms
+question and nothing finer, and the T6 authority's own anchor supersedes the
+capture.
+
+With neither T5 nor a qualified T4, the raw phase stands and so does the
+refusal. The recorder then publishes it as `t6_pps.acquisition_refusal_*` in
+its status file, with `restart_cures` false: the counter belongs to radiod
+and outlives a recorder restart. hpps-watchdog reads that and stops
+restarting the recorder, which on ND had happened about 41 times a day.
+
 ---
 
 ## 5. Failure, alarm, and the judge
