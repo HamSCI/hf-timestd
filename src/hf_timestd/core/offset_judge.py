@@ -532,14 +532,17 @@ class ChronyBench:
             return None
         return proc.stdout or ""
 
-    def _selected_source_is_lan(self) -> Optional[bool]:
+    def _selected_source_is_lan(self, out: Optional[str] = None
+                                ) -> Optional[bool]:
         """Classify chrony's selected ('*') source as LAN or WAN.
 
         Returns None when it cannot be determined (no output, no
         selected source) — caller falls back to T2 (conservative).
         Uses `chronyc -n -c sources` CSV: mode,state,name,... .
+        ``out`` passes in output already fetched.
         """
-        out = self._chronyc(["-n", "-c", "sources"])
+        if out is None:
+            out = self._chronyc(["-n", "-c", "sources"])
         if not out:
             return None
         for line in out.splitlines():
@@ -581,8 +584,14 @@ class ChronyBench:
         )
         sigma_ns = max(sigma_s * 1e9, self.SIGMA_FLOOR_NS)
 
-        is_lan = self._selected_source_is_lan()
+        # One sources call serves two readers: the T4/T2 split and the
+        # selection's own health, which the judge tests before T2's word
+        # may refuse T6 (chrony_source_health.py).
+        sources = self._chronyc(["-n", "-c", "sources"])
+        is_lan = self._selected_source_is_lan(sources or "")
         tier = "T4" if is_lan else "T2"
+        from .chrony_source_health import chrony_source_health
+        health = chrony_source_health(sources)
         return BenchReading(
             tier=tier, utc=utc, sigma_ns=sigma_ns, mono=mono,
             detail={
@@ -593,6 +602,7 @@ class ChronyBench:
                 "root_delay_s": tracking.root_delay_s,
                 "rms_offset_s": tracking.rms_offset_s,
                 "selected_source_lan": is_lan,
+                "chrony_health": health,
             },
         )
 
@@ -1447,6 +1457,10 @@ class OffsetJudge:
         # recorder reads it to let a qualified T4 place T6's edge before
         # T6 can (t4_reference.py), so no second chronyc caller exists.
         self._host_clock_reading: Optional[BenchReading] = None
+        # An open episode in which T2 showed a fault of its own and so
+        # did not refuse a credible T6 (_t2_overrule_reason_locked);
+        # None outside one.  Published as ``t2_overruled``.
+        self._t2_overrule: Optional[Dict] = None
         self._candidate_tier: Optional[str] = None      # upgrade hysteresis
         self._candidate_count: int = 0
         self._publish_error_logged = False
@@ -1859,6 +1873,18 @@ class OffsetJudge:
         with self._lock:
             self._host_clock_reading = next(
                 (r for r in readings if r.tier in ("T4", "T2")), None)
+            if self._t2_overrule is not None:
+                # The episode ends when T2 heals, even with T6 already
+                # adopted and the gate no longer asked.
+                from .chrony_source_health import chrony_unhealthy_reason
+                t2 = next((r for r in readings if r.tier == "T2"), None)
+                if t2 is None:
+                    self._t2_overrule_exit_locked(
+                        None, None, "T2 no longer answers")
+                elif chrony_unhealthy_reason(
+                        (t2.detail or {}).get("chrony_health")) is None:
+                    self._t2_overrule_exit_locked(
+                        None, None, "T2 shows no fault now")
             self._t6_rate = t6_rate
             self._t3_shadow = t3_shadow
             self._gpsdo_discipline = gpsdo_state
@@ -2738,6 +2764,17 @@ class OffsetJudge:
             return "ok"
         host = min(hosts, key=lambda r: float(r.sigma_ns))
         raw_ns = (t6.utc_at(mono_now) - host.utc_at(mono_now)) * 1e9
+        # A T2 with a fault of its own cannot drive a held T6 out either
+        # (see _cross_gate_ok_locked).
+        overrule = self._t2_overrule_reason_locked(t6, host)
+        if overrule is not None:
+            delta_ns = self._cross_bench_delta_ns(t6, host, mono_now)
+            if (not self._t6_gross_ok(t6, host, raw_ns)
+                    or abs(delta_ns) > self._chain_band_ns(t6, host)):
+                self._held_t6_departed_since = None
+                self._held_t6_gross_since = None
+                self._t2_overrule_enter_locked(t6, host, overrule, delta_ns)
+                return "ok"
         if not self._t6_gross_ok(t6, host, raw_ns):
             if self._held_t6_gross_since is None:
                 self._held_t6_gross_since = mono_now
@@ -3009,6 +3046,9 @@ class OffsetJudge:
             raw_ns = (cand.utc_at(mono_now) - ref.utc_at(mono_now)) * 1e9
             gross_ok = self._t6_gross_ok(cand, ref, raw_ns)
         if gross_ok and abs(delta_ns) <= limit_ns:
+            self._t2_overrule_exit_locked(
+                cand, ref, f"T6 agrees with T2 again "
+                f"(delta {delta_ns/1e6:+.3f} ms)")
             if (self._cross_conflict is not None
                     and self._cross_conflict.get("upper") == cand.tier):
                 logger.warning(
@@ -3019,6 +3059,20 @@ class OffsetJudge:
                 )
                 self._cross_conflict = None
             return True
+        # ⛔ T2 earns no vacuous trust over a credible T6.  The lowest
+        # tier anchors the chain, and on a station with no T4 or T5 that
+        # is chrony on internet NTP.  WB6CXC-7, 2026-11-01: a snapshot
+        # stepped the host 185 ms, chrony clung to a stale sample, and
+        # this gate refused a correct T6 for fifteen minutes on that T2's
+        # word.  So T2 must show its own health first; a healthy T2 that
+        # disagrees still refuses, as before.
+        overrule = self._t2_overrule_reason_locked(cand, ref)
+        if overrule is not None:
+            self._t2_overrule_enter_locked(cand, ref, overrule, delta_ns)
+            return True
+        self._t2_overrule_exit_locked(
+            cand, ref, f"T2 shows no fault now ({ref.tier} disagrees by "
+            f"{delta_ns/1e6:+.3f} ms, so its refusal stands)")
         conflict = self._cross_conflict
         if (conflict is None
                 or conflict.get("upper") != cand.tier
@@ -3073,6 +3127,81 @@ class OffsetJudge:
                     record, limit_ns, gross_ok, raw_ns, cand, ref)
             )
         return False
+
+    # ── T2 must show its health before it may refuse T6 ─────────────
+
+    @staticmethod
+    def _t6_credibility_gap(r: BenchReading) -> Optional[str]:
+        """None when a T6 reading carries its own credentials, else what
+        it lacks: the authority's anchor, AUTHORITATIVE, a passing
+        battery, and a named second.  A reading with no health detail
+        has none."""
+        detail = getattr(r, "detail", None) or {}
+        health = detail.get("t6_health")
+        if not isinstance(health, dict):
+            return "no T6 health detail"
+        if detail.get("anchor_tier") != "T6":
+            return "anchor not the authority's"
+        if health.get("authority_state") != "AUTHORITATIVE":
+            return f"authority {health.get('authority_state')}"
+        if health.get("battery_passed") is not True:
+            return "battery not passed"
+        if health.get("second_named") is not True:
+            return "second not named"
+        return None
+
+    def _t2_overrule_reason_locked(
+        self, cand: BenchReading, ref: BenchReading
+    ) -> Optional[str]:
+        """Why T2's disagreement must not refuse this T6, or None.
+
+        Only a credible T6 against a T2 that shows a fault in its own
+        selection (chrony_source_health.py).  Anything else -- a T6
+        without credentials, a T2 with no health summary or none of the
+        faults -- keeps today's refusal.
+        """
+        if cand.tier != "T6" or ref.tier != "T2":
+            return None
+        if self._t6_credibility_gap(cand) is not None:
+            return None
+        from .chrony_source_health import chrony_unhealthy_reason
+        return chrony_unhealthy_reason(
+            (getattr(ref, "detail", None) or {}).get("chrony_health"))
+
+    def _t2_overrule_enter_locked(
+        self, cand: BenchReading, ref: BenchReading, reason: str,
+        delta_ns: float,
+    ) -> None:
+        """Open (or refresh) the episode; log on entry only."""
+        if self._t2_overrule is None:
+            logger.warning(
+                f"OffsetJudge: T6 disagrees with T2 by "
+                f"{delta_ns/1e6:+.3f} ms, but T2 shows a fault of its own "
+                f"-- {reason} -- so T6 is NOT refused on T2's word.  T6 "
+                f"carries its own credentials (AUTHORITATIVE, battery "
+                f"passed, second named).  Logged once; the end is logged "
+                f"too.")
+            self._t2_overrule = {
+                "since_utc": self._iso_utc(self._time()),
+                "reason": reason,
+            }
+        self._t2_overrule = dict(self._t2_overrule, reason=reason,
+                                 delta_ns=round(delta_ns, 1))
+
+    def _t2_overrule_exit_locked(
+        self, cand: Optional[BenchReading], ref: Optional[BenchReading],
+        why: str,
+    ) -> None:
+        """Close the episode; log on exit only.  ``cand``/``ref`` None
+        means the caller has already decided the pair applies."""
+        if self._t2_overrule is None:
+            return
+        if cand is not None and (cand.tier != "T6" or ref.tier != "T2"):
+            return
+        logger.warning(
+            f"OffsetJudge: T2's word counts against T6 again: {why}.  "
+            f"(Episode since {self._t2_overrule.get('since_utc')}.)")
+        self._t2_overrule = None
 
     def _standing_conflict_due_locked(self, attr: str, mono_now: float) -> bool:
         """Once, then every CHAIN_LEARNING_CONFLICT_LOG_INTERVAL_S, on the
@@ -4104,6 +4233,7 @@ class OffsetJudge:
             # per-tick shadow residual of every non-adopted bench vs
             # the adopted one.
             "cross_bench_conflict": self._cross_conflict,
+            "t2_overruled": self._t2_overrule,
             # The (label − host) plane term in force this tick, and
             # where it came from ("measured" | "config").  Published so
             # the correction applied to every cross-plane comparison is

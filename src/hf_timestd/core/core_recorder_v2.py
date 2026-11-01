@@ -2886,11 +2886,18 @@ class CoreRecorderV2:
                 self._t6_health_last = last
             cal = getattr(self, '_t6_calibrator', None)
             rehome_mono = getattr(cal, 'last_rehome_mono', None)
+            verdict = getattr(self, '_t6_last_verdict', None)
+            named = getattr(self, '_t6_block_named', None)
             return {
                 "authority_state": name,
                 "state_for_s": round(now - last[1], 1),
                 "rehome_age_s": (None if rehome_mono is None
                                  else round(now - rehome_mono, 1)),
+                # T6's own credentials, which the judge weighs before a
+                # T2 with a fault of its own may refuse it.
+                "battery_passed": bool(getattr(verdict, 'passed', False)),
+                "second_named": bool(named is not None
+                                     and named[1] is not None),
             }
         except Exception as e:  # noqa: BLE001 — diagnostics never fatal
             logger.debug(f"T6 health state failed: {e}")
