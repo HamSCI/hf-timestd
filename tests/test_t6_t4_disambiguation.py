@@ -400,7 +400,7 @@ class TestRadiodsPairOff(unittest.TestCase):
         r = _fold_recorder()
         _feed(r)
         fold._acquire(r, wall_error_sec=self.PAIR_ERROR_S)
-        self.assertIsNone(r._t6_native_anchor)
+        self.assertIsNone(r._t6_acquisition_accepted)
         rec = _refusal(r)
         self.assertIsNotNone(rec)
         self.assertFalse(rec["restart_cures"])
@@ -409,14 +409,14 @@ class TestRadiodsPairOff(unittest.TestCase):
         r = _fold_recorder(host=_host())
         _feed(r)
         fold._acquire(r, wall_error_sec=self.PAIR_ERROR_S)
-        a = r._t6_native_anchor
+        a = r._t6_acquisition_accepted
         self.assertIsNotNone(a)
-        self.assertEqual(a.captured_via_tier, "T4")
-        self.assertEqual(a.captured_at_utc_ns,
+        self.assertEqual(a.reference, "T4")
+        self.assertEqual(a.named_second_utc_ns,
                          fold.LAST_NAMED * 1_000_000_000)
         # The arrival pairing reads late by the transport latency, and
         # the capture says so in its sigma rather than hiding it.
-        self.assertAlmostEqual(a.chain_delay_ns / 1e9,
+        self.assertAlmostEqual(a.placement_ns / 1e9,
                                fold.CHAIN_DELAY_SEC + TRANSPORT_S,
                                places=4)
         ref = r._t6_acquisition_reference
@@ -434,7 +434,7 @@ class TestRadiodsPairOff(unittest.TestCase):
         r = _fold_recorder(named=fold.NAMED_SECOND + 1, host=_host())
         _feed(r)
         fold._acquire(r, wall_error_sec=self.PAIR_ERROR_S)
-        self.assertIsNone(r._t6_native_anchor)
+        self.assertIsNone(r._t6_acquisition_accepted)
         self.assertIn("names second",
                       _refusal(r)["t4_reference"])
 
@@ -443,7 +443,7 @@ class TestRadiodsPairOff(unittest.TestCase):
         r = _fold_recorder(host=_host(), t5=t5)
         _feed(r)
         fold._acquire(r, wall_error_sec=self.PAIR_ERROR_S)
-        self.assertIsNone(r._t6_native_anchor)
+        self.assertIsNone(r._t6_acquisition_accepted)
         self.assertIn("T5",
                       _refusal(r)["t4_reference"])
 
@@ -455,7 +455,7 @@ class TestRadiodsPairOff(unittest.TestCase):
         r._offset_judge = _host()(
             lambda m: m + _Clock.T0 + 0.30, lambda: r._fixture_clock.mono)
         fold._acquire(r, wall_error_sec=self.PAIR_ERROR_S)
-        self.assertIsNone(r._t6_native_anchor)
+        self.assertIsNone(r._t6_acquisition_accepted)
         self.assertIn("also places",
                       _refusal(r)["t4_reference"])
 
@@ -467,7 +467,7 @@ class TestTheBatteryJudgesT4OnlyBeforeAcquisition(unittest.TestCase):
         _feed(r)
         self.assertEqual(r._t6_battery_plausibility_ref, "T4")
         fold._acquire(r)
-        self.assertIsNotNone(r._t6_native_anchor)
+        self.assertIsNotNone(r._t6_acquisition_accepted)
         r._t6_last_chain_delay_ns = 1          # the caller's latch
         _feed(r, n=1)
         self.assertEqual(r._t6_battery_plausibility_ref, "acquired")

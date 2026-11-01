@@ -110,6 +110,7 @@ def _recorder(named=NAMED_SECOND, battery=None):
     r._t6_disambiguation_ns = 0
     r._t6_last_chain_delay_ns = None
     r._t6_native_anchor = None
+    r._t6_acquisition_accepted = None
     r._t6_rate_reset = lambda _why: None
     r._t6_channel_info = SimpleNamespace(chain_delay_correction_ns=None)
     r._t6_calibrator = SimpleNamespace(sample_rate=SR,
@@ -195,7 +196,7 @@ class TestAcquisitionUsesTheFold(unittest.TestCase):
         r = _recorder()
         _feed_blocks(r)
         _acquire(r)
-        self.assertIsNotNone(r._t6_native_anchor)
+        self.assertIsNotNone(r._t6_acquisition_accepted)
         self.assertTrue(r._t6_last_verdict.passed,
                         r._t6_last_verdict.failures)
 
@@ -203,7 +204,7 @@ class TestAcquisitionUsesTheFold(unittest.TestCase):
         r = _recorder()
         _feed_blocks(r, fold_retention=0.006)
         _acquire(r)
-        self.assertIsNone(r._t6_native_anchor)
+        self.assertIsNone(r._t6_acquisition_accepted)
         self.assertIn("retention", r._t6_last_verdict.failures)
 
     def test_no_named_second_refuses_without_capturing(self):
@@ -212,7 +213,7 @@ class TestAcquisitionUsesTheFold(unittest.TestCase):
         r = _recorder(named=None)
         _feed_blocks(r)
         _acquire(r)
-        self.assertIsNone(r._t6_native_anchor)
+        self.assertIsNone(r._t6_acquisition_accepted)
 
     def test_the_plausibility_guard_still_refuses_a_gross_wrap(self):
         """radiod's mapping 450 ms from the named second.
@@ -225,13 +226,13 @@ class TestAcquisitionUsesTheFold(unittest.TestCase):
         r = _recorder()
         _feed_blocks(r)
         _acquire(r, wall_error_sec=0.45)
-        self.assertIsNone(r._t6_native_anchor)
+        self.assertIsNone(r._t6_acquisition_accepted)
 
     def test_the_anchor_is_built_on_the_named_second(self):
         r = _recorder()
         _feed_blocks(r)
         _acquire(r)
-        self.assertEqual(r._t6_native_anchor.captured_at_utc_ns,
+        self.assertEqual(r._t6_acquisition_accepted.named_second_utc_ns,
                          LAST_NAMED * 1_000_000_000)
 
     # test_the_old_sigma_gate_is_no_longer_consulted stood here.  It mocked
@@ -245,9 +246,9 @@ class TestAcquisitionUsesTheFold(unittest.TestCase):
         r = _recorder()
         _feed_blocks(r)
         _acquire(r)
-        self.assertEqual(r._t6_native_anchor.anchor_rtp,
+        self.assertEqual(r._t6_acquisition_accepted.edge_rtp,
                          LAST_EDGE_RTP & 0xFFFFFFFF)
-        self.assertNotEqual(r._t6_native_anchor.anchor_rtp,
+        self.assertNotEqual(r._t6_acquisition_accepted.edge_rtp,
                             MF_EDGE_RTP & 0xFFFFFFFF)
 
     def test_the_fold_domain_position_is_never_read(self):
@@ -263,7 +264,7 @@ class TestAcquisitionUsesTheFold(unittest.TestCase):
         wrong = _recorder()
         _feed_blocks(wrong, edge_offset_samples=77_777.0)
         _acquire(wrong)
-        self.assertEqual(wrong._t6_native_anchor, good._t6_native_anchor)
+        self.assertEqual(wrong._t6_acquisition_accepted, good._t6_acquisition_accepted)
 
 
 class TestTheBatteryIsJudgedWhereBlocksArrive(unittest.TestCase):
@@ -316,7 +317,7 @@ class TestTheBatteryIsJudgedWhereBlocksArrive(unittest.TestCase):
         r = _recorder()
         r._t6_last_fine_est = _estimate(EDGE_RTP)
         _acquire(r)
-        self.assertIsNone(r._t6_native_anchor)
+        self.assertIsNone(r._t6_acquisition_accepted)
         self.assertIsNone(r._t6_last_verdict)
 
     def test_repeating_the_call_does_not_manufacture_a_run(self):
@@ -325,23 +326,23 @@ class TestTheBatteryIsJudgedWhereBlocksArrive(unittest.TestCase):
         r = _recorder()
         r._t6_last_fine_est = _estimate(EDGE_RTP)
         _acquire(r, times=6)
-        self.assertIsNone(r._t6_native_anchor)
+        self.assertIsNone(r._t6_acquisition_accepted)
         self.assertEqual(len(r._t6_battery._edges), 0)
 
     def test_the_hold_resolves_itself_as_blocks_accumulate(self):
         r = _recorder()
         r._t6_last_fine_est = _estimate(EDGE_RTP)
         _acquire(r)
-        self.assertIsNone(r._t6_native_anchor)
+        self.assertIsNone(r._t6_acquisition_accepted)
 
         _feed_blocks(r, n=1)
         _acquire(r)
-        self.assertIsNone(r._t6_native_anchor)
+        self.assertIsNone(r._t6_acquisition_accepted)
         self.assertIn("ruler", r._t6_last_verdict.failures)
 
         _feed_blocks(r, n=BLOCKS)
         _acquire(r)
-        self.assertIsNotNone(r._t6_native_anchor)
+        self.assertIsNotNone(r._t6_acquisition_accepted)
 
     def test_the_holding_message_is_throttled(self):
         """A station that never acquires must not log per cycle."""
@@ -368,7 +369,7 @@ class TestARefusedEdgeDoesNotMoveTheClock(unittest.TestCase):
         # AI6VN, and the exact failure criterion 1 exists to catch.
         _feed_blocks(r, fold_retention=0.006)
         _acquire(r, wall_error_sec=0.030)
-        self.assertIsNone(r._t6_native_anchor)
+        self.assertIsNone(r._t6_acquisition_accepted)
         self.assertEqual(r._t6_disambiguation_ns, self.PRIOR)
 
     def test_a_plausibility_refusal_leaves_the_shift_untouched(self):
@@ -376,7 +377,7 @@ class TestARefusedEdgeDoesNotMoveTheClock(unittest.TestCase):
         r._t6_disambiguation_ns = self.PRIOR
         _feed_blocks(r)
         _acquire(r, wall_error_sec=0.45)
-        self.assertIsNone(r._t6_native_anchor)
+        self.assertIsNone(r._t6_acquisition_accepted)
         self.assertEqual(r._t6_disambiguation_ns, self.PRIOR)
 
     def test_an_unnamed_second_leaves_the_shift_untouched(self):
@@ -393,7 +394,7 @@ class TestARefusedEdgeDoesNotMoveTheClock(unittest.TestCase):
         r._t6_disambiguation_ns = self.PRIOR
         _feed_blocks(r)
         _acquire(r, wall_error_sec=3.0 / SR)
-        self.assertIsNotNone(r._t6_native_anchor)
+        self.assertIsNotNone(r._t6_acquisition_accepted)
         self.assertEqual(r._t6_disambiguation_ns, round(3 * 1e9 / SR))
 
 
@@ -405,7 +406,7 @@ class TestTheDeviationArithmetic(unittest.TestCase):
         _feed_blocks(r)
         _acquire(r)
         self.assertEqual(r._t6_disambiguation_ns, 0)
-        self.assertEqual(r._t6_native_anchor.chain_delay_ns, CHAIN_DELAY_NS)
+        self.assertEqual(r._t6_acquisition_accepted.placement_ns, CHAIN_DELAY_NS)
 
     def test_a_firing_instant_three_samples_late_shifts_three_samples(self):
         r = _recorder()
@@ -414,12 +415,12 @@ class TestTheDeviationArithmetic(unittest.TestCase):
         # +3 samples of deviation -> +3 samples of correction, ADDED to
         # the raw chain delay (the caller re-forms raw + disambiguation).
         self.assertEqual(r._t6_disambiguation_ns, round(3 * 1e9 / SR))
-        self.assertEqual(r._t6_native_anchor.chain_delay_ns,
+        self.assertEqual(r._t6_acquisition_accepted.placement_ns,
                          CHAIN_DELAY_NS + round(3 * 1e9 / SR))
         # And the property the sign exists to satisfy: once corrected,
         # the firing instant lands on the second it was named for.
         firing = (_wall_of(LAST_EDGE_RTP, 3.0 / SR)
-                  - r._t6_native_anchor.chain_delay_ns / 1e9)
+                  - r._t6_acquisition_accepted.placement_ns / 1e9)
         self.assertAlmostEqual(firing, float(LAST_NAMED), places=7)
 
     def test_the_correction_is_signed_not_absolute(self):
@@ -429,7 +430,7 @@ class TestTheDeviationArithmetic(unittest.TestCase):
         _acquire(r, wall_error_sec=-3.0 / SR)
         self.assertEqual(r._t6_disambiguation_ns, -round(3 * 1e9 / SR))
         firing = (_wall_of(LAST_EDGE_RTP, -3.0 / SR)
-                  - r._t6_native_anchor.chain_delay_ns / 1e9)
+                  - r._t6_acquisition_accepted.placement_ns / 1e9)
         self.assertAlmostEqual(firing, float(LAST_NAMED), places=7)
 
     def test_the_subsample_fraction_is_carried_not_discarded(self):
@@ -466,7 +467,7 @@ class TestThePlausibilityGuardStandsAlone(unittest.TestCase):
         _acquire(r, wall_error_sec=0.45)
         self.assertTrue(r._t6_last_verdict.passed,
                         r._t6_last_verdict.failures)
-        self.assertIsNone(r._t6_native_anchor)
+        self.assertIsNone(r._t6_acquisition_accepted)
 
 
 class TestSigmaEvidence(unittest.TestCase):
@@ -484,7 +485,7 @@ class TestSigmaEvidence(unittest.TestCase):
         _feed_blocks(r, n=1)                          # < 2 positions
         self.assertIn("sigma", r._t6_last_verdict.failures)
         _acquire(r)
-        self.assertIsNone(r._t6_native_anchor)
+        self.assertIsNone(r._t6_acquisition_accepted)
 
     def test_sigma_comes_from_the_fold_when_no_anchor_exists(self):
         """⛔ THE CIRCULAR DEPENDENCY, pinned.
@@ -502,14 +503,14 @@ class TestSigmaEvidence(unittest.TestCase):
         """
         r = _recorder()
         r._t6_chain_delay_history = []                # as production holds it
-        self.assertIsNone(r._t6_native_anchor)
+        self.assertIsNone(r._t6_acquisition_accepted)
         _feed_blocks(r)
         self.assertNotIn("sigma", r._t6_last_verdict.failures)
         self.assertTrue(math.isfinite(r._t6_last_verdict.sigma_ms))
         self.assertTrue(r._t6_last_verdict.passed,
                         r._t6_last_verdict.failures)
         _acquire(r)
-        self.assertIsNotNone(r._t6_native_anchor)
+        self.assertIsNotNone(r._t6_acquisition_accepted)
 
     def test_a_legitimate_zero_sigma_is_not_swallowed(self):
         """`or 0.0` also could not tell 'no reading' from a real 0.0."""
@@ -535,7 +536,7 @@ class TestSigmaEvidence(unittest.TestCase):
         _feed_blocks(r, n=1)                      # must not raise
         self.assertIsNone(r._t6_last_verdict)
         _acquire(r)
-        self.assertIsNone(r._t6_native_anchor)
+        self.assertIsNone(r._t6_acquisition_accepted)
 
     def test_no_placement_fails_plausibility(self):
         """Nothing named the second, so nothing can place the edge in it.

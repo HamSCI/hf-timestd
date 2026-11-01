@@ -5351,7 +5351,7 @@ class CoreRecorderV2:
                 summary['refusals'], rec.CURRENT_FOR_S)
         return rec.current(mono)
 
-    def _t6_disambiguate_via_external_reference(self, result) -> None:
+    def _t6_disambiguate_via_external_reference(self, result) -> bool:
         """Acquire the T6 anchor on T6's own edge (acceptance criteria §3).
 
         Two questions, and they used to be asked at one threshold.
@@ -5537,7 +5537,6 @@ class CoreRecorderV2:
             # cascade-NAMED integer second.  The effective chain delay
             # (= result.chain_delay_ns + disambig_ns) is where in that
             # second the edge fell.
-            from .native_anchor import NativeAnchor
             (deviation_sec, shift_samples, disambiguation_ns,
              effective_chain_delay_ns) = _place(raw_wall_time_sec)
             T6_PHYSICAL_CHAIN_DELAY_MAX_NS = 250_000_000
@@ -5653,40 +5652,39 @@ class CoreRecorderV2:
                         'stratum', 'arrival_age_s')}),
             }
 
-            pps_firing_utc_ns = int(named_second) * 1_000_000_000
-            self._t6_native_anchor = NativeAnchor(
-                anchor_rtp=edge_rtp & 0xFFFFFFFF,
-                anchor_utc_ns=pps_firing_utc_ns + effective_chain_delay_ns,
-                sample_rate_hz=int(sr_local),
-                chain_delay_ns=effective_chain_delay_ns,
-                captured_at_utc_ns=pps_firing_utc_ns,
-                captured_via_tier=str(ref_tier),
+            # ⛔ NO ANCHOR IS BUILT HERE.  This path used to capture a
+            # coarse "namer" anchor at named second + placement, which
+            # copied radiod's host-clock tie into the anchor and overwrote
+            # the authority's own until its next fold block.  Anchors now
+            # come only from T6AnchorAuthority._build_anchor (named second
+            # + asserted delay - subsample), so acquisition here ACCEPTS
+            # and the caller latches once that authority anchor exists.
+            from .t6_acquisition_acceptance import T6AcquisitionAcceptance
+            self._t6_acquisition_accepted = T6AcquisitionAcceptance(
+                named_second_utc_ns=int(named_second) * 1_000_000_000,
+                edge_rtp=edge_rtp & 0xFFFFFFFF,
+                placement_ns=int(effective_chain_delay_ns),
+                reference=str(ref_tier),
             )
-            self._t6_rate_reset(f"native anchor captured via {ref_tier}")
-            # getattr'd: test harnesses borrow this method onto bare
-            # fakes that have neither the helper nor a ledger.
-            _led = getattr(self, '_t6_ledger_append', None)
-            if _led is not None:
-                _led(self._t6_native_anchor)
             logger.info(
-                f"T6 acquired on the fold's edge: second named "
-                f"{named_second} by the coarse cascade; firing instant "
-                f"deviated {deviation_sec*1000:+.3f} ms from it, so "
-                f"shifting {shift_samples} samples "
-                f"({self._t6_disambiguation_ns} ns); raw="
-                f"{result.chain_delay_ns} ns implied effective "
-                f"chain_delay {effective_chain_delay_ns/1e6:+.3f} ms; "
-                f"battery passed (sigma {verdict.sigma_ms:.4f} ms, "
-                f"plausibility judged on "
-                f"{getattr(self, '_t6_battery_plausibility_ref', None)}); "
-                + (f"sub-second placed by T4, sigma "
-                   f"{t4_info['sigma_ns'] / 1e6:.3f} ms (host "
+                f"T6 acquisition accepted on the fold's edge: second named "
+                f"{named_second} by the coarse cascade; "
+                f"{'T4' if t4_info is not None else 'radiod pair'} places "
+                f"the edge {effective_chain_delay_ns/1e6:+.3f} ms into it "
+                f"(a placement through that tie, not a delay; shift "
+                f"{shift_samples} samples from the raw counter phase "
+                f"{result.chain_delay_ns} ns); battery passed (sigma "
+                f"{verdict.sigma_ms:.4f} ms, plausibility judged on "
+                f"{getattr(self, '_t6_battery_plausibility_ref', None)})"
+                + (f"; T4 sigma {t4_info['sigma_ns'] / 1e6:.3f} ms (host "
                    f"{t4_info['host_sigma_ns'] / 1e6:.3f} ms + arrival "
-                   f"floor); " if t4_info is not None else "")
-                + f"{format_native_anchor_log(self._t6_native_anchor, ref_tier)}"
+                   f"floor)" if t4_info is not None else "")
+                + ".  The anchor comes from the T6 authority."
             )
+            return True
         except Exception as e:
             logger.warning(f"T6 disambiguation failed: {e}")
+        return False
 
     def _wait_for_chrony_settled(self) -> bool:
         """Block until chrony's Last offset has been below
@@ -6303,17 +6301,37 @@ class CoreRecorderV2:
                 # this attempt's success and latch the gate shut on it.
                 _anchor_before = getattr(self, '_t6_native_anchor', None)
                 _dpath = "t5-lb1421"
-                if not self._t6_disambiguate_via_t5_lb1421(result):
-                    self._t6_disambiguate_via_external_reference(result)
+                if self._t6_disambiguate_via_t5_lb1421(result):
+                    _captured = (self._t6_native_anchor is not None
+                                 and self._t6_native_anchor
+                                 is not _anchor_before)
+                else:
+                    _accepted = bool(
+                        self._t6_disambiguate_via_external_reference(result))
                     _dpath = "external-ref"
-                    if (self._t6_native_anchor is not _anchor_before
-                            and getattr(self._t6_native_anchor,
-                                        'captured_via_tier', None) == 'T4'):
+                    if (_accepted and (getattr(
+                            self, '_t6_acquisition_reference', None)
+                            or {}).get('placed_by') == 'T4'):
                         _dpath = "external-ref:T4"
+                    # The external path builds no anchor; it latches on
+                    # the T6 authority's, which the fold-block path
+                    # installs at AUTHORITATIVE.  Accepted before the
+                    # authority gets there: the gate stays open.
+                    _auth_anchor = getattr(self, '_t6_native_anchor', None)
+                    _captured = (_accepted and _auth_anchor is not None
+                                 and getattr(_auth_anchor,
+                                             'captured_via_tier',
+                                             None) == 'T6')
+                    if (_accepted and not _captured
+                            and self._t6_say_once('acceptance_awaits_authority')):
+                        logger.info(
+                            "T6 acquisition accepted, awaiting the anchor "
+                            "authority: no AUTHORITATIVE anchor yet, so the "
+                            "gate stays open and the walk retries.  "
+                            "(Repeated at most every %.0f s.)",
+                            self.T6_REPEAT_PERIOD_SEC)
                 self._t6_disambig_path = _dpath
                 self._t6_disambig_detail = ""
-                _captured = (self._t6_native_anchor is not None
-                             and self._t6_native_anchor is not _anchor_before)
                 # ⛔ NOTHING TO JUDGE WITHOUT AN ACQUISITION.  This guard
                 # used to run on every walk, and when the walk captured
                 # nothing the disambiguation stood at zero, so it judged
@@ -6365,7 +6383,7 @@ class CoreRecorderV2:
                             f'disambig_dump:{result.chain_delay_ns // 1000}'):
                         logger.warning(
                             "T6 DISAMBIG: path=%s raw=%d ns (%.6f ms) "
-                            "disambig=%d ns (%.6f ms) effective=%d ns "
+                            "disambig=%d ns (%.6f ms) placement=%d ns "
                             "(%.6f ms) | shift/wrap=%.4f shift/sample=%.2f | %s",
                             getattr(self, '_t6_disambig_path', 'fallthrough'),
                             result.chain_delay_ns,
@@ -6438,11 +6456,17 @@ class CoreRecorderV2:
                     self._t6_clear_acquisition_refusal(
                         "T6 acquired (anchor via "
                         f"{getattr(self._t6_native_anchor, 'captured_via_tier', '?')}"
-                        f", effective chain delay {effective / 1e6:+.3f} ms)")
+                        f", edge placed {effective / 1e6:+.3f} ms into its "
+                        f"second)")
+                    # ``effective`` is where the accepting reference put
+                    # the edge in its second -- radiod's host-clock tie or
+                    # T4 -- not a chain delay; the anchor applies the
+                    # asserted delay instead.
                     logger.info(
-                        f"T6 chain_delay initial accept: "
-                        f"{result.chain_delay_ns} ns "
-                        f"(effective with disambiguation: {effective} ns)"
+                        f"T6 initial accept: edge placed "
+                        f"{effective / 1e6:+.3f} ms into its named second "
+                        f"(raw counter phase {result.chain_delay_ns} ns + "
+                        f"disambiguation {self._t6_disambiguation_ns} ns)"
                     )
             elif abs(wrap_chain_delay_ns(
                     (result.chain_delay_ns + self._t6_disambiguation_ns)
@@ -6632,11 +6656,23 @@ class CoreRecorderV2:
             # alignment.  Pre-2026-05 archives lacked this metadata field
             # and had chain_delay applied at write time — readers should
             # treat absence as "applied=True".
+            #
+            # ⛔ The ASSERTED delay the authority's anchor applies, never
+            # ``effective_chain_delay``: that figure is where radiod's
+            # host-clock tie placed the edge in its second (raw counter
+            # phase + disambiguation), not a delay, and on WB6CXC-7 it
+            # read -166.9 ms one start and +13.3 ms the next for one
+            # cable.  None while no authority exists.
+            _auth = getattr(self, '_t6_authority', None)
+            _asserted_ns = (
+                None if _auth is None else
+                int(getattr(_auth, 'delay_budget_ns', 0) or 0)
+                + int(getattr(_auth, 'filter_group_delay_ns', 0) or 0))
             for desc, recorder in self.recorders.items():
                 writer = getattr(recorder, 'archive_writer', None)
                 if writer is not None and hasattr(writer, 'set_bpsk_metadata'):
                     writer.set_bpsk_metadata(
-                        chain_delay_ns=effective_chain_delay,
+                        chain_delay_ns=_asserted_ns,
                         applied=False,
                     )
 
@@ -6842,92 +6878,94 @@ class CoreRecorderV2:
                         )
                         _sys_at_edge = _shm_pair.system_time
 
-                        # Falling back means system_time is read at push
-                        # again -- the ~0.5 s defect returns, silently, and
-                        # chrony would only reveal it as a falseticker much
-                        # later.  Say so.  Rate-limited to 1 / 5 min.
-                        if _pair_fallback is not None:
+                        # ⛔ NO FLOOR, NO PUSH.  Without the arrival floor
+                        # the only host time for this edge is the push-time
+                        # construction, which republishes stream arrival
+                        # latency (13-45 ms on B4) as clock error and, with
+                        # no RTP interval either, the whole MF detection
+                        # latency (~0.5 s).  Chrony learns of that only as a
+                        # falseticker much later.  So this edge is not
+                        # pushed; the episode logs once on entry and once
+                        # on exit (hf-timestd#18, #7).
+                        if _floor is None:
+                            if not getattr(self, '_t6_shm_no_floor', False):
+                                self._t6_shm_no_floor = True
+                                logger.warning(
+                                    "T6 HPPS: arrival floor has no estimate "
+                                    "(%s); not pushing to chrony until it "
+                                    "has one.  The push-time construction "
+                                    "would publish transport latency as "
+                                    "clock error.  Logged once; the end is "
+                                    "logged too.", _pair_fallback)
+                            self._t6_last_pushed_rtp = last_edge_rtp
+                        elif getattr(self, '_t6_shm_no_floor', False):
+                            self._t6_shm_no_floor = False
+                            logger.warning(
+                                "T6 HPPS: arrival floor has an estimate "
+                                "again; pushes resume.")
+                        if _floor is not None:
+                            # ---- end fix ----
+                            # precision is DERIVED from the floor's measured
+                            # sigma, never asserted.  This used to be a hardcoded
+                            # -14 (61 us) regardless of what the pair was worth;
+                            # against B4's measured 1.4 ms scatter that is a 26x
+                            # overclaim, and it is where the "+/- 55us" column in
+                            # `chronyc sources` comes from -- a number that has
+                            # now caused three separate misdiagnoses by looking
+                            # like a measurement.  Same derivation FUSE uses, so
+                            # chrony can weigh the two feeds against each other
+                            # honestly.  hf-timestd#18.
+                            # hf-timestd#29: a sustained, concordant
+                            # witness verdict overrides the bench's own
+                            # claim.  If T4 and T3 agree the bench is 26 ms
+                            # away, a 0.8 ms error bar is a false statement
+                            # whatever produced it.
+                            # NB: `_floor` above is the ARRIVAL floor; this
+                            # is a sigma floor. Different quantity, hence the
+                            # distinct name.
+                            _prec = _shm_pair.precision
+                            _dissent_floor = self._t6_dissent_sigma_floor_ns()
+                            if (_dissent_floor is not None
+                                    and _dissent_floor > _shm_pair.sigma_ns):
+                                _prec = precision_from_sigma_ns(_dissent_floor)
+                            self._t6_shm.update(
+                                reference_time=ref_time_ns / 1e9,
+                                system_time=_sys_at_edge,
+                                precision=_prec,
+                            )
+                            # Structural health signal.  push_lag is the MF's
+                            # detection latency (~N/sample_rate, ~455 ms at
+                            # 96 kHz); drift means the buffering changed.
+                            # offset_to_chrony is what chrony now receives, and
+                            # is the instrument for the residual chain-delay
+                            # error (hf-timestd#7 defect 2).  1 line / 5 min.
                             _now_m = time.monotonic()
                             if (_now_m - getattr(
-                                    self, '_t6_pair_fallback_last_warn', 0.0)
-                                    ) > 300.0:
-                                self._t6_pair_fallback_last_warn = _now_m
-                                logger.warning(
-                                    "T6 SHM pair: no arrival-floor estimate "
-                                    "(%s) -- falling back to the push-time "
-                                    "construction, which republishes stream "
-                                    "arrival latency (13-45 ms measured on "
-                                    "B4) as clock error; if the RTP interval "
-                                    "was also unavailable it re-introduces "
-                                    "the whole MF detection latency (~0.5 s). "
-                                    "Precision widened to the %.0f ms "
-                                    "transport bound so chrony weighs it "
-                                    "accordingly. See hf-timestd#18, #7.",
-                                    _pair_fallback,
+                                    self, '_t6_seam_last_log', 0.0)) > 300.0:
+                                self._t6_seam_last_log = _now_m
+                                # offset_legacy is what the pre-#18 construction
+                                # WOULD have published for this same edge.  Keep
+                                # both terms: the fix is only demonstrated by the
+                                # pair, and offset_legacy tracking push_lag while
+                                # offset_to_chrony does not IS the proof.
+                                logger.info(
+                                    "T6 SHM pair: push_lag=%.1f ms "
+                                    "offset_to_chrony=%.3f ms "
+                                    "offset_legacy=%.3f ms src=%s "
+                                    "precision=%d sigma=%.3f ms "
+                                    "placement=%d ns residual=%d ns",
+                                    (_push_wall - pps_firing_utc_ns / 1e9) * 1e3,
+                                    (ref_time_ns / 1e9 - _sys_at_edge) * 1e3,
+                                    (ref_time_ns / 1e9
+                                     - _legacy_sys_at_edge) * 1e3,
+                                    _shm_pair.source,
+                                    _shm_pair.precision,
                                     _shm_pair.sigma_ns / 1e6,
+                                    int(effective_chain_delay),
+                                    int(self._t6_last_local_minus_source_ns),
                                 )
-                        # ---- end fix ----
-                        # precision is DERIVED from the floor's measured
-                        # sigma, never asserted.  This used to be a hardcoded
-                        # -14 (61 us) regardless of what the pair was worth;
-                        # against B4's measured 1.4 ms scatter that is a 26x
-                        # overclaim, and it is where the "+/- 55us" column in
-                        # `chronyc sources` comes from -- a number that has
-                        # now caused three separate misdiagnoses by looking
-                        # like a measurement.  Same derivation FUSE uses, so
-                        # chrony can weigh the two feeds against each other
-                        # honestly.  hf-timestd#18.
-                        # hf-timestd#29: a sustained, concordant
-                        # witness verdict overrides the bench's own
-                        # claim.  If T4 and T3 agree the bench is 26 ms
-                        # away, a 0.8 ms error bar is a false statement
-                        # whatever produced it.
-                        # NB: `_floor` above is the ARRIVAL floor; this
-                        # is a sigma floor. Different quantity, hence the
-                        # distinct name.
-                        _prec = _shm_pair.precision
-                        _dissent_floor = self._t6_dissent_sigma_floor_ns()
-                        if (_dissent_floor is not None
-                                and _dissent_floor > _shm_pair.sigma_ns):
-                            _prec = precision_from_sigma_ns(_dissent_floor)
-                        self._t6_shm.update(
-                            reference_time=ref_time_ns / 1e9,
-                            system_time=_sys_at_edge,
-                            precision=_prec,
-                        )
-                        # Structural health signal.  push_lag is the MF's
-                        # detection latency (~N/sample_rate, ~455 ms at
-                        # 96 kHz); drift means the buffering changed.
-                        # offset_to_chrony is what chrony now receives, and
-                        # is the instrument for the residual chain-delay
-                        # error (hf-timestd#7 defect 2).  1 line / 5 min.
-                        _now_m = time.monotonic()
-                        if (_now_m - getattr(
-                                self, '_t6_seam_last_log', 0.0)) > 300.0:
-                            self._t6_seam_last_log = _now_m
-                            # offset_legacy is what the pre-#18 construction
-                            # WOULD have published for this same edge.  Keep
-                            # both terms: the fix is only demonstrated by the
-                            # pair, and offset_legacy tracking push_lag while
-                            # offset_to_chrony does not IS the proof.
-                            logger.info(
-                                "T6 SHM pair: push_lag=%.1f ms "
-                                "offset_to_chrony=%.3f ms "
-                                "offset_legacy=%.3f ms src=%s "
-                                "precision=%d sigma=%.3f ms "
-                                "chain_delay=%d ns residual=%d ns",
-                                (_push_wall - pps_firing_utc_ns / 1e9) * 1e3,
-                                (ref_time_ns / 1e9 - _sys_at_edge) * 1e3,
-                                (ref_time_ns / 1e9
-                                 - _legacy_sys_at_edge) * 1e3,
-                                _shm_pair.source,
-                                _shm_pair.precision,
-                                _shm_pair.sigma_ns / 1e6,
-                                int(effective_chain_delay),
-                                int(self._t6_last_local_minus_source_ns),
-                            )
-                        self._t6_last_pushed_rtp = last_edge_rtp
-                        self._t6_shm_push_count += 1
+                            self._t6_last_pushed_rtp = last_edge_rtp
+                            self._t6_shm_push_count += 1
                 except Exception as e:
                     # SHM push is non-fatal — log once per ~60 s of failures
                     if not getattr(self, '_t6_shm_warned', False):
