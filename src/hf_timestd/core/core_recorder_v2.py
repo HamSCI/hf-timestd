@@ -801,6 +801,9 @@ class CoreRecorderV2:
         # than publish a wrong utc.  Keyed by channel (each radiod channel
         # starts its own counter); empty until an archive batch arrives.
         self._hf_arrivals: Dict[str, Tuple[int, float, int]] = {}
+        # Fix 1: one least-delayed-arrival floor per archive channel's
+        # counter, fed by the same tap (``_wire_t5_fallback_arrival``).
+        self._hf_arrival_floors: Dict[str, object] = {}
         # P5 decoupling (2026-08-05, AC0G-B4: lb1421_enabled=true with
         # [timing.t6_pps] off left the judge stuck at T4 because the T5
         # bench only ever grounded on the T6 stream): every archive
@@ -2920,9 +2923,11 @@ class CoreRecorderV2:
     def _hf_acquired_bench_state(self):
         """HfAcquiredBench provider (T3): a copy of ``_hf_arrivals``,
         ``{channel: (arrival_rtp, arrival_mono, arrival_sample_rate,
-        counter_map)}``, or None before any archive batch arrives.
+        counter_map, floor)}``, or None before any archive batch arrives.
         ``counter_map`` is the channel's live map when it fits the
-        channel's raw radiod pair, else None.
+        channel's raw radiod pair, else None.  ``floor`` is the channel's
+        least-delayed arrival at this one, ``(lead_s, FloorEstimate)`` from
+        ``CounterArrivalFloor.lead``, or None while its window is empty.
 
         Each radiod channel starts its own RTP counter, so an arrival means
         something only in its own channel's counter.  The bench picks the
@@ -2958,7 +2963,19 @@ class CoreRecorderV2:
             if not map_fits_raw_pair(cmap, getattr(ci, 'gps_time', None),
                                      getattr(ci, 'rtp_timesnap', None)):
                 cmap = None
-            out[desc] = (*tuple(arrival)[:3], cmap)
+            # Fix 1: the channel's least-delayed-arrival floor at this
+            # arrival, ``(lead_s, FloorEstimate)`` or None.  Read here, once
+            # per judge tick for every channel, so each floor's sigma
+            # history keeps the judge's cadence whichever channel the
+            # summary names this minute.
+            lead = None
+            floor = (getattr(self, '_hf_arrival_floors', None) or {}).get(desc)
+            if floor is not None:
+                try:
+                    lead = floor.lead(arrival[0], arrival[1], time.monotonic())
+                except Exception as e:  # noqa: BLE001 — bench must not die
+                    logger.debug(f"T3 arrival floor estimate failed for {desc}: {e}")
+            out[desc] = (*tuple(arrival)[:3], cmap, lead)
         return out
 
     # ── T3 against T6 in the sample plane (T3 foundations, task 14) ──
@@ -3215,7 +3232,23 @@ class CoreRecorderV2:
                 arrivals = getattr(self, '_hf_arrivals', None)
                 if arrivals is None:  # __new__-bypassed instance
                     self._hf_arrivals = arrivals = {}
-                arrivals[_desc] = (newest, time.monotonic(), _sr)
+                mono = time.monotonic()
+                arrivals[_desc] = (newest, mono, _sr)
+                # Fix 1: the least-delayed arrival of this channel's
+                # counter, fed here on the delivery path as T6's floor is
+                # (``_t6_note_arrival``): the judge's 10 s tick would hold
+                # one arrival per window and filter nothing.
+                floors = getattr(self, '_hf_arrival_floors', None)
+                if floors is None:  # __new__-bypassed instance
+                    self._hf_arrival_floors = floors = {}
+                floor = floors.get(_desc)
+                if floor is None:
+                    from .counter_arrival_floor import CounterArrivalFloor
+                    floors[_desc] = floor = CounterArrivalFloor(_sr)
+                try:
+                    floor.note(newest, mono)
+                except Exception as e:  # noqa: BLE001 — bench feed, never fatal
+                    logger.debug(f"T3 arrival floor note failed for {_desc}: {e}")
 
         try:
             recorder.add_tap(_note_arrival_tap)

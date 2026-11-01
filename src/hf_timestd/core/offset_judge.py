@@ -917,6 +917,19 @@ class HfAcquiredBench:
     configured rates (``cross_channel_rtp.py``) — the provider must
     name its own sample rate so ``poll`` can refuse a domain mismatch
     outright rather than publish a wrong ``utc``.
+
+    Fix 1 (B4 T3 shadow record, 2026-10-31/11-01): a fifth element carries
+    the least-delayed-arrival floor of that channel's counter, ``(lead_s,
+    FloorEstimate)`` from ``CounterArrivalFloor.lead``, or None while its
+    window is empty.  The latest arrival only proves the stream is alive;
+    its label sits behind true UTC by its delivery latency, so the bench
+    adds ``lead_s`` -- how far the least-delayed arrival puts the counter
+    ahead of it -- as NativeAnchorBench does with its floor.  Without it the
+    judge's T3-vs-T6 residual ran below the direct label comparison by a
+    median 6.6 ms (p5 18 ms) on every channel.  The floor's sigma joins the
+    registration's in quadrature; a named but empty floor falls back to the
+    latest arrival with NativeAnchorBench's transport bound.  An arrival of
+    four elements or fewer keeps the pre-floor reading.
     """
 
     TIER = "T3"
@@ -1016,6 +1029,24 @@ class HfAcquiredBench:
         # claim; `fuse_registrations` is left reporting what its inputs
         # actually measured.
         sigma_ms = max(float(s["sigma_ms"]), ORIGIN_SIGMA_FLOOR_MS)
+        sigma_ns = sigma_ms * 1e6
+        floor_detail = {}
+        if len(tuple(arrival)) > 4:
+            # Fix 1: the least-delayed arrival, not the latest, hands the
+            # label to the monotonic clock (see the class docstring).
+            floor = tuple(arrival)[4]
+            if floor is None:
+                sigma_ns = math.hypot(sigma_ns, NativeAnchorBench.LATENCY_SIGMA_FLOOR_NS)
+                floor_detail = {"floor_n": None}
+            else:
+                lead_s, est = floor
+                utc += float(lead_s)
+                sigma_ns = math.hypot(sigma_ns, float(est.sigma_ns))
+                floor_detail = {
+                    "floor_n": int(est.n),
+                    "floor_span_s": round(float(est.span_s), 3),
+                    "latest_arrival_lag_ns": int(round(float(lead_s) * 1e9)),
+                }
         # THE one gate, asked here so the FUSE feed and the anchor
         # surfaces cannot diverge (fix round 1, C-1).  A WITNESS plane
         # answers as a witness and is refused authority; the judge still
@@ -1026,13 +1057,13 @@ class HfAcquiredBench:
             stale_s=self.FRESHNESS_S, sample_rate=int(arrival_sample_rate),
         )
         return BenchReading(
-            utc=utc, mono=float(arrival_mono), sigma_ns=sigma_ms * 1e6,
+            utc=utc, mono=float(arrival_mono), sigma_ns=sigma_ns,
             tier=self.TIER,
             detail={"bench": "hf_acquired", "counter_epoch_id": s.get("counter_epoch_id"),
                     "raw_pair_residual_ms": s.get("raw_pair_residual_ms"),
                     "registration_age_s": round(reg_age, 1),
                     "authoritative": refusal is None,
-                    "refusal": refusal},
+                    "refusal": refusal, **floor_detail},
             plane="label",
         )
 
