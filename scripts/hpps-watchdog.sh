@@ -30,6 +30,12 @@
 #   HPPS_STATUS_FILE          - producer status surface (authority.json)
 #   HPPS_WITHDRAWN_GRACE_S    - how long to tolerate an HONEST withdrawal
 #                               before restarting anyway (default 3600)
+#   HPPS_RECORDER_STATUS_FILE - the recorder's own status file, read for
+#                               a T6 acquisition refusal a restart cannot
+#                               cure (core-recorder-status.json)
+#   HPPS_RECORDER_STATUS_MAX_AGE_S - older than this, the status file no
+#                               longer speaks for a live recorder, and its
+#                               refusal record holds off nothing (default 120)
 #
 # Exit codes:
 #   0 - HPPS healthy, OR restart attempted, OR cooldown active
@@ -45,6 +51,9 @@ STATE_FILE="$STATE_DIR/hpps-watchdog-last-restart"
 STATUS_FILE="${HPPS_STATUS_FILE:-/run/hf-timestd/authority.json}"
 WITHDRAWN_GRACE_S="${HPPS_WITHDRAWN_GRACE_S:-3600}"
 WITHDRAWN_FILE="$STATE_DIR/hpps-watchdog-withdrawn-since"
+RECORDER_STATUS_FILE="${HPPS_RECORDER_STATUS_FILE:-/var/lib/timestd/status/core-recorder-status.json}"
+RECORDER_STATUS_MAX_AGE_S="${HPPS_RECORDER_STATUS_MAX_AGE_S:-120}"
+REFUSAL_FILE="$STATE_DIR/hpps-watchdog-refusal-since"
 LOG_TAG="hpps-watchdog"
 TARGET_UNIT="timestd-core-recorder.service"
 
@@ -129,6 +138,49 @@ hpps_publishing() {
     esac
 }
 
+# Does T6 report a refusal that a recorder restart cannot cure?
+#
+# T6 refuses to acquire when its edge implies a chain delay outside the
+# physical bound.  Before acquisition that value reads radiod's RTP
+# counter, and the counter outlives a recorder restart, so a restart
+# draws the same refusal.  On AC0G-ND 2026-10-27..31 this script
+# restarted the recorder ~41 times a day for 4.5 days that way, curing
+# nothing and opening a data gap each time.  The recorder now publishes
+# the refusal in its status file with `acquisition_refusal_restart_cures`
+# false (t6_acquisition_refusal.py).
+#
+# Prints the reason and the implied chain delay when such a refusal is
+# current; returns 1 otherwise.  A status file older than
+# RECORDER_STATUS_MAX_AGE_S speaks for no live recorder, so a dead or
+# wedged recorder still gets its restart.
+incurable_refusal() {
+    [ -r "$RECORDER_STATUS_FILE" ] || return 1
+    local mtime now reason effective
+    mtime="$(stat -c %Y "$RECORDER_STATUS_FILE" 2>/dev/null)" || return 1
+    now="$(date -u +%s)"
+    [ $(( now - mtime )) -le "$RECORDER_STATUS_MAX_AGE_S" ] || return 1
+    grep -q '"acquisition_refusal_restart_cures"[[:space:]]*:[[:space:]]*false' \
+        "$RECORDER_STATUS_FILE" 2>/dev/null || return 1
+    reason="$(grep -o '"acquisition_refusal_reason"[[:space:]]*:[[:space:]]*"[^"]*"' \
+              "$RECORDER_STATUS_FILE" 2>/dev/null | head -1 \
+              | sed 's/.*:[[:space:]]*"\([^"]*\)"/\1/')"
+    effective="$(grep -o '"acquisition_refusal_effective_ms"[[:space:]]*:[[:space:]]*[-0-9.]*' \
+                 "$RECORDER_STATUS_FILE" 2>/dev/null | head -1 \
+                 | sed 's/.*:[[:space:]]*//')"
+    printf '%s (implied chain delay %s ms)\n' "${reason:-unspecified}" "${effective:-?}"
+}
+
+# The refusal is a persistent condition: say so once on entry, once on
+# exit, and nothing on the runs in between.
+refusal_exit() {
+    [ -f "$REFUSAL_FILE" ] || return 0
+    local since now
+    since="$(cat "$REFUSAL_FILE" 2>/dev/null || echo 0)"
+    now="$(date -u +%s)"
+    log "T6 no longer reports a refusal a restart cannot cure ($1) after $(( now - since ))s; normal restart policy resumes"
+    rm -f "$REFUSAL_FILE" 2>/dev/null || true
+}
+
 cooldown_active() {
     [ -f "$STATE_FILE" ] || return 1
     local last_restart now elapsed
@@ -159,8 +211,22 @@ main() {
     if [ "$lastrx" -lt "$LASTRX_THRESHOLD_S" ]; then
         # Healthy — nothing to do.  Quiet exit (no log spam every minute).
         rm -f "$WITHDRAWN_FILE" 2>/dev/null || true
+        refusal_exit "HPPS sampled again"
         return 0
     fi
+
+    # Checked before the LastRx line below, which would otherwise repeat
+    # every minute for as long as the refusal lasts.
+    local refusal
+    if refusal="$(incurable_refusal)"; then
+        if [ ! -f "$REFUSAL_FILE" ]; then
+            log "HPPS dark (LastRx=${lastrx}s) because T6 refuses acquisition: ${refusal}.  A recorder restart keeps radiod's RTP counter and cannot cure this, so not restarting while the refusal stays current.  A radiod restart, a live T5 or a qualified T4 clears it; see the recorder journal.  Logged once; the exit is logged too."
+            mkdir -p "$STATE_DIR" 2>/dev/null || true
+            date -u +%s > "$REFUSAL_FILE" 2>/dev/null || true
+        fi
+        return 0
+    fi
+    refusal_exit "the recorder status no longer carries one"
 
     log "HPPS LastRx=${lastrx}s exceeds threshold ${LASTRX_THRESHOLD_S}s"
 
