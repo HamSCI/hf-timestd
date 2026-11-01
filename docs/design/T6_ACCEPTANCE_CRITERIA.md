@@ -609,6 +609,17 @@ the arrival-pairing floor (25 ms) in its sigma. That settles a ±250 ms
 question and nothing finer, and the T6 authority's own anchor supersedes the
 capture.
 
+The same T4 also names the second. ND's LBE-Mini publishes no PPS second, so
+its namer never answered and naming fell to radiod's pair. A pair 0.45 s off
+leaves the edge 0.467 s from an integer, and naming gives up; a pair 0.70 s off
+rounds to the next second with 0.283 s to spare, and naming accepts the wrong
+one. The cascade now asks an NMEA reading or second-namer first, then a
+qualified T4 (mjh, 2026-11-01: the host clock may name the second at startup),
+then radiod's pair. When T4 names, the recorder reports any disagreement with
+the pair beyond 0.25 s once when it starts and once when it ends, and never
+lets it veto. The slip check against the previous anchor still follows every
+branch, and `t6_pps.naming_source` records which source named.
+
 With neither T5 nor a qualified T4, the raw phase stands and so does the
 refusal. The recorder then publishes it as `t6_pps.acquisition_refusal_*` in
 its status file, with `restart_cures` false: the counter belongs to radiod

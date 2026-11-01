@@ -3580,8 +3580,9 @@ class CoreRecorderV2:
     def _t6_name_integer_second(self, edge_rtp: int) -> Optional[int]:
         """Name the integer UTC second of a fine-stage edge (spec §2).
 
-        The coarse cascade (T5 NMEA preferred, radiod-pair wall estimate
-        as fallback) only NAMES the second — it needs ±0.5 s accuracy
+        The coarse cascade (T5 NMEA or a second-namer first, then a
+        qualified T4, then the radiod-pair wall estimate as the last
+        resort) only NAMES the second — it needs ±0.5 s accuracy
         and its noise cannot enter the sub-second value.  Residual
         beyond ±0.4 s (margin inside the cell) → None (invariant 3).
 
@@ -3621,6 +3622,27 @@ class CoreRecorderV2:
                 if abs(edge_utc - named) > 0.4:
                     return None
                 self._t6_report_naming_vs_radiod_pair(wall, edge_utc)
+                self._t6_naming_source = 'nmea'
+                return self._t6_reconcile_naming(named, edge_rtp)
+
+        # A qualified T4 next, ahead of radiod's pair (mjh, 2026-11-01:
+        # the host clock may name the second at startup).  AC0G-ND's
+        # LBE-Mini publishes no PPS second, so ND named from the pair
+        # alone, and after the 2026-10-27 RX888 stall the pair came up
+        # 0.3-0.5 s off: past 0.4 s naming gave up, and past ~0.58 s it
+        # would round to the WRONG second with no signal.  Same gates
+        # and pairing as the T4 placement (t4_reference.py); T5, when it
+        # reads, keeps the first word.
+        _via_t4 = getattr(self, '_t6_edge_utc_via_t4', None)
+        if _via_t4 is not None:
+            t4_utc, t4_info = _via_t4(edge_rtp)
+            self._t6_naming_t4_refusal = (t4_info or {}).get('refused')
+            if t4_utc is not None:
+                named = int(round(t4_utc))
+                if abs(t4_utc - named) > 0.4:
+                    return None
+                self._t6_report_naming_t4_vs_radiod_pair(wall, t4_utc, named)
+                self._t6_naming_source = 'T4'
                 return self._t6_reconcile_naming(named, edge_rtp)
 
         if wall is None:
@@ -3628,7 +3650,49 @@ class CoreRecorderV2:
         named = int(round(wall))
         if abs(wall - named) > 0.4:
             return None
+        self._t6_naming_source = 'radiod_pair'
         return self._t6_reconcile_naming(named, edge_rtp)
+
+    #: T4 and radiod's pair may differ by the arrival's transport latency
+    #: (tens of ms) and the pair's own non-atomicity.  Past the chain
+    #: delay's physical bound the pair alone would already put T6's edge
+    #: somewhere impossible, so that is where a disagreement becomes news.
+    T6_NAMING_T4_DISAGREE_S = 0.25
+
+    def _t6_report_naming_t4_vs_radiod_pair(
+        self, wall: Optional[float], t4_utc: float, named: int
+    ) -> None:
+        """Report T4-versus-pair disagreement; never correct, never veto.
+
+        The NMEA counterpart (``_t6_report_naming_vs_radiod_pair``)
+        throttles per period.  This one logs per EPISODE instead: once
+        when the two part by more than ``T6_NAMING_T4_DISAGREE_S``, once
+        when they agree again.  The namer runs once per fold block, and
+        on ND the pair stayed off for 4.5 days.
+        """
+        if wall is None:
+            return
+        delta = wall - t4_utc
+        self._t6_naming_vs_radiod_pair_s = delta
+        apart = abs(delta) > self.T6_NAMING_T4_DISAGREE_S
+        was_apart = getattr(self, '_t6_naming_t4_apart', False)
+        if apart and not was_apart:
+            logger.warning(
+                "T6 naming: radiod-pair wall estimate disagrees with T4 by "
+                "%+.3f s (> %.2f s) -- radiod's RTP->UTC tie is off.  "
+                "Naming %d from T4; the pair alone would have %s.  "
+                "Reported only, no correction applied.  Logged once; the "
+                "end is logged too.", delta, self.T6_NAMING_T4_DISAGREE_S,
+                named,
+                ("refused to name it" if abs(wall - round(wall)) > 0.4
+                 else f"named {int(round(wall))}, the WRONG second"
+                 if int(round(wall)) != named
+                 else "named the same second"))
+        elif was_apart and not apart:
+            logger.warning(
+                "T6 naming: radiod-pair wall estimate agrees again with "
+                "T4 (%+.3f s).", delta)
+        self._t6_naming_t4_apart = apart
 
     def _t6_reconcile_naming(self, named: int, edge_rtp: int) -> int:
         """Remove a whole-second slip from the integer-second naming.
@@ -5483,6 +5547,8 @@ class CoreRecorderV2:
             # one criterion 7 judged.  A T4 resolution carries the host
             # clock's sigma and the arrival-pairing floor beside it.
             self._t6_acquisition_reference = {
+                'second_named_by': getattr(
+                    self, '_t6_naming_source', None),
                 'placed_by': 'T4' if ref_tier == 'T4' else 'radiod_pair',
                 'anchor_tier': str(ref_tier),
                 'battery_plausibility': getattr(
@@ -7127,6 +7193,14 @@ class CoreRecorderV2:
                     # an acquisition.
                     'acquisition_reference': getattr(
                         self, '_t6_acquisition_reference', None),
+                    # Which source named the integer second last
+                    # ('nmea', 'T4' or 'radiod_pair'), and why T4 did not
+                    # when it did not.  The authority's anchor rests on
+                    # that second.
+                    'naming_source': getattr(
+                        self, '_t6_naming_source', None),
+                    'naming_t4_refusal': getattr(
+                        self, '_t6_naming_t4_refusal', None),
                 }
                 # A refusal a recorder restart cannot cure, flat so
                 # hpps-watchdog can grep it (t6_acquisition_refusal.py).
