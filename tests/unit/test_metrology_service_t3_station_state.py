@@ -77,3 +77,72 @@ def test_t6_state_follows_the_fused_plane_not_the_writer(
     # as verified evidence, so it keeps the own plane's state.
     ch = json.loads((tmp_path / "reg" / "SHARED_10000.json").read_text())
     assert ch["state"] == ("WITNESS" if own_verified else "CANDIDATE")
+
+
+# ── fix 4: nothing to publish never overwrites a sibling's plane ─────
+
+
+def _store_at(tmp_path, now):
+    from hf_timestd.core.registration_store import RegistrationStore
+
+    return RegistrationStore(tmp_path / "reg", tmp_path / "registration.json",
+                             time_fn=lambda: now[0])
+
+
+def test_store_names_another_writers_fresh_plane(tmp_path):
+    """The stopgap's one question: does a FRESH plane written by ANOTHER
+    channel stand in the summary?  Fresh means within the store's
+    ``stale_s``, the age past which a sibling's file stops counting as
+    live evidence."""
+    now = [1000.0]
+    store = _store_at(tmp_path, now)
+    assert store.fresh_plane_from_another_writer("B") is None  # nothing yet
+    plane = Registration("ep", rtp_ref=1, utc_ref=T0, sample_rate=SR,
+                         sigma_ms=1.0, verified=True, n_minutes=5)
+    store.write_summary(plane, ["A"], "WITNESS", {}, writer="A")
+    assert store.read_summary()["writer"] == "A"
+    assert store.fresh_plane_from_another_writer("B") == "A"
+    assert store.fresh_plane_from_another_writer("A") is None  # its own
+    now[0] += store.stale_s + 1.0
+    assert store.fresh_plane_from_another_writer("B") is None  # stale
+    now[0] = 1000.0
+    store.write_summary(None, [], "BOOTSTRAP", {}, writer="A")
+    assert store.fresh_plane_from_another_writer("B") is None  # no plane
+
+
+def test_a_channel_without_a_plane_leaves_a_siblings_summary_standing(tmp_path):
+    """B4 shadow record: 21 BOOTSTRAP minutes came from a channel that had
+    lost its own plane publishing fused=None over the plane its siblings
+    had just written -- last writer wins.  The channel still writes its
+    own file, and says there whose summary it left standing."""
+    svc = _service(tmp_path)
+    plane = Registration("ep", rtp_ref=1, utc_ref=T0, sample_rate=SR,
+                         sigma_ms=1.0, verified=True, n_minutes=5)
+    svc.reg_store.write_summary(plane, ["WWV_20000"], "ACQUIRED", {},
+                                writer="WWV_20000")
+    # No ticks, no siblings: this channel has nothing to publish.
+    import numpy as np
+    svc.apply_registration(label_timing(T0, 0.0, SR), np.zeros(62 * SR),
+                           1_000_000, MIN, _meta(0, 0.0))
+    s = svc.reg_store.read_summary()
+    assert s["state"] == "ACQUIRED" and s["writer"] == "WWV_20000"
+    ch = json.loads((tmp_path / "reg" / "SHARED_10000.json").read_text())
+    assert ch["state"] == "BOOTSTRAP"
+    assert ch["summary_left_to"] == "WWV_20000"
+
+
+def test_a_channel_withdraws_its_own_plane_from_the_summary(tmp_path):
+    """The writer of the standing plane may still stand it down: when its
+    own plane goes, its BOOTSTRAP reaches the summary (task 16b, "a reset
+    stands every surface down the same minute")."""
+    svc = _service(tmp_path)
+    _minute(svc, 0, walk=0.0, raw_walk=0.0)
+    assert svc.reg_store.read_summary()["writer"] == "SHARED_10000"
+    import numpy as np
+    svc.acquirer.reset("test")
+    svc.apply_registration(label_timing(T0 + 60, 0.0, SR), np.zeros(62 * SR),
+                           1_000_000 + 60 * SR, MIN + 60, _meta(1, 0.0))
+    s = svc.reg_store.read_summary()
+    assert s["state"] == "BOOTSTRAP" and s["writer"] == "SHARED_10000"
+    ch = json.loads((tmp_path / "reg" / "SHARED_10000.json").read_text())
+    assert ch["summary_left_to"] is None

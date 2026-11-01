@@ -1683,17 +1683,26 @@ class MetrologyService:
         # Final review I-8: always present, empty when nothing was dropped.
         dropped = (sorted(getattr(self, "_fusion_dropped", None) or [])
                    if fused is not None else [])
+        # Stopgap for the last-writer-wins summary (B4 shadow record
+        # 2026-10-31/11-01: 21 BOOTSTRAP minutes while siblings stood
+        # fine).  With no plane to publish, this channel leaves another
+        # channel's fresh plane standing and says so in its own file.  The
+        # per-transmitter-site station answer replaces this (606042d).
+        left_to = (self.reg_store.fresh_plane_from_another_writer(self.channel_name)
+                   if fused is None else None)
+        self._note_summary_left_to(left_to)
         if current is not None:
             self.reg_store.write_channel(current, state, {
                 "label_sample0_utc": label_s0,
                 "correction_ms": None if residual_ms is None else round(residual_ms, 3),
-                "dropped": dropped})
+                "dropped": dropped, "summary_left_to": left_to})
         else:
             self.reg_store.write_channel(
                 Registration(counter_epoch_id=epoch, rtp_ref=0, utc_ref=0.0,
                              sample_rate=self.engine.sample_rate, sigma_ms=float("inf"),
                              channel=self.channel_name), state,
-                {"label_sample0_utc": label_s0, "dropped": dropped})
+                {"label_sample0_utc": label_s0, "dropped": dropped,
+                 "summary_left_to": left_to})
         # The summary is the network-wide view: CANDIDATE only when the
         # SOLE contributor is this channel's own not-yet-verified plane --
         # real corroboration from an ACQUIRED sibling (which is, by the
@@ -1741,7 +1750,24 @@ class MetrologyService:
             # Fix round 1: a publish naming no conflict ends the episode.
             self._conflict_logged = None
             self._conflict_planes = {}
-        self.reg_store.write_summary(fused, sorted(set(contributing)), summary_state, extra)
+        if left_to is not None:
+            return
+        self.reg_store.write_summary(fused, sorted(set(contributing)), summary_state, extra,
+                                     writer=self.channel_name)
+
+    def _note_summary_left_to(self, left_to: Optional[str]) -> None:
+        """Log, once on entry and once on exit, an episode in which this
+        channel has no plane and leaves another channel's in the summary."""
+        prev = getattr(self, "_summary_left_to", None)
+        if (prev is None) != (left_to is None):
+            if left_to is not None:
+                logger.info(
+                    f"[{self.channel_name}] no plane of its own to publish; the "
+                    f"station summary keeps {left_to}'s fresh plane")
+            else:
+                logger.info(
+                    f"[{self.channel_name}] writes the station summary again")
+        self._summary_left_to = left_to
 
     def feed_back_ensembles(self, results) -> None:
         """Retired as a route to the registration (Task 10, "T3 stands

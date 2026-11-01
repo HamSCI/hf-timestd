@@ -11,7 +11,10 @@ counter's map to radiod's input-sample index; ``fuse_registrations``
 converts every sibling into the caller's counter through both maps and
 drops any it cannot convert.  The last writer also refreshes the
 station summary /run/hf-timestd/registration.json (spec §7), which the
-Offset Judge's HfAcquiredBench and the provenance sidecar read.
+Offset Judge's HfAcquiredBench and the provenance sidecar read.  A
+writer with no plane leaves another channel's fresh plane standing
+(``fresh_plane_from_another_writer``), a stopgap until the station
+answer per transmitter site exists.
 """
 
 from __future__ import annotations
@@ -394,15 +397,45 @@ class RegistrationStore:
         contributing: List[str],
         state: str,
         extra: dict,
+        writer: Optional[str] = None,
     ) -> None:
+        """``writer`` names the channel whose process wrote this summary, so
+        a later writer can tell another channel's plane from its own
+        (``fresh_plane_from_another_writer``)."""
         payload = {
             "state": state,
             "contributing": list(contributing),
             "written_at": self._time(),
+            "writer": writer,
             **self._payload(fused),
             **extra,
         }
         self._atomic_write(self.summary_path, payload)
+
+    def fresh_plane_from_another_writer(self, writer: str) -> Optional[str]:
+        """The channel whose FRESH plane stands in the summary, when that
+        is not ``writer``; else None.
+
+        A stopgap for the last-writer-wins summary (B4 T3 shadow record,
+        2026-10-31/11-01: 21 BOOTSTRAP minutes while siblings stood fine).
+        Six metrology processes write one summary; a writer with no plane
+        to publish asks this first and leaves another channel's plane
+        standing.  Fresh means within ``stale_s``, the age past which a
+        sibling's channel file stops counting as live evidence
+        (``read_siblings``); past it a dead writer's plane may be stood
+        down by anyone.  A summary that names no writer (written before
+        this field existed) counts as another's.  The full answer, one
+        station answer per transmitter site, is the restoration design's
+        (docs/superpowers/specs/2026-10-30-t3-restoration-design.md)."""
+        s = self.read_summary()
+        if not s or s.get("utc_ref") is None:
+            return None
+        other = s.get("writer")
+        if other == writer:
+            return None
+        if self.summary_age_s(s) > self.stale_s:
+            return None
+        return str(other) if other else "an earlier writer"
 
     # ── reading ────────────────────────────────────────────────────
     RUN_FILE = "radiod_run.state"   # not *.json: read_siblings skips it
