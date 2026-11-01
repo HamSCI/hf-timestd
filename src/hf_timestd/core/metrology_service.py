@@ -1581,16 +1581,24 @@ class MetrologyService:
                 fused_s0 = fused.sample0_utc_for(int(start_rtp))
                 residual_vs_t6_ms = (fused_s0 - float(buffer_timing.sample0_utc)) * 1000.0
                 raw_residual_ms = (fused_s0 - label_s0) * 1000.0
+            # The summary carries the FUSED plane, so its state is the fused
+            # plane's verification, not this writer's own acquirer's.  B4
+            # 2026-11-01: a shared channel whose own plane was still a
+            # candidate published its verified siblings' plane as CANDIDATE
+            # -- 42 of the shadow record's 63 station drops to CANDIDATE.
+            # The channel file keeps its own plane's state: a sibling reads
+            # a WITNESS file as verified evidence (``read_siblings``), so an
+            # unverified own plane stays CANDIDATE there.
             current = self.acquirer.registration
             if fused is None:
-                witness_state = "BOOTSTRAP"
-            elif current is not None and current.verified:
-                witness_state = "WITNESS"
+                witness_state = own_state = "BOOTSTRAP"
             else:
-                witness_state = "CANDIDATE"
+                witness_state = "WITNESS" if fused.verified else "CANDIDATE"
+                own_state = ("WITNESS" if current is not None and current.verified
+                             else "CANDIDATE")
             self._publish_registration(
                 fused, [] if fused is None else list(kept), label_s0, raw_residual_ms,
-                epoch, state_override=witness_state,
+                epoch, state_override=witness_state, channel_state_override=own_state,
                 waiting=[] if fused is None else list(waiting),
                 extra_extra={
                     "witness_of": "T6",
@@ -1635,9 +1643,10 @@ class MetrologyService:
         summary's -- use it only for a state the FUSED result justifies
         (WITNESS / CANDIDATE / BOOTSTRAP on the T6 path, BOOTSTRAP without
         a raw pair).  ``channel_state_override`` names a PER-CHANNEL state
-        that must not reach the summary (CONFLICT); pass ``conflicts``
-        alongside it so the summary can name the channels involved (final
-        review, I6).  ``standalone_reason`` says why T3 cannot run this
+        that must not reach the summary: CONFLICT, for which pass
+        ``conflicts`` alongside so the summary can name the channels
+        involved (final review, I6), or on the T6 path the own plane's
+        WITNESS / CANDIDATE beside the fused plane's.  ``standalone_reason`` says why T3 cannot run this
         minute (Task 10: ``"raw_pair_unavailable"``); None when it runs.
         ``label_s0`` is the raw pair's label, None without one."""
         # NOTE: this "current" registration is the ACQUIRER's own state as of

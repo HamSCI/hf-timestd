@@ -1,0 +1,79 @@
+"""The station summary's state on a T6 station, and who may overwrite it.
+
+AC0G-B4's 36-hour T3 shadow record (2026-10-31/11-01) traced three
+defects to ``MetrologyService``:
+
+* 42 of 63 station drops to CANDIDATE: the T6 branch took WITNESS or
+  CANDIDATE from the writer's own acquirer while it published the FUSED
+  plane, often a verified sibling's.
+* 21 BOOTSTRAP minutes: a channel that had lost its own plane published
+  ``fused=None`` over a summary its siblings had just written.
+* 36 of 37 WITNESS->ACQUIRED drops: one authority tick without T6 sent
+  every channel down the non-T6 path at once.
+"""
+
+import dataclasses
+import json
+
+import pytest
+
+from hf_timestd.core.registration_acquirer import Registration, RegistrationAcquirer
+from tests.unit.test_metrology_service_registration import (
+    MIN,
+    SR,
+    T0,
+    _meta,
+    _minute,
+    _service,
+    _SIB_MAP,
+    _ticks,
+)
+from tests.unit.synth_ticks import label_timing
+
+
+# ── fix 3: the T6 branch names the state of the plane it publishes ────
+
+
+def _fused_like(svc, verified):
+    """A sibling-only plane at truth in this channel's counter."""
+    return Registration(
+        svc.acquirer.registration.counter_epoch_id, rtp_ref=1_000_000 + 60 * SR,
+        utc_ref=T0 + 60, sample_rate=SR, sigma_ms=0.9, n_minutes=40,
+        channel="fused", stations=("WWV",), verified=verified,
+        counter_map=_SIB_MAP, rtp_domain=svc.channel_name,
+    )
+
+
+@pytest.mark.parametrize("own_verified,fused_verified,expect", [
+    (False, True, "WITNESS"),
+    (True, False, "CANDIDATE"),
+])
+def test_t6_state_follows_the_fused_plane_not_the_writer(
+        tmp_path, monkeypatch, own_verified, fused_verified, expect):
+    """The summary carries the FUSED plane, so its WITNESS/CANDIDATE must
+    be the fused plane's verification.  B4 2026-11-01: a shared channel
+    whose own plane was still a candidate published its verified
+    siblings' plane, n continuing, as CANDIDATE -- 42 of 63 station drops
+    to CANDIDATE.  The reverse case keeps an unverified fused plane from
+    reaching the summary as WITNESS."""
+    svc = _service(tmp_path)
+    _minute(svc, 0, walk=0.0, raw_walk=0.0, t6=True)
+    svc.acquirer.registration.verified = own_verified
+    fused = _fused_like(svc, fused_verified)
+    real = svc._fuse_minute
+
+    def fake_fuse(own, convertible, resolved, start_rtp, at_map):
+        real(own, convertible, resolved, start_rtp, at_map)
+        return (svc.acquirer.registration, False, fused, ["WWV_20000"], [], False)
+
+    monkeypatch.setattr(svc, "_fuse_minute", fake_fuse)
+    monkeypatch.setattr(svc, "_route_arrivals", lambda arrivals: None)
+    _minute(svc, 1, walk=0.0, raw_walk=0.0, t6=True)
+    assert svc.acquirer.registration.verified is own_verified
+    s = svc.reg_store.read_summary()
+    assert s["state"] == expect
+    assert s["verified"] is fused_verified
+    # The channel file carries the OWN plane: siblings read a WITNESS file
+    # as verified evidence, so it keeps the own plane's state.
+    ch = json.loads((tmp_path / "reg" / "SHARED_10000.json").read_text())
+    assert ch["state"] == ("WITNESS" if own_verified else "CANDIDATE")
