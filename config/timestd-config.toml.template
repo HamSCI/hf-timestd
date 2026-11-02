@@ -142,7 +142,10 @@ description = "WWV_25000"
 # time code, and (optionally) feeds the Fusion source pool.  No archive.
 # =============================================================================
 [wwvb]
-enabled = false                 # master switch for the WWVB consumer + decode loop
+enabled = true                  # master switch for the WWVB consumer + decode loop.  On by
+                                # default since v3.85: decoding only names the date and time
+                                # from the radio (no clock trusted); it feeds nothing to fusion
+                                # until feed_fusion below.  AC0G-ND decodes at ~39 dB SNR.
 frequency_hz = 60000
 sample_rate = 4000              # NARROW ON PURPOSE -- do not widen.  WWVB is a
                                 # 1 bit/s code on a 60 kHz carrier; extra

@@ -55,6 +55,16 @@ class WwvbTemplateWidthTests(unittest.TestCase):
         m = re.search(r"^sample_rate\s*=\s*(\d+)", self.section, re.M)
         self.assertLessEqual(int(m.group(1)), 8000)
 
+    def test_new_stations_decode_wwvb_but_do_not_feed_fusion(self):
+        """v3.85: decoding on by default, so every station names the date and
+        time from the radio; the fusion feed stays off until a station's
+        decodes are validated (B4, UACNJ, W2NAF, K3LR and WB6CXC-7 all ran
+        with WWVB off by the old default while ND decoded at ~39 dB)."""
+        en = re.search(r"^enabled\s*=\s*(\w+)", self.section, re.M)
+        ff = re.search(r"^feed_fusion\s*=\s*(\w+)", self.section, re.M)
+        self.assertEqual(en.group(1), "true")
+        self.assertEqual(ff.group(1), "false")
+
     def test_carrier_frequency_unchanged(self):
         """Narrowing the channel must not have moved the tuning."""
         m = re.search(r"^frequency_hz\s*=\s*(\d+)", self.section, re.M)
