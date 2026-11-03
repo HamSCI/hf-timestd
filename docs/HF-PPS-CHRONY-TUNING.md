@@ -154,13 +154,30 @@ walking the lock.
 
 But what if the chain delay *really* changed (a cable, a radiod filter
 reconfig, a TS1 retuning)? `STEP_CONFIRM_EDGES = 60` is the threshold:
-60 consecutive off-position edges all agreeing on a new position is
-treated as a genuine step. At 1 PPS that's ~60 s — comfortably longer
-than the worst observed Costas excursion (~10-15 s), so an excursion
-can never be mistaken for a step.
+60 off-position edges, each at least 0.99 s after the last and all
+agreeing on a new position, make a genuine step. At 1 PPS that takes
+about 60 s, comfortably longer than the worst observed Costas excursion
+(about 10-15 s), so an excursion cannot pass for a step.
 
-Step adoption *is* expected behaviour, not a fault. When it fires
-HPPS will briefly stop pushing while the lock re-homes.
+The spacing rule matters because a phantom never moves the reference
+that the short-gap test measures from. Once 0.99 s pass without an
+accepted edge, every ripple peak on the matched filter's flat apex
+reaches the step counter, a few samples from the last and inside the
+tolerance. Until hf-timestd 0149f75 (2026-11-03) the counter took them
+all, so sixty ripple peaks inside one window "confirmed" a step. UACNJ
+re-homed once every 1.8 s for weeks that way, on a pilot that folded
+cleanly offline (48,490 re-homes in 24 h; K3LR, on the same code, none).
+
+With a fold reference in force, the per-edge path confirms no step at
+all: the coarse fold owns step detection there. Two consecutive folds
+that agree on a new position re-home the lock, moving the fold
+reference, the published chain delay and the edge reference together.
+A per-edge re-home would move only the edge reference, so every later
+edge would look off-position again.
+
+Step adoption *is* expected behaviour, not a fault, when it comes rarely.
+When it fires, HPPS briefly stops pushing while the lock re-homes. Re-homes
+by tens or hundreds of ms, more than once an hour, point at a fault.
 
 ### 3.3 Costas dphase threshold: `COSTAS_DPHASE_MAX_RAD = 0.050`
 
