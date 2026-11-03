@@ -72,6 +72,20 @@ def _drive_one_peak(cal: BpskPpsCalibratorMF, rtp_at_peak: int,
     cal._detect_and_record_peaks(y, rtp)
 
 
+def _drive_ripple(cal: BpskPpsCalibratorMF, rtp_first: int, n_peaks: int,
+                  spacing: int = 5, magnitude: float = 120.0) -> None:
+    """One window holding ``n_peaks`` local maxima ``spacing`` samples apart,
+    all above threshold: the noise ripple on the matched filter's flat,
+    half-second-wide apex (memory reference_t6_flat_apex)."""
+    pad = 16
+    window_len = 2 * pad + n_peaks * spacing
+    y = np.full(window_len, 0.8 * magnitude)
+    for i in range(n_peaks):
+        y[pad + i * spacing] = magnitude
+    rtp = (np.arange(window_len, dtype=np.int64) - pad + rtp_first) & 0xFFFFFFFF
+    cal._detect_and_record_peaks(y, rtp)
+
+
 class TestPhantomInert(unittest.TestCase):
 
     def test_acquired_phantom_edge_is_inert(self):
@@ -163,6 +177,45 @@ class TestGenuineStepDetection(unittest.TestCase):
             _drive_one_peak(cal, rtp_at_peak=ref0 + (i + 1) * SR + 5_000)
         self.assertEqual(cal._last_edge_rtp, ref0, "not adopted yet")
         self.assertEqual(cal._step_candidate_count, STEP_CONFIRM_EDGES - 1)
+
+
+class TestStepConfirmationNeedsSeconds(unittest.TestCase):
+    """UACNJ, 2026-11-03: 48,490 "lock re-homed" lines in 24 h, one every
+    1.8 s, each "after 60 consistent off-position edges".  A phantom never
+    walks ``_last_edge_rtp``, so once 0.99 s pass without an accepted edge
+    every ripple peak on the apex passes the short-gap test, lands off
+    position, and agrees with its neighbour to within the tolerance.  Sixty
+    of them fill the run inside one window.  A step candidate must therefore
+    count only edges a second apart; and with a fold reference in force, the
+    fold (two agreeing folds) owns step detection, so per-edge phantoms never
+    re-home the lock."""
+
+    def test_ripple_burst_inside_one_second_never_steps(self):
+        cal = _make_acquired()
+        ref0 = cal._last_edge_rtp
+        _drive_ripple(cal, rtp_first=ref0 + SR + 5_000,
+                      n_peaks=STEP_CONFIRM_EDGES + 20)
+        self.assertEqual(cal.rehome_count, 0, "ripple on one apex is not a step")
+        self.assertEqual(cal._last_edge_rtp, ref0, "reference must hold")
+        self.assertTrue(cal.locked)
+
+    def test_candidates_closer_than_a_second_do_not_extend_the_run(self):
+        cal = _make_acquired()
+        ref0 = cal._last_edge_rtp
+        _drive_ripple(cal, rtp_first=ref0 + SR + 5_000, n_peaks=10)
+        self.assertLessEqual(cal._step_candidate_count, 1)
+
+    def test_fold_referenced_lock_is_not_rehomed_by_edges(self):
+        cal = _make_acquired()
+        cal._fold_ref = float(cal._last_edge_rtp % SR)
+        ref0, delay0 = cal._last_edge_rtp, cal._chain_delay_samples
+        for i in range(STEP_CONFIRM_EDGES + 5):
+            _drive_one_peak(cal, rtp_at_peak=ref0 + (i + 1) * SR + 5_000)
+        self.assertEqual(cal.rehome_count, 0, "the fold owns step detection")
+        self.assertEqual(cal._last_edge_rtp, ref0)
+        self.assertEqual(cal._fold_ref, float(ref0 % SR))
+        self.assertEqual(cal._chain_delay_samples, delay0)
+        self.assertTrue(cal.locked)
 
 
 class TestAcquisitionUnchanged(unittest.TestCase):

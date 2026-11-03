@@ -749,6 +749,17 @@ class BpskPpsCalibratorMF:
         a true step, where the old edge is simply gone, can.
         """
         if self._step_candidate_rtp is not None:
+            # Only edges a second apart can make a run.  A phantom never
+            # walks _last_edge_rtp, so the short-gap test stops guarding
+            # once 0.99 s pass without an accepted edge; every ripple peak
+            # on the flat apex then lands here, a few samples from the
+            # last.  Counted, sixty of them confirmed a "step" inside one
+            # window (UACNJ 2026-11-03: a re-home every 1.8 s).
+            gap = (edge_rtp_int - self._step_candidate_rtp) & 0xFFFFFFFF
+            if gap > 0x7FFFFFFF:
+                gap -= 0x100000000
+            if abs(gap) < int(0.99 * self.sample_rate):
+                return False
             cur_off = edge_rtp_int % self.sample_rate
             cand_off = self._step_candidate_rtp % self.sample_rate
             dc = (cur_off - cand_off) % self.sample_rate
@@ -1098,7 +1109,14 @@ class BpskPpsCalibratorMF:
                     # edge then falls through to be accepted at the new
                     # operating point.
                     self.pps_phantom += 1
-                    stepped = self._note_step_candidate(edge_rtp_int)
+                    # With a fold reference in force the fold owns step
+                    # detection (two agreeing folds re-home, moving
+                    # _fold_ref, the chain delay and the reference
+                    # together).  A per-edge re-home would move only the
+                    # reference, leave the fold's chain delay behind, and
+                    # make every later edge look off-position again.
+                    stepped = (self._fold_ref is None
+                               and self._note_step_candidate(edge_rtp_int))
                     if debug_active:
                         self._debug_peaks.append((
                             batch_idx, edge_rtp_int, edge_rtp_frac,
