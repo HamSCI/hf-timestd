@@ -231,3 +231,42 @@ class TestThroughTheRealCallback(unittest.TestCase):
         r = self._run(None)
         self.assertIsNone(r._t6_last_chain_delay_ns)
         self.assertNotEqual(r._t6_authority.state.value, "AUTHORITATIVE")
+
+
+class TestANamingOutageSaysWhy(unittest.TestCase):
+    """B4 2026-11-03: T6 lost the authority for ``naming_unavailable``
+    15 times in 7 h, and nothing said which source refused."""
+
+    def _lines(self, logs):
+        return [m for m in logs.output if "T6 naming:" in m
+                and "radiod-pair" not in m]
+
+    def test_one_line_per_outage_naming_every_refusal(self):
+        r = _recorder()          # no NMEA, no T4: the pair is all there is
+        with self.assertLogs(LOGGER, level=logging.INFO) as logs:
+            for _ in range(5):
+                self.assertIsNone(_name(r, 0.45))
+            self.assertEqual(_name(r, 0.0), NAMED)
+            self.assertIsNone(_name(r, 0.45))
+        lines = self._lines(logs)
+        self.assertEqual(len(lines), 3, lines)
+        self.assertIn("could not name", lines[0])
+        self.assertIn("nmea: no current reading", lines[0])
+        self.assertIn("radiod pair: edge 0.467 s from an integer", lines[0])
+        self.assertIn("via radiod_pair after 5 refused", lines[1])
+        self.assertIn("could not name", lines[2])
+
+    def test_t4_refusal_is_named(self):
+        r = _recorder(host=True, tier="T2", sigma_ns=55e6)
+        with self.assertLogs(LOGGER, level=logging.INFO) as logs:
+            self.assertIsNone(_name(r, 0.45))
+        line = self._lines(logs)[0]
+        self.assertIn("T4: ", line)
+        self.assertIn("T2", line)
+
+    def test_steady_naming_logs_nothing(self):
+        r = _recorder(host=True)
+        with mock.patch(f"{LOGGER}.logger") as log:
+            for _ in range(5):
+                _name(r, 0.0)
+        log.warning.assert_not_called()

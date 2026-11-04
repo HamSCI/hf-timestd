@@ -3545,22 +3545,30 @@ class CoreRecorderV2:
         # NAMING, so a device that only names a second qualifies — see
         # `_t6_naming_probe`.  `_t5_pairing` is built unconditionally in
         # __init__, so it is available even where T5 is not.
+        why = self._t6_naming_why_list()
         probe = self._t6_naming_probe()
         pairing = getattr(self, '_t5_pairing', None)
         if probe is None or pairing is None:
+            why.append("nmea: no %s" % (
+                "naming device" if probe is None else "T5 pairing"))
             return None
         reading = probe.get_latest()
         if reading is None:
+            why.append("nmea: no current reading")
             return None
         arrival = pairing.latest_arrival
         if arrival is None:
+            why.append("nmea: no T6-stream arrival yet")
             return None
         sr = self._t6_sample_rate()
         if not sr:
+            why.append("nmea: no T6 sample rate")
             return None
         arrival_rtp, arrival_mono = arrival
         age = pairing.now_mono() - arrival_mono
         if age < 0.0 or age > T5RtpPairing.ARRIVAL_MAX_AGE_S:
+            why.append("nmea: last arrival %.2f s old (limit %.1f s)"
+                       % (age, T5RtpPairing.ARRIVAL_MAX_AGE_S))
             return None
         arrival_wall = pairing.now_wall() - age
         # NMEA attestation window — same guard T5RtpPairing.compute uses.
@@ -3570,10 +3578,15 @@ class CoreRecorderV2:
         if not (T5RtpPairing.NMEA_DELAY_MIN_S
                 <= nmea_delay
                 <= T5RtpPairing.NMEA_DELAY_MAX_S):
+            why.append("nmea: arrival %.3f s after the reading's second "
+                       "(window %.2f..%.2f s)" % (
+                           nmea_delay, T5RtpPairing.NMEA_DELAY_MIN_S,
+                           T5RtpPairing.NMEA_DELAY_MAX_S))
             return None
         delta_s = _rtp_delta_signed(
             int(edge_rtp) & 0xFFFFFFFF, int(arrival_rtp)) / float(sr)
         if abs(delta_s) > self.T6_NAMING_MAX_EDGE_AGE_SEC:
+            why.append("nmea: edge %+.1f s from the last arrival" % delta_s)
             return None
         return arrival_wall + delta_s
 
@@ -3590,7 +3603,44 @@ class CoreRecorderV2:
                 return sr
         return None
 
+    def _t6_naming_why_list(self) -> list:
+        """This naming attempt's refusal reasons (reset per attempt)."""
+        why = getattr(self, '_t6_naming_why', None)
+        if why is None:
+            why = self._t6_naming_why = []
+        return why
+
     def _t6_name_integer_second(self, edge_rtp: int) -> Optional[int]:
+        """Name the edge's second, and report a naming outage.
+
+        The cascade below returns None quietly, and the authority then
+        reads only ``naming_unavailable``.  On B4 2026-11-03 that came
+        2-3 s after a 10-minute mark, 15 times in 7 h, each costing T6
+        the authority for about 1.5 minutes, with nothing to say which
+        source refused.  Log once when naming fails, with every
+        branch's reason, and once when it names again.
+        """
+        self._t6_naming_why = []
+        named = self._t6_name_integer_second_cascade(edge_rtp)
+        refused = getattr(self, '_t6_naming_refused_blocks', 0)
+        if named is None:
+            if refused == 0:
+                logger.warning(
+                    "T6 naming: could not name the edge's UTC second "
+                    "(rtp %d) -- %s.  Logged once; the recovery is "
+                    "logged too.", int(edge_rtp) & 0xFFFFFFFF,
+                    "; ".join(self._t6_naming_why) or "no reason recorded")
+            self._t6_naming_refused_blocks = refused + 1
+        elif refused:
+            logger.warning(
+                "T6 naming: named the second again via %s after %d "
+                "refused block(s).", getattr(self, '_t6_naming_source',
+                                             None), refused)
+            self._t6_naming_refused_blocks = 0
+        return named
+
+    def _t6_name_integer_second_cascade(
+            self, edge_rtp: int) -> Optional[int]:
         """Name the integer UTC second of a fine-stage edge (spec §2).
 
         The coarse cascade (T5 NMEA or a second-namer first, then a
@@ -3626,6 +3676,7 @@ class CoreRecorderV2:
             reading = _probe.get_latest() if _probe is not None else None
             if reading is None:
                 # Raced with a probe expiry between the two reads.
+                self._t6_naming_why.append("nmea: reading expired")
                 edge_utc = None
             else:
                 # NMEA holds the integer-second authority; the host
@@ -3633,6 +3684,9 @@ class CoreRecorderV2:
                 named = (int(reading.pps_utc_sec)
                          + int(round(edge_utc - reading.pps_utc_sec)))
                 if abs(edge_utc - named) > 0.4:
+                    self._t6_naming_why.append(
+                        "nmea: edge %.3f s from an integer" % abs(
+                            edge_utc - named))
                     return None
                 self._t6_report_naming_vs_radiod_pair(wall, edge_utc)
                 self._t6_naming_source = 'nmea'
@@ -3650,18 +3704,28 @@ class CoreRecorderV2:
         if _via_t4 is not None:
             t4_utc, t4_info = _via_t4(edge_rtp)
             self._t6_naming_t4_refusal = (t4_info or {}).get('refused')
-            if t4_utc is not None:
+            if t4_utc is None:
+                self._t6_naming_why.append(
+                    "T4: %s" % (self._t6_naming_t4_refusal or "no reading"))
+            else:
                 named = int(round(t4_utc))
                 if abs(t4_utc - named) > 0.4:
+                    self._t6_naming_why.append(
+                        "T4: edge %.3f s from an integer" % abs(
+                            t4_utc - named))
                     return None
                 self._t6_report_naming_t4_vs_radiod_pair(wall, t4_utc, named)
                 self._t6_naming_source = 'T4'
                 return self._t6_reconcile_naming(named, edge_rtp)
 
         if wall is None:
+            self._t6_naming_why.append("radiod pair: no estimate")
             return None
         named = int(round(wall))
         if abs(wall - named) > 0.4:
+            self._t6_naming_why.append(
+                "radiod pair: edge %.3f s from an integer" % abs(
+                    wall - named))
             return None
         self._t6_naming_source = 'radiod_pair'
         return self._t6_reconcile_naming(named, edge_rtp)
