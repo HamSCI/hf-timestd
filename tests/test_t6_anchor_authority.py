@@ -25,10 +25,11 @@ BUDGET = 10_000
 # the bug.
 
 
-def est(offset=43_181.0, rtp=1_000_000, sub=0.25, n=30):
+def est(offset=43_181.0, rtp=1_000_000, sub=0.25, n=30, retention=0.98):
     return FineEdgeEstimate(
         edge_offset_samples=offset, edge_rtp=rtp, edge_subsample=sub,
         n_seconds_folded=n, plateau_amplitude=30.0, fit_rms=0.05,
+        fold_retention=retention,
     )
 
 
@@ -382,3 +383,43 @@ class TestUnverifiedCrossCheck:
         d = auth.on_fine_estimate(e, None, SECOND)
         assert d.state.name == "AUTHORITATIVE"
         assert d.anchor is not None
+
+
+class TestRetentionGatesAuthority:
+    """UACNJ 2026-11-04: the TS-1 stopped toggling its phase but still
+    marked each second weakly.  The fold found the mark (retention
+    ~0.003, against B4's 0.98), and T6 held the authority for 11
+    minutes claiming 1 us, until the battery flagged retention.  A
+    pilot whose modulation does not hold together across the fold
+    cannot carry that claim (Michael, 2026-11-04)."""
+
+    def test_incoherent_pilot_never_becomes_authoritative(self, auth):
+        e = est(retention=0.003)
+        d = auth.on_fine_estimate(e, phase(e), SECOND)
+        assert d.state is T6AuthorityState.ACQUIRING
+        assert "retention" in d.violations
+        assert d.anchor is None
+
+    def test_retention_collapse_degrades_and_holds_anchor(self, auth):
+        e1 = est()
+        d1 = auth.on_fine_estimate(e1, phase(e1), SECOND)
+        assert d1.state is T6AuthorityState.AUTHORITATIVE
+        e2 = est(retention=0.003)
+        d2 = auth.on_fine_estimate(e2, phase(e2), SECOND + 30)
+        assert d2.state is T6AuthorityState.DEGRADED
+        assert d2.violations == ("retention",)
+        assert d2.anchor == d1.anchor
+
+    def test_threshold_is_the_battery_floor(self, auth):
+        from hf_timestd.core.t6_battery import BatteryThresholds
+        floor = BatteryThresholds().min_fold_retention
+        assert auth.min_fold_retention == floor
+        e = est(retention=floor)
+        assert "retention" not in auth.on_fine_estimate(
+            e, phase(e), SECOND).violations
+
+    def test_retention_recorded_as_measured(self, auth):
+        e = est(retention=0.42)
+        auth.on_fine_estimate(e, phase(e), SECOND)
+        assert auth.last_check_metrics["fold_retention"] == 0.42
+        assert auth.last_check_metrics["min_fold_retention"] == 0.50

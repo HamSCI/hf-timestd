@@ -173,7 +173,7 @@ class BpskPpsCalibratorMF:
         phase_log_period_batches: int = 0,
         use_magnitude_correlation: bool = False,
         fold_seconds: int = 60,
-        fold_min_snr: float = 8.0,
+        fold_min_snr: float = 12.0,
     ):
         """
         Args:
@@ -188,8 +188,11 @@ class BpskPpsCalibratorMF:
                 stands ``fold_min_snr`` above its residual grants the same
                 lock a run of ``consecutive_required`` edges would.
             fold_min_snr: apex amplitude over residual sigma a fold must
-                reach to count.  Pure noise folds to ~4-5 sigma; 8 keeps
-                the false-lock rate negligible.
+                reach to count.  Pure noise folds to ~4-5 sigma, but live
+                noise folds have reached 8.3 (UACNJ 2026-11-04, a false
+                lock at 494 ms), 8.4 and 11.8 (K3LR); the weakest real
+                fold on a healthy station read 44 (ND).  12 sits above
+                the noise seen and well below the signal.
             use_magnitude_correlation: If True, peak-pick on |MF(s_rot)|
                 (complex matched filter, take magnitude) instead of
                 MF(Re(s_rot)) (legacy).  Costas is still used to remove

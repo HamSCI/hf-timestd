@@ -965,7 +965,7 @@ class CoreRecorderV2:
                     # fell off its lock cliff every night on AC0G-B4
                     # (48-57 dB-Hz).  K = 60 s buys 17.8 dB.  0 disables.
                     fold_seconds=int(self._t6_config.get('coarse_fold_seconds', 60)),
-                    fold_min_snr=float(self._t6_config.get('coarse_fold_min_snr', 8.0)),
+                    fold_min_snr=float(self._t6_config.get('coarse_fold_min_snr', 12.0)),
                     # Diagnostic capture (opt-in).  When
                     # debug_dump_path is set, the MF calibrator
                     # records the matched-filter output ``y``,

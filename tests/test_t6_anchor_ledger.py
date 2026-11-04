@@ -130,6 +130,7 @@ class TestRecorderWiring:
         return FineEdgeEstimate(
             edge_offset_samples=43_181.0, edge_rtp=rtp, edge_subsample=0.0,
             n_seconds_folded=30, plateau_amplitude=30.0, fit_rms=0.05,
+            fold_retention=0.98,
         )
 
     def test_authoritative_decision_is_ledgered(self, tmp_path):

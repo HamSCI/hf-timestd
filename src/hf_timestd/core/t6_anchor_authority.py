@@ -84,6 +84,7 @@ class T6AnchorAuthority:
         fine_coarse_max_ms: float = 5.0,
         degraded_unlock_after_sec: float = 600.0,
         fine_fold_seconds: float = 30.0,
+        min_fold_retention: Optional[float] = None,
         now: Callable[[], float] = time.monotonic,
     ):
         if abs(int(delay_budget_ns)) > DELAY_BUDGET_BOUND_NS:
@@ -110,6 +111,12 @@ class T6AnchorAuthority:
         self.fine_coarse_max_ms = float(fine_coarse_max_ms)
         self.degraded_unlock_after_sec = float(degraded_unlock_after_sec)
         self.fine_fold_seconds = float(fine_fold_seconds)
+        # The battery's floor, so the two never disagree about what a
+        # coherent pilot looks like (see t6_battery.BatteryThresholds).
+        if min_fold_retention is None:
+            from .t6_battery import BatteryThresholds
+            min_fold_retention = BatteryThresholds().min_fold_retention
+        self.min_fold_retention = float(min_fold_retention)
         self._now = now
         self._state = T6AuthorityState.ACQUIRING
         self._anchor: Optional[NativeAnchor] = None
@@ -271,6 +278,19 @@ class T6AnchorAuthority:
             # so this check may simply not run.  Record that positively:
             # an unrun check must never read as a passed one.
             metrics["fine_coarse_unverified"] = True
+        # Retention: does the modulation hold together across the fold?
+        # The battery fails a low value but only marks T6 suspect.  On
+        # UACNJ 2026-11-04 a TS-1 that had stopped toggling still marked
+        # each second weakly; the fold found the mark at retention ~0.003
+        # and T6 held the authority for 11 minutes claiming 1 us.  Such a
+        # pilot cannot carry the claim, so here it refuses the authority
+        # (Michael, 2026-11-04).  The value itself is reported, never
+        # adjusted.
+        retention = float(est.fold_retention)
+        metrics["fold_retention"] = retention
+        metrics["min_fold_retention"] = self.min_fold_retention
+        if retention < self.min_fold_retention:
+            v.append("retention")
         if named_second_utc is None:
             v.append("naming_unavailable")
         self.last_check_metrics = metrics

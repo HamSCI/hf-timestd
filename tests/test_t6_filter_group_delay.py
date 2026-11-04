@@ -36,6 +36,7 @@ def est(offset=43_181.0, rtp=1_000_000, sub=0.25, n=30):
     return FineEdgeEstimate(
         edge_offset_samples=offset, edge_rtp=rtp, edge_subsample=sub,
         n_seconds_folded=n, plateau_amplitude=30.0, fit_rms=0.05,
+        fold_retention=0.98,
     )
 
 

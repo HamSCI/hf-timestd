@@ -131,3 +131,36 @@ def test_fold_floor_reaches_40_dbhz_with_white_noise(cn0):
     assert lock is not None and res is not None and res.locked
     assert cal.fold_locks == 1
     assert abs(_wrapped(res.chain_delay_samples, EDGE)) <= 2.0    # sub-sample class, not just in tolerance
+
+
+def _judge_synthetic_fold(target_snr: float, seed: int = 3):
+    """Hand the fold judge a triangle of known apex over Gaussian
+    residual, so apex/sigma lands near ``target_snr``."""
+    cal = BpskPpsCalibratorMF(SR, consecutive_required=10,
+                              edge_tolerance_samples=TOL, fold_seconds=60)
+    rng = np.random.default_rng(seed)
+    k = int(EDGE)
+    d = np.abs(np.arange(SR) - k)
+    amp = 1.0
+    cal._fold_acc = amp * (1.0 - 2.0 * d / SR) + rng.normal(0, amp / target_snr, SR)
+    cal._fold_cnt = np.ones(SR, dtype=np.int32)
+    cal._fold_first_rtp, cal._fold_last_rtp = 0, 60 * SR
+    cal._fold_evaluate()
+    return cal
+
+
+def test_threshold_rejects_the_folds_noise_has_reached():
+    """UACNJ 2026-11-04 01:04Z: a noise fold at apex/sigma 8.3 locked
+    T6 at 494 ms, 138 ms from where T5 put the second; K3LR's noise
+    folds reached 8.4 and 11.8.  The weakest real fold on a healthy
+    station read 44 (ND).  So the floor moves from 8 to 12."""
+    cal = _judge_synthetic_fold(10.0)
+    assert 8.0 < cal.fold_last_snr < 12.0
+    assert cal.fold_min_snr == 12.0
+    assert cal.fold_locks == 0
+
+
+def test_threshold_still_admits_a_real_but_weak_fold():
+    cal = _judge_synthetic_fold(20.0)
+    assert cal.fold_last_snr > 12.0
+    assert cal.fold_locks >= 1
