@@ -33,7 +33,7 @@ def sums(d):
 
 def make_upload(tmp_path, files=None, ctime_age=None):
     """A station upload directory with a correct SHA256SUMS."""
-    d = tmp_path / "root" / "EV1" / "AC0G-B4" / "hf-timestd"
+    d = tmp_path / "incoming" / "AC0G-B4" / "EV1" / "AC0G-B4" / "hf-timestd"
     files = files or {"a/x.bin": b"alpha", "b/y.bin": b"beta", "order.json": b"{}"}
     lines = []
     for rel, body in sorted(files.items()):
@@ -52,7 +52,7 @@ def fake_now(d):
 
 
 def run(tmp_path, now):
-    return es.verify(str(tmp_path / "root"), now=now)
+    return es.verify(str(tmp_path / "incoming"), now=now)
 
 
 def test_verify_writes_receipt(tmp_path):
@@ -124,10 +124,14 @@ def test_unlisted_file_is_ignored(tmp_path):
     assert (d / "RECEIPT").exists()
 
 
-@pytest.mark.parametrize("bad", ["/etc/passwd", "../outside", "a/../../x"])
-def test_hostile_path_fails(tmp_path, bad):
+@pytest.mark.parametrize("kind", ["absolute", "dotdot", "dotdot-inner"])
+def test_hostile_path_fails(tmp_path, kind):
+    """The file exists and its hash is right, so only the path check can refuse it."""
     d = make_upload(tmp_path)
-    (tmp_path / "root" / "outside").write_bytes(b"z")
+    outside = d.parent / "outside"
+    outside.write_bytes(b"z")
+    bad = {"absolute": str(outside), "dotdot": "../outside",
+           "dotdot-inner": "a/../../outside"}[kind]
     with open(d / "SHA256SUMS", "a") as f:
         f.write("%s  %s\n" % (hashlib.sha256(b"z").hexdigest(), bad))
     run(tmp_path, fake_now(d))
@@ -135,11 +139,143 @@ def test_hostile_path_fails(tmp_path, bad):
     assert not (d / "RECEIPT").exists()
 
 
-def test_empty_or_garbled_sums_fails(tmp_path):
+def test_garbled_sums_fails_without_echoing_text(tmp_path):
     d = make_upload(tmp_path)
     (d / "SHA256SUMS").write_text("this is not a sum line\n")
     run(tmp_path, fake_now(d))
+    assert (d / "FAILED").read_text() == "line 1: unparseable\n"
+    assert not (d / "RECEIPT").exists()
+
+
+@pytest.mark.parametrize("body", ["", "\n\n"])
+def test_empty_list_fails(tmp_path, body):
+    d = make_upload(tmp_path)
+    (d / "SHA256SUMS").write_text(body)
+    run(tmp_path, fake_now(d))
+    assert (d / "FAILED").read_text() == "SHA256SUMS lists no files\n"
+    assert not (d / "RECEIPT").exists()
+
+
+def test_corruption_of_each_listed_file(tmp_path):
+    files = {"a/x.bin": b"alpha", "b/y.bin": b"beta", "order.json": b"{}"}
+    for victim in sorted(files):
+        d = make_upload(tmp_path / victim.replace("/", "_"), files)
+        (d / victim).write_bytes(files[victim] + b"!")
+        run(tmp_path / victim.replace("/", "_"), fake_now(d))
+        assert (d / "FAILED").read_text().splitlines() == [victim], victim
+        assert not (d / "RECEIPT").exists()
+
+
+def test_out_of_tree_symlink_fails(tmp_path):
+    d = make_upload(tmp_path)
+    secret = tmp_path / "secret"
+    secret.write_bytes(b"alpha")                      # same bytes as a/x.bin
+    (d / "a" / "x.bin").unlink()
+    os.symlink(secret, d / "a" / "x.bin")
+    run(tmp_path, fake_now(d))
+    assert "symlink: a/x.bin" in (d / "FAILED").read_text()
+    assert not (d / "RECEIPT").exists()
+
+
+def test_symlinked_directory_fails(tmp_path):
+    d = make_upload(tmp_path)
+    os.symlink(tmp_path, d / "link")
+    run(tmp_path, fake_now(d))
+    assert (d / "FAILED").read_text() == "symlink: link\n"
+
+
+def test_symlinked_sums_fails(tmp_path):
+    d = make_upload(tmp_path)
+    real = tmp_path / "real-sums"
+    real.write_bytes(sums(d))
+    (d / "SHA256SUMS").unlink()
+    os.symlink(real, d / "SHA256SUMS")
+    run(tmp_path, fake_now(d))
     assert (d / "FAILED").exists() and not (d / "RECEIPT").exists()
+
+
+def test_sums_a_directory_fails_and_pass_continues(tmp_path):
+    d = make_upload(tmp_path)
+    (d / "SHA256SUMS").unlink()
+    (d / "SHA256SUMS").mkdir()
+    other = tmp_path / "incoming" / "AC0G-B4" / "EV2" / "AC0G-B4" / "hf-timestd"
+    other.mkdir(parents=True)
+    (other / "f").write_bytes(b"q")
+    (other / "SHA256SUMS").write_text("%s  f\n" % hashlib.sha256(b"q").hexdigest())
+    now = datetime.now(timezone.utc) + timedelta(minutes=5)
+    es.verify(str(tmp_path / "incoming"), now=now)
+    assert (d / "FAILED").read_text() == "SHA256SUMS is not a regular file\n"
+    assert (other / "RECEIPT").exists()
+
+
+def test_sums_over_1mib_fails(tmp_path):
+    d = make_upload(tmp_path)
+    (d / "SHA256SUMS").write_bytes(sums(d) + b"#" * (1 << 20))
+    run(tmp_path, fake_now(d))
+    assert (d / "FAILED").read_text() == "SHA256SUMS is over 1 MiB\n"
+
+
+def test_symlinked_event_dir_not_walked(tmp_path):
+    real = tmp_path / "elsewhere"
+    (real / "AC0G-B4" / "hf-timestd").mkdir(parents=True)
+    (real / "AC0G-B4" / "hf-timestd" / "f").write_bytes(b"q")
+    (real / "AC0G-B4" / "hf-timestd" / "SHA256SUMS").write_text(
+        "%s  f\n" % hashlib.sha256(b"q").hexdigest())
+    inc = tmp_path / "incoming" / "AC0G-B4"
+    inc.mkdir(parents=True)
+    os.symlink(real, inc / "EVX")
+    es.verify(str(tmp_path / "incoming"), now=datetime.now(timezone.utc) + timedelta(minutes=5))
+    assert not (real / "AC0G-B4" / "hf-timestd" / "RECEIPT").exists()
+
+
+def test_verdict_write_error_is_contained(tmp_path, monkeypatch, caplog):
+    d = make_upload(tmp_path)
+    real = es._atomic_write
+
+    def flaky(path, text, *a, **k):
+        if os.path.basename(path) in ("RECEIPT", "FAILED"):
+            raise OSError("disk")
+        return real(path, text, *a, **k)
+    monkeypatch.setattr(es, "_atomic_write", flaky)
+    with caplog.at_level(logging.INFO, logger="events_server"):
+        run(tmp_path, fake_now(d))
+        n = len(caplog.records)
+        run(tmp_path, fake_now(d))
+        assert len(caplog.records) == n            # logged once
+    assert not (d / "RECEIPT").exists()
+
+
+def test_orders_split_per_station(tmp_path):
+    feed = tmp_path / "feed.json"
+    feed.write_text(json.dumps([{
+        "time_tag": "2026-11-06T18:00:00Z", "begin_time": "2026-11-06T17:50:00Z",
+        "begin_class": "C9.0", "max_time": "2026-11-06T18:00:00Z", "max_class": "M1.2",
+        "max_xrlong": 1.2e-5, "end_time": "2026-11-06T18:20:00Z", "end_class": "M1.0"}]))
+    st = tmp_path / "st.json"
+    b4 = json.loads((REPO / "scripts/events/stations.json").read_text())[0]
+    other = dict(b4, id="XX0X-OTHER", lat=-38.0, lon=92.0)   # night on the paths
+    st.write_text(json.dumps([b4, other]))
+    inc = tmp_path / "incoming"
+    for sid in ("AC0G-B4", "XX0X-OTHER"):
+        (inc / sid).mkdir(parents=True)
+    out = tmp_path / "orders.json"
+    assert es.main(["orders", "--stations", str(st), "--out", str(out),
+                    "--feed", str(feed)]) == 0
+    full = json.loads(out.read_text())["orders"]
+    mine = json.loads((inc / "AC0G-B4" / "orders" / "orders.json").read_text())
+    assert mine["orders"] == [o for o in full if "AC0G-B4" in o["stations"]] and mine["orders"]
+    theirs = json.loads((inc / "XX0X-OTHER" / "orders" / "orders.json").read_text())
+    assert all("AC0G-B4" not in o["stations"] for o in theirs["orders"])
+
+
+def test_orders_refuse_planted_symlink(tmp_path):
+    inc = tmp_path / "incoming" / "AC0G-B4"
+    inc.mkdir(parents=True)
+    target = tmp_path / "victim"
+    target.mkdir()
+    os.symlink(target, inc / "orders")
+    es._write_station_orders(str(tmp_path / "incoming"), "AC0G-B4", [])
+    assert list(target.iterdir()) == []
 
 
 def test_existing_verdicts_are_not_reverified(tmp_path):
@@ -166,9 +302,10 @@ def test_receipt_write_leaves_no_tmp(tmp_path):
 
 
 def test_orders_dir_not_scanned(tmp_path):
-    (tmp_path / "root" / "orders").mkdir(parents=True)
-    (tmp_path / "root" / "orders" / "orders.json").write_text("{}")
-    assert es.verify(str(tmp_path / "root"), now=datetime.now(timezone.utc)) == 0
+    o = tmp_path / "incoming" / "AC0G-B4" / "orders"
+    o.mkdir(parents=True)
+    (o / "orders.json").write_text("{}")
+    assert es.verify(str(tmp_path / "incoming"), now=datetime.now(timezone.utc)) == 0
 
 
 def test_second_pass_logs_nothing_new(tmp_path, caplog):
@@ -228,7 +365,10 @@ def test_units_match_rulings():
         assert "User=wsprdaemon" in s and "Nice=19" in s and "IOSchedulingClass=idle" in s
     assert "OnCalendar=hourly" in (d / "events-orders.timer").read_text()
     assert "5min" in (d / "events-verify.timer").read_text()
-    assert "scripts/events/stations.json" in (d / "events-orders.service").read_text()
+    o = (d / "events-orders.service").read_text()
+    assert "/home/wsprdaemon/hamsci-events/stations.json" in o and "/srv/wd_data/events/bin" not in o
+    assert "After=network-online.target" in o and "Wants=network-online.target" in o
+    assert "/srv/wd_data/events/bin" not in (d / "events-verify.service").read_text()
 
 
 def test_end_to_end_keeper_verifier_keeper(tmp_path):
@@ -236,7 +376,7 @@ def test_end_to_end_keeper_verifier_keeper(tmp_path):
     for ch in CHANNELS:
         for i, m in enumerate((0, 10, 20)):
             make_file(raw, ch, ts(2026, 11, 6, 0, m), i)
-    server = tmp_path / "server"
+    server = tmp_path / "incoming" / STATION
     (server / "orders").mkdir(parents=True)
     staging = tmp_path / "staging"
     cfg = {"station_id": STATION, "remote": "local", "remote_root": "", "ssh_key": "/k",
@@ -252,7 +392,7 @@ def test_end_to_end_keeper_verifier_keeper(tmp_path):
     assert (d / "SHA256SUMS").exists() and not (d / "RECEIPT").exists()
 
     # the verifier: ctime is real (just now), so the injected clock moves 2 min on
-    es.verify(str(server), now=datetime.now(timezone.utc) + timedelta(minutes=2))
+    es.verify(str(server.parent), now=datetime.now(timezone.utc) + timedelta(minutes=2))
     assert (d / "RECEIPT").exists() and not (d / "FAILED").exists()
 
     keeper.run_once(cfg, READY, tr, disk_usage=empty)
@@ -265,7 +405,7 @@ def test_end_to_end_corruption_keeps_staging(tmp_path):
     for ch in CHANNELS:
         for i, m in enumerate((0, 10, 20)):
             make_file(raw, ch, ts(2026, 11, 6, 0, m), i)
-    server = tmp_path / "server"
+    server = tmp_path / "incoming" / STATION
     (server / "orders").mkdir(parents=True)
     staging = tmp_path / "staging"
     cfg = {"station_id": STATION, "remote": "local", "remote_root": "", "ssh_key": "/k",
@@ -279,7 +419,7 @@ def test_end_to_end_corruption_keeps_staging(tmp_path):
     d = server / EID / STATION / "hf-timestd"
     victim = sorted(p for p in d.rglob("*") if p.is_file() and p.name != "SHA256SUMS")[0]
     victim.write_bytes(victim.read_bytes() + b"x")
-    es.verify(str(server), now=datetime.now(timezone.utc) + timedelta(minutes=2))
+    es.verify(str(server.parent), now=datetime.now(timezone.utc) + timedelta(minutes=2))
     assert (d / "FAILED").exists()
     keeper.run_once(cfg, READY, tr, disk_usage=empty)
     assert state(type("E", (), {"staging": staging})).get(EID, "").startswith("failed:")
