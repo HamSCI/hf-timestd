@@ -1,0 +1,13 @@
+[Unit]
+Description=Turn the GOES flare list into event orders (wd30)
+
+[Service]
+Type=oneshot
+User=wsprdaemon
+Nice=19
+IOSchedulingClass=idle
+# The checkout under /srv/wd_data/events/bin/hf-timestd supplies events_server.py, flare_orders.py
+# (found by path in the same checkout) and stations.json.
+ExecStart=/usr/bin/python3 /srv/wd_data/events/bin/hf-timestd/scripts/events/events_server.py orders \
+    --stations /srv/wd_data/events/bin/hf-timestd/scripts/events/stations.json \
+    --out /srv/wd_data/events/orders/orders.json

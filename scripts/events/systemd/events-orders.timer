@@ -1,0 +1,9 @@
+[Unit]
+Description=Hourly event orders from the GOES flare list
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target

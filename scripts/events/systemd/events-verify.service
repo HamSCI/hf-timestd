@@ -1,0 +1,10 @@
+[Unit]
+Description=Verify station event uploads and write RECEIPT or FAILED (wd30)
+
+[Service]
+Type=oneshot
+User=wsprdaemon
+Nice=19
+IOSchedulingClass=idle
+ExecStart=/usr/bin/python3 /srv/wd_data/events/bin/hf-timestd/scripts/events/events_server.py verify \
+    --root /srv/wd_data/events
