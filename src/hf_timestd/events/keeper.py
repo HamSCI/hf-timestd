@@ -161,9 +161,14 @@ class RsyncTransport(LocalTransport):
         return "%s:%s" % (self.cfg["remote"], path)
 
     def _opts(self) -> list:
-        opts = ["-e", "ssh -i %s -o BatchMode=yes -o ConnectTimeout=30 "
+        # The server's host key sits in known_hosts beside the key, not in
+        # the service user's home: timestd's home is not where its key lives.
+        key = self.cfg["ssh_key"]
+        known = os.path.join(os.path.dirname(key), "known_hosts")
+        opts = ["-e", "ssh -i %s -o UserKnownHostsFile=%s -o BatchMode=yes "
+                      "-o ConnectTimeout=30 "
                       "-o ServerAliveInterval=30 -o ServerAliveCountMax=4"
-                % shlex.quote(self.cfg["ssh_key"])]
+                % (shlex.quote(key), shlex.quote(known))]
         bw = int(self.cfg.get("bwlimit_kib_s", 0) or 0)
         if bw:
             opts.append("--bwlimit=%d" % bw)

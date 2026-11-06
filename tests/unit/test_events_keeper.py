@@ -378,12 +378,13 @@ def test_rsync_transport_command_line(monkeypatch):
     assert "--timeout=300" in cmd
     assert "--bwlimit=200" in cmd
     assert cmd[cmd.index("-e") + 1] == (
-        "ssh -i /k -o BatchMode=yes -o ConnectTimeout=30 "
+        "ssh -i /k -o UserKnownHostsFile=/known_hosts -o BatchMode=yes "
+        "-o ConnectTimeout=30 "
         "-o ServerAliveInterval=30 -o ServerAliveCountMax=4")
     assert "u@h:orders/o.json" in cmd
     seen.clear()
     keeper.RsyncTransport(dict(cfg, ssh_key="/a b/k")).pull("o", "/b")
-    assert "ssh -i '/a b/k' -o" in seen[0][seen[0].index("-e") + 1]
+    assert "ssh -i '/a b/k' -o UserKnownHostsFile='/a b/known_hosts'" in seen[0][seen[0].index("-e") + 1]
     seen.clear()
     keeper.RsyncTransport(dict(cfg, bwlimit_kib_s=0)).pull("a", "/b")
     assert not any(a.startswith("--bwlimit") for a in seen[0])

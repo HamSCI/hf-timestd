@@ -53,10 +53,10 @@ files out of it. Until then the scp route is the only one.
 
 Add one line to `~wsprdaemon/.ssh/authorized_keys`, with B4's public key:
 
-    restrict,command="rrsync -no-lock -munge-links /srv/wd_data/events/incoming/AC0G-B4" ssh-ed25519 AAAA... timestd@AC0G-B4
+    restrict,command="rrsync -no-lock -munge /srv/wd_data/events/incoming/AC0G-B4" ssh-ed25519 AAAA... timestd@AC0G-B4
 
 `-no-lock` matters. Without it, rrsync takes a per-directory lock, and one
-station's long push blocks every other station. `-munge-links` stops a
+station's long push blocks every other station. `-munge` (rsync's --munge-links on the server side) stops a
 station from planting a symlink that points outside its tree.
 
 ## 3. Units
