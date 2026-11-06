@@ -8,6 +8,7 @@ ssh_key     = "/var/lib/timestd/.ssh/events_ed25519"
 staging     = "/var/lib/timestd/events-staging"
 raw_root    = "/var/lib/timestd/raw_buffer"
 settle_minutes = 15     # wait this long after a window closes before cutting it
+max_disk_used_pct = 78  # no new cut if staging's disk would pass this; must stay below timestd-prune's 80 % trigger
 bwlimit_kib_s = 0       # rsync --bwlimit in KiB/s; 0 = no limit
 
 # Optional: cut only these channels.  Default: every directory under raw_root.

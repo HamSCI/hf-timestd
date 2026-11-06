@@ -559,14 +559,14 @@ def test_disk_guard_leaves_order_pending(env):
     # window 00:05-00:25 touches 3 files x 2 channels x 115.2 MB = 691.2 MB
     est = 3 * 2 * 115_200_000
     total = 10 * 10**9
-    lines = run_once(env.cfg, READY, t, disk_usage=lambda p: Usage(total, int(0.75 * total) - est + 10**6))
+    lines = run_once(env.cfg, READY, t, disk_usage=lambda p: Usage(total, int(0.78 * total) - est + 10**6))
     assert not (env.staging / EID).exists()
     assert not (env.staging / "state.json").exists() or state(env) == {}
     msg = [l for l in lines if "not staging" in l]
     assert msg and str(est) in msg[0] and str(total) in msg[0]
     # room again: the same order stages on a later pass
     run_once(env.cfg, READY + timedelta(minutes=5), t,
-             disk_usage=lambda p: Usage(total, int(0.75 * total) - est - 10**6))
+             disk_usage=lambda p: Usage(total, int(0.78 * total) - est - 10**6))
     assert state(env) == {EID: "uploaded"}
 
 
@@ -619,3 +619,63 @@ def test_sums_push_has_no_partial(env, monkeypatch):
     pushes = [c for c in calls if str(env.staging / EID) in " ".join(c)]
     assert "--partial" in pushes[0] and "--partial" not in pushes[1]
     assert all("--timeout=300" in c for c in calls)
+
+
+def _b4_cfg_run(env, used_pct):
+    total = 251 * 10**9
+    put_orders(env, order(), )
+    cfg = dict(env.cfg)
+    # 15 files x 6 channels x 115.2 MB = 10.368 GB; pin the estimate to B4's window
+    est = 15 * 6 * keeper.BYTES_PER_FILE_CHANNEL
+    keeper_slots = keeper._window_slots
+    keeper._window_slots = lambda o: 15
+    try:
+        orig = keeper._channels
+        keeper._channels = lambda c: ["c%d" % i for i in range(6)]
+        try:
+            lines = run_once(cfg, READY, LocalTransport(cfg),
+                             disk_usage=lambda p: Usage(total, int(total * used_pct / 100)))
+        finally:
+            keeper._channels = orig
+    finally:
+        keeper._window_slots = keeper_slots
+    return lines, est
+
+
+def test_disk_guard_b4_numbers_stage_at_default(env, monkeypatch):
+    # 72 % used + 10.4 GB on 251 GB is about 76.1 %: under the default 78
+    monkeypatch.setattr(keeper, "write_window_drf",
+                        lambda *a: {"channels": {}, "bytes": 0})
+    lines, est = _b4_cfg_run(env, 72)
+    assert abs(est - 10.368e9) < 1e6
+    assert not any("not staging" in l for l in lines)
+    assert state(env) == {EID: "staged"} or state(env) == {EID: "uploaded"}
+
+
+def test_disk_guard_76_percent_refuses_at_default(env, monkeypatch):
+    monkeypatch.setattr(keeper, "write_window_drf",
+                        lambda *a: {"channels": {}, "bytes": 0})
+    lines, _ = _b4_cfg_run(env, 76)
+    assert any("not staging" in l and "limit 78 %" in l for l in lines)
+    assert not (env.staging / "state.json").exists() or state(env) == {}
+
+
+@pytest.mark.parametrize("bad", [80, 85, 0, -5, True, "78"])
+def test_max_disk_used_pct_bounds(tmp_path, bad):
+    good = {"station_id": "S", "remote": "r", "remote_root": "", "ssh_key": "/k",
+            "staging": str(tmp_path / "s"), "raw_root": str(tmp_path / "r")}
+    keeper.validate_config(dict(good, max_disk_used_pct=79.5))
+    with pytest.raises(keeper.ConfigError):
+        keeper.validate_config(dict(good, max_disk_used_pct=bad))
+
+
+def test_cli_max_disk_80_exits_2(env, tmp_path, capsys):
+    from hf_timestd import cli
+    conf = tmp_path / "events.toml"
+    conf.write_text('station_id = "S"\nremote = "h"\nremote_root = ""\nssh_key = "/k"\n'
+                    'max_disk_used_pct = 80\nstaging = "%s"\nraw_root = "%s"\n'
+                    % (env.cfg["staging"], env.cfg["raw_root"]))
+    with pytest.raises(SystemExit) as e:
+        cli.main(["events", "run", "--config", str(conf)])
+    assert e.value.code == 2
+    assert "max_disk_used_pct" in capsys.readouterr().err

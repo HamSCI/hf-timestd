@@ -47,7 +47,8 @@ _RESERVED_IDS = ("state.json", "state.json.tmp", "orders.json")
 _RECEIPT = re.compile(r"[0-9a-f]{64}  verified \S+\n?\Z")
 _REQUIRED = ("station_id", "remote", "ssh_key", "staging", "raw_root")
 BYTES_PER_FILE_CHANNEL = 115_200_000      # 600 s x 24 kHz x complex64
-DISK_LIMIT = 0.75                          # below timestd-prune's 80 % trigger
+DEFAULT_MAX_DISK_PCT = 78                  # must stay below timestd-prune's 80 % trigger
+PRUNE_TRIGGER_PCT = 80
 _TS = "%Y-%m-%dT%H:%M:%SZ"
 PULL_TIMEOUT = 600
 PUSH_TIMEOUT = 6 * 3600
@@ -76,6 +77,11 @@ def validate_config(cfg: dict) -> dict:
                                   and all(isinstance(c, str) and _SAFE_ID.match(c)
                                           for c in cfg["channels"])):
         raise ConfigError("events.toml: channels must be a list of names")
+    if "max_disk_used_pct" in cfg:
+        v = cfg["max_disk_used_pct"]
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not (0 < v < PRUNE_TRIGGER_PCT):
+            raise ConfigError("events.toml: max_disk_used_pct must be above 0 and below %d "
+                              "(timestd-prune's trigger)" % PRUNE_TRIGGER_PCT)
     for k in ("settle_minutes", "bwlimit_kib_s"):
         if k in cfg and (isinstance(cfg[k], bool) or not isinstance(cfg[k], (int, float))
                          or cfg[k] < 0):
@@ -416,6 +422,7 @@ def _stage_next(cfg, now, transport, staging, state, say, disk_usage):
     if not channels:
         say("no channel directories under %s; nothing to cut" % cfg["raw_root"])
         return
+    limit_pct = float(cfg.get("max_disk_used_pct", DEFAULT_MAX_DISK_PCT))
     for o in ready:
         eid = o["event_id"]
         d = _event_dir(staging, eid)
@@ -426,10 +433,10 @@ def _stage_next(cfg, now, transport, staging, state, say, disk_usage):
         except Exception as exc:
             say("%s: cannot read disk usage (%s); not staging" % (eid, exc))
             return
-        if frac > DISK_LIMIT:
+        if 100 * frac > limit_pct:
             say("%s: not staging: estimated %d bytes would take %s to %.1f %% used "
-                "(%d of %d bytes used now; limit %d %%); order stays pending"
-                % (eid, est, staging, 100 * frac, du.used, du.total, int(DISK_LIMIT * 100)))
+                "(%d of %d bytes used now; limit %g %%); order stays pending"
+                % (eid, est, staging, 100 * frac, du.used, du.total, limit_pct))
             return
         try:
             _remove_staging(cfg, staging, eid)   # a cut that crashed before state was written
