@@ -172,3 +172,43 @@ def test_samples_written_truncates(tmp_path):
     r = DigitalRFReader(str(out))
     assert r.get_bounds(CH) == (s * RATE, s * RATE + 19)
     assert np.array_equal(r.read_vector(s * RATE, 20, CH), x[:20])
+
+
+def test_peak_memory_stays_near_one_file(tmp_path):
+    """Eight full-size (14.4 M sample, ~115 MB decoded) files must not pile up.
+
+    Before the one-file-at-a-time rewrite this peaked near 1 GB (all files of
+    the channel held at once; 1.7 GB for 15 files).  Zeros compress to almost
+    nothing, so the raw side stays small; the output is ~920 MB, so it goes to
+    /var/tmp (tmpfs /tmp can be too small).  Set TIMESTD_BIGTMP to move it.
+    """
+    import os
+    import resource
+    import shutil
+    import sys
+    import tempfile
+
+    big = os.environ.get("TIMESTD_BIGTMP") or ("/var/tmp" if os.path.isdir("/var/tmp") else None)
+    work = Path(tempfile.mkdtemp(dir=big))
+    try:
+        if shutil.disk_usage(work).free < 3 * 2**30:
+            pytest.skip("needs 3 GiB free under TIMESTD_BIGTMP or /var/tmp")
+        n, ch, nfile = 14_400_000, "CH0_20000", 8
+        z = zstandard.ZstdCompressor().compress(np.zeros(n, np.complex64).tobytes())
+        base = ts(2026, 11, 6, 0, 0)
+        day = work / "raw" / ch / "20261106"
+        day.mkdir(parents=True)
+        for i in range(nfile):
+            s = base + 600 * i
+            (day / f"{s}.bin.zst").write_bytes(z)
+            (day / f"{s}.json").write_text(json.dumps(
+                {"sample_rate": RATE, "samples_written": n}))
+        order = {"event_id": "mem", "start_utc": "2026-11-06T00:00:00Z",
+                 "end_utc": "2026-11-06T01:20:00Z"}
+        code = ("from hf_timestd.events.window_drf import write_window_drf as w; "
+                f"w({str(work / 'raw')!r}, [{ch!r}], {order!r}, {str(work / 'out')!r})")
+        subprocess.run([sys.executable, "-c", code], check=True)
+        peak_mb = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss / 1024
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    assert peak_mb < 600, f"peak RSS {peak_mb:.0f} MB"

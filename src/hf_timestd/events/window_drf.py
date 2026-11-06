@@ -67,40 +67,34 @@ def _write_channel(raw_root, channel, order, found, missing, out_dir):
     from ..core.binary_archive_writer import BinaryArchiveReader
 
     reader = BinaryArchiveReader(Path(raw_root), channel)
-    loaded = []
     missing = list(missing)
-    for s in found:
-        try:
-            samples = reader.read_minute(s)
-            side = reader.read_metadata(s)
-        except Exception as e:
-            log.warning("%s %s: unreadable, counted missing: %s", channel, s, e)
-            samples, side = None, None
-        if samples is None:
-            missing.append(s)
-            continue
-        loaded.append((s, samples, side or {}))
-    missing.sort()
-    if not loaded:
-        return 0, 0, missing
-    rate = int(loaded[0][2].get("sample_rate") or DEFAULT_RATE)
-    first_idx = loaded[0][0] * rate
     chan_dir = Path(out_dir) / channel
     md_dir = chan_dir / "metadata"
-    md_dir.mkdir(parents=True, exist_ok=True)
-
-    writer = drf.DigitalRFWriter(
-        str(chan_dir), np.complex64, 3600, 60000, first_idx,
-        rate, 1, uuid_str=channel, compression_level=0, checksum=False,
-        is_complex=True, num_subchannels=1, is_continuous=False,
-        marching_periods=False)
-    md_writer = drf.DigitalMetadataWriter(
-        str(md_dir), 3600, 3600, rate, 1, "metadata")
-    order_json = json.dumps(order, sort_keys=True)
-    missing_json = json.dumps(missing)
+    writer = None
+    first_idx = rate = 0
+    written = []          # (start, first sample index) per file; no arrays, no sidecars
     nbytes = 0
     try:
-        for s, samples, side in loaded:
+        # One ten-minute file at a time: decode, write, release.
+        for s in found:
+            try:
+                samples = reader.read_minute(s)
+                side = reader.read_metadata(s) or {}
+            except Exception as e:
+                log.warning("%s %s: unreadable, counted missing: %s", channel, s, e)
+                samples, side = None, {}
+            if samples is None:
+                missing.append(s)
+                continue
+            if writer is None:
+                rate = int(side.get("sample_rate") or DEFAULT_RATE)
+                first_idx = s * rate
+                md_dir.mkdir(parents=True, exist_ok=True)
+                writer = drf.DigitalRFWriter(
+                    str(chan_dir), np.complex64, 3600, 60000, first_idx,
+                    rate, 1, uuid_str=channel, compression_level=0, checksum=False,
+                    is_complex=True, num_subchannels=1, is_continuous=False,
+                    marching_periods=False)
             n = len(samples)
             if side.get("samples_written") is not None:
                 n = min(n, int(side["samples_written"]))
@@ -108,17 +102,32 @@ def _write_channel(raw_root, channel, order, found, missing, out_dir):
             writer.rf_write(np.ascontiguousarray(samples[:n], dtype=np.complex64),
                             next_sample=idx - first_idx)  # relative to start_global_index
             nbytes += n * 8
-            md_writer.write(idx, {
-                "event_id": str(order.get("event_id", "")),
-                "channel": channel,
-                "start_unix": np.int64(s),
-                "sidecar_json": json.dumps(side, sort_keys=True),
-                "order_json": order_json,
-                "missing_json": missing_json,
-            })
+            written.append((s, idx))
+            del samples
     finally:
-        writer.close()
-    return len(loaded), nbytes, missing
+        if writer is not None:
+            writer.close()
+    missing.sort()
+    if not written:
+        return 0, 0, missing
+    # Every metadata record names the full missing list, so these wait until
+    # the data pass has found out which files were unreadable.  Each sidecar
+    # is read again here, one at a time.
+    md_writer = drf.DigitalMetadataWriter(
+        str(md_dir), 3600, 3600, rate, 1, "metadata")
+    order_json = json.dumps(order, sort_keys=True)
+    missing_json = json.dumps(missing)
+    for s, idx in written:
+        side = reader.read_metadata(s) or {}
+        md_writer.write(idx, {
+            "event_id": str(order.get("event_id", "")),
+            "channel": channel,
+            "start_unix": np.int64(s),
+            "sidecar_json": json.dumps(side, sort_keys=True),
+            "order_json": order_json,
+            "missing_json": missing_json,
+        })
+    return len(written), nbytes, missing
 
 
 def _write_sums(out_dir: Path):
