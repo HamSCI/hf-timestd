@@ -109,8 +109,9 @@ def orders_from_flares(flares: list, stations: list, now: datetime) -> list:
     orders, seen = [], set()
     for fl in flares:
         try:
-            if flare_class_value(fl["max_class"]) < MIN_FLARE_WM2:
-                continue
+            flux = flare_class_value(fl["max_class"])
+            if not math.isfinite(flux) or not (flux >= MIN_FLARE_WM2):
+                continue                      # weak, or NaN/inf from a bad class
             if not fl.get("end_time"):
                 continue                      # still in progress; wait
             peak = _parse(fl["max_time"])
@@ -160,26 +161,34 @@ def main(argv=None) -> int:
     ap.add_argument("--out", required=True, help="orders.json to merge into")
     ap.add_argument("--url", default=FEED_URL)
     args = ap.parse_args(argv)
+    tmp = args.out + ".tmp"
     try:
         with open(args.stations) as f:
             stations = json.load(f)
         with urllib.request.urlopen(args.url, timeout=60) as r:
             flares = json.load(r)
+        if not isinstance(flares, list):
+            raise ValueError("feed is not a list: %.80r" % (flares,))
         try:
             with open(args.out) as f:
                 existing = json.load(f)
         except FileNotFoundError:
             existing = {"version": 1, "orders": []}
+        merged = merge_orders(existing, orders_from_flares(
+            flares, stations, datetime.now(timezone.utc)))
+        with open(tmp, "w") as f:
+            json.dump(merged, f, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, args.out)
     except Exception as exc:                  # leave the orders file alone
         print("flare_orders: %s" % exc, file=sys.stderr)
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
         return 1
-    merged = merge_orders(existing, orders_from_flares(flares, stations,
-                                                       datetime.now(timezone.utc)))
-    tmp = args.out + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(merged, f, indent=2)
-        f.write("\n")
-    os.replace(tmp, args.out)
     return 0
 
 

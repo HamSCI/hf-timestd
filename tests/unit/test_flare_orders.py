@@ -123,3 +123,73 @@ def test_main_writes_orders(tmp_path):
     assert fo.main(["--stations", str(st), "--out", str(out),
                     "--url", feed.as_uri()]) == 0
     assert len(json.loads(out.read_text())["orders"]) == 1
+
+
+def _order_at(h, m, cls="M1.2"):
+    pk = "2026-11-06T%02d:%02d:00Z" % (h, m)
+    return fo.orders_from_flares([_flare(cls, pk, end=pk)], [B4], NOW)
+
+
+def test_station_sunlit_but_paths_dark_makes_no_order():
+    # 13:00Z: sun up at B4, down at both path midpoints.
+    assert fo.solar_elevation_deg(_utc(13), B4["lat"], B4["lon"]) > 0
+    for p in B4["paths"]:
+        mid = fo.path_midpoint(B4["lat"], B4["lon"], *p)
+        assert fo.solar_elevation_deg(_utc(13), *mid) < 0
+    assert _order_at(13, 0) == []
+
+
+def test_station_dark_but_midpoint_lit_makes_no_order():
+    # 23:10Z: sun down at B4, up at the WWV midpoint.
+    assert fo.solar_elevation_deg(_utc(23, 10), B4["lat"], B4["lon"]) < 0
+    mid = fo.path_midpoint(B4["lat"], B4["lon"], *fo.WWV)
+    assert fo.solar_elevation_deg(_utc(23, 10), *mid) > 0
+    assert _order_at(23, 10) == []
+
+
+def test_m1_boundary():
+    assert len(_order_at(18, 0, "M1.0")) == 1
+    assert _order_at(18, 0, "M0.9") == []
+
+
+def test_odd_classes():
+    assert fo.flare_class_value("M1") == 1e-5
+    assert fo.flare_class_value("X10") == pytest.approx(1e-3)
+    assert len(_order_at(18, 0, "M1")) == 1
+    assert len(_order_at(18, 0, "X10")) == 1
+    for bad in ("", None, "MNaN", "Minf", "M", "Z5.0", 5):
+        assert _order_at(18, 0, bad) == [], bad
+
+
+def test_midpoint_antimeridian():
+    lat, lon = fo.path_midpoint(0, 170, 0, -170)
+    assert lat == pytest.approx(0, abs=1e-9)
+    assert abs(abs(lon) - 180) < 1e-9
+    lat, lon = fo.path_midpoint(10, 175, 10, -165)
+    assert lon == pytest.approx(-175.0)
+
+
+def test_main_rejects_non_list_feed(tmp_path):
+    st = tmp_path / "st.json"
+    st.write_text(json.dumps([B4]))
+    out = tmp_path / "orders.json"
+    out.write_text('{"version": 1, "orders": []}')
+    feed = tmp_path / "feed.json"
+    feed.write_text('{"error": "nope"}')
+    assert fo.main(["--stations", str(st), "--out", str(out),
+                    "--url", feed.as_uri()]) == 1
+    assert out.read_text() == '{"version": 1, "orders": []}'
+
+
+def test_main_write_failure_cleans_tmp(tmp_path):
+    st = tmp_path / "st.json"
+    st.write_text(json.dumps([B4]))
+    out = tmp_path / "orders.json"
+    feed = tmp_path / "feed.json"
+    feed.write_text(json.dumps([_flare("M1.2", "2026-11-06T18:00:00Z",
+                                       end="2026-11-06T18:20:00Z")]))
+    with mock.patch("os.replace", side_effect=OSError("disk")):
+        assert fo.main(["--stations", str(st), "--out", str(out),
+                        "--url", feed.as_uri()]) == 1
+    assert not out.exists()
+    assert not (tmp_path / "orders.json.tmp").exists()
