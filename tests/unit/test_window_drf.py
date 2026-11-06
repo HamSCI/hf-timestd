@@ -126,3 +126,49 @@ def test_sha256sums_cover_all(tmp_path):
     assert "order.json" in paths
     r = subprocess.run(["sha256sum", "-c", "SHA256SUMS"], cwd=out, capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_corrupt_file_counts_missing(tmp_path):
+    from digital_rf import DigitalRFReader
+    starts = [ts(2026, 11, 6, 0, m) for m in (0, 10, 20)]
+    data = {s: make_file(tmp_path, CH, s, i)[0] for i, s in enumerate(starts)}
+    (tmp_path / CH / "20261106" / f"{starts[1]}.bin.zst").write_bytes(b"garbage not zstd")
+    out = tmp_path / "out"
+    res = write_window_drf(tmp_path, [CH], ORDER, out)
+    assert res["channels"][CH] == {"files": 2, "missing": [starts[1]]}
+    assert json.loads((out / "order.json").read_text())["missing"] == {CH: [starts[1]]}
+    r = DigitalRFReader(str(out))
+    for s in (starts[0], starts[2]):
+        assert np.array_equal(r.read_vector(s * RATE, NSAMP, CH), data[s])
+
+
+def test_window_files_finds_bin_and_lz4(tmp_path):
+    s0, s1 = ts(2026, 11, 6, 0, 0), ts(2026, 11, 6, 0, 10)
+    day = tmp_path / CH / "20261106"
+    day.mkdir(parents=True)
+    (day / f"{s0}.bin").write_bytes(b"x")
+    (day / f"{s1}.bin.lz4").write_bytes(b"x")
+    found, missing = window_files(tmp_path, CH, utc(2026, 11, 6, 0, 0), utc(2026, 11, 6, 0, 20))
+    assert found == [s0, s1] and missing == []
+
+
+def test_window_end_on_boundary_excludes_next(tmp_path):
+    starts = [ts(2026, 11, 6, 0, m) for m in (0, 10, 20)]
+    for i, s in enumerate(starts):
+        make_file(tmp_path, CH, s, i)
+    found, missing = window_files(tmp_path, CH, utc(2026, 11, 6, 0, 0), utc(2026, 11, 6, 0, 20))
+    assert found == starts[:2] and missing == []
+
+
+def test_samples_written_truncates(tmp_path):
+    from digital_rf import DigitalRFReader
+    s = ts(2026, 11, 6, 0, 0)
+    x, side = make_file(tmp_path, CH, s, 1)
+    side["samples_written"] = 20          # sidecar claims fewer than the file holds
+    (tmp_path / CH / "20261106" / f"{s}.json").write_text(json.dumps(side))
+    out = tmp_path / "out"
+    res = write_window_drf(tmp_path, [CH], ORDER, out)
+    assert res["bytes"] == 20 * 8
+    r = DigitalRFReader(str(out))
+    assert r.get_bounds(CH) == (s * RATE, s * RATE + 19)
+    assert np.array_equal(r.read_vector(s * RATE, 20, CH), x[:20])

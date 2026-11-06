@@ -9,13 +9,21 @@ Layout written:
 
 Each buffer file lands at sample index start_unix * sample_rate.  A file that
 is absent, or short of its expected samples, leaves a gap; nothing fills it.
+A file that cannot be read counts as missing.
+
+Files are cut whole at 600 s, not clipped to the window.  Digital Metadata
+cannot hold nested dicts, so each record stores the sidecar as a JSON string
+(sort_keys=True) under "sidecar_json".
 """
 import hashlib
 import json
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 FILE_SEC = 600
 DEFAULT_RATE = 24000
@@ -32,6 +40,12 @@ def _bin_path(raw_root: Path, channel: str, start: int) -> Path:
     return Path(raw_root) / channel / day / f"{start}.bin.zst"
 
 
+def _exists(raw_root: Path, channel: str, start: int) -> bool:
+    base = _bin_path(raw_root, channel, start)
+    stem = base.with_name(f"{start}.bin")
+    return any(p.exists() for p in (stem, base, stem.with_name(f"{start}.bin.lz4")))
+
+
 def window_files(raw_root, channel, start, end):
     """Return (existing, missing) file start times overlapping [start, end)."""
     t0, t1 = _epoch(start), _epoch(end)
@@ -39,7 +53,7 @@ def window_files(raw_root, channel, start, end):
     found, missing = [], []
     s = first
     while s < t1:
-        (found if _bin_path(raw_root, channel, s).exists() else missing).append(s)
+        (found if _exists(raw_root, channel, s) else missing).append(s)
         s += FILE_SEC
     return found, missing
 
@@ -54,16 +68,21 @@ def _write_channel(raw_root, channel, order, found, missing, out_dir):
 
     reader = BinaryArchiveReader(Path(raw_root), channel)
     loaded = []
+    missing = list(missing)
     for s in found:
-        samples = reader.read_minute(s)
-        side = reader.read_metadata(s)
+        try:
+            samples = reader.read_minute(s)
+            side = reader.read_metadata(s)
+        except Exception as e:
+            log.warning("%s %s: unreadable, counted missing: %s", channel, s, e)
+            samples, side = None, None
         if samples is None:
             missing.append(s)
             continue
         loaded.append((s, samples, side or {}))
     missing.sort()
     if not loaded:
-        return 0, 0
+        return 0, 0, missing
     rate = int(loaded[0][2].get("sample_rate") or DEFAULT_RATE)
     first_idx = loaded[0][0] * rate
     chan_dir = Path(out_dir) / channel
@@ -99,7 +118,7 @@ def _write_channel(raw_root, channel, order, found, missing, out_dir):
             })
     finally:
         writer.close()
-    return len(loaded), nbytes
+    return len(loaded), nbytes, missing
 
 
 def _write_sums(out_dir: Path):
@@ -125,7 +144,7 @@ def write_window_drf(raw_root, channels, order, out_dir):
     missing_by = {}
     for ch in channels:
         found, missing = window_files(raw_root, ch, start, end)
-        n, nbytes = _write_channel(raw_root, ch, order, found, missing, out_dir)
+        n, nbytes, missing = _write_channel(raw_root, ch, order, found, missing, out_dir)
         missing_by[ch] = list(missing)
         result["channels"][ch] = {"files": n, "missing": list(missing)}
         result["bytes"] += nbytes
