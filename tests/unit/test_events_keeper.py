@@ -9,7 +9,18 @@ import pytest
 
 from test_window_drf import make_file, ts, utc
 from hf_timestd.events import keeper
-from hf_timestd.events.keeper import LocalTransport, run_once
+from hf_timestd.events.keeper import LocalTransport
+from hf_timestd.events.keeper import run_once as _run_once
+
+
+class Usage:
+    def __init__(self, total, used):
+        self.total, self.used, self.free = total, used, total - used
+
+
+def run_once(cfg, now, transport, disk_usage=lambda p: Usage(10**12, 0)):
+    """The tests' default: an empty disk, whatever this machine's /tmp holds."""
+    return _run_once(cfg, now, transport, disk_usage=disk_usage)
 
 STATION = "AC0G-B4"
 CHANNELS = ["WWV_20000", "WWV_10000"]
@@ -35,9 +46,9 @@ def env(tmp_path):
             make_file(raw, ch, ts(2026, 11, 6, 0, m), i)
     remote = tmp_path / "remote"
     (remote / "orders").mkdir(parents=True)
-    cfg = {"station_id": STATION, "remote": "local", "remote_root": str(remote),
+    cfg = {"station_id": STATION, "remote": "local", "remote_root": "", "ssh_key": "/k", "local_base": str(remote),
            "staging": str(tmp_path / "staging"), "raw_root": str(raw),
-           "settle_minutes": 15, "bwlimit_kbps": 0}
+           "settle_minutes": 15, "bwlimit_kib_s": 0}
     return type("Env", (), dict(cfg=cfg, raw=raw, remote=remote,
                                 staging=tmp_path / "staging"))
 
@@ -117,7 +128,7 @@ def test_sums_pushed_last_in_separate_call(env, monkeypatch):
     run_once(env.cfg, READY, LocalTransport(env.cfg))
     pushes = [c for c in calls if str(env.staging / EID) in " ".join(c)]
     assert len(pushes) == 2
-    assert all("--partial" in c and "-a" in c for c in pushes)
+    assert all("-a" in c for c in pushes) and "--partial" in pushes[0]
     assert not any("SHA256SUMS" in a and "exclude" not in a for a in pushes[0]
                    if not a.startswith("--exclude"))
     assert pushes[1][-2].endswith("SHA256SUMS")
@@ -308,7 +319,6 @@ def test_hostile_event_id_refused(env):
     # even a state file naming it must not delete outside staging
     env.staging.mkdir(exist_ok=True)
     (env.staging / "state.json").write_text(json.dumps({"../victim": "uploaded"}))
-    (env.remote / "../victim").resolve()
     run_once(env.cfg, READY, LocalTransport(env.cfg))
     assert (victim / "keep").exists()
 
@@ -333,14 +343,18 @@ def test_stale_partial_staging_is_cleaned(env):
 
 
 def test_config_validation(tmp_path):
-    good = {"station_id": "S", "remote": "r", "remote_root": "/x", "ssh_key": "/k",
+    good = {"station_id": "S", "remote": "r", "remote_root": "", "ssh_key": "/k",
             "staging": str(tmp_path / "s"), "raw_root": str(tmp_path / "r")}
     keeper.validate_config(dict(good))
-    for k in ("station_id", "remote_root", "staging", "raw_root"):
+    for k in ("station_id", "remote", "ssh_key", "remote_root", "staging", "raw_root"):
         bad = dict(good)
         del bad[k]
         with pytest.raises(keeper.ConfigError):
             keeper.validate_config(bad)
+    for rr in ("/srv/wd_data/events", "/", "a/../b"):
+        with pytest.raises(keeper.ConfigError):
+            keeper.validate_config(dict(good, remote_root=rr))
+    keeper.validate_config(dict(good, remote_root="events/sub"))
     nested = dict(good, staging=str(tmp_path / "r" / "stage"))
     with pytest.raises(keeper.ConfigError):
         keeper.validate_config(nested)
@@ -355,15 +369,21 @@ def test_rsync_transport_command_line(monkeypatch):
     class R:
         returncode = 0
     monkeypatch.setattr(keeper.subprocess, "run", lambda cmd, *a, **k: (seen.append(cmd), R())[1])
-    cfg = {"remote": "u@h", "ssh_key": "/k", "bwlimit_kbps": 200}
-    keeper.RsyncTransport(cfg).pull("/srv/o.json", "/tmp/o.json")
+    cfg = {"remote": "u@h", "ssh_key": "/k", "bwlimit_kib_s": 200}
+    keeper.RsyncTransport(cfg).pull("orders/o.json", "/tmp/o.json")
     cmd = seen[0]
     assert cmd[:3] == ["rsync", "-a", "--partial"]
+    assert "--timeout=300" in cmd
     assert "--bwlimit=200" in cmd
-    assert cmd[cmd.index("-e") + 1] == "ssh -i /k -o BatchMode=yes"
-    assert "u@h:/srv/o.json" in cmd
+    assert cmd[cmd.index("-e") + 1] == (
+        "ssh -i /k -o BatchMode=yes -o ConnectTimeout=30 "
+        "-o ServerAliveInterval=30 -o ServerAliveCountMax=4")
+    assert "u@h:orders/o.json" in cmd
     seen.clear()
-    keeper.RsyncTransport(dict(cfg, bwlimit_kbps=0)).pull("/a", "/b")
+    keeper.RsyncTransport(dict(cfg, ssh_key="/a b/k")).pull("o", "/b")
+    assert "ssh -i '/a b/k' -o" in seen[0][seen[0].index("-e") + 1]
+    seen.clear()
+    keeper.RsyncTransport(dict(cfg, bwlimit_kib_s=0)).pull("a", "/b")
     assert not any(a.startswith("--bwlimit") for a in seen[0])
 
 
@@ -380,12 +400,222 @@ def test_cli_exit_codes(tmp_path, capsys):
     assert e.value.code == 2
 
 
-def test_cli_transport_failure_exits_zero(env, tmp_path):
+def test_cli_transport_failure_exits_zero(env, tmp_path, monkeypatch):
     from hf_timestd import cli
+    monkeypatch.setattr(keeper, "RsyncTransport", DeadTransport)   # no real ssh
     raw, staging = env.cfg["raw_root"], env.cfg["staging"]
     conf = tmp_path / "events.toml"
     conf.write_text(
-        'station_id = "AC0G-B4"\nremote = "nobody@127.0.0.1"\nremote_root = "/nonexistent"\n'
+        'station_id = "AC0G-B4"\nremote = "nobody@host"\nremote_root = ""\n'
         f'ssh_key = "{tmp_path}/nokey"\nstaging = "{staging}"\nraw_root = "{raw}"\n')
     cli.main(["events", "run", "--config", str(conf)])     # SystemExit would fail the test
     assert not (Path(staging) / EID).exists()
+
+
+@pytest.mark.parametrize("drop", ["remote", "ssh_key"])
+def test_cli_missing_remote_or_key_exits_2(env, tmp_path, drop, capsys):
+    from hf_timestd import cli
+    kv = {"station_id": "AC0G-B4", "remote": "h", "remote_root": "", "ssh_key": "/k",
+          "staging": env.cfg["staging"], "raw_root": env.cfg["raw_root"]}
+    del kv[drop]
+    conf = tmp_path / "events.toml"
+    conf.write_text("".join('%s = "%s"\n' % kv_ for kv_ in kv.items()))
+    with pytest.raises(SystemExit) as e:
+        cli.main(["events", "run", "--config", str(conf)])
+    assert e.value.code == 2
+    assert drop in capsys.readouterr().err
+
+
+def test_cli_absolute_remote_root_exits_2(env, tmp_path):
+    from hf_timestd import cli
+    conf = tmp_path / "events.toml"
+    conf.write_text('station_id = "S"\nremote = "h"\nremote_root = "/srv/wd_data/events"\n'
+                    'ssh_key = "/k"\nstaging = "%s"\nraw_root = "%s"\n'
+                    % (env.cfg["staging"], env.cfg["raw_root"]))
+    with pytest.raises(SystemExit) as e:
+        cli.main(["events", "run", "--config", str(conf)])
+    assert e.value.code == 2
+
+
+class Recording(LocalTransport):
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        self.paths = []
+
+    def pull(self, remote_path, local_path):
+        self.paths.append(remote_path)
+        return super().pull(remote_path, local_path)
+
+    def push(self, local_dir, remote_dir):
+        self.paths.append(remote_dir)
+        return super().push(local_dir, remote_dir)
+
+    def fetch_receipt(self, remote_dir, local_path, name="RECEIPT"):
+        self.paths.append(remote_dir)
+        return super().fetch_receipt(remote_dir, local_path, name)
+
+
+def test_remote_paths_are_relative_to_rrsync_root(env):
+    put_orders(env, order())
+    t = Recording(env.cfg)
+    run_once(env.cfg, READY, t)
+    receipt(env)
+    run_once(env.cfg, READY + timedelta(minutes=5), t)
+    assert state(env) == {EID: "done"}
+    assert t.paths and "orders/orders.json" in t.paths
+    for p in t.paths:
+        assert not p.startswith("/") and ".." not in p.split("/"), p
+    assert "%s/%s/hf-timestd" % (EID, STATION) in t.paths
+    # a configured sub-root joins in front, still relative
+    env.cfg["remote_root"] = "sub/"
+    assert keeper._remote_dir(env.cfg, EID) == "sub/%s/%s/hf-timestd" % (EID, STATION)
+    assert keeper._rjoin(env.cfg, "orders", "orders.json") == "sub/orders/orders.json"
+
+
+@pytest.mark.parametrize("body", [
+    b"", b"\n", b"abc", b"\xff\xfe\x00bad",
+    "{}  verified 2026-11-06T01:00:00Z\n",            # truncated, 63 chars (filled below)
+    "{}  verified 2026-11-06T01:00:00Z\n",            # uppercase (filled below)
+    "{}  verified\n",                                 # no timestamp
+    "{} verified 2026-11-06T01:00:00Z\n",             # one space
+    "{}  verified 2026-11-06T01:00:00Z\nextra\n",    # extra line
+    "{}  checked 2026-11-06T01:00:00Z\n",             # wrong token
+    "{}  verified 2026-11-06T01:00:00Z\n",            # another hash (filled below)
+], ids=["empty", "newline", "short", "not-utf8", "prefix63", "upper", "no-ts",
+        "one-space", "extra-line", "wrong-token", "other-hash"])
+def test_malformed_receipt_keeps_staging(env, body, request):
+    put_orders(env, order())
+    t = LocalTransport(env.cfg)
+    run_once(env.cfg, READY, t)
+    ours = sums_sha(env.staging / EID / "SHA256SUMS")
+    rid = request.node.callspec.id
+    if isinstance(body, str):
+        h = {"prefix63": ours[:63], "upper": ours.upper(),
+             "other-hash": "0" * 64}.get(rid, ours)
+        body = body.format(h).encode()
+    (rdir(env) / "RECEIPT").write_bytes(body)
+    lines = run_once(env.cfg, READY + timedelta(minutes=5), t)
+    assert state(env) == {EID: "failed:receipt-mismatch"}
+    assert (env.staging / EID / "SHA256SUMS").exists()
+    assert any("receipt-mismatch" in l for l in lines)
+
+
+def test_receipt_without_trailing_newline_accepted(env):
+    put_orders(env, order())
+    t = LocalTransport(env.cfg)
+    run_once(env.cfg, READY, t)
+    h = sums_sha(env.staging / EID / "SHA256SUMS")
+    (rdir(env) / "RECEIPT").write_text(f"{h}  verified 2026-11-06T01:00:00Z")
+    run_once(env.cfg, READY + timedelta(minutes=5), t)
+    assert state(env) == {EID: "done"}
+
+
+def test_failed_cut_gets_state_and_queue_moves_on(env, monkeypatch):
+    o2 = order(EID2)
+    put_orders(env, order(), o2)
+    real = keeper.write_window_drf
+
+    def boom(raw, chans, o, out):
+        if o["event_id"] == EID:
+            Path(out).mkdir(parents=True, exist_ok=True)
+            (Path(out) / "partial").write_text("x")
+            raise OSError("No space left on device")
+        return real(raw, chans, o, out)
+    monkeypatch.setattr(keeper, "write_window_drf", boom)
+    t = LocalTransport(env.cfg)
+    lines = run_once(env.cfg, READY, t)
+    assert state(env) == {EID: "failed:cut:OSError", EID2: "uploaded"}
+    assert not (env.staging / EID).exists()
+    assert any("failed:cut:OSError" in l for l in lines)
+    # never retried automatically
+    monkeypatch.setattr(keeper, "write_window_drf", real)
+    receipt(env, EID2)
+    run_once(env.cfg, READY + timedelta(minutes=5), t)
+    run_once(env.cfg, READY + timedelta(minutes=10), t)
+    assert state(env)[EID] == "failed:cut:OSError"
+    assert not (env.staging / EID).exists()
+
+
+@pytest.mark.parametrize("bad", ["state.json", "orders.json", "ok\n"])
+def test_reserved_and_newline_ids_refused(env, bad):
+    put_orders(env, order(bad))
+    run_once(env.cfg, READY, LocalTransport(env.cfg))
+    assert not (env.staging / "state.json").exists() or state(env) == {}
+    assert keeper._event_dir(env.staging, bad) is None
+
+
+def test_stations_must_be_a_list(env):
+    o = order()
+    o["stations"] = STATION           # a bare string would pass a substring test
+    put_orders(env, o)
+    lines = run_once(env.cfg, READY, LocalTransport(env.cfg))
+    assert not (env.staging / EID).exists()
+    assert any("stations is not a list" in l for l in lines)
+
+
+def test_disk_guard_leaves_order_pending(env):
+    put_orders(env, order())
+    t = LocalTransport(env.cfg)
+    # window 00:05-00:25 touches 3 files x 2 channels x 115.2 MB = 691.2 MB
+    est = 3 * 2 * 115_200_000
+    total = 10 * 10**9
+    lines = run_once(env.cfg, READY, t, disk_usage=lambda p: Usage(total, int(0.75 * total) - est + 10**6))
+    assert not (env.staging / EID).exists()
+    assert not (env.staging / "state.json").exists() or state(env) == {}
+    msg = [l for l in lines if "not staging" in l]
+    assert msg and str(est) in msg[0] and str(total) in msg[0]
+    # room again: the same order stages on a later pass
+    run_once(env.cfg, READY + timedelta(minutes=5), t,
+             disk_usage=lambda p: Usage(total, int(0.75 * total) - est - 10**6))
+    assert state(env) == {EID: "uploaded"}
+
+
+def test_deleting_state_finishes_next_pass(env, monkeypatch):
+    put_orders(env, order())
+    t = LocalTransport(env.cfg)
+    run_once(env.cfg, READY, t)
+    receipt(env)
+
+    class Crash(BaseException):
+        pass
+
+    def die(*a, **k):
+        raise Crash()
+    real = keeper._remove_staging
+    monkeypatch.setattr(keeper, "_remove_staging", die)
+    with pytest.raises(Crash):
+        run_once(env.cfg, READY + timedelta(minutes=5), t)
+    # the intent was written before any delete began
+    assert state(env) == {EID: "deleting"}
+    assert (env.staging / EID / "SHA256SUMS").exists()
+    monkeypatch.setattr(keeper, "_remove_staging", real)
+    lines = run_once(env.cfg, READY + timedelta(minutes=10), t)
+    assert state(env) == {EID: "done"}
+    assert not (env.staging / EID).exists()
+    assert any("interrupted delete" in l for l in lines)
+
+
+def test_done_with_leftover_staging_is_swept(env):
+    put_orders(env, order())
+    t = LocalTransport(env.cfg)
+    run_once(env.cfg, READY, t)
+    receipt(env)
+    run_once(env.cfg, READY + timedelta(minutes=5), t)
+    (env.staging / EID).mkdir()
+    (env.staging / EID / "left").write_text("x")
+    lines = run_once(env.cfg, READY + timedelta(minutes=10), t)
+    assert not (env.staging / EID).exists()
+    assert state(env) == {EID: "done"}
+    assert any("left behind" in l for l in lines)
+
+
+def test_sums_push_has_no_partial(env, monkeypatch):
+    put_orders(env, order())
+    calls = []
+    real = keeper.subprocess.run
+    monkeypatch.setattr(keeper.subprocess, "run",
+                        lambda cmd, *a, **k: (calls.append(list(cmd)), real(cmd, *a, **k))[1])
+    run_once(env.cfg, READY, LocalTransport(env.cfg))
+    pushes = [c for c in calls if str(env.staging / EID) in " ".join(c)]
+    assert "--partial" in pushes[0] and "--partial" not in pushes[1]
+    assert all("--timeout=300" in c for c in calls)

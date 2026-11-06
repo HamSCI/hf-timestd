@@ -19,8 +19,8 @@ flight at a time.  A `failed:*` state keeps its staging copy and is never
 retried automatically; a person decides.
 
 Deletion rules (this module deletes data):
-  * the only thing it ever removes is the directory <staging>/<event_id>/ and
-    the files inside it;
+  * its only deletes are the directory <staging>/<event_id>/ (with the files
+    inside it) and its own cache <staging>/orders.json;
   * it never removes anything under raw_root, and refuses a configuration where
     staging and raw_root nest;
   * an event_id must be one plain path component.
@@ -31,21 +31,27 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .window_drf import write_window_drf
+from .window_drf import FILE_SEC, write_window_drf
 
 log = logging.getLogger(__name__)
 
 IN_FLIGHT = ("staged", "uploaded")
-_SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
-_REQUIRED = ("station_id", "remote_root", "staging", "raw_root")
+_SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]*\Z")
+_RESERVED_IDS = ("state.json", "state.json.tmp", "orders.json")
+_RECEIPT = re.compile(r"[0-9a-f]{64}  verified \S+\n?\Z")
+_REQUIRED = ("station_id", "remote", "ssh_key", "staging", "raw_root")
+BYTES_PER_FILE_CHANNEL = 115_200_000      # 600 s x 24 kHz x complex64
+DISK_LIMIT = 0.75                          # below timestd-prune's 80 % trigger
 _TS = "%Y-%m-%dT%H:%M:%SZ"
-PULL_TIMEOUT = 300
+PULL_TIMEOUT = 600
 PUSH_TIMEOUT = 6 * 3600
+RSYNC_IO_TIMEOUT = 300
 
 
 class ConfigError(Exception):
@@ -60,11 +66,17 @@ def validate_config(cfg: dict) -> dict:
     for k in _REQUIRED:
         if not cfg.get(k) or not isinstance(cfg[k], str):
             raise ConfigError("events.toml: missing or invalid %r" % k)
+    rr = cfg.get("remote_root")
+    if not isinstance(rr, str):
+        raise ConfigError("events.toml: remote_root must be a string (use \"\")")
+    if rr.startswith("/") or ".." in rr.split("/"):
+        raise ConfigError("events.toml: remote_root %r must be relative to the ssh "
+                          "account's rrsync root (no leading '/', no '..')" % rr)
     if "channels" in cfg and not (isinstance(cfg["channels"], list)
                                   and all(isinstance(c, str) and _SAFE_ID.match(c)
                                           for c in cfg["channels"])):
         raise ConfigError("events.toml: channels must be a list of names")
-    for k in ("settle_minutes", "bwlimit_kbps"):
+    for k in ("settle_minutes", "bwlimit_kib_s"):
         if k in cfg and (isinstance(cfg[k], bool) or not isinstance(cfg[k], (int, float))
                          or cfg[k] < 0):
             raise ConfigError("events.toml: %s must be a number >= 0" % k)
@@ -89,19 +101,22 @@ class Transport:
 class LocalTransport(Transport):
     """rsync between local paths; what the tests use, and the base of RsyncTransport."""
 
-    def __init__(self, cfg=None):
+    def __init__(self, cfg=None, base=None):
         self.cfg = cfg or {}
+        self.base = base or self.cfg.get("local_base") or "."
 
     # hooks -------------------------------------------------------------
     def _remote(self, path) -> str:
-        return str(path)
+        return os.path.join(str(self.base), str(path))
 
     def _opts(self) -> list:
         return []
 
     # -------------------------------------------------------------------
-    def _rsync(self, args, src, dst, timeout) -> bool:
-        cmd = ["rsync", "-a", "--partial"] + self._opts() + list(args) + [src, dst]
+    def _rsync(self, args, src, dst, timeout, partial=True) -> bool:
+        cmd = (["rsync", "-a"] + (["--partial"] if partial else [])
+               + ["--timeout=%d" % RSYNC_IO_TIMEOUT] + self._opts()
+               + list(args) + [src, dst])
         try:
             return subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                   stderr=subprocess.PIPE,
@@ -121,7 +136,7 @@ class LocalTransport(Transport):
             return False
         return self._rsync(["--mkpath"], src + "SHA256SUMS",
                            self._remote(str(remote_dir).rstrip("/") + "/SHA256SUMS"),
-                           PUSH_TIMEOUT)
+                           PUSH_TIMEOUT, partial=False)
 
     def fetch_receipt(self, remote_dir, local_path, name="RECEIPT") -> bool:
         return self._rsync([], self._remote(str(remote_dir).rstrip("/") + "/" + name),
@@ -135,8 +150,10 @@ class RsyncTransport(LocalTransport):
         return "%s:%s" % (self.cfg["remote"], path)
 
     def _opts(self) -> list:
-        opts = ["-e", "ssh -i %s -o BatchMode=yes" % self.cfg["ssh_key"]]
-        bw = int(self.cfg.get("bwlimit_kbps", 0) or 0)
+        opts = ["-e", "ssh -i %s -o BatchMode=yes -o ConnectTimeout=30 "
+                      "-o ServerAliveInterval=30 -o ServerAliveCountMax=4"
+                % shlex.quote(self.cfg["ssh_key"])]
+        bw = int(self.cfg.get("bwlimit_kib_s", 0) or 0)
         if bw:
             opts.append("--bwlimit=%d" % bw)
         return opts
@@ -182,7 +199,8 @@ def _save_state(staging: Path, state: dict):
 
 def _event_dir(staging: Path, event_id):
     """<staging>/<event_id>, or None if event_id is not one plain component."""
-    if not isinstance(event_id, str) or not _SAFE_ID.match(event_id) or ".." in event_id:
+    if (not isinstance(event_id, str) or not _SAFE_ID.match(event_id)
+            or ".." in event_id or event_id in _RESERVED_IDS):
         return None
     return staging / event_id
 
@@ -210,11 +228,17 @@ def _channels(cfg) -> list:
 
 
 def _remote_dir(cfg, event_id) -> str:
-    return "%s/%s/%s/hf-timestd" % (cfg["remote_root"].rstrip("/"), event_id,
-                                    cfg["station_id"])
+    return _rjoin(cfg, event_id, cfg["station_id"], "hf-timestd")
 
 
-def run_once(cfg: dict, now: datetime, transport: Transport) -> list:
+def _rjoin(cfg, *parts) -> str:
+    """A remote path relative to the ssh account's rrsync root."""
+    root = cfg["remote_root"].strip("/")
+    return "/".join(([root] if root else []) + list(parts))
+
+
+def run_once(cfg: dict, now: datetime, transport: Transport,
+             disk_usage=shutil.disk_usage) -> list:
     """One keeper pass.  Returns a log line per action."""
     lines = []
 
@@ -237,11 +261,46 @@ def run_once(cfg: dict, now: datetime, transport: Transport) -> list:
         except StateError as exc:
             say("%s; refusing to act until a person fixes it" % exc)
             return lines
+        _finish_deletes(cfg, staging, state, say)
         _tend_in_flight(cfg, transport, staging, state, say)
-        _stage_next(cfg, now, transport, staging, state, say)
+        _stage_next(cfg, now, transport, staging, state, say, disk_usage)
     finally:
         lock.close()
     return lines
+
+
+def _try_remove(cfg, staging, eid, say) -> bool:
+    try:
+        _remove_staging(cfg, staging, eid)
+        return True
+    except Exception as exc:
+        say("%s: could not delete staging (%s); will retry" % (eid, exc))
+        return False
+
+
+def _finish_deletes(cfg, staging, state, say):
+    """Finish a delete a crash interrupted, and sweep staging left under `done`."""
+    for eid in sorted(state):
+        st = state[eid]
+        d = _event_dir(staging, eid)
+        if d is None:
+            continue
+        if st == "deleting":
+            if _try_remove(cfg, staging, eid, say):
+                state[eid] = "done"
+                _save_state(staging, state)
+                say("%s: finished an interrupted delete; state done" % eid)
+        elif st == "done" and (d.exists() or d.is_symlink()):
+            if _try_remove(cfg, staging, eid, say):
+                say("%s: removed staging left behind under state done" % eid)
+
+
+def _receipt_matches(receipt_local: Path, ours: str) -> bool:
+    try:
+        text = receipt_local.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    return bool(_RECEIPT.match(text)) and text[:64] == ours
 
 
 def _tend_in_flight(cfg, transport, staging, state, say):
@@ -279,29 +338,38 @@ def _tend_in_flight(cfg, transport, staging, state, say):
         if not transport.fetch_receipt(rdir, receipt_local, "RECEIPT"):
             say("%s: no receipt yet" % eid)
             continue
-        try:
-            first = receipt_local.read_text().splitlines()[0].split()
-            theirs = first[0].lower() if first else ""
-        except (OSError, IndexError):
-            theirs = ""
         ours = _sha256(d / "SHA256SUMS")
-        if theirs != ours:
+        if not _receipt_matches(receipt_local, ours):
             state[eid] = "failed:receipt-mismatch"
             _save_state(staging, state)
-            say("%s: receipt hash %r != ours %s; state failed:receipt-mismatch, staging kept"
-                % (eid, theirs[:64], ours))
+            say("%s: RECEIPT is malformed or names another hash (ours %s); "
+                "state failed:receipt-mismatch, staging kept" % (eid, ours))
             continue
-        state[eid] = "done"
+        # delete order: mark deleting, delete, mark done
+        state[eid] = "deleting"
         _save_state(staging, state)
-        _remove_staging(cfg, staging, eid)
-        say("%s: receipt matches; state done, staging deleted" % eid)
+        if _try_remove(cfg, staging, eid, say):
+            state[eid] = "done"
+            _save_state(staging, state)
+            say("%s: receipt matches; state done, staging deleted" % eid)
 
 
-def _stage_next(cfg, now, transport, staging, state, say):
+def _window_slots(order) -> int:
+    t0 = _parse(order["start_utc"]).timestamp()
+    t1 = _parse(order["end_utc"]).timestamp()
+    first = int(t0 // FILE_SEC) * FILE_SEC
+    n, t = 0, first
+    while t < t1:
+        n += 1
+        t += FILE_SEC
+    return n
+
+
+def _stage_next(cfg, now, transport, staging, state, say, disk_usage):
     orders_local = staging / "orders.json"
     if orders_local.exists():
         orders_local.unlink()
-    orders_remote = "%s/orders/orders.json" % cfg["remote_root"].rstrip("/")
+    orders_remote = _rjoin(cfg, "orders", "orders.json")
     if not transport.pull(orders_remote, orders_local):
         say("orders: could not pull %s; will retry next pass" % orders_remote)
         return
@@ -319,6 +387,9 @@ def _stage_next(cfg, now, transport, staging, state, say):
     for o in doc["orders"]:
         try:
             eid = o["event_id"]
+            if not isinstance(o["stations"], list):
+                say("orders: ignoring %r: stations is not a list" % (eid,))
+                continue
             if station not in o["stations"] or eid in state:
                 continue
             if not any(r.get("client") == "hf-timestd" for r in o.get("record", [])):
@@ -341,29 +412,45 @@ def _stage_next(cfg, now, transport, staging, state, say):
         say("%s awaiting its receipt; %d ready order(s) wait" % (waiting[0], len(ready)))
         return
 
-    o = ready[0]
-    eid = o["event_id"]
     channels = _channels(cfg)
     if not channels:
-        say("%s: no channel directories under %s; nothing to cut" % (eid, cfg["raw_root"]))
+        say("no channel directories under %s; nothing to cut" % cfg["raw_root"])
         return
-    d = _event_dir(staging, eid)
-    _remove_staging(cfg, staging, eid)           # a cut that crashed before state was written
-    try:
-        res = write_window_drf(cfg["raw_root"], channels, o, d)
-    except Exception as exc:
-        say("%s: cutting the window failed (%s); will retry" % (eid, exc))
-        _remove_staging(cfg, staging, eid)
-        return
-    state[eid] = "staged"
-    _save_state(staging, state)
-    miss = sum(len(c["missing"]) for c in res["channels"].values())
-    say("%s: staged %d channel(s), %d bytes, %d missing file(s)"
-        % (eid, len(channels), res["bytes"], miss))
-    rdir = _remote_dir(cfg, eid)
-    if transport.push(d, rdir):
-        state[eid] = "uploaded"
+    for o in ready:
+        eid = o["event_id"]
+        d = _event_dir(staging, eid)
+        est = _window_slots(o) * BYTES_PER_FILE_CHANNEL * len(channels)
+        try:
+            du = disk_usage(str(staging))
+            frac = (du.used + est) / du.total
+        except Exception as exc:
+            say("%s: cannot read disk usage (%s); not staging" % (eid, exc))
+            return
+        if frac > DISK_LIMIT:
+            say("%s: not staging: estimated %d bytes would take %s to %.1f %% used "
+                "(%d of %d bytes used now; limit %d %%); order stays pending"
+                % (eid, est, staging, 100 * frac, du.used, du.total, int(DISK_LIMIT * 100)))
+            return
+        try:
+            _remove_staging(cfg, staging, eid)   # a cut that crashed before state was written
+            res = write_window_drf(cfg["raw_root"], channels, o, d)
+        except Exception as exc:
+            state[eid] = "failed:cut:%s" % type(exc).__name__
+            _save_state(staging, state)
+            say("%s: cutting the window failed (%s: %s); state %s, no retry"
+                % (eid, type(exc).__name__, exc, state[eid]))
+            _try_remove(cfg, staging, eid, say)
+            continue
+        state[eid] = "staged"
         _save_state(staging, state)
-        say("%s: uploaded to %s" % (eid, rdir))
-    else:
-        say("%s: upload failed; staging kept, will retry" % eid)
+        miss = sum(len(c["missing"]) for c in res["channels"].values())
+        say("%s: staged %d channel(s), %d bytes, %d missing file(s)"
+            % (eid, len(channels), res["bytes"], miss))
+        rdir = _remote_dir(cfg, eid)
+        if transport.push(d, rdir):
+            state[eid] = "uploaded"
+            _save_state(staging, state)
+            say("%s: uploaded to %s" % (eid, rdir))
+        else:
+            say("%s: upload failed; staging kept, will retry" % eid)
+        return

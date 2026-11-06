@@ -1,12 +1,17 @@
 [Unit]
 Description=hf-timestd event-response keeper pass (ship ordered windows, delete after RECEIPT)
 Documentation=https://github.com/HamSCI/hf-timestd
+Wants=network-online.target
 After=network-online.target local-fs.target
 
 [Service]
 Type=oneshot
 User=timestd
 Group=timestd
+TimeoutStartSec=6h
+# The kernel enforces: this unit never writes the raw buffer.  The leading '-'
+# keeps the unit startable on a station whose buffer lives elsewhere.
+ReadOnlyPaths=-/var/lib/timestd/raw_buffer
 
 # Operator identity from sigmond - CLIENT-CONTRACT 14.2
 EnvironmentFile=-/etc/sigmond/coordination.env

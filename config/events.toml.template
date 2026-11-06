@@ -3,12 +3,12 @@
 
 station_id  = "AC0G-B4"
 remote      = "wsprdaemon@192.168.1.164"
-remote_root = "/srv/wd_data/events"
+remote_root = ""        # relative to the ssh account's rrsync root (wd30: /srv/wd_data/events); never starts with "/"
 ssh_key     = "/var/lib/timestd/.ssh/events_ed25519"
 staging     = "/var/lib/timestd/events-staging"
 raw_root    = "/var/lib/timestd/raw_buffer"
 settle_minutes = 15     # wait this long after a window closes before cutting it
-bwlimit_kbps = 0        # 0 = no rsync bandwidth limit
+bwlimit_kib_s = 0       # rsync --bwlimit in KiB/s; 0 = no limit
 
 # Optional: cut only these channels.  Default: every directory under raw_root.
 # channels = ["WWV_2_5", "WWV_5"]
