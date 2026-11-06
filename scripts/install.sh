@@ -742,11 +742,22 @@ for tf in \
     timestd-chrony-monitor.service timestd-chrony-monitor.timer \
     timestd-pipeline-watchdog.service timestd-pipeline-watchdog.timer \
     timestd-prune.service timestd-prune.timer \
+    timestd-events.service timestd-events.timer \
     timestd-vtec.service \
     timestd-alert@.service
 do
     copy_unit "$PROJECT_DIR/systemd/$tf" && ((UPDATED_COUNT++)) || true
 done
+
+# ── Event-response keeper: enable the timer only on a station that has
+# /etc/hf-timestd/events.toml (the units are installed everywhere).
+if [[ -f "$CONFIG_DIR/events.toml" ]]; then
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable --now timestd-events.timer 2>/dev/null || true
+    log_info "Event keeper timer enabled (events.toml present)"
+else
+    log_info "Event keeper timer not enabled (no $CONFIG_DIR/events.toml)"
+fi
 
 # ── VTEC service ──
 VTEC_ENABLED=$("$VENV_DIR/bin/python3" -c "

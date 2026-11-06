@@ -1,0 +1,27 @@
+[Unit]
+Description=hf-timestd event-response keeper pass (ship ordered windows, delete after RECEIPT)
+Documentation=https://github.com/HamSCI/hf-timestd
+After=network-online.target local-fs.target
+
+[Service]
+Type=oneshot
+User=timestd
+Group=timestd
+
+# Operator identity from sigmond - CLIENT-CONTRACT 14.2
+EnvironmentFile=-/etc/sigmond/coordination.env
+
+# One pass: pull orders, cut closed windows to Digital RF, upload, wait for the
+# server's RECEIPT, delete the staging copy.  Exits 0 when the server cannot be
+# reached (the next pass retries); exits 2 on a missing or invalid events.toml.
+ExecStart=/opt/git/sigmond/hf-timestd/venv/bin/hf-timestd events run \
+    --config /etc/hf-timestd/events.toml
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=timestd-events
+
+# Never compete with the recording services
+IOSchedulingClass=idle
+CPUSchedulingPolicy=idle
+Nice=19

@@ -1,0 +1,11 @@
+[Unit]
+Description=hf-timestd event-response keeper pass, every five minutes
+Documentation=https://github.com/HamSCI/hf-timestd
+
+[Timer]
+OnCalendar=*:0/5
+# Run a missed pass on the next boot
+Persistent=true
+
+[Install]
+WantedBy=timers.target

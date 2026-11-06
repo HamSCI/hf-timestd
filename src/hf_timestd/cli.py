@@ -1675,6 +1675,26 @@ def cmd_shm_init(args) -> int:
     return 1 if failed else 0
 
 
+def _handle_events(args, parser):
+    """`events run`: one keeper pass.  Exit 2 on a bad config; 0 otherwise,
+    transport failures included (the next timer pass retries)."""
+    if getattr(args, 'events_command', None) != 'run':
+        parser.print_help()
+        return 1
+    import tomllib
+    from datetime import datetime, timezone
+    from .events import keeper
+    try:
+        with open(args.config, 'rb') as f:
+            cfg = keeper.validate_config(tomllib.load(f))
+    except (OSError, ValueError, keeper.ConfigError) as exc:
+        print(f"events: config {args.config}: {exc}", file=sys.stderr)
+        return 2
+    for line in keeper.run_once(cfg, datetime.now(timezone.utc), keeper.RsyncTransport(cfg)):
+        print(line)
+    return 0
+
+
 def main(argv=None):
     """Main entry point for hf-timestd command"""
     # Quiet stderr for sigmond client-contract subcommands so they emit
@@ -2102,6 +2122,14 @@ Per-service overrides in [services] take precedence over the profile.
     hfcd_parser.add_argument('--json', action='store_true',
         help='Print JSON instead of the table')
 
+    events_parser = subparsers.add_parser('events',
+        help='Event response: ship ordered windows of the raw buffer to the server')
+    events_sub = events_parser.add_subparsers(dest='events_command')
+    events_run = events_sub.add_parser('run',
+        help='One keeper pass: pull orders, cut, upload, wait for RECEIPT, delete staging')
+    events_run.add_argument('--config', '-c', default='/etc/hf-timestd/events.toml',
+        help='Keeper configuration (default /etc/hf-timestd/events.toml)')
+
     args = parser.parse_args(argv)
 
     # If no command specified, show help
@@ -2358,6 +2386,10 @@ Per-service overrides in [services] take precedence over the profile.
         _handle_service(args, locals().get('service_parser'))
     elif args.command == 'chain-delay':
         rc = _handle_chain_delay(args, chain_parser)
+        if rc:
+            sys.exit(rc)
+    elif args.command == 'events':
+        rc = _handle_events(args, events_parser)
         if rc:
             sys.exit(rc)
     elif args.command == 'hf-chain-delay':
