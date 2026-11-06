@@ -13,9 +13,12 @@ Every five minutes on a station (`hf-timestd events run`):
      event done and delete <staging>/<event_id>/.
 
 State, in <staging>/state.json, maps event_id to one of
-    staged | uploaded | done | failed:<reason>
-Only `staged` and `uploaded` count as in flight; at most one window is in
-flight at a time.  A `failed:*` state keeps its staging copy and is never
+    staged | uploaded | deleting | done | failed:<reason>
+`staged`, `uploaded` and `deleting` (a delete that has begun and not finished)
+block staging a new window; at most one window is in flight at a time.
+The key `_conditions` holds the persistent conditions now active (disk over
+the limit, awaiting a receipt, transport down); each logs once when it begins
+and once when it clears, not on every pass.  The order loop ignores it.  A `failed:*` state keeps its staging copy and is never
 retried automatically; a person decides.
 
 Deletion rules (this module deletes data):
@@ -42,8 +45,10 @@ from .window_drf import FILE_SEC, write_window_drf
 log = logging.getLogger(__name__)
 
 IN_FLIGHT = ("staged", "uploaded")
+BUSY = IN_FLIGHT + ("deleting",)          # blocks staging a new window
+COND_KEY = "_conditions"
 _SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]*\Z")
-_RESERVED_IDS = ("state.json", "state.json.tmp", "orders.json")
+_RESERVED_IDS = ("state.json", "state.json.tmp", "orders.json", "_conditions")
 _RECEIPT = re.compile(r"[0-9a-f]{64}  verified \S+\n?\Z")
 _REQUIRED = ("station_id", "remote", "ssh_key", "staging", "raw_root")
 BYTES_PER_FILE_CHANNEL = 115_200_000      # 600 s x 24 kHz x complex64
@@ -185,8 +190,10 @@ def _load_state(staging: Path) -> dict:
         return {}
     try:
         st = json.loads(p.read_text())
-        if not isinstance(st, dict) or not all(
-                isinstance(k, str) and isinstance(v, str) for k, v in st.items()):
+        conds = st.get(COND_KEY, {}) if isinstance(st, dict) else None
+        if not isinstance(st, dict) or not isinstance(conds, dict) or not all(
+                isinstance(k, str) and isinstance(v, str)
+                for k, v in list(st.items()) + list(conds.items()) if k != COND_KEY):
             raise ValueError("not a map of strings")
     except (OSError, ValueError) as exc:
         raise StateError("state.json unreadable (%s)" % exc)
@@ -194,6 +201,8 @@ def _load_state(staging: Path) -> dict:
 
 
 def _save_state(staging: Path, state: dict):
+    if not state.get(COND_KEY):
+        state = {k: v for k, v in state.items() if k != COND_KEY}
     tmp = staging / "state.json.tmp"
     with open(tmp, "w") as f:
         json.dump(state, f, indent=2, sort_keys=True)
@@ -267,12 +276,44 @@ def run_once(cfg: dict, now: datetime, transport: Transport,
         except StateError as exc:
             say("%s; refusing to act until a person fixes it" % exc)
             return lines
+        conds = _Conds(state, say)
         _finish_deletes(cfg, staging, state, say)
-        _tend_in_flight(cfg, transport, staging, state, say)
-        _stage_next(cfg, now, transport, staging, state, say, disk_usage)
+        _tend_in_flight(cfg, transport, staging, state, say, conds)
+        _stage_next(cfg, now, transport, staging, state, say, disk_usage, conds)
+        # a failed pull hides the order-side conditions; keep them until it works
+        conds.finish(staging, ("disk:", "waiting", "channels", "orders-bad")
+                     if "transport" in conds.seen else ())
     finally:
         lock.close()
     return lines
+
+
+class _Conds:
+    """Persistent conditions: log when one begins and when it clears, never per pass."""
+
+    def __init__(self, state, say):
+        self.state, self.say, self.seen, self.dirty = state, say, set(), False
+
+    def note(self, key, msg):
+        self.seen.add(key)
+        conds = self.state.setdefault(COND_KEY, {})
+        if key not in conds:
+            conds[key] = "active"
+            self.dirty = True
+            self.say(msg)
+            return True
+        return False
+
+    def finish(self, staging, keep_prefixes=()):
+        conds = self.state.get(COND_KEY, {})
+        gone = [k for k in sorted(conds) if k not in self.seen
+                and not k.startswith(tuple(keep_prefixes))]
+        for k in gone:
+            del conds[k]
+            self.dirty = True
+            self.say("%s: condition cleared" % k)
+        if self.dirty:
+            _save_state(staging, self.state)  # also drops an empty _conditions
 
 
 def _try_remove(cfg, staging, eid, say) -> bool:
@@ -309,7 +350,7 @@ def _receipt_matches(receipt_local: Path, ours: str) -> bool:
     return bool(_RECEIPT.match(text)) and text[:64] == ours
 
 
-def _tend_in_flight(cfg, transport, staging, state, say):
+def _tend_in_flight(cfg, transport, staging, state, say, conds):
     for eid in sorted(state):
         st = state[eid]
         if st not in IN_FLIGHT:
@@ -327,7 +368,7 @@ def _tend_in_flight(cfg, transport, staging, state, say):
                 _save_state(staging, state)
                 say("%s: uploaded to %s" % (eid, rdir))
             else:
-                say("%s: upload failed; staging kept, will retry" % eid)
+                conds.note("upload:" + eid, "%s: upload failed; staging kept, will retry" % eid)
             continue
         # uploaded: wait for the server's verdict
         failed_local = d / "FAILED.remote"
@@ -342,7 +383,7 @@ def _tend_in_flight(cfg, transport, staging, state, say):
                 % (eid, failed_local.read_text(errors="replace").strip()[:200]))
             continue
         if not transport.fetch_receipt(rdir, receipt_local, "RECEIPT"):
-            say("%s: no receipt yet" % eid)
+            conds.note("receipt:" + eid, "%s: no receipt yet" % eid)
             continue
         ours = _sha256(d / "SHA256SUMS")
         if not _receipt_matches(receipt_local, ours):
@@ -371,20 +412,20 @@ def _window_slots(order) -> int:
     return n
 
 
-def _stage_next(cfg, now, transport, staging, state, say, disk_usage):
+def _stage_next(cfg, now, transport, staging, state, say, disk_usage, conds):
     orders_local = staging / "orders.json"
     if orders_local.exists():
         orders_local.unlink()
     orders_remote = _rjoin(cfg, "orders", "orders.json")
     if not transport.pull(orders_remote, orders_local):
-        say("orders: could not pull %s; will retry next pass" % orders_remote)
+        conds.note("transport", "orders: could not pull %s; will retry next pass" % orders_remote)
         return
     try:
         doc = json.loads(orders_local.read_text())
         if doc.get("version") != 1 or not isinstance(doc.get("orders"), list):
             raise ValueError("unexpected version or shape")
     except (OSError, ValueError, AttributeError) as exc:
-        say("orders: unusable orders.json (%s); skipping" % exc)
+        conds.note("orders-bad", "orders: unusable orders.json (%s); skipping" % exc)
         return
 
     settle = timedelta(minutes=float(cfg.get("settle_minutes", 15)))
@@ -413,14 +454,15 @@ def _stage_next(cfg, now, transport, staging, state, say, disk_usage):
         return
     ready.sort(key=lambda o: (o["end_utc"], o["event_id"]))
 
-    waiting = [e for e, s in state.items() if s in IN_FLIGHT]
+    waiting = sorted(e for e, s in state.items() if s in BUSY)
     if waiting:
-        say("%s awaiting its receipt; %d ready order(s) wait" % (waiting[0], len(ready)))
+        conds.note("waiting", "%s awaiting its receipt; %d ready order(s) wait"
+                   % (waiting[0], len(ready)))
         return
 
     channels = _channels(cfg)
     if not channels:
-        say("no channel directories under %s; nothing to cut" % cfg["raw_root"])
+        conds.note("channels", "no channel directories under %s; nothing to cut" % cfg["raw_root"])
         return
     limit_pct = float(cfg.get("max_disk_used_pct", DEFAULT_MAX_DISK_PCT))
     for o in ready:
@@ -434,7 +476,7 @@ def _stage_next(cfg, now, transport, staging, state, say, disk_usage):
             say("%s: cannot read disk usage (%s); not staging" % (eid, exc))
             return
         if 100 * frac > limit_pct:
-            say("%s: not staging: estimated %d bytes would take %s to %.1f %% used "
+            conds.note("disk:" + eid, "%s: not staging: estimated %d bytes would take %s to %.1f %% used "
                 "(%d of %d bytes used now; limit %g %%); order stays pending"
                 % (eid, est, staging, 100 * frac, du.used, du.total, limit_pct))
             return
@@ -459,5 +501,5 @@ def _stage_next(cfg, now, transport, staging, state, say, disk_usage):
             _save_state(staging, state)
             say("%s: uploaded to %s" % (eid, rdir))
         else:
-            say("%s: upload failed; staging kept, will retry" % eid)
+            conds.note("upload:" + eid, "%s: upload failed; staging kept, will retry" % eid)
         return

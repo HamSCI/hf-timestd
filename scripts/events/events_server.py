@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import stat
 import sys
 import tempfile
@@ -81,8 +82,10 @@ def _open_regular(path):
         raise
 
 
-def _printable(rel):
-    return rel.isprintable()
+def _printable(text):
+    """Escape a station-controlled string for a log line or FAILED: no raw
+    newline, ESC or other control character gets through."""
+    return ascii(str(text))[1:-1]
 
 
 def _scan(d):
@@ -128,7 +131,7 @@ def _check(d, sums_bytes):
             continue
         want, rel = m.group(1).lower(), m.group(2)
         listed += 1
-        label = rel if _printable(rel) else "line %d" % n
+        label = _printable(rel)
         # An absolute path would make os.path.join ignore d, so this check stays.
         if rel.startswith("/") or ".." in rel.split("/"):
             bad.append(label)
@@ -168,8 +171,9 @@ def _dirs(root):
     """root/<station>/<event>/<station>/<client>, the layout under incoming/."""
     for stn in _sub(root):
         for ev in _sub(stn, skip=("orders",)):
-            for stn2 in _sub(ev):
-                yield from _sub(stn2)
+            inner = os.path.join(ev, os.path.basename(stn))   # a station's own name only
+            if os.path.isdir(inner) and not os.path.islink(inner):
+                yield from _sub(inner)
 
 
 def _judge(d, now, condition):
@@ -189,20 +193,20 @@ def _judge(d, now, condition):
         condition(d, "waiting: rsync temp files present")
         return False
     if links:
-        bad = ["symlink: %s" % (r if _printable(r) else "(unprintable name)") for r in links]
+        bad = ["symlink: %s" % _printable(r) for r in links]
         data = None
     else:
         data = _read_sums(d)
         bad = [data] if isinstance(data, str) else _check(d, data)
     if bad:
         _atomic_write(os.path.join(d, FAILED), "".join(b + "\n" for b in bad))
-        log.warning("%s: FAILED, %d bad entr%s: %s", d, len(bad),
+        log.warning("%s: FAILED, %d bad entr%s: %s", _printable(d), len(bad),
                     "y" if len(bad) == 1 else "ies", "; ".join(bad[:5]))
     else:
         line = "%s  verified %s\n" % (hashlib.sha256(data).hexdigest(),
                                       now.strftime("%Y-%m-%dT%H:%M:%SZ"))
         _atomic_write(os.path.join(d, RECEIPT), line)
-        log.info("%s: verified, RECEIPT written", d)
+        log.info("%s: verified, RECEIPT written", _printable(d))
     return True
 
 
@@ -221,9 +225,10 @@ def verify(root, now=None):
 
     def condition(d, text):
         """Record a persistent condition; log only when it changes."""
+        text = _printable(text)
         seen[d] = text
         if conds.get(d) != text:
-            log.info("%s: %s", d, text)
+            log.info("%s: %s", _printable(d), text)
 
     for d in _dirs(root):
         try:
@@ -242,44 +247,61 @@ def _write_station_orders(incoming, station_id, orders):
     """Write incoming/<id>/orders/orders.json without following a planted symlink."""
     sdir = os.path.join(incoming, station_id)
     if not os.path.isdir(sdir) or os.path.islink(sdir):
-        log.info("%s: no station directory yet; skipping its orders", station_id)
+        log.info("%s: no station directory yet; skipping its orders", _printable(station_id))
         return
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    if not os.path.lexists(os.path.join(sdir, "orders")):
-        os.mkdir(os.path.join(sdir, "orders"))
+    odir = os.path.join(sdir, "orders")
     try:
-        dfd = os.open(os.path.join(sdir, "orders"), flags)
-    except OSError as exc:
-        log.warning("%s: orders directory unusable (%s); skipped", station_id, exc)
-        return
-    tmp = ".orders.json.%d" % os.getpid()
+        os.mkdir(odir)
+    except FileExistsError:
+        pass                                  # fall through to the O_NOFOLLOW open
+    dfd = os.open(odir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    tmp = None
     try:
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644,
-                     dir_fd=dfd)
+        for _ in range(100):                  # the station may plant names; try others
+            name = ".orders.%s.json" % secrets.token_hex(8)
+            try:
+                fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             0o644, dir_fd=dfd)
+            except FileExistsError:
+                continue
+            tmp = name
+            break
+        else:
+            raise OSError("no free temp name in the orders directory")
         with os.fdopen(fd, "w") as f:
             json.dump({"version": 1, "orders": orders}, f, indent=2)
             f.write("\n")
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, "orders.json", src_dir_fd=dfd, dst_dir_fd=dfd)
+        tmp = None
     finally:
-        try:
-            os.unlink(tmp, dir_fd=dfd)
-        except OSError:
-            pass
+        if tmp:
+            try:
+                os.unlink(tmp, dir_fd=dfd)
+            except OSError:
+                pass
         os.close(dfd)
 
 
 def station_orders(stations_path, full_path, incoming):
-    """Split the full orders file into one file per station."""
+    """Split the full orders file into one file per station.  One station's
+    failure never keeps the others from their orders.  Returns the failures."""
     with open(stations_path) as f:
         stations = json.load(f)
     with open(full_path) as f:
         doc = json.load(f)
+    failed = 0
     for s in stations:
         sid = s["id"]
         mine = [o for o in doc.get("orders", []) if sid in (o.get("stations") or [])]
-        _write_station_orders(incoming, sid, mine)
+        try:
+            _write_station_orders(incoming, sid, mine)
+        except Exception as exc:
+            failed += 1
+            log.warning("%s: could not write its orders: %s: %s", _printable(sid),
+                        type(exc).__name__, _printable(exc))
+    return failed
 
 
 def main(argv=None):
@@ -308,8 +330,9 @@ def main(argv=None):
         if rc:
             return rc
         try:
-            station_orders(args.stations, args.out, args.incoming or os.path.join(
-                os.path.dirname(os.path.abspath(args.out)), "incoming"))
+            if station_orders(args.stations, args.out, args.incoming or os.path.join(
+                    os.path.dirname(os.path.abspath(args.out)), "incoming")):
+                return 1
         except (OSError, ValueError, KeyError, TypeError) as exc:
             print("events_server: per-station orders: %s" % exc, file=sys.stderr)
             return 1

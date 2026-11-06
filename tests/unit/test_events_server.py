@@ -274,7 +274,8 @@ def test_orders_refuse_planted_symlink(tmp_path):
     target = tmp_path / "victim"
     target.mkdir()
     os.symlink(target, inc / "orders")
-    es._write_station_orders(str(tmp_path / "incoming"), "AC0G-B4", [])
+    with pytest.raises(OSError):
+        es._write_station_orders(str(tmp_path / "incoming"), "AC0G-B4", [])
     assert list(target.iterdir()) == []
 
 
@@ -424,3 +425,91 @@ def test_end_to_end_corruption_keeps_staging(tmp_path):
     keeper.run_once(cfg, READY, tr, disk_usage=empty)
     assert state(type("E", (), {"staging": staging})).get(EID, "").startswith("failed:")
     assert (staging / EID).is_dir()
+
+
+def _orders_setup(tmp_path, ids):
+    feed = tmp_path / "feed.json"
+    feed.write_text(json.dumps([{
+        "time_tag": "2026-11-06T18:00:00Z", "begin_time": "2026-11-06T17:50:00Z",
+        "begin_class": "C9.0", "max_time": "2026-11-06T18:00:00Z", "max_class": "M1.2",
+        "max_xrlong": 1.2e-5, "end_time": "2026-11-06T18:20:00Z", "end_class": "M1.0"}]))
+    b4 = json.loads((REPO / "scripts/events/stations.json").read_text())[0]
+    st = tmp_path / "st.json"
+    st.write_text(json.dumps([dict(b4, id=i) for i in ids]))
+    inc = tmp_path / "incoming"
+    for i in ids:
+        (inc / i).mkdir(parents=True)
+    return feed, st, inc
+
+
+def test_one_stations_orders_failure_does_not_stop_the_next(tmp_path, caplog):
+    feed, st, inc = _orders_setup(tmp_path, ["AAA-1", "BBB-2"])
+    (inc / "AAA-1" / "orders").write_text("a file, so mkdir and open both fail")
+    out = tmp_path / "orders.json"
+    # both stations share B4's coordinates, so both are named by the order
+    with caplog.at_level(logging.INFO, logger="events_server"):
+        rc = es.main(["orders", "--stations", str(st), "--out", str(out), "--feed", str(feed)])
+    assert rc == 1                                   # the failure shows in the exit status
+    assert json.loads((inc / "BBB-2" / "orders" / "orders.json").read_text())["orders"]
+    assert any("AAA-1" in r.getMessage() and "could not write" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_orders_mkdir_race_falls_through(tmp_path, monkeypatch):
+    feed, st, inc = _orders_setup(tmp_path, ["AAA-1"])
+    (inc / "AAA-1" / "orders").mkdir()
+    real = os.mkdir
+    monkeypatch.setattr(os, "mkdir", lambda p, *a, **k: (_ for _ in ()).throw(FileExistsError(p)))
+    es._write_station_orders(str(inc), "AAA-1", [])
+    monkeypatch.setattr(os, "mkdir", real)
+    assert json.loads((inc / "AAA-1" / "orders" / "orders.json").read_text())["orders"] == []
+
+
+def test_planted_temp_names_cannot_block_orders(tmp_path, monkeypatch):
+    feed, st, inc = _orders_setup(tmp_path, ["AAA-1"])
+    o = inc / "AAA-1" / "orders"
+    o.mkdir()
+    # the old predictable name, and the first random name the writer will draw
+    (o / (".orders.json.%d" % os.getpid())).write_text("planted")
+    names = iter(["aaaa", "aaaa", "bbbb"])
+    monkeypatch.setattr(es.secrets, "token_hex", lambda n: next(names))
+    (o / ".orders.aaaa.json").write_text("planted")
+    es._write_station_orders(str(inc), "AAA-1", [])
+    assert json.loads((o / "orders.json").read_text())["orders"] == []
+    assert (o / ".orders.aaaa.json").read_text() == "planted"   # collision left alone
+
+
+def test_hostile_station_dir_name_is_logged_escaped(tmp_path, caplog):
+    evil = "AC0G-B4\n[FAKE] \x1b[31mRECEIPT ok"
+    d = tmp_path / "incoming" / evil / "EV1" / evil / "hf-timestd"
+    d.mkdir(parents=True)
+    (d / "f").write_bytes(b"q")
+    (d / "SHA256SUMS").write_text("%s  f\n" % hashlib.sha256(b"q").hexdigest())
+    c = os.stat(d / "SHA256SUMS").st_ctime
+    with caplog.at_level(logging.INFO, logger="events_server"):
+        es.verify(str(tmp_path / "incoming"), now=datetime.fromtimestamp(c + 10, timezone.utc))
+        es.verify(str(tmp_path / "incoming"), now=datetime.fromtimestamp(c + 120, timezone.utc))
+    assert caplog.records
+    for r in caplog.records:
+        m = r.getMessage()
+        assert "\n" not in m and "\x1b" not in m
+    assert any("\\x1b" in r.getMessage() and "\\n" in r.getMessage() for r in caplog.records)
+
+
+def test_hostile_listed_name_is_escaped_in_failed(tmp_path):
+    d = make_upload(tmp_path)
+    with open(d / "SHA256SUMS", "a") as f:
+        f.write("%s  bad\x1b[2Jname\n" % ("0" * 64))
+    run(tmp_path, fake_now(d))
+    text = (d / "FAILED").read_text()
+    assert "\x1b" not in text and "bad\\x1b[2Jname" in text
+
+
+def test_inner_station_name_must_match_outer(tmp_path):
+    d = make_upload(tmp_path)
+    other = d.parent.parent / "AAA0-OTHER" / "hf-timestd"
+    other.parent.mkdir()
+    shutil.copytree(d, other)
+    now = datetime.now(timezone.utc) + timedelta(minutes=5)
+    es.verify(str(tmp_path / "incoming"), now=now)
+    assert (d / "RECEIPT").exists() and not (other / "RECEIPT").exists()

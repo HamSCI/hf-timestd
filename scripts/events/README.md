@@ -37,7 +37,10 @@ Then on wd30:
     chown wsprdaemon: /home/wsprdaemon/hamsci-events/*
     chmod 644 /home/wsprdaemon/hamsci-events/*
     install -d -o wsprdaemon -g wsprdaemon /srv/wd_data/events/incoming/AC0G-B4
-    chown wsprdaemon: /srv/wd_data/events
+    chown wsprdaemon: /srv/wd_data/events /srv/wd_data/events/incoming
+
+`install -d` sets the owner on the last directory only. `incoming/` must belong
+to `wsprdaemon` too, or the verifier cannot write `.verify-state.json` there.
 
 `stations.json` lists B4 only. Edit it to add stations, and give each a
 `incoming/<id>` directory and its own key line.
@@ -85,6 +88,13 @@ Orders run hourly. Verify runs five minutes after boot, then every five minutes.
 * It never re-verifies a directory that holds `RECEIPT` or `FAILED`.
 * It logs a waiting condition once, when it starts or changes. It keeps that
   memory in `incoming/.verify-state.json`.
+
+## What a RECEIPT proves
+
+A RECEIPT is only as trustworthy as the station's own root. A station can write
+files anywhere under `incoming/<station>`, so it can plant its own RECEIPT. That
+only skips the verification of its own data. It reaches no other station and no
+code, because each key sees one root and the code lives outside all of them.
 
 ## Recovering from FAILED
 

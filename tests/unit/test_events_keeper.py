@@ -63,7 +63,9 @@ def rdir(env, eid=EID):
 
 
 def state(env):
-    return json.loads((env.staging / "state.json").read_text())
+    st = json.loads((env.staging / "state.json").read_text())
+    st.pop("_conditions", None)           # the keeper's log memory, not an event
+    return st
 
 
 def sums_sha(path):
@@ -679,3 +681,56 @@ def test_cli_max_disk_80_exits_2(env, tmp_path, capsys):
         cli.main(["events", "run", "--config", str(conf)])
     assert e.value.code == 2
     assert "max_disk_used_pct" in capsys.readouterr().err
+
+
+def _count(lines, text):
+    return sum(text in l for l in lines)
+
+
+def test_disk_condition_logs_once_then_clears(env):
+    put_orders(env, order())
+    t = LocalTransport(env.cfg)
+    full = lambda p: Usage(10**10, 10**10 - 1)
+    first = run_once(env.cfg, READY, t, disk_usage=full)
+    second = run_once(env.cfg, READY + timedelta(minutes=5), t, disk_usage=full)
+    third = run_once(env.cfg, READY + timedelta(minutes=10), t, disk_usage=full)
+    assert _count(first, "not staging") == 1
+    assert _count(second + third, "not staging") == 0
+    # room again: it stages, and the clearing is logged once
+    lines = run_once(env.cfg, READY + timedelta(minutes=15), t)
+    assert _count(lines, "condition cleared") == 1
+    assert "_conditions" not in json.loads((env.staging / "state.json").read_text())
+
+
+def test_awaiting_receipt_logs_once(env):
+    put_orders(env, order(), order(EID2, start="2026-11-06T00:35:00Z", end="2026-11-06T00:55:00Z"))
+    t = LocalTransport(env.cfg)
+    later = READY + timedelta(minutes=40)
+    first = run_once(env.cfg, later, t)
+    second = run_once(env.cfg, later + timedelta(minutes=5), t)
+    assert _count(first, "no receipt yet") == 0          # first pass uploads
+    again = run_once(env.cfg, later + timedelta(minutes=10), t)
+    assert _count(second + again, "no receipt yet") == 1
+    assert _count(second + again, "awaiting its receipt") == 1
+
+
+def test_transport_down_logs_once(env):
+    put_orders(env, order())
+    env.cfg["local_base"] = str(env.remote / "missing")
+    t = LocalTransport(env.cfg)
+    a = run_once(env.cfg, READY, t)
+    b = run_once(env.cfg, READY + timedelta(minutes=5), t)
+    assert _count(a, "could not pull") == 1 and _count(b, "could not pull") == 0
+
+
+def test_deleting_blocks_a_new_window(env, monkeypatch):
+    put_orders(env, order(), order(EID2, start="2026-11-06T00:35:00Z", end="2026-11-06T00:55:00Z"))
+    t = LocalTransport(env.cfg)
+    run_once(env.cfg, READY + timedelta(minutes=40), t)
+    receipt(env, EID)
+    monkeypatch.setattr(keeper, "_remove_staging",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("busy")))
+    lines = run_once(env.cfg, READY + timedelta(minutes=45), t)
+    assert state(env) == {EID: "deleting"}
+    assert not (env.staging / EID2).exists()
+    assert _count(lines, "awaiting its receipt") == 1
