@@ -423,3 +423,36 @@ class TestRetentionGatesAuthority:
         auth.on_fine_estimate(e, phase(e), SECOND)
         assert auth.last_check_metrics["fold_retention"] == 0.42
         assert auth.last_check_metrics["min_fold_retention"] == 0.50
+
+
+class TestEdgeSigma:
+    """MEASUREMENT_MODEL.md §6.3: the authority publishes how well it
+    knows the edge, from the scatter of successive accepted edges."""
+
+    @staticmethod
+    def _feed(auth, subs, rtp0=1_000_000, block_s=30):
+        for k, sub in enumerate(subs):
+            e = est(rtp=(rtp0 + k * block_s * SR) & 0xFFFFFFFF, sub=sub)
+            d = auth.on_fine_estimate(e, phase(e), SECOND + k * block_s)
+            assert d.state == T6AuthorityState.AUTHORITATIVE
+
+    def test_none_until_enough_edges(self, auth):
+        self._feed(auth, [0.25, 0.27, 0.23, 0.27])   # three deltas
+        assert auth.edge_sigma_ns is None
+
+    def test_scatter_of_successive_edges(self, auth):
+        # Alternating ±0.02 samples about 0.25: every delta is ±0.04,
+        # so one edge carries 0.04/√2 samples.
+        self._feed(auth, [0.27, 0.23] * 4)
+        expect = 0.04 / 2 ** 0.5 / SR * 1e9            # ≈ 294.6 ns
+        assert auth.edge_sigma_ns == pytest.approx(expect, rel=1e-6)
+
+    def test_rtp_wrap_does_not_read_as_scatter(self, auth):
+        # Edges straddling the 32-bit counter wrap, perfectly steady.
+        self._feed(auth, [0.25] * 6, rtp0=(1 << 32) - 2 * 30 * SR)
+        assert auth.edge_sigma_ns == pytest.approx(0.0, abs=1e-6)
+
+    def test_cleared_on_unlock(self, auth):
+        self._feed(auth, [0.27, 0.23] * 4)
+        auth.on_mf_unlock()
+        assert auth.edge_sigma_ns is None

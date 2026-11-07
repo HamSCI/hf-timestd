@@ -21,7 +21,9 @@ rather than freezing the last anchor forever.
 from __future__ import annotations
 
 import logging
+import math
 import time
+from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Dict, Optional
@@ -57,6 +59,11 @@ FILTER_GROUP_DELAY_BOUND_NS = 250_000_000  # ±250 ms, as the coarse path
 ESTIMATE_STALE_INTERVALS = 3.0
 # Throttle for the "still ACQUIRING" visibility warning.
 ACQUIRING_WARN_PERIOD_SEC = 300.0
+# Edge uncertainty (MEASUREMENT_MODEL.md §6.3): the scatter of successive
+# accepted edges about where the ruler puts them, over the last few fold
+# blocks.  Fewer than EDGE_SIGMA_MIN_N deltas and nothing is claimed.
+EDGE_SIGMA_WINDOW = 16
+EDGE_SIGMA_MIN_N = 4
 
 
 class T6AuthorityState(str, Enum):
@@ -127,6 +134,9 @@ class T6AnchorAuthority:
         # periodicity reference — kept in raw counter form, NOT as a
         # mod-SR phase, so the check survives the 32-bit RTP wrap.
         self._prev_edge: Optional[tuple] = None
+        # Signed period deviations (samples) between consecutive ACCEPTED
+        # edges; ``edge_sigma_ns`` is computed from them.
+        self._edge_deltas: deque = deque(maxlen=EDGE_SIGMA_WINDOW)
         self._degraded_since: Optional[float] = None
         # Liveness (spec §6, expose-don't-stall): when the estimate
         # stream dies while the MF stays locked, nothing edge-triggered
@@ -153,6 +163,11 @@ class T6AnchorAuthority:
         return abs((a - b + p / 2) % p - p / 2)
 
     def _period_deviation_samples(self, est: FineEdgeEstimate, prev: tuple) -> float:
+        return abs(self._signed_period_deviation_samples(est, prev))
+
+    def _signed_period_deviation_samples(
+        self, est: FineEdgeEstimate, prev: tuple
+    ) -> float:
         """How far this edge sits from an exact whole number of seconds
         after the previous one, in samples, wrapped to ±SR/2.
 
@@ -172,7 +187,25 @@ class T6AnchorAuthority:
         p = self.sample_rate_hz
         d = float(_wrapped_signed32(int(est.edge_rtp) - int(prev_rtp)))
         d += float(est.edge_subsample) - float(prev_sub)
-        return abs((d + p / 2) % p - p / 2)
+        return (d + p / 2) % p - p / 2
+
+    @property
+    def edge_sigma_ns(self) -> Optional[float]:
+        """1-sigma uncertainty of one accepted edge, in ns, or None.
+
+        The GPSDO disciplines the counter, so successive edges belong a
+        whole number of seconds apart.  Each delta between two accepted
+        edges carries both estimates' errors, hence the √2.  This is the
+        number MEASUREMENT_MODEL.md §6.3 asks the estimator to publish:
+        how well the edge is known, not when the stream reached the host
+        (that is the arrival floor's quantity, and it stays the judge's
+        comparison sigma).
+        """
+        n = len(self._edge_deltas)
+        if n < EDGE_SIGMA_MIN_N:
+            return None
+        rms = math.sqrt(sum(d * d for d in self._edge_deltas) / n)
+        return rms / math.sqrt(2.0) * 1e9 / self.sample_rate_hz
 
     def edge_phase_rtp(self, est: FineEdgeEstimate) -> float:
         """Edge position within the second in the **RTP domain**.
@@ -324,6 +357,11 @@ class T6AnchorAuthority:
         self.note_estimate_seen(violations)
 
         if not violations:
+            if (prev in (T6AuthorityState.AUTHORITATIVE,
+                         T6AuthorityState.DEGRADED)
+                    and self._prev_edge is not None):
+                self._edge_deltas.append(
+                    self._signed_period_deviation_samples(est, self._prev_edge))
             self._anchor = self._build_anchor(est, named_second_utc)
             self._prev_edge = (int(est.edge_rtp), float(est.edge_subsample))
             self._degraded_since = None
@@ -467,6 +505,7 @@ class T6AnchorAuthority:
         self._state = T6AuthorityState.UNLOCKED
         self._anchor = None
         self._prev_edge = None
+        self._edge_deltas.clear()
         self._degraded_since = None
         self._last_estimate_at = None
         return T6AnchorDecision(self._state, prev, None, violations)

@@ -30,6 +30,7 @@ import logging
 import sys
 import types
 from pathlib import Path
+from typing import Optional
 
 import numpy as np  # noqa: F401 — offset_judge dependency
 import pytest
@@ -127,12 +128,14 @@ class FakeBench:
 
     def __init__(self, clock: FakeClock, tier: str = "T4",
                  sigma_ns: float = 1e5, bench_error_s: float = 0.0,
-                 available: bool = True):
+                 available: bool = True,
+                 precision_sigma_ns: Optional[float] = None):
         self.clock = clock
         self.tier = tier
         self.sigma_ns = sigma_ns
         self.bench_error_s = bench_error_s
         self.available = available
+        self.precision_sigma_ns = precision_sigma_ns
 
     def poll(self):
         if not self.available:
@@ -142,6 +145,7 @@ class FakeBench:
             utc=self.clock.wall + self.bench_error_s,
             sigma_ns=self.sigma_ns,
             mono=self.clock.mono_v,
+            precision_sigma_ns=self.precision_sigma_ns,
         )
 
 
@@ -424,6 +428,47 @@ class TestPrecisionNonRegression:
         assert tier_of(judge) == "T5"      # wide honest bench beats none
         snap = read_json(tmp_path / "offset_judge.json")
         assert snap["precision_hold"] is None   # hold released on adoption
+
+    def _t4_incumbent_t6(self, clock, tmp_path, precision):
+        """The post-restart shape (ND 2026-11-03): T4 chrony at 150 us
+        holds; T6 arrives with a 2 ms arrival floor."""
+        t4 = FakeBench(clock, tier="T4", sigma_ns=1.5e5)
+        t6 = FakeBench(clock, tier="T6", sigma_ns=2e6, available=False,
+                       precision_sigma_ns=precision)
+        judge = make_judge(clock, tmp_path, [t4, t6])
+        register_healthy(judge, clock)
+        judge.tick()
+        assert tier_of(judge) == "T4"
+        t6.available = True
+        return judge
+
+    def test_t6_edge_precision_wins_over_its_arrival_floor(self, tmp_path):
+        clock = FakeClock()
+        judge = self._t4_incumbent_t6(clock, tmp_path, precision=400.0)
+        tick_n(judge, clock, 6)
+        assert tier_of(judge) == "T6"
+        assert read_json(tmp_path / "offset_judge.json")[
+            "precision_hold"] is None
+
+    def test_violation_bound_keeps_the_arrival_sigma(self, tmp_path):
+        # Precision decides adoption only.  Comparisons on the host
+        # clock still carry the transport scatter, so the k*sigma
+        # bound must not shrink to the edge's 400 ns.
+        clock = FakeClock()
+        judge = self._t4_incumbent_t6(clock, tmp_path, precision=400.0)
+        tick_n(judge, clock, 6)
+        v = judge.offset_for(KEY, 5000)
+        assert v.tier == "T6"
+        assert v.sigma_ns >= 2e6
+
+    def test_t6_without_edge_precision_is_still_held(self, tmp_path):
+        clock = FakeClock()
+        judge = self._t4_incumbent_t6(clock, tmp_path, precision=None)
+        tick_n(judge, clock, 6)
+        assert tier_of(judge) == "T4"
+        h = read_json(tmp_path / "offset_judge.json")["precision_hold"]
+        assert h["candidate"] == "T6"
+        assert h["sigma_candidate_ns"] == pytest.approx(2e6, rel=1e-3)
 
     def test_margin_configurable(self, tmp_path):
         clock = FakeClock()

@@ -464,6 +464,20 @@ class BenchReading:
     # misread as a bench fault.  See
     # docs/design/CONTENT_TIME_LABELING_CONVENTION.md §5.2.
     plane: str = "host"   # "host" | "label"
+    # How well the bench knows UTC, when that differs from how well its
+    # reading can be compared on the host clock.  T6 sets it from the
+    # fold's edge scatter; its ``sigma_ns`` stays the arrival floor,
+    # because transport scatter is real in every host-plane comparison.
+    # Only the precision non-regression clause reads it
+    # (MEASUREMENT_MODEL.md §6.3).  None means the two coincide.
+    precision_sigma_ns: Optional[float] = None
+
+    @property
+    def precision_ns(self) -> float:
+        """Sigma for the precision non-regression clause."""
+        if self.precision_sigma_ns is None:
+            return self.sigma_ns
+        return self.precision_sigma_ns
 
     def utc_at(self, mono_now: float) -> float:
         """Extrapolate the reading to a later monotonic instant."""
@@ -724,9 +738,13 @@ class NativeAnchorBench:
         provider: Callable[[], Optional[Tuple]],
         mono_fn: Callable[[], float] = time.monotonic,
         health_provider: Optional[Callable[[], Optional[Dict]]] = None,
+        precision_provider: Optional[Callable[[], Optional[float]]] = None,
     ):
         self._provider = provider
         self._mono = mono_fn
+        # The fold's edge uncertainty in ns (T6AnchorAuthority
+        # .edge_sigma_ns), or None while it has too few edges to say.
+        self._precision_provider = precision_provider
         # T6 health (authority state, re-home age) rides in the reading
         # detail under "t6_health".  Never the key "authoritative":
         # _adoptable reads that one.
@@ -807,6 +825,18 @@ class NativeAnchorBench:
         if str(anchor.captured_via_tier) != "T6":
             sigma_ns = coast_sigma0_ns(sigma_ns, anchor.captured_via_tier)
             detail["anchor_sigma_floor_ns"] = COARSE_ANCHOR_SIGMA_NS
+        # Only a T6-captured anchor is known to the fold's precision; a
+        # coarse one keeps the arrival floor for precision as well.
+        precision_ns = None
+        if (self._precision_provider is not None
+                and str(anchor.captured_via_tier) == "T6"):
+            try:
+                precision_ns = self._precision_provider()
+            except Exception:  # noqa: BLE001 — precision trouble ≠ judge trouble
+                precision_ns = None
+            if precision_ns is not None:
+                precision_ns = max(float(precision_ns), 1.0)
+                detail["edge_sigma_ns"] = round(precision_ns, 1)
         return BenchReading(
             tier="T6",
             utc=float(floor.offset_s) + float(arrival_mono),
@@ -814,6 +844,7 @@ class NativeAnchorBench:
             mono=float(arrival_mono),
             detail=detail,
             plane="label",
+            precision_sigma_ns=precision_ns,
         )
 
 
@@ -3266,32 +3297,38 @@ class OffsetJudge:
         (not CRITICAL — this is a precision policy, not a fault) names
         both benches; the refused candidate keeps being measured via
         shadow_residuals.
+
+        Both sides compare ``precision_ns``: how well each bench knows
+        UTC.  For T6 that is the fold's edge scatter, not the arrival
+        floor, which measures transport and kept T6 out for days after
+        every restart (ND 2026-11-03: 2 ms arrival vs T4's 0.15 ms, with
+        the edge known to under a microsecond).
         """
         margin = self.sigma_regression_margin
-        if cand.sigma_ns <= ref.sigma_ns * margin:
+        if cand.precision_ns <= ref.precision_ns * margin:
             if (self._precision_hold is not None
                     and self._precision_hold.get("candidate") == cand.tier):
                 logger.info(
                     f"OffsetJudge precision hold released: candidate "
-                    f"{cand.tier} sigma {cand.sigma_ns/1e6:.3f} ms now "
+                    f"{cand.tier} sigma {cand.precision_ns/1e6:.6f} ms now "
                     f"within {margin:.1f}x of incumbent {ref.tier} sigma "
-                    f"{ref.sigma_ns/1e6:.3f} ms"
+                    f"{ref.precision_ns/1e6:.6f} ms"
                 )
                 self._precision_hold = None
             return True
         self._precision_hold = {
             "candidate": cand.tier,
             "incumbent": ref.tier,
-            "sigma_candidate_ns": round(cand.sigma_ns, 1),
-            "sigma_incumbent_ns": round(ref.sigma_ns, 1),
+            "sigma_candidate_ns": round(cand.precision_ns, 1),
+            "sigma_incumbent_ns": round(ref.precision_ns, 1),
         }
         if (mono_now - self._last_precision_warning_log
                 >= self.critical_log_interval_s):
             self._last_precision_warning_log = mono_now
             logger.warning(
                 f"OFFSET JUDGE PRECISION HOLD: candidate {cand.tier} sigma "
-                f"{cand.sigma_ns/1e6:.3f} ms is worse than incumbent "
-                f"{ref.tier} sigma {ref.sigma_ns/1e6:.3f} ms x margin "
+                f"{cand.precision_ns/1e6:.6f} ms is worse than incumbent "
+                f"{ref.tier} sigma {ref.precision_ns/1e6:.6f} ms x margin "
                 f"{margin:.1f} — voluntary upgrade refused (precision "
                 f"non-regression: tier rank must not widen the k*sigma "
                 f"violation bound); judging stays on {ref.tier}, candidate "

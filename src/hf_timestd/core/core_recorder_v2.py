@@ -858,7 +858,8 @@ class CoreRecorderV2:
                 self._offset_judge.add_bench(
                     NativeAnchorBench(
                         provider=self._t6_bench_state,
-                        health_provider=self._t6_health_state))
+                        health_provider=self._t6_health_state,
+                        precision_provider=self._t6_edge_sigma_ns))
                 self._offset_judge.add_bench(
                     LbeT5Bench(provider=self._t5_bench_state))
                 self._offset_judge.add_bench(
@@ -2869,6 +2870,15 @@ class CoreRecorderV2:
             tracker.note(utc_s - mono, mono)
         except Exception as e:  # noqa: BLE001 — diagnostics never fatal
             logger.debug(f"T6 arrival floor note failed: {e}")
+
+    def _t6_edge_sigma_ns(self) -> Optional[float]:
+        """The fold's edge uncertainty for the judge's precision clause,
+        while T6 is AUTHORITATIVE; None otherwise, and the judge falls
+        back to the arrival floor."""
+        authority = getattr(self, '_t6_authority', None)
+        if authority is None or authority.state.name != "AUTHORITATIVE":
+            return None
+        return authority.edge_sigma_ns
 
     def _t6_health_state(self) -> Optional[Dict]:
         """T6 health for the judge: authority state, how long it has held

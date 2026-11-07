@@ -362,3 +362,38 @@ def test_record_false_returns_the_same_estimate():
     recorded = t.estimate(101.0)
     assert peeked.offset_s == recorded.offset_s
     assert peeked.n == recorded.n
+
+
+def test_bench_carries_the_edge_precision_beside_the_arrival_floor():
+    """MEASUREMENT_MODEL.md §6.3: precision comes from the edge, while
+    sigma stays the arrival floor for host-plane comparisons."""
+    mono = 100.0
+    anchor = _anchor(truth_utc=mono + TRUE_OFF, tier="T6")
+    floor = FloorEstimate(offset_s=TRUE_OFF, sigma_ns=750_000.0,
+                          n=110, span_s=2.0)
+    bench = NativeAnchorBench(
+        provider=lambda: (anchor, 5000, mono, floor), mono_fn=lambda: mono,
+        precision_provider=lambda: 360.0)
+
+    r = bench.poll()
+
+    assert r.sigma_ns == pytest.approx(750_000.0)
+    assert r.precision_sigma_ns == pytest.approx(360.0)
+    assert r.precision_ns == pytest.approx(360.0)
+    assert r.detail["edge_sigma_ns"] == pytest.approx(360.0)
+
+
+def test_bench_ignores_edge_precision_on_a_coarse_anchor():
+    """A coarse capture's second boundary is not the fold's edge."""
+    mono = 100.0
+    anchor = _anchor(truth_utc=mono + TRUE_OFF, tier="T5")
+    floor = FloorEstimate(offset_s=TRUE_OFF, sigma_ns=750_000.0,
+                          n=110, span_s=2.0)
+    bench = NativeAnchorBench(
+        provider=lambda: (anchor, 5000, mono, floor), mono_fn=lambda: mono,
+        precision_provider=lambda: 360.0)
+
+    r = bench.poll()
+
+    assert r.precision_sigma_ns is None
+    assert r.precision_ns >= COARSE_ANCHOR_SIGMA_NS
