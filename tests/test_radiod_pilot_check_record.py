@@ -63,3 +63,19 @@ def test_tick_arrival_follows_the_label_sub_sample():
     b = cr.tick_arrival(*_tick_side(0.4), 1000.0, start_second_of_minute=1)
     d = b["arrival_ms_after_labelled_second"] - a["arrival_ms_after_labelled_second"]
     assert d == pytest.approx(0.4 / 24, abs=1e-6)
+
+
+def test_chain_delay_moves_the_pilot_prediction_but_not_the_tick():
+    """The label counts the chain delay, so the TS-1 edge sits at S + chain;
+    a WWV tick is timed from the labelled second S itself."""
+    period = 1e9 / 24_000
+    side = {"sample_period_ns": period, "chain_delay_ns": 0.0,
+            "first_sample": {"after_window_start_ns": 0.0}}
+    chained = {**side, "chain_delay_ns": 0.4 * period}
+    assert cr.predicted_index(chained, 3, with_chain=True) == pytest.approx(
+        cr.predicted_index(side, 3, with_chain=True) + 0.4)
+    x, tside = _tick_side(0.0)
+    a = cr.tick_arrival(x, tside, 1000.0, start_second_of_minute=1)
+    b = cr.tick_arrival(x, {**tside, "chain_delay_ns": 0.4 * period}, 1000.0,
+                        start_second_of_minute=1)
+    assert b["arrival_ms_after_labelled_second"] == a["arrival_ms_after_labelled_second"]

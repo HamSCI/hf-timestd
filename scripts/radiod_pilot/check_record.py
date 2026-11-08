@@ -45,11 +45,18 @@ def load(stem: str):
     return x, side
 
 
-def predicted_index(side: dict, k_seconds: int) -> float:
-    """Fractional sample index whose label is window start + k seconds + chain."""
+def predicted_index(side: dict, k_seconds: int, *, with_chain: bool) -> float:
+    """Fractional sample index whose label is window start + k seconds, plus
+    the chain delay when ``with_chain``.
+
+    The label already counts the chain delay (TS-1 edge to ADC), so the
+    TS-1 edge of second S carries the label S + chain: the pilot check needs
+    ``with_chain=True``.  A broadcast tick is judged against the labelled UTC
+    second itself, so the WWV check needs ``with_chain=False``."""
     period = side["sample_period_ns"]
     after = side["first_sample"]["after_window_start_ns"]
-    return (k_seconds * 1e9 + side["chain_delay_ns"] - after) / period
+    chain = side["chain_delay_ns"] if with_chain else 0.0
+    return (k_seconds * 1e9 + chain - after) / period
 
 
 def _sinc_interp(y: np.ndarray, t: float, half: int = 256, beta: float = 8.0) -> float:
@@ -105,7 +112,7 @@ def check_pilot(stem: str) -> dict:
     period = side["sample_period_ns"]
     rows = []
     for k in range(side["window"]["seconds"] + 1):
-        p = predicted_index(side, k)
+        p = predicted_index(side, k, with_chain=True)
         e = edge_position(x, p)
         if e is None:
             continue
@@ -143,7 +150,7 @@ def tick_arrival(x: np.ndarray, side: dict, tone_hz: float, *, start_second_of_m
     for k in range(nsec):
         if (start_second_of_minute + k) % 60 in SKIP_SECONDS:
             continue
-        p = predicted_index(side, k)
+        p = predicted_index(side, k, with_chain=False)
         i0 = int(round(p)) - pre
         if i0 < 0 or i0 + span > len(env):
             continue
