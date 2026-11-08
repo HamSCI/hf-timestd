@@ -19,9 +19,14 @@ T_GPS_TIME = 3
 T_RTP_TIMESNAP = 8
 T_INPUT_SAMPRATE = 10
 T_INPUT_SAMPLES = 13
+T_OUTPUT_DATA_DEST_SOCKET = 17
 T_OUTPUT_SSRC = 18
 T_OUTPUT_SAMPRATE = 20
 T_RADIO_FREQUENCY = 33
+T_FILTER_BLOCKSIZE = 42
+T_FILTER_FIR_LENGTH = 43
+T_OUTPUT_CHANNELS = 49
+T_OUTPUT_ENCODING = 107
 
 # Pilot detector types (status.h 228..240)
 T_INPUT_EPOCH = 240
@@ -52,6 +57,14 @@ def _sint64(b):
     return struct.unpack(">q", _uint(b).to_bytes(8, "big"))[0]
 
 
+def _socket(b):
+    """encode_socket (status.c): IPv4 address and port in network order,
+    six fixed bytes (no zero suppression); IPv6 takes eighteen."""
+    if len(b) == 6:
+        return ".".join(str(x) for x in b[:4]), int.from_bytes(b[4:6], "big")
+    return None
+
+
 def _double(b):
     return struct.unpack(">d", _uint(b).to_bytes(8, "big"))[0] if b else 0.0
 
@@ -64,6 +77,11 @@ _FIELDS = {
     T_INPUT_SAMPRATE: ("input_samprate", _uint),
     T_INPUT_SAMPLES: ("input_samples", _sint64),
     T_RADIO_FREQUENCY: ("frequency", _double),
+    T_OUTPUT_DATA_DEST_SOCKET: ("data_dest", _socket),
+    T_FILTER_BLOCKSIZE: ("filter_blocksize", _uint),
+    T_FILTER_FIR_LENGTH: ("filter_fir_length", _uint),
+    T_OUTPUT_CHANNELS: ("output_channels", _uint),
+    T_OUTPUT_ENCODING: ("output_encoding", _uint),
     T_OUTPUT_SAMPRATE: ("output_samprate", _uint),
     T_INPUT_EPOCH: ("input_epoch", _uint),
     T_ANCHOR_RTP: ("anchor_rtp", _uint),
