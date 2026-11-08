@@ -17,6 +17,7 @@ import struct
 # Existing radiod types (ka9q-radio src/status.h enum status_type)
 T_GPS_TIME = 3
 T_RTP_TIMESNAP = 8
+T_INPUT_SAMPRATE = 10
 T_INPUT_SAMPLES = 13
 T_OUTPUT_SSRC = 18
 T_OUTPUT_SAMPRATE = 20
@@ -60,6 +61,7 @@ _FIELDS = {
     T_OUTPUT_SSRC: ("ssrc", _uint),
     T_GPS_TIME: ("gps_time", _sint64),
     T_RTP_TIMESNAP: ("rtp_timesnap", _uint),
+    T_INPUT_SAMPRATE: ("input_samprate", _uint),
     T_INPUT_SAMPLES: ("input_samples", _sint64),
     T_RADIO_FREQUENCY: ("frequency", _double),
     T_OUTPUT_SAMPRATE: ("output_samprate", _uint),
