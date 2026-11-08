@@ -131,3 +131,31 @@ def test_without_any_echo_a_negative_anywhere_wins(tmp_path):
 def test_setup_station_surfaces_the_probe_warning():
     sh = (REPO / 'scripts' / 'setup-station.sh').read_text()
     assert "TS1_WARN=" in sh and 'log_warn "TS-1 probe: $_ts1_warn"' in sh
+
+
+def _probe_port(glob: str) -> subprocess.CompletedProcess:
+    return subprocess.run(['bash', str(PROBE), '129600000'],
+                          env={'PATH': '/usr/bin:/bin', 'TS1_BYID_GLOB': glob},
+                          capture_output=True, text=True, timeout=30)
+
+
+def test_a_regular_file_where_the_node_belongs_is_refused_and_left_alone(tmp_path):
+    # UACNJ, 2026-11-04 → 11-08: a STAT sent while the TS-1 re-enumerated created
+    # /dev/ttyACM1 as a regular file; the by-id link still pointed there, so every
+    # later command wrote into that file and none reached the TS-1.
+    stray = tmp_path / 'ttyACM1'
+    stray.write_bytes(b'\rSTAT\r')
+    link = tmp_path / 'usb-Adafruit_Trinket_M0_TEST-if00'
+    link.symlink_to(stray)
+    r = _probe_port(str(tmp_path / 'usb-Adafruit_Trinket_M0_*'))
+    kv = dict(l.split('=', 1) for l in r.stdout.splitlines() if '=' in l)
+    assert r.returncode == 1
+    assert kv['TS1_PRESENT'] == 'yes'
+    assert 'not a character device' in kv['TS1_ERROR']
+    assert stray.read_bytes() == b'\rSTAT\r'        # nothing appended
+
+
+def test_no_trinket_link_reads_absent(tmp_path):
+    r = _probe_port(str(tmp_path / 'usb-Adafruit_Trinket_M0_*'))
+    assert r.returncode == 1
+    assert 'TS1_PRESENT=no' in r.stdout

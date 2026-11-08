@@ -32,11 +32,20 @@ if [ -n "${TS1_PROBE_STAT_FILE:-}" ]; then
 else
 
 port=""
-for p in /dev/serial/by-id/usb-Adafruit_Trinket_M0_*; do
+for p in ${TS1_BYID_GLOB:-/dev/serial/by-id/usb-Adafruit_Trinket_M0_*}; do
     [ -e "$p" ] && port=$(readlink -f "$p") && break
 done
 if [ -z "$port" ]; then
     echo "TS1_PRESENT=no"
+    exit 1
+fi
+# Write only to a character device.  On UACNJ (11-04) a STAT sent while the TS-1
+# re-enumerated created /dev/ttyACM1 as a regular file; the kernel could not put its
+# node back, and every later command landed in that file instead of the TS-1.
+if [ ! -c "$port" ]; then
+    echo "TS1_PRESENT=yes"
+    echo "TS1_PORT=$port"
+    echo "TS1_ERROR=$port is not a character device (a stray file? remove it, then recreate the node from /sys/class/tty/$(basename "$port")/dev)"
     exit 1
 fi
 if fuser -s "$port" 2>/dev/null; then
