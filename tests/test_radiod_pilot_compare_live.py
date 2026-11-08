@@ -223,7 +223,7 @@ def test_old_pair_gap_measures_the_late_gps_time():
     assert g["gap_rtp_ns"] == pytest.approx(3_000_000, abs=2)
     # the INPUT_SAMPLES form: here INPUT_SAMPLES sits one block (20 ms)
     # before RTP_TIMESNAP's sample, as B1 sends them, so it reads 20 ms later
-    assert g["gap_input_ns"] == pytest.approx(3_000_000 + 1920 * 1e9 / OUT_RATE, abs=2)
+    assert g["gap_input_derived_ns"] == pytest.approx(3_000_000 + 1920 * 1e9 / OUT_RATE, abs=2)
 
 
 # --- the battery --------------------------------------------------------
@@ -246,3 +246,90 @@ def test_battery_resets_on_epoch_change():
            [pilot_row(N0 + 30 * k, epoch=EPOCH + 1) for k in range(3, 5)]
     v = cl.battery_verdicts(cl.radiod_edges(rows))
     assert v[3]["accumulating"] and v[3]["mode"] == "bootstrap"
+
+
+def test_old_pair_decomposition_adds_up():
+    # synthetic: gps_time read 3 ms after the true time of RTP_TIMESNAP's sample;
+    # radiod's host-time gap 3.8 ms; filter delay 2.5 ms
+    e = cl.radiod_edges([pilot_row(N0, gps_late_ns=3_000_000, host_gap_ns=3_800_000)])[0]
+    g = e["packets"][0]
+    assert g["filter_delay_ns"] == pytest.approx(2_500_000)
+    assert g["gap_rtp_net_ns"] == pytest.approx(g["gap_rtp_ns"] - 2_500_000)
+    assert g["host_term_ns"] == pytest.approx(3_800_000 - 2_500_000)
+    assert g["residual_ns"] == pytest.approx(3_000_000 - 3_800_000, abs=2)
+    # raw = filter delay + host term + residual
+    assert g["gap_rtp_ns"] == pytest.approx(
+        g["filter_delay_ns"] + g["host_term_ns"] + g["residual_ns"], abs=1e-6)
+    assert g["block_offset_ns"] == pytest.approx(1920 * 1e9 / OUT_RATE, abs=1e-3)
+
+
+def test_rows_missing_fields_are_skipped():
+    good = pilot_row(N0)
+    rows = []
+    for k in ("input_samprate", "output_samprate", "pilot_host_time"):
+        r = pilot_row(N0 + 30)
+        del r[k]
+        rows.append(r)
+    edges = cl.radiod_edges([good] + rows)
+    assert [e["named_s"] for e in edges] == [N0]
+
+
+def test_load_jsonl_sorts_by_logged_time(tmp_path):
+    p = tmp_path / "x.jsonl"
+    p.write_text('{"logged_at_unix": 3}\n{"logged_at_unix": 1}\n{"logged_at_unix": 2\n')
+    assert [r["logged_at_unix"] for r in cl.load_jsonl([p])] == [1, 3]
+
+
+def test_scatter_skips_steps_longer_than_two_folds():
+    # one 90 s gap carrying a 1-sample jump must not enter the scatter
+    rows = [pilot_row(N0 + 30 * k) for k in range(5)]
+    late = pilot_row(N0 + 30 * 4 + 90, phase=PHI + 1.0)
+    s = cl.radiod_scatter(cl.radiod_edges(rows + [late]), fold_s=30)
+    assert s["n_diffs"] == 4 and s["max_abs_diff_ns"] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_paired_scatter_uses_the_same_seconds():
+    r = cl.radiod_edges([pilot_row(N0 + 30 * k + 7) for k in range(6)])
+    anchors = cl.channel_anchors([anchor_row(N0 + 60, N0 + 60)], 206674315)
+    # hf edges at k = 0, 1, 2 and 5: the 2 -> 5 step (90 s) is skipped
+    hf = cl.hf_edges([hf_row(N0 + 30 * k) for k in (0, 1, 2, 5)])
+    pairs = cl.pair_hf_with_radiod(hf, anchors, r, max_dn=60)
+    s = cl.paired_scatter(pairs, fold_s=30)
+    assert s["hf_timestd"]["n_diffs"] == 2 and s["radiod_a"]["n_diffs"] == 2
+    assert "common-mode" in s["caveat"]
+
+
+def test_hf_pair_dropped_when_anchors_disagree_on_the_tie():
+    a1 = anchor_row(N0 - 3, N0 - 3)
+    a2 = anchor_row(N0 + 2, N0 + 2)
+    a2["anchor_input_sample"] += DECIM          # a skipped block moved the tie
+    anchors = cl.channel_anchors([a1, a2], 206674315)
+    counts = {}
+    pairs = cl.pair_hf_with_radiod(cl.hf_edges([hf_row(N0)]), anchors,
+                                   cl.radiod_edges([pilot_row(N0)]), counts=counts)
+    assert pairs == [] and counts == {"tie_disagrees": 1}
+
+
+def test_groups_by_ssrc():
+    rows = [dict(pilot_row(N0), group="239.1.1.1"), dict(pilot_row(N0), group="239.2.2.2"),
+            dict(anchor_row(N0, N0), group="239.3.3.3")]
+    assert cl.groups_by_ssrc(rows) == {"45375": ["239.1.1.1", "239.2.2.2"],
+                                      "206674315": ["239.3.3.3"]}
+
+
+def test_drift_fitted_per_epoch():
+    items = [("e1", t, 10.0 * t / 3600) for t in range(0, 7200, 600)] + \
+            [("e2", t, 1e6 - 5.0 * t / 3600) for t in range(0, 7200, 600)]
+    d = cl.drift_by_group(items)
+    assert d["e1"] == pytest.approx(10.0) and d["e2"] == pytest.approx(-5.0)
+
+
+def test_paired_scatter_skips_when_radiod_side_spans_too_long_or_repeats():
+    # hf edges 30 s apart, but radiod's partners 90 s apart (then the same edge twice)
+    r = cl.radiod_edges([pilot_row(N0 - 20), pilot_row(N0 + 70)])
+    anchors = cl.channel_anchors([anchor_row(N0 + 30, N0 + 30)], 206674315)
+    hf = cl.hf_edges([hf_row(N0), hf_row(N0 + 30), hf_row(N0 + 60)])
+    pairs = cl.pair_hf_with_radiod(hf, anchors, r, max_dn=60)
+    assert [p["_r"]["named_s"] for p in pairs] == [N0 - 20, N0 + 70, N0 + 70]
+    s = cl.paired_scatter(pairs, fold_s=30)
+    assert s["hf_timestd"]["n_diffs"] == 0 and s["radiod_a"]["n_diffs"] == 0

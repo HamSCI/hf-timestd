@@ -91,25 +91,32 @@ IP_MULTICAST_ALL = getattr(socket, "IP_MULTICAST_ALL", 49)
 IP_PKTINFO = getattr(socket, "IP_PKTINFO", 8)
 
 
-def open_socket(groups, port: int, iface=None) -> socket.socket:
+def open_socket(groups, port: int, iface=None, sock_factory=None, err=sys.stderr):
     """One socket joined to every group in ``groups``, all on ``port``.
 
     IP_MULTICAST_ALL off: Linux otherwise hands a socket bound to the
     wildcard address every group any process on the host has joined,
-    and B1-a and B1-b both send SSRC 45375.  IP_PKTINFO on, so each row
-    can name the group its packet came to.
+    and B1-a and B1-b both send SSRC 45375.  Without it the rows could
+    mix two radiods, so failing to set it raises OSError.  IP_PKTINFO
+    on, so each row can name the group its packet came to; failing that
+    only warns, since the rows stay right, just unlabelled.
     """
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    s = (sock_factory or (lambda: socket.socket(
+        socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)))()
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
     except (AttributeError, OSError):
         pass
-    for opt in (IP_MULTICAST_ALL, IP_PKTINFO):
-        try:
-            s.setsockopt(socket.IPPROTO_IP, opt, 0 if opt == IP_MULTICAST_ALL else 1)
-        except OSError:
-            pass
+    try:
+        s.setsockopt(socket.IPPROTO_IP, IP_MULTICAST_ALL, 0)
+    except OSError as e:
+        raise OSError(f"cannot turn IP_MULTICAST_ALL off ({e}); rows could mix groups") from None
+    try:
+        s.setsockopt(socket.IPPROTO_IP, IP_PKTINFO, 1)
+    except OSError as e:
+        print(f"listen: WARNING cannot set IP_PKTINFO ({e}); rows will not name their group",
+              file=err, flush=True)
     s.bind(("", port))
     for g in groups:
         s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, membership_request(g, iface))

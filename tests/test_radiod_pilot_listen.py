@@ -219,3 +219,41 @@ def test_main_rejects_mixed_ports(capsys):
         listen.main(["--status", "239.1.2.3:5006", "--status", "239.1.2.4:5007",
                      "--ssrc", "1", "--out", "/dev/null"])
     assert e.value.code == 2 and "one port" in capsys.readouterr().err
+
+
+class OptSock:
+    """Records setsockopt calls; refuses the options named in ``refuse``."""
+    def __init__(self, refuse=()):
+        self.refuse, self.opts = set(refuse), []
+
+    def setsockopt(self, level, opt, val):
+        if opt in self.refuse:
+            raise OSError(92, "Protocol not available")
+        self.opts.append((level, opt, val))
+
+    def bind(self, addr):
+        pass
+
+    def settimeout(self, t):
+        pass
+
+
+def test_open_socket_sets_multicast_all_off_and_pktinfo():
+    s = OptSock()
+    listen.open_socket(["239.1.2.3"], 5006, None, sock_factory=lambda: s, err=io.StringIO())
+    assert (socket.IPPROTO_IP, listen.IP_MULTICAST_ALL, 0) in s.opts
+    assert (socket.IPPROTO_IP, listen.IP_PKTINFO, 1) in s.opts
+
+
+def test_open_socket_refuses_without_multicast_all_off():
+    with pytest.raises(OSError, match="IP_MULTICAST_ALL"):
+        listen.open_socket(["239.1.2.3"], 5006, None,
+                           sock_factory=lambda: OptSock({listen.IP_MULTICAST_ALL}),
+                           err=io.StringIO())
+
+
+def test_open_socket_warns_without_pktinfo():
+    err = io.StringIO()
+    listen.open_socket(["239.1.2.3"], 5006, None,
+                       sock_factory=lambda: OptSock({listen.IP_PKTINFO}), err=err)
+    assert "WARNING" in err.getvalue() and "IP_PKTINFO" in err.getvalue()
