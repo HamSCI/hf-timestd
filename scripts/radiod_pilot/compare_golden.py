@@ -8,7 +8,8 @@ For every <name>.golden.jsonl in DIR (written by make_golden.py), runs
 
 * |Δ edge_offset_samples| <= 0.001 sample (about 10 ns at 96 kHz);
 * each battery field within 1 % relative or 1e-6 absolute, whichever is
-  looser.  Both sides NaN (the C prints null) counts as agreement.
+  looser.  Both sides NaN (the C prints null) counts as agreement;
+* costas_quiet (the Costas quiet gate's per-fold verdict) exactly.
 
 Prints the per-set worst |Δ| and exits 1 on any failure.
 """
@@ -59,13 +60,17 @@ def compare_set(golden_path, replay, rate):
             failures.append(f"fold {i}: edge_rtp {g['edge_rtp']} vs {r['edge_rtp']}")
         if g["n_seconds_folded"] != r["n_seconds_folded"]:
             failures.append(f"fold {i}: n_seconds_folded differs")
+        if g.get("costas_quiet") != r.get("costas_quiet"):
+            failures.append(f"fold {i}: costas_quiet python "
+                            f"{g.get('costas_quiet')!r} C {r.get('costas_quiet')!r}")
         for k in BATTERY:
             a, b = _num(g[k]), _num(r[k])
             if not (math.isnan(a) or math.isnan(b)):
                 worst_field[k] = max(worst_field[k], abs(a - b))
             if not field_ok(g[k], r[k]):
                 failures.append(f"fold {i}: {k} python {g[k]!r} C {r[k]!r}")
-    return name, len(gold), worst_edge, worst_field, failures
+    quiet = "".join("Q" if g.get("costas_quiet") else "." for g in gold)
+    return name, len(gold), worst_edge, worst_field, quiet, failures
 
 
 def main(argv=None):
@@ -80,10 +85,11 @@ def main(argv=None):
         return 1
     bad = 0
     for g in sets:
-        name, n, we, wf, failures = compare_set(g, a.replay, a.rate)
+        name, n, we, wf, quiet, failures = compare_set(g, a.replay, a.rate)
         status = "PASS" if not failures else "FAIL"
         fields = " ".join(f"{k}={v:.2e}" for k, v in wf.items())
-        print(f"{status} {name}: {n} folds, max|Δedge| {we:.3e} sample; max|Δ| {fields}")
+        print(f"{status} {name}: {n} folds, max|Δedge| {we:.3e} sample; "
+              f"costas_quiet {quiet}; max|Δ| {fields}")
         for f in failures:
             print(f"    {f}")
         bad += bool(failures)
