@@ -8,7 +8,7 @@ For every <name>.golden.jsonl in DIR (written by make_golden.py), runs
 <name>.meta.json), pairs the reports by order, streaming both sides, and
 checks per report:
 
-* window_start_index, step, nprofile and complete exactly;
+* second_index, window_start_index, step, nprofile and complete exactly;
 * each profile value within 1e-4 of the reference profile's largest
   magnitude (relative);
 * peak_index within 0.01 sample;
@@ -57,7 +57,7 @@ def compare_set(golden_path, replay):
             n_gold += 1
             n_c += 1
             g, c = json.loads(gl), json.loads(cl)
-            for k in ["window_start_index", "step", "nprofile", "complete"]:
+            for k in ["second_index", "window_start_index", "step", "nprofile", "complete"]:
                 if g[k] != c[k]:
                     failures.append(f"report {i}: {k} reference {g[k]!r} C {c[k]!r}")
             for t in names:
