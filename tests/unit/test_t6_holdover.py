@@ -11,6 +11,7 @@ import pytest
 from hf_timestd.core.t6_holdover import (
     coast_ruler_intact,
     coast_sigma0_ns,
+    audited_label_drift,
     coast_ruler_intact_by_drift,
     RULER_DRIFT_TOLERANCE_S,
     UNMEASURED_RATE_SIGMA_PPM,
@@ -382,3 +383,39 @@ class TestUnmeasuredRateIsAxisAware:
         assert holdover_sigma_ns(800_000.0, None, 3600.0) == pytest.approx(
             holdover_sigma_ns(800_000.0, None, 3600.0,
                               unmeasured_ppm=UNMEASURED_RATE_SIGMA_PPM))
+
+
+class TestAuditedLabelDrift:
+    """The coast's ruler test reads the label audit's drift.  The audit
+    creates ``_lbl_drift`` only on the first mismatch, so a clean counter
+    left it absent and the coast fell back to the arrival-floor proxy,
+    which the 5-minute archive flush trips (W2NAF 2026-11-09: 155 false
+    "ruler was re-based" withdrawals in 21 h, every one with
+    mismatched=0)."""
+
+    class _Cal:
+        pass
+
+    def test_clean_audit_measures_zero(self):
+        cal = self._Cal()
+        cal._lbl_batches = 1200          # audit ran; never mismatched
+        assert audited_label_drift(cal) == 0
+
+    def test_audit_not_run_is_unknown(self):
+        assert audited_label_drift(self._Cal()) is None
+
+    def test_mismatches_carry_their_drift(self):
+        cal = self._Cal()
+        cal._lbl_batches = 10
+        cal._lbl_drift = -60
+        assert audited_label_drift(cal) == -60
+
+    def test_clean_counter_coasts_through_a_flush(self):
+        # Both ends read from a clean audit: the drift test decides, so
+        # the floor proxy never runs.
+        cal = self._Cal()
+        cal._lbl_batches = 5
+        drift0 = audited_label_drift(cal)
+        cal._lbl_batches = 9000
+        assert coast_ruler_intact_by_drift(
+            audited_label_drift(cal), drift0, 96000) is True

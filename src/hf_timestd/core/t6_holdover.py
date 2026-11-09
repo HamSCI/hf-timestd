@@ -210,6 +210,18 @@ def coast_ruler_intact(
 RULER_DRIFT_TOLERANCE_S = 0.001
 
 
+def audited_label_drift(cal) -> Optional[int]:
+    """The label audit's cumulative drift in samples, or None if it never ran.
+
+    The calibrator creates ``_lbl_drift`` only on the first mismatched
+    batch, so on a clean counter it is absent although the audit has
+    measured zero.  ``_lbl_batches`` tells the two apart.
+    """
+    if not getattr(cal, '_lbl_batches', 0):
+        return None
+    return int(getattr(cal, '_lbl_drift', 0) or 0)
+
+
 def coast_ruler_intact_by_drift(
     drift_samples: Optional[int],
     drift_at_freeze_samples: Optional[int],

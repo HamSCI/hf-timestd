@@ -4104,6 +4104,8 @@ class CoreRecorderV2:
         ledger = getattr(self, '_t6_anchor_ledger', None)
         if ledger is None:
             return
+        from hf_timestd.core.t6_holdover import (
+            audited_label_drift as _audited_label_drift)
         auth = getattr(self, '_t6_authority', None)
         cal = getattr(self, '_t6_calibrator', None)
         est = getattr(self, '_t6_last_fine_est', None)
@@ -4168,9 +4170,7 @@ class CoreRecorderV2:
             zero_fill=(_zf.snapshot()
                        if (_zf := getattr(self, '_t6_zero_fill', None))
                        else None),
-            label_drift_samples=(
-                int(getattr(cal, '_lbl_drift', 0) or 0)
-                if getattr(cal, '_lbl_batches', 0) else None),
+            label_drift_samples=_audited_label_drift(cal),
         )
 
     def _t6_apply_authority_decision(self, decision) -> None:
@@ -4318,8 +4318,8 @@ class CoreRecorderV2:
         """
         from hf_timestd.core.t6_anchor_authority import T6AuthorityState
         from hf_timestd.core.t6_holdover import (
-            coast_ruler_intact, coast_ruler_intact_by_drift,
-            coast_sigma0_ns, holdover_sigma_ns,
+            audited_label_drift, coast_ruler_intact,
+            coast_ruler_intact_by_drift, coast_sigma0_ns, holdover_sigma_ns,
             unmeasured_rate_sigma_ppm,
             may_coast,
         )
@@ -4366,7 +4366,7 @@ class CoreRecorderV2:
                 floor.sigma_ns, getattr(anchor, 'captured_via_tier', None)
             )
             self._t6_holdover_floor0_s = float(floor.offset_s)
-            self._t6_holdover_drift0 = getattr(cal, '_lbl_drift', None)
+            self._t6_holdover_drift0 = audited_label_drift(cal)
             self._t6_holdover_anchor_id = anchor_id
 
         since = getattr(self, '_t6_holdover_since', None)
@@ -4405,7 +4405,7 @@ class CoreRecorderV2:
         # Fall back to the old proxy only when the audit is absent.
         drift0 = getattr(self, '_t6_holdover_drift0', None)
         ruler_ok = coast_ruler_intact_by_drift(
-            getattr(cal, '_lbl_drift', None), drift0,
+            audited_label_drift(cal), drift0,
             getattr(cal, 'sample_rate', 0) or 0)
         if ruler_ok is None:
             ruler_ok = coast_ruler_intact(floor.offset_s, floor0)
