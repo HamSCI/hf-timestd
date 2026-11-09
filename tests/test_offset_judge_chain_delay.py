@@ -174,7 +174,8 @@ def test_snapshot_without_a_record_says_none(tmp_path):
     # Task 5: with no record the judge is learning, and says how far.
     assert block == {"state": "none", "record": None, "candidate": None,
                      "changed": None,
-                     "learning": {"span_s": 0.0, "n": 0, "target_s": 7200.0}}
+                     "learning": {"span_s": 0.0, "n": 0, "target_s": 7200.0,
+                                  "blocked": None}}
 
 
 def test_default_path_is_redirected_away_from_var_lib(tmp_path):
@@ -994,3 +995,55 @@ def test_an_unpersisted_learn_says_so(tmp_path, caplog, monkeypatch):
                if "chain delay LEARNED" in r.getMessage()]
     assert len(learned) == 1
     assert "(not persisted; see the store error)" in learned[0].getMessage()
+
+
+def t2_reading(clock, sigma_ns=15_500_000.0):
+    return BenchReading(tier="T2", utc=clock.wall, sigma_ns=sigma_ns,
+                        mono=clock.mono_v)
+
+
+def _blocked_lines(caplog):
+    return [r for r in caplog.records if r.levelno == logging.WARNING
+            and "chain-delay learn BLOCKED" in r.getMessage()]
+
+
+def test_learn_blocked_by_a_loose_host_clock_says_so(tmp_path, caplog):
+    # K3LR and WB6CXC-7, 2026-11-09: T6 AUTHORITATIVE for 21 h against a
+    # host on internet NTP (T2, sigma 15-18 ms).  The tracker rightly
+    # refuses every pair, but nothing said so: the seed sat unexplained.
+    j = learning_judge(tmp_path)
+    clock = j._test_clock
+    with caplog.at_level(logging.WARNING, logger=offset_judge.logger.name):
+        for _ in range(int(2.2 * 360)):        # 2.2 h of 10 s ticks
+            clock.wall += 10.0
+            clock.mono_v += 10.0
+            j._observe_label_plane_locked(
+                [t6_reading(clock, -16_350_000.0), t2_reading(clock)],
+                clock.mono_v)
+    assert j.chain_delay_store.record is None
+    blocked = j._learning_progress()["blocked"]
+    assert blocked["host_tier"] == "T2"
+    assert blocked["host_sigma_ns"] == 15_500_000.0
+    assert blocked["max_host_sigma_ns"] == 1_000_000.0
+    # Once, then hourly: 2.2 h gives 3 lines.
+    assert len(_blocked_lines(caplog)) == 3
+
+
+def test_learn_unblocks_when_a_tight_host_returns(tmp_path, caplog):
+    j = learning_judge(tmp_path)
+    clock = j._test_clock
+    for _ in range(30):
+        clock.wall += 10.0
+        clock.mono_v += 10.0
+        j._observe_label_plane_locked(
+            [t6_reading(clock, -16_350_000.0), t2_reading(clock)],
+            clock.mono_v)
+    assert j._learning_progress()["blocked"] is not None
+    feed(j, clock, 121, -16_350_000.0)
+    assert j.chain_delay_store.record.state == "confirmed"
+
+
+def test_healthy_learn_reports_no_block(tmp_path):
+    j = learning_judge(tmp_path)
+    feed(j, j._test_clock, 10, -16_350_000.0)
+    assert j._learning_progress()["blocked"] is None

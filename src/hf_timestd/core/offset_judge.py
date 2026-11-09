@@ -1438,6 +1438,11 @@ class OffsetJudge:
         # wide to write (chain_delay_max_spread_ns): the first learn, and
         # the candidate learn.
         self._learn_spread_refused = False
+        # Why a learn under way takes no observations, or None.  The tracker
+        # drops pairs against a host looser than its bound without a word;
+        # this says so (K3LR, WB6CXC-7 2026-11-09: 21 h seeded on T2).
+        self._learn_blocked: Optional[Dict] = None
+        self._learn_blocked_logged_mono: Optional[float] = None
         self._candidate_spread_refused = False
         # The held-T6 check (spec §5, "Holding T6"): when the held T6
         # first left the band, and when the gross bound first refused it
@@ -2349,13 +2354,55 @@ class OffsetJudge:
         return store.record is None or store.record.state == "seeded"
 
     def _learning_progress(self) -> Dict:
-        """``{"span_s", "n", "target_s"}`` of the learn under way."""
+        """``{"span_s", "n", "target_s", "blocked"}`` of the learn under way."""
         est = self._t6_learner.estimate()
         return {
             "span_s": round(float(est.span_s), 1) if est is not None else 0.0,
             "n": int(est.n) if est is not None else 0,
             "target_s": self.chain_delay_learn_s,
+            "blocked": (dict(self._learn_blocked)
+                        if self._learn_blocked is not None else None),
         }
+
+    LEARN_BLOCKED_LOG_EVERY_S = 3600.0
+
+    def _note_learn_block_locked(self, labels, hosts, mono_now: float) -> None:
+        """Record, and log once then hourly, a learn starved of a host clock.
+
+        The learner needs a host reading within its tracker's bound to pair
+        with T6.  A station whose tightest host clock is looser (internet
+        NTP: T2 at 15-18 ms) keeps its seed for good, which is correct, but
+        it must say why rather than sit at n 0 in silence.
+        """
+        if (self._t6_learner is None or not self._chain_learning_active()
+                or not any(r.tier == "T6" for r in labels)):
+            self._learn_blocked = None
+            return
+        limit = float(self._t6_learner.max_host_sigma_ns)
+        host = (min(hosts, key=lambda r: float(r.sigma_ns))
+                if hosts else None)
+        if host is not None and float(host.sigma_ns) <= limit:
+            self._learn_blocked = None
+            self._learn_blocked_logged_mono = None
+            return
+        self._learn_blocked = {
+            "reason": "no host reference within the tracker's bound",
+            "host_tier": host.tier if host is not None else None,
+            "host_sigma_ns": float(host.sigma_ns) if host is not None else None,
+            "max_host_sigma_ns": limit,
+        }
+        last = self._learn_blocked_logged_mono
+        if last is not None and mono_now - last < self.LEARN_BLOCKED_LOG_EVERY_S:
+            return
+        self._learn_blocked_logged_mono = mono_now
+        logger.warning(
+            "OffsetJudge T6 chain-delay learn BLOCKED: the tightest host "
+            "clock is "
+            + (f"{host.tier} at sigma {float(host.sigma_ns)/1e6:.2f} ms"
+               if host is not None else "absent")
+            + f", looser than the {limit/1e6:.2f} ms the learner needs; "
+            "the record stays as it is.  A disciplined LAN time source "
+            "(GPS-locked NTP) lets it learn.")
 
     def _maybe_confirm_learn_locked(self) -> None:
         """Write the learned chain delay once a full learn completes.
@@ -3377,6 +3424,7 @@ class OffsetJudge:
             host = min(hosts, key=lambda r: float(r.sigma_ns))
             for label in labels:
                 self.observe_label_plane(label, host)
+        self._note_learn_block_locked(labels, hosts, mono_now)
         if self._t6_learner is not None:
             # Every tick, paired or not: the change alarm's sustain and
             # return timers must see a witness that has gone quiet.  The
