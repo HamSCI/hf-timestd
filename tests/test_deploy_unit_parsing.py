@@ -172,3 +172,13 @@ def test_a_missing_unit_is_recognised_as_missing():
     assert check_units(
         ["definitely-not-a-real-unit.service"]
     )["definitely-not-a-real-unit.service"] == "missing"
+
+
+def test_events_timer_is_listed_and_its_pass_skips_without_config():
+    """Every station runs the event keeper's timer; a station with no
+    events.toml must skip the pass, not log a failed unit every 5 minutes."""
+    import tomllib
+    units = tomllib.loads((REPO / "deploy.toml").read_text())["systemd"]["units"]
+    assert "timestd-events.timer" in units
+    service = (REPO / "systemd" / "timestd-events.service").read_text()
+    assert "ConditionPathExists=/etc/hf-timestd/events.toml" in service

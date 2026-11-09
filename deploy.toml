@@ -164,6 +164,10 @@ units = [
     # timestd-hfps-watchdog.timer` and delete the two files.
     "timestd-hpps-watchdog.timer",
     "timestd-prune.timer",
+    # Event-response keeper: listed so every station runs it.  The service
+    # skips (ConditionPathExists) on a station with no events.toml, so the
+    # timer stays quiet until that station is enrolled with wd30.
+    "timestd-events.timer",
     # GRAPE (grape-daily.timer, grape-upload-retry.timer) MOVED to
     # hamsci-physics in the 2026-08-24 split, along with its upload pipeline
     # block; grape-daily keeps its operator-facing unit name there.

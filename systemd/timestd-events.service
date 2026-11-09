@@ -3,6 +3,9 @@ Description=hf-timestd event-response keeper pass (ship ordered windows, delete 
 Documentation=https://github.com/HamSCI/hf-timestd
 Wants=network-online.target
 After=network-online.target local-fs.target
+# A station with no keeper config skips the pass cleanly, so the timer can be
+# enabled fleet-wide; it starts shipping once events.toml is written.
+ConditionPathExists=/etc/hf-timestd/events.toml
 
 [Service]
 Type=oneshot
