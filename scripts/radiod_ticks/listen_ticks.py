@@ -26,7 +26,9 @@ dropped.  At most two minutes are buffered per channel.  A minute is written
 once the next minute is 5 s old or its second 59 has arrived (so a reordered
 second 59 still lands in it), when the socket goes quiet, and at exit.
 Writing merges with any file already there for that channel and minute (new
-rows win), so a restart or a quiet-socket flush loses nothing.  A report more
+rows win), so a restart or a quiet-socket flush loses nothing.  An existing
+file that cannot be read (truncated, empty, junk) is renamed to
+`NAME.corrupt-<UTC stamp>` and the minute is written fresh; the listener goes on.  A report more
 than one minute behind the newest goes to the index only, marked "late".
 """
 import argparse
@@ -70,28 +72,31 @@ def _second_of_minute(second_utc_ns: int) -> int:
 
 
 def _rows_from_npz(path):
-    """Rebuild per-second decoded dicts from a minute file this logger wrote."""
+    """Rebuild per-second decoded dicts from a minute file this logger wrote.
+
+    Returns (rows, ok); ok is False when the file cannot be read."""
     rows = {}
     try:
-        z = np.load(path)
-        secs = z["second_utc"]
-        for i, s in enumerate(secs):
-            d = {"tick_second_utc": int(s), "tick_flags": int(z["flags"][i]),
-                 "tick_step": int(z["step"][i]), "tick_window_start": int(z["window_start"][i])}
-            for k, name in enumerate(TEMPLATES):
-                n = int(z["nprofile"][i, k])
-                if n:
-                    d[f"tick_profile_{name}"] = z["profiles"][i, k, :n].copy()
-            if not np.isnan(z["envelope"][i]).all():
-                d["tick_envelope"] = z["envelope"][i].copy()
-            if not np.isnan(z["markers"][i]).all():
-                d["tick_markers"] = z["markers"][i].copy()
-            if not np.isnan(z["peaks"][i]).all():
-                d["tick_peaks"] = z["peaks"][i].copy()
-            rows[int(s)] = d
-    except (OSError, ValueError, KeyError) as e:
-        print(f"listen_ticks: cannot merge {path}: {e}", file=sys.stderr, flush=True)
-    return rows
+        with np.load(path) as z:
+            secs = z["second_utc"]
+            for i, s in enumerate(secs):
+                d = {"tick_second_utc": int(s), "tick_flags": int(z["flags"][i]),
+                     "tick_step": int(z["step"][i]), "tick_window_start": int(z["window_start"][i])}
+                for k, name in enumerate(TEMPLATES):
+                    n = int(z["nprofile"][i, k])
+                    if n:
+                        d[f"tick_profile_{name}"] = z["profiles"][i, k, :n].copy()
+                if not np.isnan(z["envelope"][i]).all():
+                    d["tick_envelope"] = z["envelope"][i].copy()
+                if not np.isnan(z["markers"][i]).all():
+                    d["tick_markers"] = z["markers"][i].copy()
+                if not np.isnan(z["peaks"][i]).all():
+                    d["tick_peaks"] = z["peaks"][i].copy()
+                rows[int(s)] = d
+    except Exception as e:      # BadZipFile, EOFError, OSError, ValueError, KeyError, ...
+        print(f"listen_ticks: cannot read {path}: {e!r}", file=sys.stderr, flush=True)
+        return {}, False
+    return rows, True
 
 
 class TickLogger:
@@ -134,7 +139,17 @@ class TickLogger:
         if not new_rows:
             return
         path = self.out / f"ticks-{ssrc}-{_stamp(minute, '%Y%m%dT%H%MZ')}.npz"
-        rows = _rows_from_npz(path) if path.exists() else {}
+        rows = {}
+        if path.exists():
+            rows, ok = _rows_from_npz(path)
+            if not ok:      # keep the unreadable file aside, never overwrite it silently
+                aside = path.with_name(f"{path.name}.corrupt-{time.strftime('%Y%m%dT%H%M%S', time.gmtime())}")
+                try:
+                    path.replace(aside)
+                    print(f"listen_ticks: moved unreadable {path.name} to {aside.name}",
+                          file=self.err, flush=True)
+                except OSError as e:
+                    print(f"listen_ticks: cannot move {path}: {e}", file=self.err, flush=True)
         rows.update(new_rows)           # new wins on duplicates
         secs = sorted(rows)
         n = len(secs)

@@ -459,3 +459,23 @@ def test_previous_minute_closes_once_next_is_aged(tmp_path):
     lg.add(tlv_ticks.decode_ticks(_at(59)))             # arrives after the close: merged
     lg.close()
     assert _seconds(tmp_path) == [58, 59]
+
+
+@pytest.mark.parametrize("junk", ["truncated", "empty", "pk_junk"])
+def test_corrupt_existing_minute_file_is_kept_aside(tmp_path, junk):
+    # a real minute file, then damaged
+    a = listen_ticks.TickLogger(tmp_path)
+    a.add(tlv_ticks.decode_ticks(_at(10)))
+    a.close()
+    f = tmp_path / "ticks-10000-20261109T1200Z.npz"
+    good = f.read_bytes()
+    f.write_bytes({"truncated": good[:len(good) // 2], "empty": b"",
+                   "pk_junk": b"PK\x03\x04" + b"\xff" * 50}[junk])
+    damaged = f.read_bytes()
+    err = open(tmp_path / "err", "w")
+    b = listen_ticks.TickLogger(tmp_path, err=err)
+    assert b.add(tlv_ticks.decode_ticks(_at(20))) is True
+    b.close()                                           # must not raise
+    assert _seconds(tmp_path) == [20]                   # fresh file, new run only
+    aside = list(tmp_path.glob("ticks-10000-20261109T1200Z.npz.corrupt-*"))
+    assert len(aside) == 1 and aside[0].read_bytes() == damaged
