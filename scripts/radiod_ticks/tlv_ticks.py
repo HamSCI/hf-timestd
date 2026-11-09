@@ -124,5 +124,8 @@ def decode_ticks(packet: bytes) -> dict:
         elif t == T_TICK_ENVELOPE:
             s = _scaled(b, ENVELOPE_LEN)
             if s is not None:
-                out["tick_envelope"] = (s[1] * s[0]).astype(np.float32)
+                if s[0] > 0 and np.isfinite(s[0]):
+                    out["tick_envelope"] = (s[1] * s[0]).astype(np.float32)
+                else:       # scale 0: incomplete report (or silence); absent, not a quiet second
+                    out["tick_envelope"] = np.full(ENVELOPE_LEN, np.nan, np.float32)
     return out

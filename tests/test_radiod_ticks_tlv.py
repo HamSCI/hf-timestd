@@ -237,7 +237,7 @@ def test_incomplete_report_nan_peaks_zero_scales():
         assert p.shape == (NPROF,) and not p.any()
     assert np.isnan(d["tick_peaks"][:, 0]).all()
     assert not np.isnan(d["tick_peaks"][:, 1]).any()
-    assert not d["tick_envelope"].any() or np.isfinite(d["tick_envelope"]).all()
+    assert d["tick_envelope"].shape == (1000,) and np.isnan(d["tick_envelope"]).all()
 
 
 def test_mask_wwv_bpm_leaves_wwvh_absent():
@@ -358,12 +358,12 @@ def test_logger_dedupes_on_ssrc_and_second(tmp_path):
 
 def test_logger_late_report_goes_to_index_only(tmp_path):
     lg = listen_ticks.TickLogger(tmp_path)
-    lg.add(tlv_ticks.decode_ticks(_at(61)))
-    lg.add(tlv_ticks.decode_ticks(_at(59)))                       # older minute, after rollover
+    lg.add(tlv_ticks.decode_ticks(_at(121)))
+    lg.add(tlv_ticks.decode_ticks(_at(59)))                       # two minutes behind
     lg.close()
     rows = _index(tmp_path)
     assert [r["late"] for r in rows] == [False, True]
-    z = np.load(tmp_path / "ticks-10000-20261109T1201Z.npz")
+    z = np.load(tmp_path / "ticks-10000-20261109T1202Z.npz")
     assert z["profiles"].shape[0] == 1
 
 
@@ -372,8 +372,9 @@ def test_logger_keeps_one_minute_per_channel(tmp_path):
     for m in range(5):
         for s in (0, 30):
             lg.add(tlv_ticks.decode_ticks(_at(60 * m + s)))
-        assert len(lg.chan[10000].rows) <= 2
-    assert len(list(tmp_path.glob("ticks-10000-*.npz"))) == 4     # the fifth still buffered
+        assert len(lg.chan[10000].open) <= 2
+    # minutes 0-3 written (each next minute is 30 s old); minute 4 still buffered
+    assert len(list(tmp_path.glob("ticks-10000-*.npz"))) == 4
 
 
 def test_logger_ignores_packets_without_a_tick_group(tmp_path):
@@ -405,3 +406,56 @@ def test_run_filters_ssrc_uses_big_buffer_and_survives_quiet(tmp_path):
     assert n == 2
     assert min(sock.sizes) >= 65536
     assert len(_index(tmp_path)) == 2 and not _index(tmp_path, 999)
+
+
+def _seconds(tmp_path, stamp="20261109T1200Z", ssrc=10000):
+    z = np.load(tmp_path / f"ticks-{ssrc}-{stamp}.npz")
+    return [(int(x) - T0) // 10**9 for x in z["second_utc"]]
+
+
+def test_restart_mid_minute_keeps_both_runs(tmp_path):
+    a = listen_ticks.TickLogger(tmp_path)
+    a.add(tlv_ticks.decode_ticks(_at(10)))
+    a.add(tlv_ticks.decode_ticks(_at(11)))
+    a.close()                                           # run one ends mid-minute
+    b = listen_ticks.TickLogger(tmp_path)
+    b.add(tlv_ticks.decode_ticks(_at(11, hexpkt=MASK5_HEX)))   # duplicate second: new wins
+    b.add(tlv_ticks.decode_ticks(_at(12)))
+    b.close()
+    assert _seconds(tmp_path) == [10, 11, 12]
+    z = np.load(tmp_path / "ticks-10000-20261109T1200Z.npz")
+    assert list(z["nprofile"][1]) == [NPROF, 0, NPROF]  # second 11 is the newer packet
+    assert list(z["nprofile"][0]) == [NPROF, NPROF, 0]
+    assert np.abs(z["profiles"][0, 1] - _expect_profile(1)).max() <= _tol(1)
+
+
+def test_quiet_flush_then_same_minute_report_keeps_both(tmp_path):
+    lg = listen_ticks.TickLogger(tmp_path)
+    lg.add(tlv_ticks.decode_ticks(_at(10)))
+    lg.flush()
+    lg.add(tlv_ticks.decode_ticks(_at(20)))
+    lg.close()
+    assert _seconds(tmp_path) == [10, 20]
+
+
+def test_reordered_second_59_lands_in_its_minute(tmp_path):
+    lg = listen_ticks.TickLogger(tmp_path)
+    lg.add(tlv_ticks.decode_ticks(_at(58)))
+    lg.add(tlv_ticks.decode_ticks(_at(60)))             # next minute first
+    assert not (tmp_path / "ticks-10000-20261109T1200Z.npz").exists()   # held back
+    lg.add(tlv_ticks.decode_ticks(_at(59)))             # then the straggler
+    assert _seconds(tmp_path) == [58, 59]
+    lg.close()
+    assert _seconds(tmp_path, "20261109T1201Z") == [60]
+    assert [r["late"] for r in _index(tmp_path)] == [False, False, False]
+
+
+def test_previous_minute_closes_once_next_is_aged(tmp_path):
+    lg = listen_ticks.TickLogger(tmp_path)
+    lg.add(tlv_ticks.decode_ticks(_at(58)))
+    lg.add(tlv_ticks.decode_ticks(_at(60)))
+    lg.add(tlv_ticks.decode_ticks(_at(66)))             # next minute is 6 s old
+    assert _seconds(tmp_path) == [58]
+    lg.add(tlv_ticks.decode_ticks(_at(59)))             # arrives after the close: merged
+    lg.close()
+    assert _seconds(tmp_path) == [58, 59]

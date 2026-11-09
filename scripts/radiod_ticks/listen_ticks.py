@@ -22,11 +22,12 @@ destination.  Per channel and UTC minute the logger writes
       one row per second, no arrays, written as the report arrives
 
 Duplicates (same ssrc and tick_second_utc, e.g. a second destination) are
-dropped.  One minute is buffered per channel; it is written when a report
-for a later minute arrives, when the socket goes quiet, and at exit.  A
-report for an already written minute goes to the index only, marked
-"late".  A minute interrupted by a restart is rewritten by whatever the
-new run sees of it.
+dropped.  At most two minutes are buffered per channel.  A minute is written
+once the next minute is 5 s old or its second 59 has arrived (so a reordered
+second 59 still lands in it), when the socket goes quiet, and at exit.
+Writing merges with any file already there for that channel and minute (new
+rows win), so a restart or a quiet-socket flush loses nothing.  A report more
+than one minute behind the newest goes to the index only, marked "late".
 """
 import argparse
 import json
@@ -54,12 +55,43 @@ def _stamp(minute: int, fmt: str) -> str:
     return time.strftime(fmt, time.gmtime(minute * 60))
 
 
+GRACE_S = 5     # a minute stays open until the next one is this many seconds old
+
+
 class _Channel:
     def __init__(self):
-        self.minute = None
-        self.rows = {}          # second_utc_ns -> decoded dict, current minute only
+        self.open = {}          # minute -> {second_utc_ns: decoded dict}; at most two
+        self.newest = None      # newest minute seen
         self.seen = {}          # second_utc_ns -> None, insertion-ordered recent memory
-        self.written = set()    # minutes already on disk this run (bounded)
+
+
+def _second_of_minute(second_utc_ns: int) -> int:
+    return ((second_utc_ns + tlv_ticks.GPS_TO_UNIX_NS) // NS) % 60
+
+
+def _rows_from_npz(path):
+    """Rebuild per-second decoded dicts from a minute file this logger wrote."""
+    rows = {}
+    try:
+        z = np.load(path)
+        secs = z["second_utc"]
+        for i, s in enumerate(secs):
+            d = {"tick_second_utc": int(s), "tick_flags": int(z["flags"][i]),
+                 "tick_step": int(z["step"][i]), "tick_window_start": int(z["window_start"][i])}
+            for k, name in enumerate(TEMPLATES):
+                n = int(z["nprofile"][i, k])
+                if n:
+                    d[f"tick_profile_{name}"] = z["profiles"][i, k, :n].copy()
+            if not np.isnan(z["envelope"][i]).all():
+                d["tick_envelope"] = z["envelope"][i].copy()
+            if not np.isnan(z["markers"][i]).all():
+                d["tick_markers"] = z["markers"][i].copy()
+            if not np.isnan(z["peaks"][i]).all():
+                d["tick_peaks"] = z["peaks"][i].copy()
+            rows[int(s)] = d
+    except (OSError, ValueError, KeyError) as e:
+        print(f"listen_ticks: cannot merge {path}: {e}", file=sys.stderr, flush=True)
+    return rows
 
 
 class TickLogger:
@@ -98,15 +130,18 @@ class TickLogger:
         f.write(json.dumps(row) + "\n")
 
     # -- npz -----------------------------------------------------------
-    def _write_minute(self, ssrc, ch):
-        if not ch.rows:
+    def _write_minute(self, ssrc, minute, new_rows):
+        if not new_rows:
             return
-        secs = sorted(ch.rows)
+        path = self.out / f"ticks-{ssrc}-{_stamp(minute, '%Y%m%dT%H%MZ')}.npz"
+        rows = _rows_from_npz(path) if path.exists() else {}
+        rows.update(new_rows)           # new wins on duplicates
+        secs = sorted(rows)
         n = len(secs)
         npro = np.zeros((n, 3), np.int32)
         for i, s in enumerate(secs):
             for k, name in enumerate(TEMPLATES):
-                p = ch.rows[s].get(f"tick_profile_{name}")
+                p = rows[s].get(f"tick_profile_{name}")
                 npro[i, k] = 0 if p is None else len(p)
         width = int(npro.max()) if npro.size else 0
         prof = np.zeros((n, 3, width), np.complex64)
@@ -117,7 +152,7 @@ class TickLogger:
         step = np.zeros(n, np.int32)
         wstart = np.zeros(n, np.int64)
         for i, s in enumerate(secs):
-            d = ch.rows[s]
+            d = rows[s]
             for k, name in enumerate(TEMPLATES):
                 p = d.get(f"tick_profile_{name}")
                 if p is not None:
@@ -131,7 +166,6 @@ class TickLogger:
             flags[i] = d.get("tick_flags", 0)
             step[i] = d.get("tick_step", 0)
             wstart[i] = d.get("tick_window_start", 0)
-        path = self.out / f"ticks-{ssrc}-{_stamp(ch.minute, '%Y%m%dT%H%MZ')}.npz"
         tmp = path.with_suffix(".tmp")
         try:
             with open(tmp, "wb") as f:
@@ -141,10 +175,6 @@ class TickLogger:
             tmp.replace(path)
         except OSError as e:
             print(f"listen_ticks: write {path}: {e}", file=self.err, flush=True)
-        ch.written.add(ch.minute)
-        if len(ch.written) > 10:
-            ch.written.discard(min(ch.written))
-        ch.rows = {}
 
     # -- input ---------------------------------------------------------
     def add(self, d: dict, group=None, now=None) -> bool:
@@ -161,26 +191,37 @@ class TickLogger:
             ch.seen.pop(next(iter(ch.seen)))
         minute = _minute_of(sec)
         now = time.time() if now is None else now
-        late = False
-        if ch.minute is None:
-            ch.minute = minute
-        elif minute > ch.minute:
-            self._write_minute(ssrc, ch)
-            ch.minute = minute
-        elif minute < ch.minute:
-            late = True
+        if ch.newest is None or minute > ch.newest:
+            ch.newest = minute
+        late = minute < ch.newest - 1       # older than the minute held back
         if not late:
-            ch.rows[sec] = d
+            ch.open.setdefault(minute, {})[sec] = d
+            self._close_settled(ssrc, ch)
         try:
             self._index_row(ssrc, d, minute, late, group, now)
         except OSError as e:
             print(f"listen_ticks: index: {e}", file=self.err, flush=True)
         return True
 
+    def _close_settled(self, ssrc, ch):
+        """Write minutes that can take no more: older than the previous one, or the
+        previous one once second 59 is in or the newest minute is GRACE_S old."""
+        cur = ch.open.get(ch.newest, {})
+        aged = any(_second_of_minute(x) >= GRACE_S for x in cur)
+        for m in sorted(ch.open):
+            if m == ch.newest:
+                continue
+            done = m < ch.newest - 1 or aged or any(
+                _second_of_minute(x) == 59 for x in ch.open[m])
+            if done:
+                self._write_minute(ssrc, m, ch.open.pop(m))
+
     def flush(self):
         """Write every buffered minute (socket quiet, or exiting)."""
         for ssrc, ch in self.chan.items():
-            self._write_minute(ssrc, ch)
+            for m in sorted(ch.open):
+                self._write_minute(ssrc, m, ch.open[m])
+            ch.open = {}
 
     def close(self):
         self.flush()
