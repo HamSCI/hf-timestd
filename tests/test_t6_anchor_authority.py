@@ -456,3 +456,48 @@ class TestEdgeSigma:
         self._feed(auth, [0.27, 0.23] * 4)
         auth.on_mf_unlock()
         assert auth.edge_sigma_ns is None
+
+
+class TestCounterStep:
+    """A suspected step in the input counter withdraws the anchor at once.
+
+    B4 2026-11-10 01:36Z: a Proxmox snapshot froze the VM and radiod lost
+    ~116 ms of samples without a USB error.  The anchor then labelled every
+    sample 116 ms wrong, yet T6 stayed AUTHORITATIVE for ~80 s and coasted
+    DEGRADED for ~30 s more: the coast assumes the counter is continuous,
+    which is the very thing a sample loss breaks.
+    """
+
+    def test_counter_step_from_authoritative_unlocks_and_drops_anchor(self, auth):
+        e = est()
+        auth.on_fine_estimate(e, phase(e), SECOND)
+        d = auth.on_counter_step()
+        assert d.previous_state is T6AuthorityState.AUTHORITATIVE
+        assert d.state is T6AuthorityState.UNLOCKED
+        assert d.anchor is None
+        assert d.violations == ("counter_step",)
+
+    def test_counter_step_from_degraded_unlocks_without_dwell(self, auth):
+        e = est()
+        auth.on_fine_estimate(e, phase(e), SECOND)
+        bad = est(rtp=e.edge_rtp + 500)          # edge_period violation -> DEGRADED
+        assert auth.on_fine_estimate(bad, phase(bad), SECOND + 1).state \
+            is T6AuthorityState.DEGRADED
+        d = auth.on_counter_step()
+        assert d.state is T6AuthorityState.UNLOCKED
+        assert d.anchor is None
+
+    def test_counter_step_while_acquiring_changes_nothing(self, auth):
+        d = auth.on_counter_step()
+        assert d.state is T6AuthorityState.ACQUIRING
+        assert d.previous_state is T6AuthorityState.ACQUIRING
+        assert d.anchor is None
+
+    def test_clean_estimate_after_counter_step_reacquires(self, auth):
+        e = est()
+        auth.on_fine_estimate(e, phase(e), SECOND)
+        auth.on_counter_step()
+        e2 = est(rtp=e.edge_rtp + SR)
+        d = auth.on_fine_estimate(e2, phase(e2), SECOND + 1)
+        assert d.state is T6AuthorityState.AUTHORITATIVE
+        assert d.anchor is not None

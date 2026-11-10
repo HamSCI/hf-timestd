@@ -4173,6 +4173,37 @@ class CoreRecorderV2:
             label_drift_samples=_audited_label_drift(cal),
         )
 
+    def _t6_check_counter_step(self) -> None:
+        """Withdraw the T6 anchor the moment the calibrator suspects a step.
+
+        A step in the input counter (samples lost or added) makes the
+        anchor label every later sample wrong by the step.  The calibrator
+        holds its lock until the step is confirmed, which takes one or two
+        60 s folds; the anchor must not be vouched for meanwhile.  Edge-
+        triggered: one decision as suspicion rises, so a clean estimate can
+        re-acquire while the lock waits for confirmation.
+
+        B4 2026-11-10 01:36Z: a Proxmox snapshot froze the VM, radiod lost
+        ~116 ms of samples with no USB error, and T6 published the stale
+        anchor for ~110 s — AUTHORITATIVE, then coasting DEGRADED.
+        """
+        cal = getattr(self, '_t6_calibrator', None)
+        authority = getattr(self, '_t6_authority', None)
+        if cal is None or authority is None:
+            return
+        suspected = getattr(cal, 'step_suspected', False) is True
+        was = getattr(self, '_t6_step_suspected', False)
+        self._t6_step_suspected = suspected
+        if suspected and not was:
+            logger.critical(
+                "T6 COUNTER STEP SUSPECTED: the pilot edge has left the lock "
+                "in force, so the input counter moved (samples lost or "
+                "added).  Withdrawing the T6 anchor now; the T5/T4 cascade "
+                "carries the station until the fold confirms the step and "
+                "T6 re-acquires.  Look for a radiod STEPPED line or a VM "
+                "pause near this time.")
+            self._t6_apply_authority_decision(authority.on_counter_step())
+
     def _t6_apply_authority_decision(self, decision) -> None:
         """Install/invalidate the T6 anchor per the authority decision.
         Every state transition is loud (expose-don't-correct)."""
@@ -6222,6 +6253,7 @@ class CoreRecorderV2:
             authority = getattr(self, '_t6_authority', None)
             if authority is not None:
                 try:
+                    self._t6_check_counter_step()
                     stale = authority.on_tick()
                     if stale is not None:
                         self._t6_apply_authority_decision(stale)
@@ -6329,6 +6361,12 @@ class CoreRecorderV2:
                 # boot), chrony adjudicates over many samples, and before
                 # this fix the window did not exist only because the gate
                 # was latching shut on a walk that had captured nothing.
+                # A suspected counter step leaves the lock where the edge
+                # used to be.  Disambiguating that lock now would capture
+                # the stale anchor all over again; wait until the fold
+                # confirms the step and re-homes the lock (or clears it).
+                if getattr(self._t6_calibrator, 'step_suspected', False) is True:
+                    return
                 if (self._t6_last_disambig_walk_wall is not None
                         and (time.monotonic()
                              - self._t6_last_disambig_walk_wall)

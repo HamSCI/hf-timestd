@@ -139,6 +139,14 @@ COSTAS_RELOCK_S = 0.5           # φ quiescent this long (s) before re-lock.
 # ~10-15 s Costas excursions, so excursion phantoms can never be mistaken
 # for a step.
 STEP_CONFIRM_EDGES = 60
+# A step is SUSPECTED long before it is confirmed.  Five off-position edges
+# a second apart, agreeing on one new position with no edge at the old one,
+# cannot be a phantom burst (an accepted on-position edge clears the run);
+# they mean the counter moved under the lock — samples were lost or added.
+# The lock is held until the step is confirmed, but the anchor it carries
+# must not be vouched for meanwhile (B4 2026-11-10: a VM snapshot cost
+# radiod ~116 ms of samples and T6 published the stale anchor ~110 s).
+STEP_SUSPECT_EDGES = 5
 
 
 class BpskPpsCalibratorMF:
@@ -737,6 +745,20 @@ class BpskPpsCalibratorMF:
                 f"dphase_ema={self._dphase_ema:.5f} — edge acceptance resumed"
             )
 
+    @property
+    def step_suspected(self) -> bool:
+        """Evidence that the input counter moved under the lock in force.
+
+        True while a coarse fold places the edge away from the lock and no
+        agreeing fold has yet confirmed it, or while at least
+        ``STEP_SUSPECT_EDGES`` consecutive off-position edges agree on one new
+        position.  The lock itself still waits for confirmation; this says
+        only that the anchor built on it can no longer be trusted.
+        """
+        return bool(self._acquired and (
+            self._fold_step_estimate is not None
+            or self._step_candidate_count >= STEP_SUSPECT_EDGES))
+
     def _note_step_candidate(self, edge_rtp_int: int) -> bool:
         """Track a run of off-position edges to tell a genuine chain-delay
         step from a transient phantom burst (TSL3 displaced-reference fix).
@@ -1118,8 +1140,10 @@ class BpskPpsCalibratorMF:
                     # together).  A per-edge re-home would move only the
                     # reference, leave the fold's chain delay behind, and
                     # make every later edge look off-position again.
-                    stepped = (self._fold_ref is None
-                               and self._note_step_candidate(edge_rtp_int))
+                    # The run is tracked either way: it is also the early
+                    # evidence behind ``step_suspected``.
+                    run_done = self._note_step_candidate(edge_rtp_int)
+                    stepped = self._fold_ref is None and run_done
                     if debug_active:
                         self._debug_peaks.append((
                             batch_idx, edge_rtp_int, edge_rtp_frac,

@@ -501,6 +501,21 @@ class T6AnchorAuthority:
     def on_mf_unlock(self) -> T6AnchorDecision:
         return self._unlock(self._state, ("mf_unlock",))
 
+    def on_counter_step(self) -> T6AnchorDecision:
+        """The calibrator suspects the input counter moved under the lock.
+
+        An anchor maps a counter value to UTC; once samples are lost or
+        added, every later label it gives is wrong by the step.  So the
+        anchor goes at once — no DEGRADED dwell, no coast, since coasting
+        assumes the very counter continuity the step broke.  A clean fine
+        estimate re-acquires as after any unlock.
+        """
+        if self._state in (T6AuthorityState.AUTHORITATIVE,
+                           T6AuthorityState.DEGRADED):
+            return self._unlock(self._state, ("counter_step",))
+        return T6AnchorDecision(self._state, self._state, self._anchor,
+                                ("counter_step",))
+
     def _unlock(self, prev: T6AuthorityState, violations: tuple) -> T6AnchorDecision:
         self._state = T6AuthorityState.UNLOCKED
         self._anchor = None

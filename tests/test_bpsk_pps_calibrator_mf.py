@@ -375,3 +375,56 @@ class TestMagnitudeCorrelation:
         assert err < 2.0, \
             f"carrier_hz={carrier_hz} recovered={result.chain_delay_samples} "\
             f"injected={injected} err={err}"
+
+
+class TestCounterStepSuspected:
+    """A loss of input samples moves every later edge earlier in the counter.
+
+    The calibrator must say so promptly (``step_suspected``) while still
+    holding its lock until the step is confirmed, so the recorder can
+    withdraw the anchor at once.  B4 2026-11-10: a VM snapshot cost radiod
+    ~116 ms of samples, and T6 published the stale anchor for ~110 s.
+    """
+
+    LOSS = 11_150   # ~116 ms at 96 kHz
+
+    def _locked(self):
+        # Production shape: the 60 s coarse fold has locked and owns step
+        # confirmation, so only the per-edge evidence can speak within seconds.
+        cal = BpskPpsCalibratorMF(
+            sample_rate=SR, consecutive_required=5, edge_tolerance_samples=20,
+            fold_seconds=60,
+        )
+        sig = _make_bpsk_signal(duration_s=95.0, edge_offset_samples=1234.0,
+                                noise_std=0.05)
+        n = int(75 * SR)
+        _feed_in_batches(cal, sig[:n])
+        assert cal._acquired
+        assert cal._fold_ref is not None, "the coarse fold never locked"
+        return cal, sig, n
+
+    def test_clean_stream_never_suspects_a_step(self):
+        cal, sig, n = self._locked()
+        rtp = n
+        for i in range(n, len(sig), 480):
+            cal.process_samples(sig[i:i + 480], rtp & 0xFFFFFFFF)
+            rtp += 480
+            assert not cal.step_suspected
+
+    def test_sample_loss_raises_suspicion_within_seconds_and_holds_lock(self):
+        cal, sig, n = self._locked()
+        before = cal._chain_delay_samples
+        # The counter skips nothing; the samples are simply gone.
+        rest = sig[n + self.LOSS:]
+        rtp = n
+        suspected_after = None
+        for i in range(0, len(rest), 480):
+            cal.process_samples(rest[i:i + 480], rtp & 0xFFFFFFFF)
+            rtp += 480
+            if cal.step_suspected:
+                suspected_after = (i + 480) / SR
+                break
+        assert suspected_after is not None, "a 116 ms loss never raised suspicion"
+        assert suspected_after <= 8.0, f"suspicion took {suspected_after:.1f} s"
+        # Suspicion alone does not move the lock: re-homing still needs confirmation.
+        assert _modular_distance(cal._chain_delay_samples, before, SR) < 1.0
