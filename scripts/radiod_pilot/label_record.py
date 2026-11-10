@@ -366,6 +366,7 @@ def record(a) -> int:
           f"{pilot_group}; window {iso(start_ns)} + {a.seconds} s", file=log, flush=True)
 
     chan_status = None
+    chan_full = {}
     anchors, reports, statuses = [], [], []
     data_sock = None
     data_dest = None
@@ -403,12 +404,19 @@ def record(a) -> int:
                         reports.append(d)
                     if d.get("ssrc") == a.channel and all(
                             k in d for k in ("input_epoch", "anchor_rtp", "anchor_input_sample")):
+                        # A short status updates the anchor; fields only a full one carries
+                        # (encoding, data group, filter length) persist from the last full one
+                        if "output_encoding" in d:
+                            chan_full = d
+                        d = {**chan_full, **d}
                         chan_status = d
                         statuses.append(d)
                         if t_begin <= d["received_unix"] <= t_end:
                             anchors.append((d["input_epoch"], d["anchor_rtp"],
                                             d["anchor_input_sample"]))
-                        if data_sock is None:
+                        # radiod's periodic short status carries the anchor but not the
+                        # encoding or data group; only a full status (a poll reply) does
+                        if data_sock is None and "output_encoding" in d:
                             if d.get("output_encoding") != ENC_F32LE or d.get("output_channels") != 2:
                                 print(f"label_record: channel encoding {d.get('output_encoding')} "
                                       f"channels {d.get('output_channels')}; need F32LE IQ",
