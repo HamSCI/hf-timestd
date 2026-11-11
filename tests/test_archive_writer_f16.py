@@ -98,3 +98,16 @@ def test_f16_check_lands_in_sidecar(tmp_path):
 def test_unknown_archive_dtype_rejected(tmp_path):
     with pytest.raises(ValueError, match="archive_dtype"):
         _writer(tmp_path, archive_dtype="float16")
+
+
+def test_silent_chunk_sidecar_is_strict_json(tmp_path):
+    w = _writer(tmp_path, compression="zstd", archive_dtype="f16")
+    d, b, _ = _flush(w, np.zeros(w.samples_per_chunk, dtype=np.complex64))
+
+    def refuse(name):
+        raise AssertionError(f"non-JSON constant {name}")
+
+    side = json.loads((d / f"{b}.json").read_text(), parse_constant=refuse)
+    assert side["dtype"] == "complex-f16"
+    assert side["f16_check"]["err_over_floor_db_max"] is None
+    assert (d / f"{b}.bin.zst").exists()

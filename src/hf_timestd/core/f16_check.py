@@ -21,10 +21,17 @@ _CARRIER_HZ = 20.0
 _CARRIER_RATE_HZ = 10
 
 
+def _finite(v):
+    """A float, or None (JSON null) when v is NaN or infinite."""
+    v = float(v)
+    return v if np.isfinite(v) else None
+
+
 def measure(x: np.ndarray, y: np.ndarray, sample_rate: int) -> dict:
     """Compare stored samples ``y`` against the original ``x``.
 
-    Uses the first 60 s (or all of a shorter chunk).
+    Uses the first 60 s (or all of a shorter chunk).  A metric that is not
+    finite (silent or NaN chunk) comes back as None.
     """
     n = min(len(x), len(y), int(sample_rate) * 60)
     xs = np.asarray(x[:n], dtype=np.complex128)
@@ -38,18 +45,21 @@ def measure(x: np.ndarray, y: np.ndarray, sample_rate: int) -> dict:
                          return_onesided=False, scaling="density")
     passband = np.abs(fx) < _PASSBAND_HZ
     carrier = np.abs(fx) < _CARRIER_HZ
-    floor = np.median(px[passband & ~carrier])
-    with np.errstate(divide="ignore"):
-        err_db = float(np.max(10.0 * np.log10(pe[passband] / floor)))
+    with np.errstate(all="ignore"):
+        floor = np.median(px[passband & ~carrier])
+        if np.isfinite(floor) and floor > 0:
+            err_db = _finite(np.max(10.0 * np.log10(pe[passband] / floor)))
+        else:
+            err_db = None
 
     blk = max(1, int(sample_rate) // _CARRIER_RATE_HZ)
     nb = n // blk * blk
+    dphi_mrad = None
     if nb:
-        cx = xs[:nb].reshape(-1, blk).mean(axis=1)
-        cy = ys[:nb].reshape(-1, blk).mean(axis=1)
-        dphi_mrad = float(1000.0 * np.sqrt(np.mean(np.angle(cy * np.conj(cx)) ** 2)))
-    else:
-        dphi_mrad = 0.0
+        with np.errstate(all="ignore"):
+            cx = xs[:nb].reshape(-1, blk).mean(axis=1)
+            cy = ys[:nb].reshape(-1, blk).mean(axis=1)
+            dphi_mrad = _finite(1000.0 * np.sqrt(np.mean(np.angle(cy * np.conj(cx)) ** 2)))
 
     return {
         "err_over_floor_db_max": err_db,

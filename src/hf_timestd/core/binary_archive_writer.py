@@ -39,7 +39,7 @@ from typing import Optional, Dict, Any, List
 from dataclasses import dataclass, field
 
 from . import f16_check
-from .iq_codec import DTYPE_F16, F16_SCALE, decode_iq, encode_f16
+from .iq_codec import DTYPE_F16, F16_SCALE, bytes_per_sample, decode_iq, encode_f16
 
 logger = logging.getLogger(__name__)
 
@@ -1322,7 +1322,7 @@ class BinaryArchiveWriter:
             dtype_name = 'complex64'
             f16_extra: Dict[str, Any] = {}
             if compression == 'zstd' and self.config.archive_dtype == 'f16':
-                chunk = np.asarray(buffer.samples[:actual_samples])
+                chunk = buffer.samples[:actual_samples]
                 raw_data = encode_f16(chunk)
                 if raw_data is None:
                     f16_extra['f16_fallback'] = 'overflow'
@@ -1335,9 +1335,12 @@ class BinaryArchiveWriter:
                     f16_extra['scale'] = F16_SCALE
                     if self.config.f16_check and actual_samples > 0:
                         try:
+                            # Slice first: the check reads only the first minute.
+                            n = min(actual_samples, int(self.config.sample_rate) * 60)
                             f16_extra['f16_check'] = f16_check.measure(
-                                chunk,
-                                decode_iq(raw_data, DTYPE_F16, F16_SCALE),
+                                np.asarray(chunk[:n]),
+                                decode_iq(raw_data[:n * bytes_per_sample(DTYPE_F16)],
+                                          DTYPE_F16, F16_SCALE),
                                 self.config.sample_rate)
                         except Exception as e:  # the check never blocks the write
                             logger.warning(f"f16_check failed for chunk {buffer.minute_boundary}: {e}")
