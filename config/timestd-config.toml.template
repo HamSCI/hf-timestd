@@ -33,6 +33,10 @@ engine = "radiod"
 # removed — it defaulted to /tmp and silently broke real recorders.
 production_data_root = "/var/lib/timestd"
 
+# Archive sample format: "complex64" (default) or "f16" (half the bytes, zstd
+# only).  "f16" is on trial at B4 and ND; leave "complex64" on other stations.
+archive_dtype = "complex64"
+
 # Recording parameters
 recording_interval = 60
 continuous = true

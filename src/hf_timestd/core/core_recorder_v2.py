@@ -413,6 +413,9 @@ class CoreRecorderV2:
         # Determine engine type: check ka9q.source first, then recorder.engine
         ka9q_section = config.get('ka9q', {})
         self.recorder_config = config.get('recorder', {})
+        # Fail at startup, not at the first chunk flush, on a bad archive_dtype.
+        from .binary_archive_writer import validate_archive_dtype
+        validate_archive_dtype(self.recorder_config.get('archive_dtype', 'complex64'))
         self.engine_type = (
             ka9q_section.get('source')
             or self.recorder_config.get('engine', 'radiod')
@@ -1698,6 +1701,7 @@ class CoreRecorderV2:
                         if self.recorder_config.get('hot_buffer_root') else None,
                     compression=self.recorder_config.get('compression', 'none'),
                     compression_level=self.recorder_config.get('compression_level', 3),
+                    archive_dtype=self.recorder_config.get('archive_dtype', 'complex64'),
                     file_duration_sec=self.recorder_config.get('file_duration_sec', 600),
                     use_digital_rf=self.recorder_config.get('save_digital_rf', False),
                     destination=self.data_destination,

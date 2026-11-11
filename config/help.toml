@@ -103,6 +103,17 @@ elsewhere."""
 example        = "/mnt/timestd-archive"
 required       = false
 
+[recorder.archive_dtype]
+title          = "Archive sample format (F16 trial)"
+help           = """Sample format of the raw IQ archive.  "complex64"
+(default) stores 8 bytes per sample.  "f16" stores 4 bytes per sample at
+a fixed 2^12 scale, halving archive size; every reader still gets
+complex64.  Applies only with compression = "zstd".  Trial setting for
+B4 and ND: each chunk's sidecar records a fine-detail check
+(f16_check).  Leave at "complex64" elsewhere."""
+example        = "complex64"
+required       = false
+
 [recorder.blocktime_ms]
 hidden = true
 

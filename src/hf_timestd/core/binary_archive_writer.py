@@ -38,6 +38,9 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass, field
 
+from . import f16_check
+from .iq_codec import DTYPE_F16, F16_SCALE, decode_iq, encode_f16
+
 logger = logging.getLogger(__name__)
 
 #: MEASUREMENT_MODEL §3 — an adopted radiod pair this far from the mapping in
@@ -79,6 +82,19 @@ class TimingSnapshot:
         }
 
 
+ARCHIVE_DTYPES = ('complex64', 'f16')
+
+
+def validate_archive_dtype(value: Any) -> str:
+    """Return ``value`` if it names a supported archive dtype, else raise."""
+    if value not in ARCHIVE_DTYPES:
+        raise ValueError(
+            f"[recorder] archive_dtype = {value!r} is not supported; "
+            f"use one of {', '.join(repr(v) for v in ARCHIVE_DTYPES)}"
+        )
+    return value
+
+
 @dataclass
 class BinaryArchiveConfig:
     """Configuration for binary archive writer."""
@@ -106,6 +122,17 @@ class BinaryArchiveConfig:
     # See docs/design/ARCHIVE_BOUNDARY_ON_THE_EDGE.md §5.
     boundary_on_pulse: bool = False
 
+    # Archive sample format.  "complex64" (F32, default) or "f16": zstd
+    # chunks store interleaved float16 at the fixed iq_codec.F16_SCALE, half
+    # the bytes.  Other compressions ignore "f16".  Set by [recorder]
+    # archive_dtype (B4/ND trial); see docs/superpowers/specs/
+    # 2026-11-11-f16-archive-design.md.
+    archive_dtype: str = 'complex64'
+    # While F16 runs, measure the rounding's fine-detail cost on each chunk's
+    # first minute and record it in the sidecar (one Welch PSD per chunk,
+    # in the flush worker).
+    f16_check: bool = True
+
     # File duration: how many seconds of IQ data per file.
     # 600s (10 minutes) reduces filesystem overhead 10x vs 60s (1 minute),
     # improves compression ratios, and reduces GRAPE pipeline I/O.
@@ -118,6 +145,9 @@ class BinaryArchiveConfig:
     # where to look, not as ground truth - the bootstrap establishes timing from
     # the tones themselves.
     pre_roll_seconds: float = 2.0  # Start buffer 2s before minute boundary
+
+    def __post_init__(self):
+        validate_archive_dtype(self.archive_dtype)
 
 
 @dataclass
@@ -1288,7 +1318,31 @@ class BinaryArchiveWriter:
             
             # Write binary data (just the filled portion)
             actual_samples = min(buffer.write_pos, self.samples_per_chunk)
-            raw_data = buffer.samples[:actual_samples].tobytes()
+            raw_data = None
+            dtype_name = 'complex64'
+            f16_extra: Dict[str, Any] = {}
+            if compression == 'zstd' and self.config.archive_dtype == 'f16':
+                chunk = np.asarray(buffer.samples[:actual_samples])
+                raw_data = encode_f16(chunk)
+                if raw_data is None:
+                    f16_extra['f16_fallback'] = 'overflow'
+                    logger.warning(
+                        f"F16 overflow in chunk {buffer.minute_boundary} "
+                        f"({self.config.channel_name}): storing complex64"
+                    )
+                else:
+                    dtype_name = DTYPE_F16
+                    f16_extra['scale'] = F16_SCALE
+                    if self.config.f16_check and actual_samples > 0:
+                        try:
+                            f16_extra['f16_check'] = f16_check.measure(
+                                chunk,
+                                decode_iq(raw_data, DTYPE_F16, F16_SCALE),
+                                self.config.sample_rate)
+                        except Exception as e:  # the check never blocks the write
+                            logger.warning(f"f16_check failed for chunk {buffer.minute_boundary}: {e}")
+            if raw_data is None:
+                raw_data = buffer.samples[:actual_samples].tobytes()
             
             # Check disk space before writing (raw size + some overhead)
             if not self._check_disk_space(minute_dir, len(raw_data) + 10000):
@@ -1318,6 +1372,8 @@ class BinaryArchiveWriter:
                     bin_path = minute_dir / f"{buffer.minute_boundary}.bin"
                     bin_path_tmp = bin_path.with_suffix('.bin.tmp')
                     buffer.samples[:actual_samples].tofile(bin_path_tmp)
+                    dtype_name = 'complex64'   # the fallback file holds F32
+                    f16_extra = {}
             elif compression == 'lz4':
                 try:
                     import lz4.frame
@@ -1370,7 +1426,7 @@ class BinaryArchiveWriter:
                 'rtp_timesnap': (buffer.label_pair[1]
                                  if buffer.label_pair is not None
                                  else self._rtp_timesnap),
-                'dtype': 'complex64',
+                'dtype': dtype_name,
                 'byte_order': 'little',
                 'compression': compression if compression != 'none' else None,
                 'radiod_snr_db': self.config.radiod_snr_db,  # SNR from radiod
@@ -1400,6 +1456,7 @@ class BinaryArchiveWriter:
             # correction applied to this chunk's labels.
             if buffer.judge_timing is not None:
                 metadata['timing'] = buffer.judge_timing
+            metadata.update(f16_extra)
             
             # Atomic write: write to temp file, fsync, then rename
             temp_json = json_path.with_suffix('.tmp')
