@@ -1695,6 +1695,111 @@ def _handle_events(args, parser):
     return 0
 
 
+F16_ERR_LIMIT_DB = -40.0
+F16_DPHI_LIMIT_MRAD = 1.0
+
+
+def _f16_collect(data_root: Path, days: int):
+    """Tally F16 sidecars per channel over the last `days` UTC day directories."""
+    from datetime import datetime, timedelta, timezone
+    today = datetime.now(timezone.utc)
+    wanted = {(today - timedelta(days=i)).strftime('%Y%m%d') for i in range(days)}
+    channels = {}
+    for sidecar in sorted((data_root / 'raw_buffer').glob('*/*/*.json')):
+        if sidecar.parent.name not in wanted:
+            continue
+        try:
+            meta = json.loads(sidecar.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(meta, dict):
+            continue
+        ch = channels.setdefault(sidecar.parent.parent.name, {
+            'f16_chunks': 0, 'fallbacks': 0, 'not_measured': 0,
+            'worst_err_over_floor_db': None, 'worst_carrier_dphi_rms_mrad': None})
+        if meta.get('f16_fallback'):
+            ch['fallbacks'] += 1
+        if meta.get('dtype') != 'complex-f16':
+            continue
+        ch['f16_chunks'] += 1
+        chk = meta.get('f16_check') or {}
+        err = chk.get('err_over_floor_db_max')
+        dphi = chk.get('carrier_dphi_rms_mrad')
+        if err is None or dphi is None:
+            ch['not_measured'] += 1
+        if err is not None:
+            w = ch['worst_err_over_floor_db']
+            ch['worst_err_over_floor_db'] = err if w is None else max(w, err)
+        if dphi is not None:
+            w = ch['worst_carrier_dphi_rms_mrad']
+            ch['worst_carrier_dphi_rms_mrad'] = dphi if w is None else max(w, dphi)
+    return {name: ch for name, ch in channels.items() if ch['f16_chunks']}
+
+
+def _f16_verdict(ch) -> str:
+    err, dphi = ch['worst_err_over_floor_db'], ch['worst_carrier_dphi_rms_mrad']
+    if (err is not None and err > F16_ERR_LIMIT_DB) or \
+            (dphi is not None and dphi > F16_DPHI_LIMIT_MRAD):
+        return 'FAIL'
+    if ch['f16_chunks'] == ch['not_measured']:
+        return 'NOT MEASURED'
+    return 'PASS'
+
+
+def _cmd_f16_report(args) -> int:
+    """`archive f16-report`: 0 PASS, 1 FAIL (or a channel never measured),
+    2 no F16 chunks in the window."""
+    channels = _f16_collect(Path(args.data_root), args.days)
+    for ch in channels.values():
+        ch['verdict'] = _f16_verdict(ch)
+    if not channels:
+        overall, rc = 'NO F16 CHUNKS', 2
+    elif all(c['verdict'] == 'PASS' for c in channels.values()):
+        overall, rc = 'PASS', 0
+    else:
+        overall, rc = 'FAIL', 1
+    if args.json:
+        print(json.dumps({'days': args.days, 'limits': {
+            'err_over_floor_db': F16_ERR_LIMIT_DB,
+            'carrier_dphi_rms_mrad': F16_DPHI_LIMIT_MRAD},
+            'channels': channels, 'verdict': overall}, indent=2))
+        return rc
+    fmt = lambda v, f: '-' if v is None else f % v
+    print(f"F16 archive check, last {args.days} UTC day(s) "
+          f"(limits: err <= {F16_ERR_LIMIT_DB:g} dB over floor, "
+          f"dphi <= {F16_DPHI_LIMIT_MRAD:g} mrad)")
+    for name, c in sorted(channels.items()):
+        print(f"{name:<14} f16={c['f16_chunks']:<5} fallbacks={c['fallbacks']:<3} "
+              f"not_measured={c['not_measured']:<4} "
+              f"err={fmt(c['worst_err_over_floor_db'], '%.1f')} dB  "
+              f"dphi={fmt(c['worst_carrier_dphi_rms_mrad'], '%.3f')} mrad  "
+              f"{c['verdict']}")
+    print(f"Overall: {overall}")
+    return rc
+
+
+def _add_f16_report_args(p):
+    p.add_argument('--days', type=int, default=3,
+        help='Look back this many UTC day directories, ending today (default 3)')
+    p.add_argument('--data-root', default='/var/lib/timestd',
+        help='Data root directory (default /var/lib/timestd)')
+    p.add_argument('--json', action='store_true',
+        help='Print a JSON object instead of the table')
+
+
+def f16_report_main(argv=None) -> int:
+    parser = argparse.ArgumentParser(prog='hf-timestd archive f16-report')
+    _add_f16_report_args(parser)
+    return _cmd_f16_report(parser.parse_args(argv))
+
+
+def _handle_archive(args, parser):
+    if getattr(args, 'archive_command', None) == 'f16-report':
+        return _cmd_f16_report(args)
+    parser.print_help()
+    return 1
+
+
 def main(argv=None):
     """Main entry point for hf-timestd command"""
     # Quiet stderr for sigmond client-contract subcommands so they emit
@@ -2122,6 +2227,15 @@ Per-service overrides in [services] take precedence over the profile.
     hfcd_parser.add_argument('--json', action='store_true',
         help='Print JSON instead of the table')
 
+    archive_parser = subparsers.add_parser('archive',
+        help='Raw-buffer archive checks')
+    archive_sub = archive_parser.add_subparsers(dest='archive_command')
+    f16_report_p = archive_sub.add_parser('f16-report',
+        help='F16 trial verdict from chunk sidecars',
+        description='Exit codes: 0 PASS, 1 FAIL (a bad chunk, or a channel '
+                    'with no measured chunk), 2 no F16 chunks in the window.')
+    _add_f16_report_args(f16_report_p)
+
     events_parser = subparsers.add_parser('events',
         help='Event response: ship ordered windows of the raw buffer to the server')
     events_sub = events_parser.add_subparsers(dest='events_command')
@@ -2386,6 +2500,10 @@ Per-service overrides in [services] take precedence over the profile.
         _handle_service(args, locals().get('service_parser'))
     elif args.command == 'chain-delay':
         rc = _handle_chain_delay(args, chain_parser)
+        if rc:
+            sys.exit(rc)
+    elif args.command == 'archive':
+        rc = _handle_archive(args, archive_parser)
         if rc:
             sys.exit(rc)
     elif args.command == 'events':
