@@ -1028,6 +1028,36 @@ class ResourceGuardian:
     # Factory
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _read_archive_dtype(config_path: str) -> str:
+        """Read [recorder] archive_dtype with a real TOML parser.
+
+        The guardian only advises on disk use, so a missing, unparseable or
+        unsupported value logs one warning and sizes the archive as
+        complex64; it never stops metrology.
+        """
+        try:
+            import tomllib
+        except ImportError:  # Python < 3.11
+            import tomli as tomllib
+        try:
+            with open(config_path, 'rb') as f:
+                value = tomllib.load(f).get('recorder', {}).get(
+                    'archive_dtype', 'complex64')
+        except OSError:
+            return 'complex64'
+        except tomllib.TOMLDecodeError as e:
+            logger.warning(
+                f"ResourceGuardian: cannot read archive_dtype from "
+                f"{config_path} ({e}); sizing the archive as complex64")
+            return 'complex64'
+        try:
+            return validate_archive_dtype(value)
+        except ValueError as e:
+            logger.warning(
+                f"ResourceGuardian: {e}; sizing the archive as complex64")
+            return 'complex64'
+
     @classmethod
     def from_config(cls, config_path: str) -> 'ResourceGuardian':
         """Create from timestd-config.toml.
@@ -1045,7 +1075,6 @@ class ResourceGuardian:
         evict_policy = EVICT_POLICY_AUTO
         evict_grace_sec = EVICT_GRACE_SEC
         evict_low_water_percent = EVICT_LOW_WATER_PERCENT
-        archive_dtype = 'complex64'
 
         try:
             section = None
@@ -1080,10 +1109,10 @@ class ResourceGuardian:
                             evict_grace_sec = float(value)
                         elif key == 'evict_low_water_percent':
                             evict_low_water_percent = float(value)
-                        elif key == 'archive_dtype':
-                            archive_dtype = value
         except (OSError, ValueError) as e:
             logger.warning(f"Could not parse {config_path}: {e}")
+
+        archive_dtype = cls._read_archive_dtype(config_path)
 
         # Fallback: count channel dirs on disk if config parse found none
         if n_channels == 0:

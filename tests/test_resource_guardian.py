@@ -318,6 +318,29 @@ frequency_hz = 7850000
         assert g.n_channels >= 1
         assert g.sample_rate == 24000
 
+    def test_archive_dtype_with_trailing_comment(self, tmp_path):
+        """A TOML comment after the value must not leak into archive_dtype."""
+        cfg = tmp_path / 'c.toml'
+        cfg.write_text('[recorder]\nproduction_data_root = "%s"\n'
+                       'archive_dtype = "f16"   # B4 trial\n'
+                       '[[channels]]\nname = "a"\n' % tmp_path)
+        g = ResourceGuardian.from_config(str(cfg))
+        assert g.archive_dtype == 'f16'
+
+    def test_invalid_archive_dtype_warns_and_sizes_as_complex64(
+            self, tmp_path, caplog):
+        """The guardian only advises: a bad archive_dtype must never stop it."""
+        cfg = tmp_path / 'c.toml'
+        cfg.write_text('[recorder]\nproduction_data_root = "%s"\n'
+                       'archive_dtype = "bogus"\n'
+                       '[[channels]]\nname = "a"\n' % tmp_path)
+        with caplog.at_level('WARNING'):
+            g = ResourceGuardian.from_config(str(cfg))
+        assert g.archive_dtype == 'complex64'
+        warnings = [r for r in caplog.records
+                    if r.levelname == 'WARNING' and 'archive_dtype' in r.getMessage()]
+        assert len(warnings) == 1
+
 
 # ======================================================================
 # Helpers
