@@ -114,3 +114,40 @@ def test_unreadable_sidecar_skipped(tmp_path, capsys):
     (tmp_path / "raw_buffer" / "WWV_10000" / _today() / "9.json").write_text("{nope")
     rc, out = _run(tmp_path, capsys, "--json")
     assert rc == 0 and json.loads(out)["channels"]["WWV_10000"]["f16_chunks"] == 1
+
+
+def test_fallback_only_channel_is_kept_and_fails(tmp_path, capsys):
+    """A channel whose every chunk fell back is what the trial probes."""
+    _write(tmp_path, "WWV_10000", _today(), 1, err=-60.0, dphi=0.2)
+    _write(tmp_path, "WWV_2500", _today(), 1, dtype="complex64",
+           fallback="overflow", check=False)
+    rc, out = _run(tmp_path, capsys, "--json")
+    rep = json.loads(out)
+    ch = rep["channels"]["WWV_2500"]
+    assert ch["f16_chunks"] == 0 and ch["fallbacks"] == 1
+    assert ch["verdict"] == "FALLBACK"
+    assert rc == 1 and rep["verdict"] == "FAIL"
+    rc, out = _run(tmp_path, capsys)
+    assert "FALLBACK" in out
+
+
+def test_fallbacks_alone_are_not_no_f16_chunks(tmp_path, capsys):
+    _write(tmp_path, "WWV_2500", _today(), 1, dtype="complex64",
+           fallback="overflow", check=False)
+    rc, out = _run(tmp_path, capsys, "--json")
+    assert rc == 1 and json.loads(out)["verdict"] == "FAIL"
+
+
+def test_nan_metric_is_not_measured(tmp_path, capsys):
+    d = tmp_path / "raw_buffer" / "WWV_10000" / _today()
+    d.mkdir(parents=True)
+    # json.dumps writes NaN as a bare token, which json.loads accepts
+    (d / "1.json").write_text(json.dumps({
+        "dtype": "complex-f16", "scale": 4096.0,
+        "f16_check": {"err_over_floor_db_max": float("nan"),
+                      "carrier_dphi_rms_mrad": float("nan"), "seconds": 60}}))
+    rc, out = _run(tmp_path, capsys, "--json")
+    ch = json.loads(out)["channels"]["WWV_10000"]
+    assert ch["not_measured"] == 1
+    assert ch["worst_err_over_floor_db"] is None
+    assert ch["verdict"] == "NOT MEASURED" and rc == 1

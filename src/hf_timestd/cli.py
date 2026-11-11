@@ -10,6 +10,7 @@ Subcommands for wsprdaemon / external client integration:
 
 import sys
 import json
+import math
 import logging
 import argparse
 import time
@@ -1723,8 +1724,8 @@ def _f16_collect(data_root: Path, days: int):
             continue
         ch['f16_chunks'] += 1
         chk = meta.get('f16_check') or {}
-        err = chk.get('err_over_floor_db_max')
-        dphi = chk.get('carrier_dphi_rms_mrad')
+        err = _f16_metric(chk.get('err_over_floor_db_max'))
+        dphi = _f16_metric(chk.get('carrier_dphi_rms_mrad'))
         if err is None or dphi is None:
             ch['not_measured'] += 1
         if err is not None:
@@ -1733,7 +1734,17 @@ def _f16_collect(data_root: Path, days: int):
         if dphi is not None:
             w = ch['worst_carrier_dphi_rms_mrad']
             ch['worst_carrier_dphi_rms_mrad'] = dphi if w is None else max(w, dphi)
-    return {name: ch for name, ch in channels.items() if ch['f16_chunks']}
+    # A channel whose chunks all fell back to complex64 stays in the report:
+    # a strong-signal channel is exactly what the trial probes.
+    return {name: ch for name, ch in channels.items()
+            if ch['f16_chunks'] or ch['fallbacks']}
+
+
+def _f16_metric(value):
+    """A finite float, or None: NaN, inf and non-numbers count as not measured."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if math.isfinite(value) else None
 
 
 def _f16_verdict(ch) -> str:
@@ -1741,14 +1752,17 @@ def _f16_verdict(ch) -> str:
     if (err is not None and err > F16_ERR_LIMIT_DB) or \
             (dphi is not None and dphi > F16_DPHI_LIMIT_MRAD):
         return 'FAIL'
+    if ch['f16_chunks'] == 0:
+        return 'FALLBACK'
     if ch['f16_chunks'] == ch['not_measured']:
         return 'NOT MEASURED'
     return 'PASS'
 
 
 def _cmd_f16_report(args) -> int:
-    """`archive f16-report`: 0 PASS, 1 FAIL (or a channel never measured),
-    2 no F16 chunks in the window."""
+    """`archive f16-report`: 0 PASS, 1 FAIL (a channel failed, was never
+    measured, or only fell back to complex64), 2 neither F16 chunks nor
+    fallbacks in the window."""
     channels = _f16_collect(Path(args.data_root), args.days)
     for ch in channels.values():
         ch['verdict'] = _f16_verdict(ch)
@@ -2232,8 +2246,10 @@ Per-service overrides in [services] take precedence over the profile.
     archive_sub = archive_parser.add_subparsers(dest='archive_command')
     f16_report_p = archive_sub.add_parser('f16-report',
         help='F16 trial verdict from chunk sidecars',
-        description='Exit codes: 0 PASS, 1 FAIL (a bad chunk, or a channel '
-                    'with no measured chunk), 2 no F16 chunks in the window.')
+        description='Exit codes: 0 PASS, 1 FAIL (a bad chunk, a channel '
+                    'with no measured chunk, or a channel whose chunks all '
+                    'fell back to complex64), 2 neither F16 chunks nor '
+                    'fallbacks in the window.')
     _add_f16_report_args(f16_report_p)
 
     events_parser = subparsers.add_parser('events',
