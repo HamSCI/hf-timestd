@@ -14,6 +14,11 @@ A file that cannot be read counts as missing.
 Files are cut whole at 600 s, not clipped to the window.  Digital Metadata
 cannot hold nested dicts, so each record stores the sidecar as a JSON string
 (sort_keys=True) under "sidecar_json".
+
+The samples are always complex64: the reader decodes F16 chunks by sidecar
+and the export holds F32.  Each record also names how the archive stored
+them, as "stored_dtype" and "stored_scale": the first chunk's values, or a
+list (one per chunk) when the window mixes chunk types.
 """
 import hashlib
 import json
@@ -117,9 +122,14 @@ def _write_channel(raw_root, channel, order, found, missing, out_dir):
         str(md_dir), 3600, 3600, rate, 1, "metadata")
     order_json = json.dumps(order, sort_keys=True)
     missing_json = json.dumps(missing)
+    sides = {s: reader.read_metadata(s) or {} for s, _ in written}
+    stored_dtype = _uniform([sd.get("dtype", "complex64") for sd in sides.values()])
+    stored_scale = _uniform([float(sd.get("scale", 1.0)) for sd in sides.values()])
     for s, idx in written:
-        side = reader.read_metadata(s) or {}
+        side = sides[s]
         md_writer.write(idx, {
+            "stored_dtype": stored_dtype,
+            "stored_scale": stored_scale,
             "event_id": str(order.get("event_id", "")),
             "channel": channel,
             "start_unix": np.int64(s),
@@ -128,6 +138,11 @@ def _write_channel(raw_root, channel, order, found, missing, out_dir):
             "missing_json": missing_json,
         })
     return len(written), nbytes, missing
+
+
+def _uniform(values):
+    """The first value when all agree, else the whole list."""
+    return values[0] if all(v == values[0] for v in values) else list(values)
 
 
 def _write_sums(out_dir: Path):

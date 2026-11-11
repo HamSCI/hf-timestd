@@ -35,7 +35,7 @@ import time
 from collections import deque as _deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from dataclasses import dataclass, field
 
 from . import f16_check
@@ -1954,24 +1954,33 @@ class BinaryArchiveReader:
         return sorted(minutes)
     
     def read_minute(self, minute_boundary: int) -> Optional[np.ndarray]:
+        """Samples for one chunk as complex64 (see read_chunk)."""
+        return self.read_chunk(minute_boundary)[0]
+
+    def read_chunk(self, minute_boundary: int) -> Tuple[Optional[np.ndarray], Optional[Dict]]:
         """
-        Read samples for a specific minute.
-        
-        Handles both compressed and uncompressed files.
-        Returns numpy array (memory-mapped for uncompressed, loaded for compressed).
+        Read one chunk: (samples, sidecar).
+
+        Samples come back as complex64 at the original amplitude.  A .bin.zst
+        chunk decodes by its sidecar's "dtype" and "scale" (F16 chunks divide
+        the fixed scale back out); .bin and .bin.lz4 are always complex64.
+        The sidecar's sample_rate, when present, replaces self.sample_rate.
         """
+        meta = self.read_metadata(minute_boundary)
+        if meta and meta.get('sample_rate'):
+            self.sample_rate = int(meta['sample_rate'])
         dt = datetime.fromtimestamp(minute_boundary, tz=timezone.utc)
         date_str = dt.strftime('%Y%m%d')
         base_path = self.archive_dir / date_str / f"{minute_boundary}"
-        
+
         # Try uncompressed first (fastest - memory-mappable)
         bin_path = Path(f"{base_path}.bin")
         if bin_path.exists():
             mm = np.memmap(bin_path, dtype=np.complex64, mode='r')
             arr = np.array(mm)
             del mm
-            return arr
-        
+            return arr, meta
+
         # Try zstd compressed
         zst_path = Path(f"{base_path}.bin.zst")
         if zst_path.exists():
@@ -1980,11 +1989,13 @@ class BinaryArchiveReader:
                 with open(zst_path, 'rb') as f:
                     dctx = zstd.ZstdDecompressor()
                     decompressed = dctx.decompress(f.read())
-                return np.frombuffer(decompressed, dtype=np.complex64)
+                meta_d = meta or {}
+                return decode_iq(decompressed, meta_d.get('dtype', 'complex64'),
+                                 meta_d.get('scale', 1.0)), meta
             except ImportError:
                 logger.warning("zstandard not installed, cannot read .bin.zst files")
-                return None
-        
+                return None, meta
+
         # Try lz4 compressed
         lz4_path = Path(f"{base_path}.bin.lz4")
         if lz4_path.exists():
@@ -1992,13 +2003,13 @@ class BinaryArchiveReader:
                 import lz4.frame
                 with open(lz4_path, 'rb') as f:
                     decompressed = lz4.frame.decompress(f.read())
-                return np.frombuffer(decompressed, dtype=np.complex64)
+                return np.frombuffer(decompressed, dtype=np.complex64), meta
             except ImportError:
                 logger.warning("lz4 not installed, cannot read .bin.lz4 files")
-                return None
-        
-        return None
-    
+                return None, meta
+
+        return None, meta
+
     def read_metadata(self, minute_boundary: int) -> Optional[Dict]:
         """Read metadata for a specific minute."""
         dt = datetime.fromtimestamp(minute_boundary, tz=timezone.utc)
