@@ -35,22 +35,11 @@ def measure(x: np.ndarray, y: np.ndarray, sample_rate: int) -> dict:
     """
     n = min(len(x), len(y), int(sample_rate) * 60)
     xs = np.asarray(x[:n], dtype=np.complex128)
-    ys = np.asarray(y[:n], dtype=np.complex128)
-    e = xs - ys
+    ys = np.array(y[:n], dtype=np.complex128)   # a copy: the error overwrites it
 
     nper = min(_NPERSEG, n)
     fx, px = signal.welch(xs, fs=sample_rate, nperseg=nper,
                           return_onesided=False, scaling="density")
-    _, pe = signal.welch(e, fs=sample_rate, nperseg=nper,
-                         return_onesided=False, scaling="density")
-    passband = np.abs(fx) < _PASSBAND_HZ
-    carrier = np.abs(fx) < _CARRIER_HZ
-    with np.errstate(all="ignore"):
-        floor = np.median(px[passband & ~carrier])
-        if np.isfinite(floor) and floor > 0:
-            err_db = _finite(np.max(10.0 * np.log10(pe[passband] / floor)))
-        else:
-            err_db = None
 
     blk = max(1, int(sample_rate) // _CARRIER_RATE_HZ)
     nb = n // blk * blk
@@ -60,6 +49,22 @@ def measure(x: np.ndarray, y: np.ndarray, sample_rate: int) -> dict:
             cx = xs[:nb].reshape(-1, blk).mean(axis=1)
             cy = ys[:nb].reshape(-1, blk).mean(axis=1)
             dphi_mrad = _finite(1000.0 * np.sqrt(np.mean(np.angle(cy * np.conj(cx)) ** 2)))
+
+    # The error reuses ys's buffer, and xs goes before the second Welch,
+    # so at most two minute-long complex128 arrays live at once.
+    e = np.subtract(xs, ys, out=ys)
+    del xs, ys
+    _, pe = signal.welch(e, fs=sample_rate, nperseg=nper,
+                         return_onesided=False, scaling="density")
+    del e
+    passband = np.abs(fx) < _PASSBAND_HZ
+    carrier = np.abs(fx) < _CARRIER_HZ
+    with np.errstate(all="ignore"):
+        floor = np.median(px[passband & ~carrier])
+        if np.isfinite(floor) and floor > 0:
+            err_db = _finite(np.max(10.0 * np.log10(pe[passband] / floor)))
+        else:
+            err_db = None
 
     return {
         "err_over_floor_db_max": err_db,
