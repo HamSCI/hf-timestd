@@ -10,6 +10,7 @@ import zstandard
 import numpy as np
 sys.path.insert(0, '/home/mjh/git/hf-timestd/src')
 
+from hf_timestd.core.iq_codec import decode_iq
 from scipy.signal import correlate
 from scipy.signal.windows import tukey
 from pathlib import Path
@@ -25,7 +26,8 @@ def load_raw_buffer(bin_path, json_path):
     
     dctx = zstandard.ZstdDecompressor()
     raw = dctx.decompress(compressed)
-    iq = np.frombuffer(raw, dtype=np.complex64).copy()
+    iq = decode_iq(raw, metadata.get('dtype', 'complex64'),
+                   metadata.get('scale', 1.0))
     
     return iq, metadata
 

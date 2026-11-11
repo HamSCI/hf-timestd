@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Tuple
 import numpy as np
 import zstandard
 
+from hf_timestd.core.iq_codec import decode_iq
 from hf_timestd.core.registration_acquirer import (  # type: ignore
     band_envelopes,
     fold_envelope,
@@ -31,10 +32,12 @@ MIN_SNR = 1.5
 SIGMA_NS = 1_000_000.0  # 1 ms, the acquirer's own origin sigma floor
 
 
-def read_iq(path: pathlib.Path) -> np.ndarray:
+def read_iq(path: pathlib.Path, meta: dict | None = None) -> np.ndarray:
+    """Decode a .bin.zst chunk to complex64 by its sidecar (F16 or F32)."""
+    meta = meta or {}
     with open(path, "rb") as fh:
         raw = zstandard.ZstdDecompressor().stream_reader(fh).read()
-    return np.frombuffer(raw, dtype=np.complex64)
+    return decode_iq(raw, meta.get("dtype", "complex64"), meta.get("scale", 1.0))
 
 
 def resample_ppm(iq: np.ndarray, ppm: float) -> np.ndarray:
@@ -247,7 +250,7 @@ def main() -> None:
                 " generator extrapolates across a gap, mislabelling every"
                 " block after it; refusing to trace it"
             )
-        iq = read_iq(binary)
+        iq = read_iq(binary, meta)
         suffix = ""
         if args.resample_ppm is not None:
             iq = resample_ppm(iq, args.resample_ppm)

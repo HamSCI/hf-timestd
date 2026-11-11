@@ -20,6 +20,7 @@ import zstandard
 
 from hf_timestd.core import registration_acquirer as ra
 from hf_timestd.core.buffer_timing import resolve_buffer_timing
+from hf_timestd.core.iq_codec import decode_iq
 from hf_timestd.core.metrology_engine import MetrologyEngine
 from hf_timestd.core.registration_acquirer import RegistrationAcquirer
 from hf_timestd.core.tick_edge_detector import TickEdgeDetector
@@ -128,11 +129,12 @@ def main() -> int:
     args = ap.parse_args()
     meta = json.loads(args.sidecar.read_text())
     sr = int(meta["sample_rate"])
-    iq = np.frombuffer(
+    iq = decode_iq(
         zstandard.ZstdDecompressor().decompress(
             args.chunk.read_bytes(), max_output_size=1 << 31
         ),
-        dtype="<c8",
+        meta.get("dtype", "complex64"),
+        meta.get("scale", 1.0),
     )
     bt_true = resolve_buffer_timing(meta, sample_rate=sr)
     det = TickEdgeDetector(sample_rate=sr)

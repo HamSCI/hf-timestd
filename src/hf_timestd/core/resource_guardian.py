@@ -11,7 +11,8 @@ for incoming data.  No per-system tuning is needed — the guardian
 auto-sizes everything from the workload.
 
 Data budget (per channel per day, at 24 kHz IQ):
-    raw_buffer      ~14 GB   (IQ binary archive, 24 kHz × 4 B × 86400 s)
+    raw_buffer      ~15.4 GB (IQ binary archive, 24 kHz × 8 B × 86400 s;
+                              half that with archive_dtype = "f16")
     phase2           ~4 GB   (HDF5 data products)
     ────────────────────────
     subtotal        ~18 GB/channel/day  (or ~4 GB with tiered storage)
@@ -58,6 +59,9 @@ from enum import Enum
 from pathlib import Path
 from typing import List, Optional, Set
 
+from .binary_archive_writer import validate_archive_dtype
+from .iq_codec import DTYPE_F16, DTYPE_F32, bytes_per_sample
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -89,7 +93,7 @@ EVICT_POLICY_AUTO = 'auto'        # DASI2 default (mjh 2026-08-22): auto with hy
 EVICT_POLICY_ALERT_ONLY = 'alert_only'  # never delete; pause + alert only
 
 # Per-channel data budget (bytes per day) at 24 kHz complex IQ
-# IQ: 24000 samples/s × 4 bytes/sample × 2 (I+Q) × 86400 s/day ≈ 14.2 GB
+# IQ: 24000 samples/s × 8 bytes/sample (complex64) × 86400 s/day ≈ 15.4 GiB; half as F16
 RAW_BYTES_PER_CHANNEL_PER_DAY = 24000 * 4 * 2 * 86400
 # Phase2 HDF5 products: empirically ~4 GB/channel/day (varies with station)
 PHASE2_BYTES_PER_CHANNEL_PER_DAY = 4 * GB
@@ -163,6 +167,7 @@ class ResourceGuardian:
         evict_grace_sec: float = EVICT_GRACE_SEC,
         evict_low_water_percent: float = EVICT_LOW_WATER_PERCENT,
         clock=time.monotonic,
+        archive_dtype: str = 'complex64',
     ):
         self.data_root = Path(data_root)
         self.n_channels = n_channels
@@ -171,9 +176,14 @@ class ResourceGuardian:
         self.archive_root = Path(archive_root) if archive_root else None
         self.archive_retention_days = archive_retention_days
 
-        # Compute per-channel-per-day raw bytes from actual sample rate
-        # complex IQ: sample_rate × 4 bytes × 2 (I+Q) × 86400 seconds
-        self.raw_per_ch_per_day = sample_rate * 4 * 2 * 86400
+        # Compute per-channel-per-day raw bytes from actual sample rate and
+        # the configured archive dtype: 8 bytes per complex sample as
+        # complex64, 4 as F16.  This is the uncompressed size, an upper
+        # bound for the .bin.zst files; eviction measures the bytes on disk.
+        validate_archive_dtype(archive_dtype)
+        self.archive_dtype = archive_dtype
+        stored = DTYPE_F16 if archive_dtype == 'f16' else DTYPE_F32
+        self.raw_per_ch_per_day = sample_rate * bytes_per_sample(stored) * 86400
         self.total_per_ch_per_day = self.raw_per_ch_per_day + PHASE2_BYTES_PER_CHANNEL_PER_DAY
 
         # Daily disk budget: exact bytes/day arriving on persistent storage.
@@ -1035,6 +1045,7 @@ class ResourceGuardian:
         evict_policy = EVICT_POLICY_AUTO
         evict_grace_sec = EVICT_GRACE_SEC
         evict_low_water_percent = EVICT_LOW_WATER_PERCENT
+        archive_dtype = 'complex64'
 
         try:
             section = None
@@ -1069,6 +1080,8 @@ class ResourceGuardian:
                             evict_grace_sec = float(value)
                         elif key == 'evict_low_water_percent':
                             evict_low_water_percent = float(value)
+                        elif key == 'archive_dtype':
+                            archive_dtype = value
         except (OSError, ValueError) as e:
             logger.warning(f"Could not parse {config_path}: {e}")
 
@@ -1099,4 +1112,5 @@ class ResourceGuardian:
             evict_policy=evict_policy,
             evict_grace_sec=evict_grace_sec,
             evict_low_water_percent=evict_low_water_percent,
+            archive_dtype=archive_dtype,
         )

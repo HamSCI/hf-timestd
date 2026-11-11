@@ -700,6 +700,7 @@ def generate_fig2():
     import zstandard
     import json as _json
     from scipy import signal as sp_signal
+    from hf_timestd.core.iq_codec import decode_iq
 
     print("Generating Fig 2: 10 MHz spectrogram from raw IQ...")
 
@@ -736,11 +737,16 @@ def generate_fig2():
     # segments — RX may have been off, or the chunk may straddle a gap).
     dctx = zstandard.ZstdDecompressor()
 
+    def _decode_chunk(raw, bp):
+        with open(bp.replace('.bin.zst', '.json')) as sf:
+            side = _json.load(sf)
+        return decode_iq(raw, side.get('dtype', 'complex64'), side.get('scale', 1.0))
+
     def _mean_power(bp):
         try:
             with open(bp, 'rb') as fh:
                 raw = dctx.decompress(fh.read())
-            iq = np.frombuffer(raw, dtype=np.complex64)
+            iq = _decode_chunk(raw, bp)
             if iq.size == 0:
                 return -np.inf
             step = max(1, iq.size // 200_000)
@@ -760,7 +766,7 @@ def generate_fig2():
     sr = meta['sample_rate']
     with open(bpath, 'rb') as f:
         raw = dctx.decompress(f.read())
-    iq = np.frombuffer(raw, dtype=np.complex64)
+    iq = decode_iq(raw, meta.get('dtype', 'complex64'), meta.get('scale', 1.0))
 
     # Show 5 seconds — enough for 5 tick pulses, not so many that detail is lost
     show_seconds = 5

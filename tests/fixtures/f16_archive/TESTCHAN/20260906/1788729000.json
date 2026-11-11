@@ -1,0 +1,32 @@
+{
+  "minute_boundary": 1788729000,
+  "channel_name": "TESTCHAN",
+  "frequency_hz": 10000000.0,
+  "sample_rate": 24000,
+  "samples_written": 1440000,
+  "samples_expected": 1440000,
+  "file_duration_sec": 60,
+  "completeness_pct": 100.0,
+  "gap_count": 0,
+  "gap_samples": 0,
+  "start_rtp_timestamp": 0,
+  "start_system_time": 1788729000.0,
+  "gps_time_ns": 1788729000000000000,
+  "rtp_timesnap": 0,
+  "dtype": "complex-f16",
+  "byte_order": "little",
+  "compression": "zstd",
+  "radiod_snr_db": null,
+  "written_at": "2026-11-11T16:18:26.975443+00:00",
+  "station": {},
+  "pipeline_offset_samples": 0,
+  "timing_snapshots": [],
+  "bpsk_chain_delay_ns": null,
+  "bpsk_chain_delay_applied": false,
+  "scale": 4096.0,
+  "f16_check": {
+    "err_over_floor_db_max": null,
+    "carrier_dphi_rms_mrad": 1.623269026877322e-14,
+    "seconds": 60
+  }
+}
