@@ -403,12 +403,14 @@ class TieredStorageManager:
         cold_json = cold_dir / json_name
         
         try:
-            # Move binary file
-            shutil.move(str(hot_file), str(cold_file))
-            
-            # Move JSON sidecar
+            # Move the JSON sidecar first, then the bin: a crash between the
+            # two must never leave a cold bin without the sidecar that names
+            # its dtype.  A hot bin left behind keeps no sidecar either, and
+            # readers treat it as missing until the next sweep moves it.
             if hot_json.exists():
                 shutil.move(str(hot_json), str(cold_json))
+
+            shutil.move(str(hot_file), str(cold_file))
             
             logger.debug(f"Archived {hot_file.name} to cold storage")
             

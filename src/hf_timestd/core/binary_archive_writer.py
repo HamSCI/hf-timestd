@@ -39,7 +39,7 @@ from typing import Optional, Dict, Any, List, Tuple
 from dataclasses import dataclass, field
 
 from . import f16_check
-from .iq_codec import DTYPE_F16, F16_SCALE, bytes_per_sample, decode_iq, encode_f16
+from .iq_codec import DTYPE_F16, DTYPE_F32, F16_SCALE, bytes_per_sample, decode_iq, encode_f16
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +93,19 @@ def validate_archive_dtype(value: Any) -> str:
             f"use one of {', '.join(repr(v) for v in ARCHIVE_DTYPES)}"
         )
     return value
+
+
+def f16_compression_warning(archive_dtype: str, compression: Optional[str]) -> Optional[str]:
+    """The startup warning for archive_dtype = "f16" without zstd, else None.
+
+    F16 applies only to .bin.zst chunks; with any other compression every
+    chunk stays complex64, which an operator who asked for F16 should hear.
+    """
+    comp = (compression or 'none').lower()
+    if archive_dtype != 'f16' or comp == 'zstd':
+        return None
+    return (f'[recorder] archive_dtype = "f16" applies only to zstd chunks; '
+            f'compression = "{comp}" stores every chunk as complex64')
 
 
 @dataclass
@@ -373,7 +386,10 @@ class BinaryArchiveWriter:
         
         logger.info(f"BinaryArchiveWriter initialized for {config.channel_name}")
         logger.info(f"  Output: {self.archive_dir}")
-        logger.info(f"  Format: raw complex64 binary + JSON metadata")
+        compression = config.compression.lower()
+        stored = (DTYPE_F16 if config.archive_dtype == 'f16' and compression == 'zstd'
+                  else DTYPE_F32)
+        logger.info(f"  Format: {stored} I/Q, compression={compression} + JSON metadata")
 
         # Clean up orphaned .tmp files from a prior crash
         self._cleanup_orphaned_tmp_files()
@@ -1396,11 +1412,11 @@ class BinaryArchiveWriter:
                 # No compression - direct write
                 buffer.samples[:actual_samples].tofile(bin_path_tmp)
             
-            # Rename atomic
-            if bin_path_tmp.exists():
-                bin_path_tmp.replace(bin_path)
-            
-            # Write metadata sidecar
+            # Write metadata sidecar.  The sidecar lands BEFORE the bin is
+            # renamed into place: a crash between the two must never leave
+            # a bin without the sidecar that names its dtype (an F16 chunk
+            # read as complex64 is garbage).  A sidecar without a bin is
+            # harmless — every reader looks for the bin first.
             metadata = {
                 'minute_boundary': buffer.minute_boundary,
                 'channel_name': self.config.channel_name,
@@ -1468,7 +1484,11 @@ class BinaryArchiveWriter:
                 f.flush()
                 os.fsync(f.fileno())
             temp_json.replace(json_path)
-            
+
+            # Rename the bin into place last (atomic)
+            if bin_path_tmp.exists():
+                bin_path_tmp.replace(bin_path)
+
             self.minutes_written += 1
             logger.info(
                 f"📁 Wrote chunk {buffer.minute_boundary}: "
@@ -1927,6 +1947,7 @@ class BinaryArchiveReader:
         self.archive_dir = archive_dir / channel_name_to_dir(channel_name)
         self.channel_name = channel_name
         self.sample_rate = 20000
+        self._warned_unreadable: set = set()
     
     def get_available_minutes(self, date_str: Optional[str] = None) -> List[int]:
         """Get list of available minute boundaries."""
@@ -1984,14 +2005,22 @@ class BinaryArchiveReader:
         # Try zstd compressed
         zst_path = Path(f"{base_path}.bin.zst")
         if zst_path.exists():
+            # Only the sidecar names a .bin.zst chunk's dtype.  Without it,
+            # or with an F16 sidecar that lacks its scale, the chunk counts
+            # as missing: guessing complex64 would reinterpret half-floats.
+            if meta is None:
+                self._warn_unreadable(zst_path, "has no JSON sidecar")
+                return None, meta
+            dtype = meta.get('dtype', DTYPE_F32)
+            if dtype == DTYPE_F16 and 'scale' not in meta:
+                self._warn_unreadable(zst_path, "has a complex-f16 sidecar without 'scale'")
+                return None, meta
             try:
                 import zstandard as zstd
                 with open(zst_path, 'rb') as f:
                     dctx = zstd.ZstdDecompressor()
                     decompressed = dctx.decompress(f.read())
-                meta_d = meta or {}
-                return decode_iq(decompressed, meta_d.get('dtype', 'complex64'),
-                                 meta_d.get('scale', 1.0)), meta
+                return decode_iq(decompressed, dtype, meta.get('scale', 1.0)), meta
             except ImportError:
                 logger.warning("zstandard not installed, cannot read .bin.zst files")
                 return None, meta
@@ -2009,6 +2038,13 @@ class BinaryArchiveReader:
                 return None, meta
 
         return None, meta
+
+    def _warn_unreadable(self, path: Path, why: str) -> None:
+        """Warn once per file that a chunk cannot be decoded."""
+        if path in self._warned_unreadable:
+            return
+        self._warned_unreadable.add(path)
+        logger.warning(f"Skipping {path}: it {why}; treating the chunk as missing")
 
     def read_metadata(self, minute_boundary: int) -> Optional[Dict]:
         """Read metadata for a specific minute."""

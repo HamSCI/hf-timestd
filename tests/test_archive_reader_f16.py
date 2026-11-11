@@ -133,3 +133,33 @@ def test_window_drf_uniform_f16_metadata_is_scalar(tmp_path):
     rec = md.read(s0 * 24000, s0 * 24000 + 1)[s0 * 24000]
     assert rec["stored_dtype"] == DTYPE_F16
     assert rec["stored_scale"] == F16_SCALE
+
+
+def test_bin_without_sidecar_is_unreadable(tmp_path, caplog):
+    """No sidecar means no dtype: decoding as complex64 could reinterpret F16."""
+    import logging
+    day = tmp_path / "raw_buffer" / "testchan" / "19700112"
+    day.mkdir(parents=True)
+    (day / "1000000.bin.zst").write_bytes(
+        zstandard.ZstdCompressor().compress(encode_f16(_samples(8))))
+    r = _reader(tmp_path)
+    with caplog.at_level(logging.WARNING):
+        assert r.read_chunk(1_000_000) == (None, None)
+        assert r.read_chunk(1_000_000) == (None, None)
+    warns = [rec for rec in caplog.records if rec.levelno == logging.WARNING]
+    assert len(warns) == 1 and "sidecar" in warns[0].getMessage()
+
+
+def test_f16_sidecar_without_scale_is_unreadable(tmp_path, caplog):
+    import logging
+    day = tmp_path / "raw_buffer" / "testchan" / "19700112"
+    day.mkdir(parents=True)
+    (day / "1000000.bin.zst").write_bytes(
+        zstandard.ZstdCompressor().compress(encode_f16(_samples(8))))
+    (day / "1000000.json").write_text(json.dumps({"dtype": DTYPE_F16}))
+    with caplog.at_level(logging.WARNING):
+        got, side = _reader(tmp_path).read_chunk(1_000_000)
+    assert got is None
+    assert side == {"dtype": DTYPE_F16}
+    assert any("scale" in rec.getMessage() for rec in caplog.records
+               if rec.levelno == logging.WARNING)

@@ -414,8 +414,14 @@ class CoreRecorderV2:
         ka9q_section = config.get('ka9q', {})
         self.recorder_config = config.get('recorder', {})
         # Fail at startup, not at the first chunk flush, on a bad archive_dtype.
-        from .binary_archive_writer import validate_archive_dtype
+        from .binary_archive_writer import f16_compression_warning, validate_archive_dtype
         validate_archive_dtype(self.recorder_config.get('archive_dtype', 'complex64'))
+        # One warning per process, not one per channel's writer.
+        f16_warning = f16_compression_warning(
+            self.recorder_config.get('archive_dtype', 'complex64'),
+            self.recorder_config.get('compression', 'none'))
+        if f16_warning:
+            logger.warning(f16_warning)
         self.engine_type = (
             ka9q_section.get('source')
             or self.recorder_config.get('engine', 'radiod')

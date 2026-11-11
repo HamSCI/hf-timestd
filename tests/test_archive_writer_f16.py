@@ -111,3 +111,108 @@ def test_silent_chunk_sidecar_is_strict_json(tmp_path):
     assert side["dtype"] == "complex-f16"
     assert side["f16_check"]["err_over_floor_db_max"] is None
     assert (d / f"{b}.bin.zst").exists()
+
+
+def test_sidecar_lands_before_the_bin(tmp_path, monkeypatch):
+    """A crash between the two renames must never leave a bin without its sidecar."""
+    import os
+    w = _writer(tmp_path, compression="zstd", archive_dtype="f16", f16_check=False)
+    real_replace = os.replace
+    seen = []
+
+    def checked_replace(src, dst):
+        dst = str(dst)
+        if dst.endswith(".bin.zst"):
+            json_path = dst[:-len(".bin.zst")] + ".json"
+            seen.append(os.path.exists(json_path))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", checked_replace)
+    _flush(w, _samples(w.samples_per_chunk))
+    assert seen == [True]
+
+
+def test_tiered_move_sidecar_before_bin(tmp_path, monkeypatch):
+    import shutil
+    from hf_timestd.core.tiered_storage import TieredStorageConfig, TieredStorageManager
+    m = TieredStorageManager(TieredStorageConfig(
+        cold_buffer_root=tmp_path / "cold", hot_buffer_root=tmp_path / "hot",
+        auto_configure=False, num_channels=1))
+    day = m.hot_root / "chan" / "20261111"
+    day.mkdir(parents=True)
+    (day / "100.bin.zst").write_bytes(b"x")
+    (day / "100.json").write_text("{}")
+    order = []
+    real_move = shutil.move
+    monkeypatch.setattr(shutil, "move",
+                        lambda s, d: (order.append(os.path.basename(s)), real_move(s, d))[1])
+    import os
+    m._move_to_cold(day / "100.bin.zst", "chan", "20261111")
+    assert order == ["100.json", "100.bin.zst"]
+    assert (m.cold_root / "chan" / "20261111" / "100.bin.zst").exists()
+
+
+def _recorder(tmp_path, monkeypatch, recorder):
+    """A CoreRecorderV2 with its radiod-facing parts stubbed out."""
+    import ka9q.utils
+
+    import hf_timestd.core.core_recorder_v2 as crv
+    import hf_timestd.core.offset_judge as oj
+
+    class _Dummy:
+        def __init__(self, *a, **k):
+            pass
+
+        def start(self):
+            pass
+
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+
+    monkeypatch.setattr(oj, "OffsetJudge", _Dummy)
+    monkeypatch.setattr(ka9q.utils, "resolve_multicast_address",
+                        lambda *a, **k: "239.1.1.1")
+    monkeypatch.setattr(crv, "RadiodControl", _Dummy)
+    monkeypatch.setattr(crv, "CounterMapProbe", _Dummy)
+    return crv.CoreRecorderV2({
+        "output_dir": str(tmp_path / "rec"),
+        "ka9q": {"status": "hf-status.local"},
+        "recorder": recorder})
+
+
+@pytest.mark.parametrize("comp", ["lz4", "none"])
+def test_f16_without_zstd_warns_once_at_recorder_startup(tmp_path, monkeypatch, caplog, comp):
+    with caplog.at_level(logging.WARNING):
+        _recorder(tmp_path, monkeypatch, {"archive_dtype": "f16", "compression": comp})
+    warns = [r.getMessage() for r in caplog.records
+             if r.levelno == logging.WARNING and "archive_dtype" in r.getMessage()]
+    assert len(warns) == 1 and comp in warns[0]
+
+
+def test_f16_with_zstd_no_recorder_warning(tmp_path, monkeypatch, caplog):
+    with caplog.at_level(logging.WARNING):
+        _recorder(tmp_path, monkeypatch, {"archive_dtype": "f16", "compression": "zstd"})
+    assert not [r for r in caplog.records if "archive_dtype" in r.getMessage()]
+
+
+def test_writer_leaves_the_warning_to_the_recorder(tmp_path, caplog):
+    """Six channels' writers must not repeat the startup warning six times."""
+    with caplog.at_level(logging.WARNING):
+        _writer(tmp_path, compression="lz4", archive_dtype="f16")
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_zstd_f16_startup_is_quiet_and_names_the_format(tmp_path, caplog):
+    with caplog.at_level(logging.INFO):
+        _writer(tmp_path, compression="zstd", archive_dtype="f16")
+    msgs = [r.getMessage() for r in caplog.records]
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    fmt = [m for m in msgs if "Format:" in m]
+    assert fmt and "complex-f16" in fmt[0] and "zstd" in fmt[0]
+
+
+def test_default_startup_names_complex64(tmp_path, caplog):
+    with caplog.at_level(logging.INFO):
+        _writer(tmp_path, compression="zstd")
+    fmt = [r.getMessage() for r in caplog.records if "Format:" in r.getMessage()]
+    assert fmt and "complex64" in fmt[0] and "complex-f16" not in fmt[0]
