@@ -205,3 +205,38 @@ def test_core_t6_reference_only_while_authoritative():
     # Never raises, even on a malformed decision.
     core._t6_authority_last_decision = object()
     assert core._t6_pair_step_reference() is None
+
+
+# ---------------------------------------------------------------------------
+# Task 4: field probe, the legacy fields torn against the atomic pair.
+# ---------------------------------------------------------------------------
+def test_probe_logs_and_counts_torn_legacy_fields(caplog):
+    sr = _recorder()
+    writer = MagicMock()
+    writer.evaluate_pair.side_effect = lambda g, r: pair_disagreement_s(
+        g, r, REF_GPS_NS, REF_RTP, SAMPLE_RATE)
+    sr.archive_writer = writer
+    sr.channel_info = _torn_ci()
+
+    with caplog.at_level(logging.WARNING):
+        sr.revalidate_radiod_pair()
+        sr.revalidate_radiod_pair()
+
+    probes = [r for r in caplog.records if 'TORN-READ PROBE' in r.getMessage()]
+    assert len(probes) == 1
+    assert probes[0].levelno == logging.WARNING
+    assert 'implied_diff=+1.000 s' in probes[0].getMessage()
+    assert sr.torn_read_probe_count == 2
+    writer.add_timing_snapshot.assert_not_called()
+
+
+def test_probe_silent_when_legacy_fields_agree(caplog):
+    sr = _recorder()
+    writer = MagicMock()
+    writer.evaluate_pair.return_value = 0.0
+    sr.archive_writer = writer
+    sr.channel_info = _pair_ci(REF_GPS_NS, REF_RTP)
+    with caplog.at_level(logging.WARNING):
+        sr.revalidate_radiod_pair()
+    assert not any('TORN-READ PROBE' in r.getMessage() for r in caplog.records)
+    assert sr.torn_read_probe_count == 0

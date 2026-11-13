@@ -37,3 +37,22 @@ def read_anchor_pair(ci: Any) -> Optional[Tuple[int, int]]:
         return int(gps), int(snap)
     except Exception:  # noqa: BLE001 - contract: never raises
         return None
+
+
+def read_legacy_pair(ci: Any) -> Optional[Tuple[int, int]]:
+    """Return ``(gps_time_ns, rtp_timesnap)`` read from the two legacy
+    attributes, in that order, or None.
+
+    Field probe only: this pair can tear, so no decision may use it.
+    Returns None when ``ci`` is None or either half is missing.  Never raises.
+    """
+    if ci is None:
+        return None
+    try:
+        gps = getattr(ci, 'gps_time', None)
+        snap = getattr(ci, 'rtp_timesnap', None)
+        if gps is None or snap is None:
+            return None
+        return int(gps), int(snap)
+    except Exception:  # noqa: BLE001 - contract: never raises
+        return None

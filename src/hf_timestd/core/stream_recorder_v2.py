@@ -47,7 +47,7 @@ RADIOD_LIFETIME_FRAMES = 6000
 _CHANNEL_VERIFY_TIMEOUT_S = float(os.environ.get("TIMESTD_CHANNEL_VERIFY_TIMEOUT_S", "20"))
 
 from ka9q import RadiodStream, ChannelInfo, StreamQuality, RadiodControl
-from .anchor_pair import read_anchor_pair
+from .anchor_pair import read_anchor_pair, read_legacy_pair
 from .pair_step_arbiter import (
     STEADY_LIMIT_S, PairStepArbiter, T6Reference, Verdict,
     pair_disagreement_s, t6_predicted_utc_s,
@@ -237,6 +237,11 @@ class StreamRecorderV2:
         self._counter_map = None
         self._pair_arbiter = PairStepArbiter(config.sample_rate)
         self._prev_mapping: Optional[tuple] = None
+        # Field probe (2026-11-13): ticks where the legacy gps_time /
+        # rtp_timesnap fields disagreed with the atomic pair, and the
+        # monotonic time of the last probe log line.  Observation only.
+        self.torn_read_probe_count = 0
+        self._torn_probe_last_log = None
         # NOTE (2026-02-03): bootstrap_service parameter kept for API compatibility
         # but is no longer used. MetrologyEngine handles timing lock internally.
         
@@ -1222,6 +1227,7 @@ class StreamRecorderV2:
         gps_time, rtp_snap = read_anchor_pair(ci) or (None, None)
         if gps_time is None or rtp_snap is None:
             return
+        self._probe_legacy_pair(ci, gps_time, rtp_snap)
 
         adopted = False      # seeded: the ring follows the new pair
         ring_done = False    # the ring was already handled this tick
@@ -1255,6 +1261,35 @@ class StreamRecorderV2:
             self._update_ring_anchor(gps_time, rtp_snap)
         elif not ring_done:
             self._reanchor_ring_if_offset_drifted()
+
+    def _probe_legacy_pair(self, ci, gps_time: int, rtp_snap: int) -> None:
+        """Field probe: compare the legacy fields with the atomic pair.
+
+        Observes only; nothing here feeds a decision.  Counts every
+        disagreeing tick and logs at most once per 300 s per channel.
+        """
+        try:
+            legacy = read_legacy_pair(ci)
+            if legacy is None or legacy == (gps_time, rtp_snap):
+                return
+            self.torn_read_probe_count = (
+                getattr(self, 'torn_read_probe_count', 0) + 1)
+            now = time.monotonic()
+            last = getattr(self, '_torn_probe_last_log', None)
+            if last is not None and now - last < 300.0:
+                return
+            self._torn_probe_last_log = now
+            implied = pair_disagreement_s(
+                legacy[0], legacy[1], gps_time, rtp_snap,
+                self.config.sample_rate)
+            logger.warning(
+                f"{self.config.description}: TORN-READ PROBE: "
+                f"atomic=({gps_time},{rtp_snap}) "
+                f"legacy=({legacy[0]},{legacy[1]}) "
+                f"implied_diff={implied:+.3f} s"
+            )
+        except Exception:  # noqa: BLE001 - the probe must never disturb a tick
+            pass
 
     def _arbitrate_pair(self, gps_time: int, rtp_snap: int, diff: float) -> bool:
         """Ask the PairStepArbiter about a pair ``diff`` seconds from the
