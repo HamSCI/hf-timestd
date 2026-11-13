@@ -44,11 +44,25 @@ def test_read_anchor_pair_unspecced_mock_falls_back_to_legacy():
     assert read_anchor_pair(m) == (1, 2)
 
 
+# Files whose `.rtp_timesnap` receivers are not a ka9q ChannelInfo.
+_NOT_CHANNEL_INFO = {
+    "cross_channel_rtp.py": "PairObservation dataclass, already a consistent pair",
+    "counter_map_probe.py": "status-reply / poll objects, not ChannelInfo",
+    "timing_validation_service.py": "stored timing-sample records",
+    "offset_judge.py": "the judge's own per-source state (st.rtp_timesnap)",
+    "time_map_producer.py": "producer inputs dataclass carrying a captured pair",
+}
+
+
 def test_no_paired_legacy_reads_left_in_src():
-    # Every (gps_time, rtp_timesnap) pair read goes through read_anchor_pair.
+    # Every read of a ChannelInfo's rtp_timesnap goes through read_anchor_pair.
     src = pathlib.Path(__file__).resolve().parent.parent / "src" / "hf_timestd"
-    pat = re.compile(r"getattr\([^)]*'rtp_timesnap'|\b(ci|_ci|src_ci|dst_ci|channel_info)\.rtp_timesnap\b")
-    hits = [f"{p}:{i}" for p in src.rglob("*.py") if p.name != "anchor_pair.py"
+    pat = re.compile(
+        r"getattr\([^)]*['\"]rtp_timesnap['\"]"
+        r"|(?<!self)\.rtp_timesnap\b(?!\s*=[^=])"
+    )
+    skip = {"anchor_pair.py", *_NOT_CHANNEL_INFO}
+    hits = [f"{p}:{i}" for p in src.rglob("*.py") if p.name not in skip
             for i, line in enumerate(p.read_text().splitlines(), 1)
             if pat.search(line) and not line.lstrip().startswith("#")]
     assert hits == []

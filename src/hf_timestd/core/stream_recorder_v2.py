@@ -1242,8 +1242,7 @@ class StreamRecorderV2:
                         logger.debug(f"{self.config.description}: Channel SSRC {our_ssrc} not found in discovery")
                         continue
                     
-                    gps_time = fresh_info.gps_time
-                    rtp_timesnap = fresh_info.rtp_timesnap
+                    gps_time, rtp_timesnap = read_anchor_pair(fresh_info) or (None, None)
                     
                 except Exception as e:
                     logger.debug(f"{self.config.description}: Discovery failed: {e}")  # Expected during radiod restart
