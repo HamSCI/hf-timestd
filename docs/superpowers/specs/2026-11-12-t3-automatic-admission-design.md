@@ -15,6 +15,12 @@ narrow down where UTC lies.  With a GPSDO the fused result should hold steady ev
 propagation changes fast, at sunrise and sunset.  That is the metrological point of the whole
 effort, and the science then measures with matching precision and accuracy.
 
+It should also improve, measurably, as the fleet grows.  Each new T6 station near a CODAR radar or
+an HFDL ground station adds a ground-wave measurement of that transmitter's offset, the best kind.
+Each new T3 station adds paths across more of the ionosphere and another cross-check on everyone
+else.  So the trust table also shows where the fleet lacks a nearby T6 station for a transmitter,
+which tells us where the next TS-1 would do the most good.
+
 ## Why
 
 AC1SN, in Massachusetts, times itself on T2 alone.  It has no TS-1 (T6), no GPSDO pulse (T5) and
