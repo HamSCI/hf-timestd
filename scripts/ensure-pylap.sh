@@ -80,13 +80,22 @@ fi
 
 # 4. obtain the pinned pyLAP fork (open binding; safe to fetch)
 # The pin lives only on refs/pull/16/head (HamSCI/PyLap's unmerged GCC-build PR), which a plain clone
-# or fetch never brings, so fetch the commit itself.  Root's git refuses a tree another user owns
-# ("dubious ownership"), and step 5 chowns it to the venv owner, so trust this one directory.
-# Without the pin, build nothing: upstream's setup.py demands Intel paths (LD_LIBRARY) and fails
-# confusingly (ND, B2, B4 on 2026-11-13).
-pgit() { git -c safe.directory="$PYLAP_DIR" -C "$PYLAP_DIR" "$@"; }
+# or fetch never brings, so fetch the commit itself, from the known URL rather than the tree's own
+# configured origin.  Git runs as the tree's owner, never as root on a tree another user owns: that
+# user's config and hooks would otherwise run as root (step 5 chowns it to the venv owner, and root's
+# git refuses such a tree anyway).  Without the pin, build nothing: upstream's setup.py demands Intel
+# paths (LD_LIBRARY) and fails confusingly (ND, B2, B4 on 2026-11-13).
+pgit() {
+    local owner
+    owner="$(stat -c %U "$PYLAP_DIR" 2>/dev/null || echo root)"
+    if [[ $EUID -eq 0 && "$owner" != root ]]; then
+        sudo -u "$owner" git -C "$PYLAP_DIR" "$@"
+    else
+        git -C "$PYLAP_DIR" "$@"
+    fi
+}
 if [[ -d "$PYLAP_DIR/.git" ]]; then
-    pgit fetch --quiet origin 2>/dev/null || warn "pyLAP fetch failed (using existing checkout)"
+    pgit fetch --quiet "$PYLAP_REPO" 2>/dev/null || warn "pyLAP fetch failed (using existing checkout)"
 elif [[ -f "$PYLAP_DIR/setup.py" ]]; then
     # A frozen source tree with no .git (Model A image clone): use as-is. The
     # image was baked from a host built at the pinned commit; the pin cannot be
@@ -97,7 +106,7 @@ else
     git clone --quiet "$PYLAP_REPO" "$PYLAP_DIR" 2>/dev/null || { warn "pyLAP clone failed — raytracing stays disabled"; exit 0; }
 fi
 if [[ -d "$PYLAP_DIR/.git" ]]; then
-    pgit cat-file -e "$PYLAP_REF^{commit}" 2>/dev/null || pgit fetch --quiet origin "$PYLAP_REF" 2>/dev/null \
+    pgit cat-file -e "$PYLAP_REF^{commit}" 2>/dev/null || pgit fetch --quiet "$PYLAP_REPO" "$PYLAP_REF" 2>/dev/null \
         || warn "pyLAP fetch of pin $PYLAP_REF failed"
     if ! pgit checkout --quiet "$PYLAP_REF" 2>/dev/null; then
         warn "pyLAP checkout $PYLAP_REF failed — not building an unpinned tree; raytracing stays disabled"
