@@ -5,6 +5,16 @@
 **Status:** design, for Michael and Rob to review; Michael's answers of 2026-11-12 folded in.  Revises ruling B of 2026-10-30
 (`2026-10-30-t3-restoration-design.md`, §8 step 7 and §9), and drops 10-30's GPSDO-only rule.
 
+## The point of all this
+
+Michael, 2026-11-13: we want T3 to reconstruct UTC as well as it possibly can.  A T6 station needs
+T3 only if it loses T6.  But T6 stations can help every T3-only station: through sigmondb they give
+accurate offsets for the CODAR and HFDL transmitters they hear.  A T3 station then models each
+broadcast it hears from geography, the ionosphere and ray tracing, and fuses every signal it has to
+narrow down where UTC lies.  With a GPSDO the fused result should hold steady even while
+propagation changes fast, at sunrise and sunset.  That is the metrological point of the whole
+effort, and the science then measures with matching precision and accuracy.
+
 ## Why
 
 AC1SN, in Massachusetts, times itself on T2 alone.  It has no TS-1 (T6), no GPSDO pulse (T5) and
