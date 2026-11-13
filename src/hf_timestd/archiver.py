@@ -546,3 +546,45 @@ def run(config_path: Path = ARCHIVE_TOML, data_root: Path = DATA_ROOT,
         return st
     finally:
         lock.close()
+
+
+# ---------------------------------------------------------------------------
+# export: an archived window back to F32 (design part 3)
+# ---------------------------------------------------------------------------
+
+def export_f32(src_root: Path, dst: Path, channel: str, start_utc: datetime,
+               end_utc: datetime) -> int:
+    """Write F32 ``.bin.zst`` chunks and sidecars, in the original layout, for
+    every chunk of ``channel`` under ``src_root/raw_buffer`` whose start lies
+    in [start_utc, end_utc).  ``src_root`` is a drive's ``timestd/<station>``
+    folder (or any data root).  Returns the number of chunks written."""
+    import zstandard as zstd
+    t0, t1 = start_utc.timestamp(), end_utc.timestamp()
+    n = 0
+    base = Path(src_root) / "raw_buffer"
+    ch_dir = (base if base.is_dir() else Path(src_root)) / channel
+    day = start_utc.astimezone(timezone.utc).date()
+    while day <= end_utc.astimezone(timezone.utc).date():
+        d = ch_dir / day.strftime("%Y%m%d")
+        for b in sorted(d.glob("*.bin.zst")) if d.is_dir() else []:
+            stem = b.name[:-len(".bin.zst")]
+            try:
+                start = float(stem)
+            except ValueError:
+                continue
+            if not (t0 <= start < t1):
+                continue
+            meta = json.loads(b.with_name(stem + ".json").read_text())
+            raw = zstd.ZstdDecompressor().decompress(b.read_bytes())
+            x = iq_codec.decode_iq(raw, meta.get("dtype", iq_codec.DTYPE_F32),
+                                   float(meta.get("scale", 1.0)))
+            out_dir = Path(dst) / channel / d.name
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / b.name).write_bytes(zstd.ZstdCompressor(level=ZSTD_LEVEL).compress(
+                np.ascontiguousarray(x, dtype=np.complex64).tobytes()))
+            out_meta = {k: v for k, v in meta.items() if k not in ("scale", "converted_from")}
+            out_meta["dtype"] = iq_codec.DTYPE_F32
+            (out_dir / f"{stem}.json").write_text(json.dumps(out_meta, indent=2) + "\n")
+            n += 1
+        day += timedelta(days=1)
+    return n

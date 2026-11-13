@@ -1846,6 +1846,14 @@ def _handle_archive(args, parser):
         return _cmd_archive_run(args)
     if getattr(args, 'archive_command', None) == 'status':
         return _cmd_archive_status(args)
+    if getattr(args, 'archive_command', None) == 'export-f32':
+        from . import archiver
+        from datetime import datetime, timezone
+        parse = lambda s: datetime.fromisoformat(s.replace('Z', '+00:00')).astimezone(timezone.utc)
+        n = archiver.export_f32(Path(args.from_root), Path(args.to), args.channel,
+                                parse(args.start), parse(args.end))
+        print(f"wrote {n} F32 chunk(s) of {args.channel} to {args.to}")
+        return 0 if n else 1
     parser.print_help()
     return 1
 
@@ -2295,6 +2303,14 @@ Per-service overrides in [services] take precedence over the profile.
         help='Data root directory (default /var/lib/timestd)')
     run_p.add_argument('--dry-run', action='store_true',
         help='Report what it would copy and delete; change nothing')
+    exp_p = archive_sub.add_parser('export-f32',
+        help='Write an archived window back as F32 chunks in the original layout')
+    exp_p.add_argument('--from', dest='from_root', required=True,
+        help='The drive folder, e.g. /var/lib/sigmond/archive/timestd/<station>')
+    exp_p.add_argument('--to', required=True, help='Output directory')
+    exp_p.add_argument('--channel', required=True, help='Channel folder, e.g. WWV_10000')
+    exp_p.add_argument('--start', required=True, help='UTC start, e.g. 2026-11-12T03:00Z')
+    exp_p.add_argument('--end', required=True, help='UTC end (exclusive)')
     status_p = archive_sub.add_parser('status', help="The archiver's last run")
     status_p.add_argument('--json', action='store_true', help='Print the status document')
 
