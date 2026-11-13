@@ -93,3 +93,100 @@ def test_pair_disagreement_across_rtp_wrap():
     # 0.5 s later = 12000 samples: rtp wraps to 6000.  Fresh is 20 ms late.
     got = pair_disagreement_s(g + 520_000_000, 6000, g, ref_rtp, 24000)
     assert abs(got - 0.02) < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# Final review fix wave: rule 2 refuses only what T6 vouches against
+# (ruling R6); persistence tolerance 0.2 s (R7); prediction None paths.
+# ---------------------------------------------------------------------------
+from hf_timestd.core.pair_step_arbiter import (
+    PERSIST_AGREE_S, t6_anchor_in_map_run, t6_contradicts_both)
+
+
+def test_t6_contradicting_both_falls_to_persistence():
+    # radiod restarted; its pair arrives 0.4 s late, the mapping is the
+    # old run's (3641 s away).  T6 agrees with neither.
+    a = PairStepArbiter(24000)
+    assert t6_contradicts_both(5000.4, 1359.0, 5000.0)
+    assert a.decide(3641.4, 5000.4, 1359.0, 8.4, 5000.0) is Verdict.HOLD
+    assert a.decide(3641.4, 5060.4, 1419.0, 8.4, 5060.0) is Verdict.ADOPT
+
+
+def test_t6_refuse_only_when_mapping_agrees():
+    a = PairStepArbiter(24000)
+    assert not t6_contradicts_both(101.0, 100.1, 100.0)
+    assert a.decide(0.9, 101.0, 100.1, 5.0, 100.0) is Verdict.REFUSE_T6
+
+
+def test_t6_rule_clears_pending_step():
+    a = PairStepArbiter(24000)
+    assert a.decide(3.2, 103.2, 100.0, 8.2, None) is Verdict.HOLD
+    # T6 refuses the same step: the pending step is dropped ...
+    assert a.decide(3.2, 163.2, 160.0, 8.2, 160.0) is Verdict.REFUSE_T6
+    # ... so the next T6-less sighting starts over.
+    assert a.decide(3.2, 223.2, 220.0, 8.2, None) is Verdict.HOLD
+
+
+def test_t6_adopt_clears_pending_step():
+    a = PairStepArbiter(24000)
+    assert a.decide(3.2, 103.2, 100.0, 8.2, None) is Verdict.HOLD
+    assert a.decide(-1.0, 159.0, 160.0, 3.0, 159.0) is Verdict.ADOPT
+    assert a.decide(3.2, 223.2, 220.0, 8.2, None) is Verdict.HOLD
+
+
+def test_persistence_tolerance_is_0p2_s():
+    assert PERSIST_AGREE_S == 0.2
+    a = PairStepArbiter(24000)
+    assert a.decide(3.2, 103.2, 100.0, 8.2, None) is Verdict.HOLD
+    # Two honest late pairs 0.15 s apart are one step ...
+    assert a.decide(3.35, 163.35, 160.0, 8.35, None) is Verdict.ADOPT
+    b = PairStepArbiter(24000)
+    assert b.decide(3.2, 103.2, 100.0, 8.2, None) is Verdict.HOLD
+    # ... but 0.3 s apart they are not.
+    assert b.decide(3.5, 163.5, 160.0, 8.5, None) is Verdict.HOLD
+
+
+def test_t6_prediction_none_when_a_map_is_missing():
+    t6_map = _map(1_000_000, 1000.0)
+    ref = _ref(t6_map)
+    assert t6_predicted_utc_s(1_000_000, None, ref) is None
+    assert t6_predicted_utc_s(1_000_000, t6_map, None) is None
+    assert t6_predicted_utc_s(
+        1_000_000, t6_map, T6Reference(anchor=ref.anchor, t6_map=None)) is None
+
+
+def test_t6_prediction_none_when_t6_index_is_none():
+    t6_map = _map(1_000_000, 1000.0)
+    ref = _ref(t6_map)
+    # Anchor at 96 kHz through a 24 kHz map: no index.
+    from dataclasses import replace
+    wrong_rate = T6Reference(anchor=replace(ref.anchor, sample_rate_hz=96000),
+                             t6_map=t6_map)
+    assert t6_predicted_utc_s(1_000_000, t6_map, wrong_rate) is None
+    # Anchor RTP far beyond the map's reach (half a wrap away).
+    far = T6Reference(anchor=replace(ref.anchor,
+                                     anchor_rtp=(t6_map.rtp_ref + 2**31) % 2**32),
+                      t6_map=t6_map)
+    assert t6_predicted_utc_s(1_000_000, t6_map, far) is None
+
+
+def test_t6_anchor_in_map_run():
+    # Identity map: epoch is the GPS second of RTP 0.
+    utc_minus_gps = 315964800 - 18
+    gps_epoch = 1_450_000_000.0
+    cmap = CounterMap(rtp_ref=1_000_000, input_ref=1_000_000, ilen=1, olen=1,
+                      input_samprate=24000, input_epoch_gps_s=gps_epoch,
+                      n_agree=3)
+
+    def anchor_at(rtp, gps_s):
+        utc_ns = int(round((gps_s + utc_minus_gps) * 1e9))
+        return NativeAnchor(anchor_rtp=rtp, anchor_utc_ns=utc_ns,
+                            sample_rate_hz=24000, chain_delay_ns=0,
+                            captured_at_utc_ns=utc_ns, captured_via_tier="T6")
+
+    good = anchor_at(1_024_000, gps_epoch + 1_024_000 / 24000)
+    assert t6_anchor_in_map_run(T6Reference(good, cmap), utc_minus_gps)
+    # An anchor from a run that started an hour earlier.
+    old = anchor_at(1_024_000, gps_epoch - 3600 + 1_024_000 / 24000)
+    assert not t6_anchor_in_map_run(T6Reference(old, cmap), utc_minus_gps)
+    assert not t6_anchor_in_map_run(None, utc_minus_gps)

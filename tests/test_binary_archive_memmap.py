@@ -277,3 +277,36 @@ def test_restore_flushes_like_adopt(tmp_path: Path):
         w._release_scratch(after)
     finally:
         w.close()
+
+
+def test_restore_is_not_reported_as_radiod_restart(tmp_path: Path, caplog):
+    """R8: the step back on a restore is our own undo.  The writer's
+    'RTP counter space CHANGED (likely radiod restart)' warning and the
+    watchdog's mapping-jump capture fire for the forward step only."""
+    import logging
+    from unittest.mock import MagicMock
+
+    w = _writer(tmp_path)
+    w._gps_time_unix = w._gps_time_ns_raw = w._rtp_timesnap = None
+    watchdog = MagicMock()
+    try:
+        with patch('hf_timestd.core.radiod_timing_watchdog.get_watchdog',
+                   return_value=watchdog), \
+                caplog.at_level(logging.WARNING):
+            saved = (1_450_000_000 * 10**9, 0)
+            assert w.add_timing_snapshot(*saved)
+            bad = (saved[0] + 60_998_000_000, 60 * w.config.sample_rate)
+            assert w.add_timing_snapshot(*bad)
+            changed = [r for r in caplog.records
+                       if 'RTP counter space CHANGED' in r.getMessage()]
+            assert len(changed) == 1
+            assert watchdog.on_mapping_jump.call_count == 1
+
+            assert w.restore_timing_mapping(*saved) is True
+        assert w.current_mapping() == saved
+        changed = [r for r in caplog.records
+                   if 'RTP counter space CHANGED' in r.getMessage()]
+        assert len(changed) == 1
+        assert watchdog.on_mapping_jump.call_count == 1
+    finally:
+        w.close()

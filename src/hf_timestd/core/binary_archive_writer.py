@@ -820,10 +820,17 @@ class BinaryArchiveWriter:
                     self.current_buffer = None
             self._last_rtp_timesnap = None
             self._anchor_restored_pending = True
-            return self._adopt_pair_locked(gps_time_ns, rtp_timesnap)
+            return self._adopt_pair_locked(gps_time_ns, rtp_timesnap,
+                                           restoring=True)
 
-    def _adopt_pair_locked(self, gps_time_ns: int, rtp_timesnap: int) -> bool:
-        """Body of ``add_timing_snapshot``; the caller holds ``_lock``."""
+    def _adopt_pair_locked(self, gps_time_ns: int, rtp_timesnap: int,
+                           restoring: bool = False) -> bool:
+        """Body of ``add_timing_snapshot``; the caller holds ``_lock``.
+
+        ``restoring`` marks a round-trip restore: the step back is our own
+        undo, which the recorder already logged at ERROR, not a radiod
+        restart, so the counter-space-changed warning and the watchdog's
+        mapping-jump capture stay quiet."""
         # Deduplicate: only store if rtp_timesnap has changed
         if rtp_timesnap == self._last_rtp_timesnap:
             return False
@@ -866,7 +873,9 @@ class BinaryArchiveWriter:
             utc_diff = old_utc - gps_unix_sec
             if abs(utc_diff) > self._anchor_step_threshold_sec:
                 is_wraparound = abs(abs(utc_diff) - WRAP_PERIOD) < 60  # within 1 min of wrap period
-                if is_wraparound:
+                if restoring:
+                    pass  # our own undo; logged by the recorder
+                elif is_wraparound:
                     logger.info(
                         f"{self.config.channel_name}: RTP counter wrapped "
                         f"(32-bit rollover at {WRAP_PERIOD/3600:.1f}h). "

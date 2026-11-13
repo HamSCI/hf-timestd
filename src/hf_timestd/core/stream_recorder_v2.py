@@ -49,9 +49,11 @@ _CHANNEL_VERIFY_TIMEOUT_S = float(os.environ.get("TIMESTD_CHANNEL_VERIFY_TIMEOUT
 from ka9q import RadiodStream, ChannelInfo, StreamQuality, RadiodControl
 from .anchor_pair import read_anchor_pair, read_legacy_pair
 from .pair_step_arbiter import (
-    STEADY_LIMIT_S, PairStepArbiter, T6Reference, Verdict,
-    pair_disagreement_s, t6_predicted_utc_s,
+    STEADY_LIMIT_S, T6_AGREE_S, PairStepArbiter, T6Reference, Verdict,
+    pair_disagreement_s, t6_anchor_in_map_run, t6_contradicts_both,
+    t6_predicted_utc_s,
 )
+from .counter_epoch_tracker import map_fits_raw_pair
 
 # NOTE (2026-02-03): Bootstrap functionality migrated into MetrologyEngine.
 # The recorder now always archives immediately. MetrologyEngine's fusion_state
@@ -1065,6 +1067,9 @@ class StreamRecorderV2:
     # pair that lands back on it within this window marks the step as a
     # torn read, and the old mapping returns exactly.
     ROUND_TRIP_WINDOW_S = 600
+    # The PAIR STEP HELD warning fires at most once per this many seconds
+    # per channel (monotonic clock), like the torn-read probe.
+    HELD_LOG_INTERVAL_S = 300.0
 
     def set_t6_reference_provider(
             self, provider: Callable[[], Optional[T6Reference]]) -> None:
@@ -1098,12 +1103,41 @@ class StreamRecorderV2:
         return arbiter
 
     @staticmethod
-    def _gps_ns_to_utc_s(gps_time_ns: int) -> float:
+    def _utc_minus_gps_s() -> int:
+        """UTC minus radiod's GPS timescale, in whole seconds."""
+        from .leap_second import get_current_gps_leap_seconds
+        return 315964800 - get_current_gps_leap_seconds()
+
+    @classmethod
+    def _gps_ns_to_utc_s(cls, gps_time_ns: int) -> float:
         """radiod GPS_TIME (ns, GPS epoch) to UTC seconds, the conversion
         ``BinaryArchiveWriter.evaluate_pair`` uses."""
-        from .leap_second import get_current_gps_leap_seconds
-        return (int(gps_time_ns) / 1_000_000_000
-                + 315964800 - get_current_gps_leap_seconds())
+        return int(gps_time_ns) / 1_000_000_000 + cls._utc_minus_gps_s()
+
+    def _valid_t6_utc_s(self, gps_time: int, rtp_snap: int) -> Optional[float]:
+        """The GPSDO's UTC for channel sample ``rtp_snap``, or None unless
+        every input belongs to radiod's current run.
+
+        Right after a radiod restart the channel map, the T6 map and the
+        T6 anchor can each still describe the old run (core refreshes the
+        maps after the revalidation tick; T6 re-locks later still).  A
+        prediction from old-run inputs equals the old mapping and would
+        refuse the genuine step on every tick (final review C1).  So:
+
+        * the channel map must fit radiod's fresh pair
+          (``map_fits_raw_pair``, 2 s allowance: a torn ±1 s pair still
+          fits, so the torn-read refusal keeps working);
+        * T6's anchor must fit T6's map (``t6_anchor_in_map_run``);
+        * ``t6_predicted_utc_s`` checks the two maps name one run.
+        """
+        cmap = getattr(self, '_counter_map', None)
+        if not map_fits_raw_pair(cmap, gps_time, rtp_snap):
+            return None
+        ref = self._t6_reference()
+        if ref is None or not t6_anchor_in_map_run(ref, self._utc_minus_gps_s()):
+            return None
+        # Both sides UTC: NativeAnchor.anchor_utc_ns is UTC.
+        return t6_predicted_utc_s(rtp_snap, cmap, ref)
 
     def _adopt_pair_step(self, gps_time: int, rtp_snap: int, how: str) -> None:
         """Adopt an arbitrated pair step, keeping the mapping it replaces.
@@ -1146,10 +1180,31 @@ class StreamRecorderV2:
                                    saved_pair[1], self.config.sample_rate)
         if abs(back) > STEADY_LIMIT_S:
             return False
+        # Where the GPSDO can speak, it must vouch for the saved mapping:
+        # a torn read that lands back on a mapping T6 contradicts proves
+        # nothing about that mapping.
+        t6_utc_s = self._valid_t6_utc_s(gps_time, rtp_snap)
+        if t6_utc_s is not None:
+            saved_utc_s = self._gps_ns_to_utc_s(gps_time) - back
+            if abs(saved_utc_s - t6_utc_s) > T6_AGREE_S:
+                logger.warning(
+                    f"{self.config.description}: ANCHOR ROUND TRIP NOT "
+                    f"RESTORED: the fresh pair lands {back:+.3f}s from the "
+                    f"mapping a step replaced, but the GPSDO puts that "
+                    f"mapping {saved_utc_s - t6_utc_s:+.3f}s off; keeping "
+                    f"the current mapping"
+                )
+                return False
 
         self.archive_writer.restore_timing_mapping(*saved_pair)
-        if saved_ring is not None and self.ring_buffer is not None:
-            self._restore_ring_anchor(saved_ring)
+        if self.ring_buffer is not None:
+            if saved_ring is not None:
+                self._restore_ring_anchor(saved_ring)
+            else:
+                # No ring state was saved (the ring had never been
+                # anchored); re-anchor it on the restored mapping so it
+                # does not stay on the stepped one.
+                self._update_ring_anchor(*saved_pair)
         from datetime import datetime, timezone
         saved_iso = datetime.fromtimestamp(
             self._gps_ns_to_utc_s(saved_pair[0]), tz=timezone.utc
@@ -1200,8 +1255,10 @@ class StreamRecorderV2:
         * adopts it (writer flush-and-adopt + judge segment fracture)
           when it disagrees with the current mapping beyond
           REVALIDATE_ADOPT_THRESHOLD_S AND the PairStepArbiter agrees —
-          the GPSDO confirms it while T6 is authoritative, else the same
-          counter offset persists across two checks.  Catches radiod
+          the GPSDO confirms it while T6 is authoritative and every T6
+          input belongs to radiod's current run, else the same counter
+          offset persists across two checks.  T6 refuses a pair only when
+          it vouches for the current mapping.  Catches radiod
           restarts / counter re-snaps that the silence-based health
           monitor never sees because the stream keeps flowing, without
           landing a one-off torn pair (AC0G-ND 2026-11-12/13);
@@ -1304,25 +1361,37 @@ class StreamRecorderV2:
         fresh_offset_s = fresh_utc_s - int(rtp_snap) / self.config.sample_rate
         t6_utc_s = None
         if abs(diff) > self.REVALIDATE_ADOPT_THRESHOLD_S:
-            cmap = getattr(self, '_counter_map', None)
-            ref = self._t6_reference() if cmap is not None else None
-            if ref is not None:
-                # Both sides UTC: NativeAnchor.anchor_utc_ns is UTC.
-                t6_utc_s = t6_predicted_utc_s(rtp_snap, cmap, ref)
+            t6_utc_s = self._valid_t6_utc_s(gps_time, rtp_snap)
         verdict = self._arbiter().decide(
             diff, fresh_utc_s, implied_utc_s, fresh_offset_s, t6_utc_s)
+        contradicted = t6_contradicts_both(
+            fresh_utc_s, implied_utc_s, t6_utc_s)
+        if contradicted:
+            logger.error(
+                f"{self.config.description}: PAIR STEP: GPSDO contradicts "
+                f"both the mapping and radiod's pair (diff {diff:+.3f}s, "
+                f"fresh−t6 {fresh_utc_s - t6_utc_s:+.3f}s, "
+                f"implied−t6 {implied_utc_s - t6_utc_s:+.3f}s); the step "
+                f"must persist to be adopted"
+            )
 
         if verdict is Verdict.ADOPT:
             self._adopt_pair_step(
                 gps_time, rtp_snap,
-                't6' if t6_utc_s is not None else 'persistent')
+                't6' if t6_utc_s is not None and not contradicted
+                else 'persistent')
             return True
         if verdict is Verdict.HOLD:
-            logger.warning(
-                f"{self.config.description}: PAIR STEP HELD (awaiting "
-                f"second tick): radiod's pair sits {diff:+.3f}s from the "
-                f"adopted mapping; no GPSDO reference, so it must persist"
-            )
+            now = time.monotonic()
+            last = getattr(self, '_held_last_log', None)
+            if last is None or now - last >= self.HELD_LOG_INTERVAL_S:
+                self._held_last_log = now
+                logger.warning(
+                    f"{self.config.description}: PAIR STEP HELD (awaiting "
+                    f"second tick): radiod's pair sits {diff:+.3f}s from "
+                    f"the adopted mapping and nothing has confirmed it, so "
+                    f"it must persist across two checks"
+                )
         elif verdict is Verdict.REFUSE_T6:
             logger.error(
                 f"{self.config.description}: PAIR STEP REFUSED: GPSDO says "
