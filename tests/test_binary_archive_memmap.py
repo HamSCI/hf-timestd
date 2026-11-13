@@ -223,3 +223,57 @@ def test_memmap_failure_falls_back_to_heap_with_warning(tmp_path: Path, caplog):
     # The fallback buffer is still usable.
     buf.samples[0] = 1.0 + 2.0j
     assert buf.samples[0] == 1.0 + 2.0j
+
+
+# ---- restore_timing_mapping (anchor round trip) -------------------------------
+
+
+def test_restore_flushes_like_adopt(tmp_path: Path):
+    """A restore flushes the in-progress chunk whole, re-adopts the saved
+    pair exactly, and tags the next chunk (not the one after) as restored."""
+    import json
+    from hf_timestd.core.leap_second import get_current_gps_leap_seconds
+
+    w = _writer(tmp_path)
+    w._gps_time_unix = w._gps_time_ns_raw = w._rtp_timesnap = None
+    try:
+        saved = (1_450_000_000 * 10**9, 0)
+        assert w.add_timing_snapshot(*saved)
+        assert w.current_mapping() == saved
+        bad = (saved[0] + 60_998_000_000, 60 * w.config.sample_rate)
+        assert w.add_timing_snapshot(*bad)
+        assert w.current_mapping() == bad
+
+        # A half-filled chunk under the bad mapping.
+        boundary = (int(w._gps_time_unix) // w.file_duration_sec) * w.file_duration_sec
+        buf = w._start_new_minute(float(boundary), bad[1])
+        half = w.samples_per_chunk // 2
+        expected = (np.arange(half) + 1).astype(np.complex64)
+        buf.samples[:half] = expected
+        buf.write_pos = half
+        w.current_buffer = buf
+
+        assert w.restore_timing_mapping(*saved) is True
+        assert w.current_buffer is None
+        w._flush_queue.join()
+        bins = list(w.archive_dir.rglob(f"{boundary}.bin"))
+        assert len(bins) == 1
+        assert np.array_equal(np.fromfile(bins[0], dtype=np.complex64), expected)
+        first_meta = json.loads(bins[0].with_suffix('.json').read_text())
+        assert 'anchor_restored' not in first_meta
+
+        assert w.current_mapping() == saved
+        gps_to_unix = 315964800 - get_current_gps_leap_seconds()
+        assert w._gps_time_unix == saved[0] / 1e9 + gps_to_unix
+
+        nxt, nxt_boundary = _drive_one_chunk(w, rtp_start=0)
+        w._flush_minute(nxt)
+        meta = json.loads(next(w.archive_dir.rglob(f"{nxt_boundary}.json")).read_text())
+        assert meta['anchor_restored'] is True
+
+        after = w._start_new_minute(float(nxt_boundary + w.file_duration_sec),
+                                    w.samples_per_chunk)
+        assert after.anchor_restored is False
+        w._release_scratch(after)
+    finally:
+        w.close()

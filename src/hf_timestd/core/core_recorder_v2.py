@@ -1762,6 +1762,12 @@ class CoreRecorderV2:
                 if getattr(self, '_anchor_closure', False):
                     recorder.set_label_anchor_provider(
                         self._label_anchor_state)
+                # Revalidation lets the GPSDO decide a pair step while T6
+                # is authoritative (2026-11-13 ND torn read).  Unlike the
+                # label anchor this is not opt-in: silence from the
+                # provider leaves the two-tick persistence rule.
+                recorder.set_t6_reference_provider(
+                    self._t6_pair_step_reference)
 
             logger.info(f"✓ Initialized {len(self.recorders)} archive recorders")
 
@@ -3169,6 +3175,26 @@ class CoreRecorderV2:
             )
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"T6 label anchor unavailable: {exc}")
+            return None
+
+    def _t6_pair_step_reference(self):
+        """T6's anchor and counter map for pair-step arbitration
+        (``StreamRecorderV2.set_t6_reference_provider``), while the T6
+        authority holds AUTHORITATIVE; None otherwise.  Never raises."""
+        try:
+            from hf_timestd.core.t6_anchor_authority import T6AuthorityState
+            from hf_timestd.core.pair_step_arbiter import T6Reference
+            decision = getattr(self, '_t6_authority_last_decision', None)
+            if (decision is None
+                    or decision.state is not T6AuthorityState.AUTHORITATIVE):
+                return None
+            anchor = getattr(self, '_t6_native_anchor', None)
+            cmap = getattr(self, '_t6_counter_map', None)
+            if anchor is None or cmap is None:
+                return None
+            return T6Reference(anchor, cmap)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"T6 pair-step reference unavailable: {exc}")
             return None
 
     def _label_anchor_state(self):

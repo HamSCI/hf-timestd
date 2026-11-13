@@ -510,6 +510,11 @@ class TestRevalidation:
                                 ring=ring)
             diff_before = w.evaluate_pair(gps1, 777_000)
             assert abs(diff_before) > StreamRecorderV2.REVALIDATE_ADOPT_THRESHOLD_S
+            # No T6 reference: the step must persist across two checks
+            # (PairStepArbiter); the first only holds it.
+            rec.revalidate_radiod_pair()
+            assert judge.registered[-1][2] == 5000
+            assert ring.anchors == []
             rec.revalidate_radiod_pair()
             # Writer mapping now consistent with the fresh pair...
             assert abs(w.evaluate_pair(gps1, 777_000)) < 1e-6

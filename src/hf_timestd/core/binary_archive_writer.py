@@ -197,6 +197,9 @@ class MinuteBuffer:
     # plane restated at radiod's snap counter; None means the sidecar
     # carries radiod's raw pair as before.
     label_pair: Optional[tuple] = None
+    # First chunk after an anchor round trip put back the mapping a pair
+    # step had replaced (StreamRecorderV2 revalidation).
+    anchor_restored: bool = False
 
     @property
     def is_complete(self) -> bool:
@@ -382,6 +385,8 @@ class BinaryArchiveWriter:
         # Timing snapshot tracking for radiod GPS_TIME/RTP_TIMESNAP pairs
         # Deduplicated by rtp_timesnap to avoid storing duplicates
         self._last_rtp_timesnap: Optional[int] = None
+        # Set by restore_timing_mapping; the next chunk started carries it.
+        self._anchor_restored_pending = False
         self._pending_snapshots: List[TimingSnapshot] = []  # Snapshots waiting for minute assignment
         
         logger.info(f"BinaryArchiveWriter initialized for {config.channel_name}")
@@ -789,120 +794,150 @@ class BinaryArchiveWriter:
             True if snapshot was stored (new), False if deduplicated
         """
         with self._lock:
-            # Deduplicate: only store if rtp_timesnap has changed
-            if rtp_timesnap == self._last_rtp_timesnap:
-                return False
-            
-            self._last_rtp_timesnap = rtp_timesnap
-            
-            # Convert GPS_TIME to Unix time
-            # GPS epoch is Jan 6, 1980. GPS_TIME is ns since GPS epoch.
-            GPS_EPOCH_UNIX = 315964800  # Unix timestamp of GPS epoch
-            from .leap_second import get_current_gps_leap_seconds
-            GPS_LEAP_SECONDS = get_current_gps_leap_seconds()
-            BILLION = 1_000_000_000
-            
-            gps_unix_ns = gps_time_ns + BILLION * (GPS_EPOCH_UNIX - GPS_LEAP_SECONDS)
-            gps_unix_sec = gps_unix_ns / BILLION
-            
-            # Detect RTP counter-space discontinuity (wraparound or radiod restart).
-            #
-            # The 32-bit RTP counter at 24 kHz wraps every ~49.7 hours — this is a
-            # routine event, not an error.  A radiod restart resets the counter to
-            # near zero at an arbitrary wall-clock moment.
-            #
-            # In both cases the correct action is identical: flush the in-progress
-            # minute buffer (so it is written with the OLD mapping) and then adopt
-            # the NEW GPS_TIME/RTP_TIMESNAP.  GPS_TIME is always authoritative; we
-            # never need to second-guess it.
-            #
-            # Distinguishing wraparound from restart for logging purposes:
-            #   - gps_unix_sec advances smoothly from _gps_time_unix  → wraparound
-            #   - gps_unix_sec is close to time.time()                → either case
-            #   The clearest signal is the magnitude of UTC disagreement relative to
-            #   one full wrap period (~178957 s).
-            WRAP_PERIOD = (0x100000000) / self.config.sample_rate  # ~178957 s at 24 kHz
-            if self._gps_time_unix is not None and self._rtp_timesnap is not None:
-                # What UTC does the OLD mapping give for the NEW rtp_timesnap?
-                old_delta = int((rtp_timesnap - self._rtp_timesnap) & 0xFFFFFFFF)
-                if old_delta > 0x7FFFFFFF:
-                    old_delta -= 0x100000000
-                old_utc = self._gps_time_unix + old_delta / self.config.sample_rate
-                utc_diff = old_utc - gps_unix_sec
-                if abs(utc_diff) > self._anchor_step_threshold_sec:
-                    is_wraparound = abs(abs(utc_diff) - WRAP_PERIOD) < 60  # within 1 min of wrap period
-                    if is_wraparound:
-                        logger.info(
-                            f"{self.config.channel_name}: RTP counter wrapped "
-                            f"(32-bit rollover at {WRAP_PERIOD/3600:.1f}h). "
-                            f"Adopting new GPS_TIME={gps_unix_sec:.3f}. Flushing current buffer."
-                        )
-                    else:
-                        logger.warning(
-                            f"{self.config.channel_name}: RTP counter space CHANGED "
-                            f"(likely radiod restart) — "
-                            f"old mapping gives UTC={old_utc:.3f} but new GPS_TIME={gps_unix_sec:.3f} "
-                            f"(diff={utc_diff:+.1f}s). Flushing current buffer."
-                        )
-                        # Feed the host-wide watchdog: it ignores the ordinary
-                        # re-anchor/jitter regime (this branch also trips on
-                        # ~0.45 s status jitter) and, on a GROSS jump, captures a
-                        # gpsd/chrony evidence bundle + GPS-source-vs-radiod
-                        # verdict.  Diagnostic only — never touches timing.
-                        try:
-                            from .radiod_timing_watchdog import get_watchdog
-                            get_watchdog().on_mapping_jump(
-                                channel=self.config.channel_name,
-                                gps_time_ns=gps_time_ns,
-                                rtp_timesnap=rtp_timesnap,
-                                radiod_utc=gps_unix_sec,
-                                old_utc=old_utc,
-                                delta_sec=utc_diff,
-                                sample_rate=self.config.sample_rate,
-                            )
-                        except Exception:  # noqa: BLE001 — never disturb recording
-                            pass
-                    # In both cases: flush and adopt new mapping
-                    if self.current_buffer is not None:
-                        if self._try_flush(self.current_buffer):
-                            self.current_buffer = None
-                        # On failure _try_flush keeps buffer for retry;
-                        # new mapping is adopted below regardless so the
-                        # retained buffer will flush with stale timing —
-                        # but partial data is better than none.
-            
-            # Store GPS_TIME/RTP_TIMESNAP mapping directly — no correction needed.
-            self._gps_time_unix = gps_unix_sec
-            self._gps_time_ns_raw = gps_time_ns
-            self._rtp_timesnap = rtp_timesnap
-            self._note_counter_epoch(gps_time_ns, rtp_timesnap, self.config.sample_rate)
+            return self._adopt_pair_locked(gps_time_ns, rtp_timesnap)
 
-            # Anchor adoption point: register the pair with the Offset
-            # Judge (spec §3 — estimated "at every radiod anchor
-            # adoption").  The judge dedupes identical pairs and
-            # fractures its segment on implausible steps / RTP wraps.
-            self._judge_register_pair(gps_time_ns, rtp_timesnap)
-            if not self._timing_locked:
-                self._timing_locked = True
-                wait_dur = ''
-                if hasattr(self, '_waiting_since'):
-                    wait_dur = f' (after {time.time() - self._waiting_since:.1f}s wait)'
-                    del self._waiting_since
-                logger.info(f"{self.config.channel_name}: RTP timing LOCKED{wait_dur} - GPS_TIME={gps_unix_sec:.6f}, RTP_TIMESNAP={rtp_timesnap}")
-            
-            snapshot = TimingSnapshot(
-                gps_time_ns=gps_time_ns,
-                rtp_timesnap=rtp_timesnap,
-                local_receipt_time=time.time()  # For diagnostics only, not used for timing
-            )
-            
-            # Add to current buffer if available, otherwise to pending list
+    def current_mapping(self) -> Optional[tuple]:
+        """The adopted ``(gps_time_ns, rtp_timesnap)`` exactly as
+        ``add_timing_snapshot`` received it, or None before the first."""
+        with self._lock:
+            if self._gps_time_ns_raw is None or self._rtp_timesnap is None:
+                return None
+            return int(self._gps_time_ns_raw), int(self._rtp_timesnap)
+
+    def restore_timing_mapping(self, gps_time_ns: int, rtp_timesnap: int) -> bool:
+        """Re-adopt a mapping that a pair step replaced (anchor round trip).
+
+        Does what ``add_timing_snapshot`` does -- flush the in-progress
+        chunk under the mapping it was labelled with, adopt the pair,
+        relay it to the judge -- but flushes whatever the step size, and
+        skips the dedupe, since the restored pair may be one this writer
+        has seen before.  The next chunk's sidecar carries
+        ``"anchor_restored": true``.
+        """
+        with self._lock:
             if self.current_buffer is not None:
-                self.current_buffer.timing_snapshots.append(snapshot)
-            else:
-                self._pending_snapshots.append(snapshot)
-            
-            return True
+                if self._try_flush(self.current_buffer):
+                    self.current_buffer = None
+            self._last_rtp_timesnap = None
+            self._anchor_restored_pending = True
+            return self._adopt_pair_locked(gps_time_ns, rtp_timesnap)
+
+    def _adopt_pair_locked(self, gps_time_ns: int, rtp_timesnap: int) -> bool:
+        """Body of ``add_timing_snapshot``; the caller holds ``_lock``."""
+        # Deduplicate: only store if rtp_timesnap has changed
+        if rtp_timesnap == self._last_rtp_timesnap:
+            return False
+        
+        self._last_rtp_timesnap = rtp_timesnap
+        
+        # Convert GPS_TIME to Unix time
+        # GPS epoch is Jan 6, 1980. GPS_TIME is ns since GPS epoch.
+        GPS_EPOCH_UNIX = 315964800  # Unix timestamp of GPS epoch
+        from .leap_second import get_current_gps_leap_seconds
+        GPS_LEAP_SECONDS = get_current_gps_leap_seconds()
+        BILLION = 1_000_000_000
+        
+        gps_unix_ns = gps_time_ns + BILLION * (GPS_EPOCH_UNIX - GPS_LEAP_SECONDS)
+        gps_unix_sec = gps_unix_ns / BILLION
+        
+        # Detect RTP counter-space discontinuity (wraparound or radiod restart).
+        #
+        # The 32-bit RTP counter at 24 kHz wraps every ~49.7 hours — this is a
+        # routine event, not an error.  A radiod restart resets the counter to
+        # near zero at an arbitrary wall-clock moment.
+        #
+        # In both cases the correct action is identical: flush the in-progress
+        # minute buffer (so it is written with the OLD mapping) and then adopt
+        # the NEW GPS_TIME/RTP_TIMESNAP.  GPS_TIME is always authoritative; we
+        # never need to second-guess it.
+        #
+        # Distinguishing wraparound from restart for logging purposes:
+        #   - gps_unix_sec advances smoothly from _gps_time_unix  → wraparound
+        #   - gps_unix_sec is close to time.time()                → either case
+        #   The clearest signal is the magnitude of UTC disagreement relative to
+        #   one full wrap period (~178957 s).
+        WRAP_PERIOD = (0x100000000) / self.config.sample_rate  # ~178957 s at 24 kHz
+        if self._gps_time_unix is not None and self._rtp_timesnap is not None:
+            # What UTC does the OLD mapping give for the NEW rtp_timesnap?
+            old_delta = int((rtp_timesnap - self._rtp_timesnap) & 0xFFFFFFFF)
+            if old_delta > 0x7FFFFFFF:
+                old_delta -= 0x100000000
+            old_utc = self._gps_time_unix + old_delta / self.config.sample_rate
+            utc_diff = old_utc - gps_unix_sec
+            if abs(utc_diff) > self._anchor_step_threshold_sec:
+                is_wraparound = abs(abs(utc_diff) - WRAP_PERIOD) < 60  # within 1 min of wrap period
+                if is_wraparound:
+                    logger.info(
+                        f"{self.config.channel_name}: RTP counter wrapped "
+                        f"(32-bit rollover at {WRAP_PERIOD/3600:.1f}h). "
+                        f"Adopting new GPS_TIME={gps_unix_sec:.3f}. Flushing current buffer."
+                    )
+                else:
+                    logger.warning(
+                        f"{self.config.channel_name}: RTP counter space CHANGED "
+                        f"(likely radiod restart) — "
+                        f"old mapping gives UTC={old_utc:.3f} but new GPS_TIME={gps_unix_sec:.3f} "
+                        f"(diff={utc_diff:+.1f}s). Flushing current buffer."
+                    )
+                    # Feed the host-wide watchdog: it ignores the ordinary
+                    # re-anchor/jitter regime (this branch also trips on
+                    # ~0.45 s status jitter) and, on a GROSS jump, captures a
+                    # gpsd/chrony evidence bundle + GPS-source-vs-radiod
+                    # verdict.  Diagnostic only — never touches timing.
+                    try:
+                        from .radiod_timing_watchdog import get_watchdog
+                        get_watchdog().on_mapping_jump(
+                            channel=self.config.channel_name,
+                            gps_time_ns=gps_time_ns,
+                            rtp_timesnap=rtp_timesnap,
+                            radiod_utc=gps_unix_sec,
+                            old_utc=old_utc,
+                            delta_sec=utc_diff,
+                            sample_rate=self.config.sample_rate,
+                        )
+                    except Exception:  # noqa: BLE001 — never disturb recording
+                        pass
+                # In both cases: flush and adopt new mapping
+                if self.current_buffer is not None:
+                    if self._try_flush(self.current_buffer):
+                        self.current_buffer = None
+                    # On failure _try_flush keeps buffer for retry;
+                    # new mapping is adopted below regardless so the
+                    # retained buffer will flush with stale timing —
+                    # but partial data is better than none.
+        
+        # Store GPS_TIME/RTP_TIMESNAP mapping directly — no correction needed.
+        self._gps_time_unix = gps_unix_sec
+        self._gps_time_ns_raw = gps_time_ns
+        self._rtp_timesnap = rtp_timesnap
+        self._note_counter_epoch(gps_time_ns, rtp_timesnap, self.config.sample_rate)
+
+        # Anchor adoption point: register the pair with the Offset
+        # Judge (spec §3 — estimated "at every radiod anchor
+        # adoption").  The judge dedupes identical pairs and
+        # fractures its segment on implausible steps / RTP wraps.
+        self._judge_register_pair(gps_time_ns, rtp_timesnap)
+        if not self._timing_locked:
+            self._timing_locked = True
+            wait_dur = ''
+            if hasattr(self, '_waiting_since'):
+                wait_dur = f' (after {time.time() - self._waiting_since:.1f}s wait)'
+                del self._waiting_since
+            logger.info(f"{self.config.channel_name}: RTP timing LOCKED{wait_dur} - GPS_TIME={gps_unix_sec:.6f}, RTP_TIMESNAP={rtp_timesnap}")
+        
+        snapshot = TimingSnapshot(
+            gps_time_ns=gps_time_ns,
+            rtp_timesnap=rtp_timesnap,
+            local_receipt_time=time.time()  # For diagnostics only, not used for timing
+        )
+        
+        # Add to current buffer if available, otherwise to pending list
+        if self.current_buffer is not None:
+            self.current_buffer.timing_snapshots.append(snapshot)
+        else:
+            self._pending_snapshots.append(snapshot)
+        
+        return True
     
     def _sanitize_channel_name(self) -> str:
         """Convert channel name to filesystem-safe format.
@@ -1045,7 +1080,9 @@ class BinaryArchiveWriter:
             scratch_path=scratch_path,
             judge_timing=judge_timing,
             label_pair=self._label_pair(label),
+            anchor_restored=bool(getattr(self, '_anchor_restored_pending', False)),
         )
+        self._anchor_restored_pending = False
 
         # Transfer any pending timing snapshots to this buffer
         if self._pending_snapshots:
@@ -1475,6 +1512,8 @@ class BinaryArchiveWriter:
             # correction applied to this chunk's labels.
             if buffer.judge_timing is not None:
                 metadata['timing'] = buffer.judge_timing
+            if buffer.anchor_restored:
+                metadata['anchor_restored'] = True
             metadata.update(f16_extra)
             
             # Atomic write: write to temp file, fsync, then rename

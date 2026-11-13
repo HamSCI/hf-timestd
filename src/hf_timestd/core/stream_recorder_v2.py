@@ -48,6 +48,10 @@ _CHANNEL_VERIFY_TIMEOUT_S = float(os.environ.get("TIMESTD_CHANNEL_VERIFY_TIMEOUT
 
 from ka9q import RadiodStream, ChannelInfo, StreamQuality, RadiodControl
 from .anchor_pair import read_anchor_pair
+from .pair_step_arbiter import (
+    STEADY_LIMIT_S, PairStepArbiter, T6Reference, Verdict,
+    pair_disagreement_s, t6_predicted_utc_s,
+)
 
 # NOTE (2026-02-03): Bootstrap functionality migrated into MetrologyEngine.
 # The recorder now always archives immediately. MetrologyEngine's fusion_state
@@ -225,6 +229,14 @@ class StreamRecorderV2:
         # (NativeAnchor, epoch_id) actually written into the ring.
         self._label_anchor_provider = None
         self._ring_label_anchor: Optional[tuple] = None
+        # Pair-step arbitration (2026-11-13, ND torn read): T6's reference
+        # provider, this channel's CounterMap, the arbiter's pending step,
+        # and the mapping a step replaced as
+        # (writer pair, ring anchor state, monotonic seconds) or None.
+        self._t6_reference_provider: Optional[Callable[[], Optional[T6Reference]]] = None
+        self._counter_map = None
+        self._pair_arbiter = PairStepArbiter(config.sample_rate)
+        self._prev_mapping: Optional[tuple] = None
         # NOTE (2026-02-03): bootstrap_service parameter kept for API compatibility
         # but is no longer used. MetrologyEngine handles timing lock internally.
         
@@ -943,7 +955,9 @@ class StreamRecorderV2:
         """Publish this channel's CounterMap (None clears it) into the ring.
 
         Never raises: a failed write must not stop the recorder loop.
+        The map is also kept for the pair-step arbiter's T6 prediction.
         """
+        self._counter_map = cmap
         if self.ring_buffer is None:
             return
         try:
@@ -1041,7 +1055,135 @@ class StreamRecorderV2:
     # judge measures + corrects the residual against its benches on its
     # own 10 s tick).  0.75 s matches the fleet re-anchor threshold and
     # the judge's pair_step_threshold_s.
-    REVALIDATE_ADOPT_THRESHOLD_S = 0.75
+    REVALIDATE_ADOPT_THRESHOLD_S = STEADY_LIMIT_S
+    # How long a mapping replaced by a pair step stays restorable: a fresh
+    # pair that lands back on it within this window marks the step as a
+    # torn read, and the old mapping returns exactly.
+    ROUND_TRIP_WINDOW_S = 600
+
+    def set_t6_reference_provider(
+            self, provider: Callable[[], Optional[T6Reference]]) -> None:
+        """Install the T6 reference provider for pair-step arbitration.
+
+        ``provider()`` answers T6's native anchor and counter map while
+        the T6 authority holds AUTHORITATIVE, else None.  While it
+        answers, the GPSDO decides whether a disagreeing pair is adopted.
+        """
+        self._t6_reference_provider = provider
+
+    def _t6_reference(self) -> Optional[T6Reference]:
+        provider = getattr(self, '_t6_reference_provider', None)
+        if provider is None:
+            return None
+        try:
+            return provider()
+        except Exception as exc:  # noqa: BLE001 — never disturb recording
+            logger.debug(
+                f"{self.config.description}: T6 reference provider "
+                f"failed: {exc}"
+            )
+            return None
+
+    def _arbiter(self) -> PairStepArbiter:
+        # getattr: unit tests build recorders without __init__.
+        arbiter = getattr(self, '_pair_arbiter', None)
+        if arbiter is None:
+            arbiter = PairStepArbiter(self.config.sample_rate)
+            self._pair_arbiter = arbiter
+        return arbiter
+
+    @staticmethod
+    def _gps_ns_to_utc_s(gps_time_ns: int) -> float:
+        """radiod GPS_TIME (ns, GPS epoch) to UTC seconds, the conversion
+        ``BinaryArchiveWriter.evaluate_pair`` uses."""
+        from .leap_second import get_current_gps_leap_seconds
+        return (int(gps_time_ns) / 1_000_000_000
+                + 315964800 - get_current_gps_leap_seconds())
+
+    def _adopt_pair_step(self, gps_time: int, rtp_snap: int, how: str) -> None:
+        """Adopt an arbitrated pair step, keeping the mapping it replaces.
+
+        ``how`` names the evidence: ``t6`` (the GPSDO confirmed it) or
+        ``persistent`` (two checks saw the same counter offset).
+        """
+        writer = self.archive_writer
+        self._prev_mapping = (
+            writer.current_mapping(),
+            getattr(self, '_ring_anchor_state', None),
+            time.monotonic(),
+        )
+        logger.warning(
+            f"{self.config.description}: PAIR STEP ADOPTED ({how}): "
+            f"radiod's pair (gps_time={int(gps_time)}, "
+            f"rtp_timesnap={int(rtp_snap)}) replaces the mapping "
+            f"{self._prev_mapping[0]}"
+        )
+        # add_timing_snapshot flushes the in-progress chunk and relays the
+        # new pair to the judge (segment fracture).
+        writer.add_timing_snapshot(gps_time_ns=gps_time, rtp_timesnap=rtp_snap)
+        self._update_ring_anchor(gps_time, rtp_snap)
+
+    def _restore_on_round_trip(self, gps_time: int, rtp_snap: int,
+                               diff: float) -> bool:
+        """Put back the mapping a recent pair step replaced, when the
+        fresh pair disagrees with the current mapping but agrees with the
+        saved one.  True when it restored."""
+        prev = getattr(self, '_prev_mapping', None)
+        if prev is None or abs(diff) <= STEADY_LIMIT_S:
+            return False
+        saved_pair, saved_ring, saved_at = prev
+        if time.monotonic() - saved_at > self.ROUND_TRIP_WINDOW_S:
+            self._prev_mapping = None
+            return False
+        if saved_pair is None:
+            return False
+        back = pair_disagreement_s(gps_time, rtp_snap, saved_pair[0],
+                                   saved_pair[1], self.config.sample_rate)
+        if abs(back) > STEADY_LIMIT_S:
+            return False
+
+        self.archive_writer.restore_timing_mapping(*saved_pair)
+        if saved_ring is not None and self.ring_buffer is not None:
+            self._restore_ring_anchor(saved_ring)
+        from datetime import datetime, timezone
+        saved_iso = datetime.fromtimestamp(
+            self._gps_ns_to_utc_s(saved_pair[0]), tz=timezone.utc
+        ).isoformat()
+        logger.error(
+            f"{self.config.description}: ANCHOR ROUND TRIP: restored the "
+            f"mapping in force before {saved_iso} (fresh pair "
+            f"{diff:+.3f}s from the stepped mapping, {back:+.3f}s from "
+            f"the restored one) — the step was a torn read"
+        )
+        self._prev_mapping = None
+        self._arbiter().reset()
+        return True
+
+    def _restore_ring_anchor(self, saved_ring: tuple) -> None:
+        """Re-write the ring anchor saved before a pair step, offset and
+        all, with no fresh judge offset folded in.  A label-plane anchor in
+        force still owns the ring."""
+        gps_time_ns, rtp_timesnap, offset_ns = saved_ring
+        self._ring_anchor_state = saved_ring
+        try:
+            self.ring_buffer.update_raw_pair(int(gps_time_ns), int(rtp_timesnap))
+        except Exception as exc:
+            logger.error(
+                f"{self.config.description}: ring update_raw_pair failed: {exc}"
+            )
+        label = self._label_anchor_state()
+        if label is not None and self._anchor_ring_from_label_plane(label):
+            return
+        try:
+            self.ring_buffer.update_anchor(
+                gps_time_ns=int(gps_time_ns + round(offset_ns)),
+                rtp_timesnap=int(rtp_timesnap),
+            )
+            self._ring_label_anchor = None
+        except Exception as exc:
+            logger.error(
+                f"{self.config.description}: ring update_anchor failed: {exc}"
+            )
 
     def revalidate_radiod_pair(self) -> None:
         """P2 per-source revalidation tick (called ~60 s by CoreRecorderV2).
@@ -1052,9 +1194,14 @@ class StreamRecorderV2:
 
         * adopts it (writer flush-and-adopt + judge segment fracture)
           when it disagrees with the current mapping beyond
-          REVALIDATE_ADOPT_THRESHOLD_S — catches radiod restarts /
-          counter re-snaps that the silence-based health monitor never
-          sees because the stream keeps flowing;
+          REVALIDATE_ADOPT_THRESHOLD_S AND the PairStepArbiter agrees —
+          the GPSDO confirms it while T6 is authoritative, else the same
+          counter offset persists across two checks.  Catches radiod
+          restarts / counter re-snaps that the silence-based health
+          monitor never sees because the stream keeps flowing, without
+          landing a one-off torn pair (AC0G-ND 2026-11-12/13);
+        * restores the replaced mapping exactly when a later pair lands
+          back on it within ROUND_TRIP_WINDOW_S;
         * leaves the mapping alone on steady sub-threshold agreement —
           a wrong-but-STEADY pair needs no re-adoption to be re-judged:
           the judge measures the registered pair against its benches
@@ -1076,7 +1223,8 @@ class StreamRecorderV2:
         if gps_time is None or rtp_snap is None:
             return
 
-        adopted = False
+        adopted = False      # seeded: the ring follows the new pair
+        ring_done = False    # the ring was already handled this tick
         if self.archive_writer is not None:
             diff = self.archive_writer.evaluate_pair(gps_time, rtp_snap)
             if diff is None:
@@ -1086,26 +1234,10 @@ class StreamRecorderV2:
                     gps_time_ns=gps_time, rtp_timesnap=rtp_snap
                 )
                 adopted = True
-            elif abs(diff) > self.REVALIDATE_ADOPT_THRESHOLD_S:
-                logger.warning(
-                    f"{self.config.description}: revalidation found radiod's "
-                    f"advertised pair {diff:+.3f}s away from the adopted "
-                    f"mapping (threshold "
-                    f"{self.REVALIDATE_ADOPT_THRESHOLD_S}s) — adopting "
-                    f"(radiod restart / counter re-snap signature)"
-                )
-                # add_timing_snapshot flushes the in-progress chunk and
-                # relays the new pair to the judge (segment fracture).
-                self.archive_writer.add_timing_snapshot(
-                    gps_time_ns=gps_time, rtp_timesnap=rtp_snap
-                )
-                adopted = True
+            elif self._restore_on_round_trip(gps_time, rtp_snap, diff):
+                ring_done = True
             else:
-                logger.debug(
-                    f"{self.config.description}: revalidation — pair steady "
-                    f"({diff:+.4f}s vs adopted mapping); judge continues "
-                    f"judging the adopted pair on its own tick"
-                )
+                ring_done = self._arbitrate_pair(gps_time, rtp_snap, diff)
         elif self._offset_judge is not None and self._judge_source_key:
             # archive=False: the judge holds the only mapping for this
             # source.  Its own dedupe / pair_step_threshold machinery
@@ -1121,8 +1253,55 @@ class StreamRecorderV2:
         # labels cannot silently diverge (audit G6).
         if adopted:
             self._update_ring_anchor(gps_time, rtp_snap)
-        else:
+        elif not ring_done:
             self._reanchor_ring_if_offset_drifted()
+
+    def _arbitrate_pair(self, gps_time: int, rtp_snap: int, diff: float) -> bool:
+        """Ask the PairStepArbiter about a pair ``diff`` seconds from the
+        mapping, and act on its verdict.  True when it adopted.
+
+        Every check reaches the arbiter, so a steady pair clears any
+        pending step; only a pair beyond the threshold costs a T6
+        prediction.
+        """
+        fresh_utc_s = self._gps_ns_to_utc_s(gps_time)
+        implied_utc_s = fresh_utc_s - diff
+        fresh_offset_s = fresh_utc_s - int(rtp_snap) / self.config.sample_rate
+        t6_utc_s = None
+        if abs(diff) > self.REVALIDATE_ADOPT_THRESHOLD_S:
+            cmap = getattr(self, '_counter_map', None)
+            ref = self._t6_reference() if cmap is not None else None
+            if ref is not None:
+                # Both sides UTC: NativeAnchor.anchor_utc_ns is UTC.
+                t6_utc_s = t6_predicted_utc_s(rtp_snap, cmap, ref)
+        verdict = self._arbiter().decide(
+            diff, fresh_utc_s, implied_utc_s, fresh_offset_s, t6_utc_s)
+
+        if verdict is Verdict.ADOPT:
+            self._adopt_pair_step(
+                gps_time, rtp_snap,
+                't6' if t6_utc_s is not None else 'persistent')
+            return True
+        if verdict is Verdict.HOLD:
+            logger.warning(
+                f"{self.config.description}: PAIR STEP HELD (awaiting "
+                f"second tick): radiod's pair sits {diff:+.3f}s from the "
+                f"adopted mapping; no GPSDO reference, so it must persist"
+            )
+        elif verdict is Verdict.REFUSE_T6:
+            logger.error(
+                f"{self.config.description}: PAIR STEP REFUSED: GPSDO says "
+                f"the counter did not move (diff {diff:+.3f}s, "
+                f"fresh−t6 {fresh_utc_s - t6_utc_s:+.3f}s, "
+                f"implied−t6 {implied_utc_s - t6_utc_s:+.3f}s)"
+            )
+        else:
+            logger.debug(
+                f"{self.config.description}: revalidation — pair steady "
+                f"({diff:+.4f}s vs adopted mapping); judge continues "
+                f"judging the adopted pair on its own tick"
+            )
+        return False
 
     def _set_filter_edges(self, ssrc: int):
         """Send filter edge commands to radiod if configured.
