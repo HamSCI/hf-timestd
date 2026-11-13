@@ -7,12 +7,13 @@ Type=oneshot
 User=timestd
 Group=timestd
 
-# Keep only 3 days of raw IQ buffer (today + 2 prior days)
+# Keep only 3 days of raw IQ buffer (today + 2 prior days).
+# Deletes only: timestd-archive.service copies raw IQ to the archive drive
+# (smd archive add) before the SSD lets it go.
 # Each day is ~35 GB across 9 channels; 3 days ≈ 105 GB
 ExecStart=/bin/bash -c '\
     DATA_ROOT=/var/lib/timestd; \
     RAW_ROOT="$DATA_ROOT/raw_buffer"; \
-    ARCHIVE_ROOT=/mnt/timestd-archive; \
     THRESHOLD_PCT=80; \
     TODAY=$(date -u +%%Y%%m%%d); \
     usage_pct() { df -P "$DATA_ROOT" | tail -1 | awk "{gsub(/%/,\"\",\$5); print \$5}"; }; \
@@ -41,16 +42,8 @@ ExecStart=/bin/bash -c '\
             channel=$(basename "${dir%/}"); \
             src="$dir/$DAY"; \
             [ -d "$src" ] || continue; \
-            if mountpoint -q "$ARCHIVE_ROOT" 2>/dev/null; then \
-                dest="$ARCHIVE_ROOT/raw_buffer/$channel/$DAY"; \
-                mkdir -p "$(dirname "$dest")"; \
-                echo "Archiving $src -> $dest"; \
-                rm -rf "$dest" 2>/dev/null || true; \
-                mv "$src" "$dest"; \
-            else \
-                echo "Removing $src"; \
-                rm -rf "$src"; \
-            fi; \
+            echo "Removing $src"; \
+            rm -rf "$src"; \
         done; \
     done; \
     USED=$(usage_pct); \
