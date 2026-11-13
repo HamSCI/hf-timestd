@@ -36,7 +36,7 @@ logger = logging.getLogger("hf_timestd.archiver")
 ARCHIVE_TOML = Path("/etc/sigmond/archive.toml")
 DATA_ROOT = Path("/var/lib/timestd")
 STATUS_PATH = Path("/var/lib/timestd/archive-status.json")
-LOCK_PATH = Path("/run/timestd-archive.lock")
+LOCK_PATH = Path("/run/timestd-archive/lock")   # RuntimeDirectory= of the unit
 MIN_AGE_S = 120
 ZSTD_LEVEL = 3                       # the recorder's (BinaryArchiveConfig.compression_level)
 MAX_FAILURES = 3
@@ -217,3 +217,332 @@ def copy_one(src_bin: Path, src_json: Path, dst_dir: Path, archive_dtype: str) -
             _unlink_quiet(dst_bin)
         raise _drive_error(exc)
     return outcome
+
+
+# ---------------------------------------------------------------------------
+# the drive: gate, usage, making room
+# ---------------------------------------------------------------------------
+
+def _load_config(path: Path) -> Optional[dict]:
+    import tomllib
+    try:
+        return tomllib.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def _is_mount(p: Path) -> bool:
+    # Under x-systemd.automount this stat is what mounts a replugged drive.
+    return os.path.ismount(p)
+
+
+def _uuid_matches(mount: Path, uuid: str) -> bool:
+    """The filesystem at ``mount`` is the one with this UUID: its device is the
+    device /dev/disk/by-uuid/<uuid> names.  An automount point with the drive
+    away has autofs's device, so it never matches."""
+    try:
+        return os.stat(f"/dev/disk/by-uuid/{uuid}").st_rdev == os.stat(mount).st_dev
+    except OSError:
+        return False
+
+
+def _station() -> str:
+    return socket.gethostname().split(".")[0]
+
+
+def _usage(mount: Path) -> Tuple[int, int, float]:
+    """(used, capacity, percent) as df's Use%: blocks in use over blocks a
+    non-root user could use."""
+    st = os.statvfs(mount)
+    used = (st.f_blocks - st.f_bfree) * st.f_frsize
+    cap = used + st.f_bavail * st.f_frsize
+    return used, cap, (100.0 * used / cap if cap else 100.0)
+
+
+def gate(cfg: Optional[dict]) -> Optional[str]:
+    """Why the archiver must not touch the drive now, or None."""
+    if not cfg:
+        return "no archive drive configured"
+    mount, uuid = cfg.get("mount"), cfg.get("uuid")
+    if not mount or not uuid:
+        return "archive.toml lacks mount or uuid"
+    if not _is_mount(Path(mount)):
+        return f"{mount} is not mounted (drive away)"
+    if not _uuid_matches(Path(mount), str(uuid)):
+        return f"the filesystem at {mount} is not UUID {uuid}"
+    return None
+
+
+def _protected(today: date) -> set:
+    return {(today - timedelta(days=k)).strftime("%Y%m%d") for k in (0, 1)}
+
+
+def _tree_bytes(path: Path) -> int:
+    total = 0
+    for f in [path, *path.rglob("*")]:
+        try:
+            total += f.lstat().st_blocks * 512
+        except OSError:
+            pass
+    return total
+
+
+def _within(p: Path, mount: Path) -> bool:
+    try:
+        Path(os.path.realpath(p)).relative_to(os.path.realpath(mount))
+        return True
+    except ValueError:
+        return False
+
+
+def _candidates(drive_root: Path, mount: Path, evict_first: List[Path], today: date
+                ) -> List[Tuple[str, List[Path]]]:
+    """(label, dirs) in eviction order: each evict_first folder's YYYYMMDD
+    children, oldest first across all of them (the KPH draft: another
+    program's days go before ours); then our own days, oldest first, each
+    day across every channel at once.  Today and yesterday never appear."""
+    keep = _protected(today)
+    foreign: List[Tuple[str, str, Path]] = []
+    for root in evict_first:
+        root = Path(root)
+        if not _within(root, mount):
+            logger.warning("archiver: evict_first %s is not on the drive; ignored", root)
+            continue
+        try:
+            for d in root.iterdir():
+                if d.is_dir() and not d.is_symlink() and _DAY_RE.match(d.name) and d.name not in keep:
+                    foreign.append((d.name, str(d), d))
+        except OSError as exc:
+            logger.warning("archiver: cannot list %s: %s", root, exc)
+    own: Dict[str, List[Path]] = {}
+    raw = drive_root / "raw_buffer"
+    try:
+        for ch in raw.iterdir():
+            if ch.is_dir():
+                for d in ch.iterdir():
+                    if d.is_dir() and _DAY_RE.match(d.name) and d.name not in keep:
+                        own.setdefault(d.name, []).append(d)
+    except OSError:
+        pass
+    out = [(label, [d]) for _, label, d in sorted(foreign)]
+    out += [(day, sorted(own[day])) for day in sorted(own)]
+    return out
+
+
+def make_room(drive_root: Path, mount: Path, high_water_pct: float, evict_first: List[Path],
+              today: date, usage=None, dry_run: bool = False) -> dict:
+    """Delete the oldest days until the drive is below ``high_water_pct``.
+    Returns {'evicted': [labels], 'bytes_freed', 'percent', 'full'}; full is
+    True when it is still at or above the mark with nothing left to delete."""
+    usage = usage or _usage
+    used, cap, pct = usage(mount)
+    res = {"evicted": [], "bytes_freed": 0, "percent": pct, "full": False}
+    if pct < high_water_pct:
+        return res
+    sim = 0
+    for label, dirs in _candidates(drive_root, mount, evict_first, today):
+        size = sum(_tree_bytes(d) for d in dirs)
+        if dry_run:
+            sim += size
+            pct = 100.0 * (used - sim) / cap if cap else 100.0
+            logger.info("archiver: [dry run] would delete %s (%.2f GB)", label, size / 1e9)
+        else:
+            for d in dirs:
+                shutil.rmtree(d)               # an OSError here is a drive error: the run ends
+            logger.info("archiver: deleted %s (%.2f GB) to stay below %s%%",
+                        label, size / 1e9, high_water_pct)
+            _, _, pct = usage(mount)
+        res["evicted"].append(label)
+        res["bytes_freed"] += size
+        if pct < high_water_pct:
+            break
+    res["percent"] = pct
+    res["full"] = pct >= high_water_pct
+    return res
+
+
+# ---------------------------------------------------------------------------
+# one run
+# ---------------------------------------------------------------------------
+
+def _held(drive_root: Path, dtype: str, previous: dict, today: date) -> Dict[str, dict]:
+    """Per channel: oldest, newest, days, bytes.  Day sizes older than
+    yesterday are taken from the previous status (they no longer change), so
+    a full drive is not walked every ten minutes."""
+    cache = previous.get("day_bytes", {}) if isinstance(previous, dict) else {}
+    keep = _protected(today)
+    out: Dict[str, dict] = {}
+    new_cache: Dict[str, int] = {}
+    raw = drive_root / "raw_buffer"
+    try:
+        chans = sorted(c for c in raw.iterdir() if c.is_dir())
+    except OSError:
+        chans = []
+    for ch in chans:
+        days = sorted(d.name for d in ch.iterdir() if d.is_dir() and _DAY_RE.match(d.name))
+        if not days:
+            continue
+        total = 0
+        for day in days:
+            key = f"{ch.name}/{day}"
+            n = cache.get(key) if day not in keep else None
+            if n is None:
+                n = _tree_bytes(ch / day)
+            if day not in keep:
+                new_cache[key] = n
+            total += n
+        out[ch.name] = {"oldest": days[0], "newest": days[-1], "days": len(days),
+                        "bytes": total, "dtype": dtype}
+    previous["day_bytes_new"] = new_cache
+    return out
+
+
+def _bytes_per_day(day_bytes: Dict[str, int]) -> Optional[float]:
+    per_day: Dict[str, int] = {}
+    for key, n in day_bytes.items():
+        per_day[key.split("/")[1]] = per_day.get(key.split("/")[1], 0) + n
+    return (sum(per_day.values()) / len(per_day)) if per_day else None
+
+
+def _write_json(path: Path, doc: dict) -> None:
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+    os.replace(tmp, path)
+
+
+def run(config_path: Path = ARCHIVE_TOML, data_root: Path = DATA_ROOT,
+        status_path: Path = STATUS_PATH, lock_path: Path = LOCK_PATH,
+        today: Optional[date] = None, now: Optional[float] = None,
+        dry_run: bool = False) -> dict:
+    """One archiver pass.  Returns the status document (also written to
+    ``status_path`` unless the pass was a dry run or found another running)."""
+    today = today or datetime.now(timezone.utc).date()
+    now = time.time() if now is None else now
+    st = {"run_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+          "present": False, "state": "unconfigured", "channels": {}, "copied": 0,
+          "converted": 0, "bytes_copied": 0, "behind": 0, "kept_f32": 0, "failures": 0,
+          "last_error": None, "bytes_per_day": None, "evicted": [], "dry_run": dry_run,
+          "percent": None}
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock = open(lock_path, "a")
+    except OSError as exc:
+        st["state"], st["last_error"] = "error", f"cannot open the lock {lock_path}: {exc}"
+        return st
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock.close()
+        st["state"] = "busy"
+        return st
+    try:
+        try:
+            previous = json.loads(status_path.read_text())
+        except (OSError, ValueError):
+            previous = {}
+        cfg = _load_config(config_path)
+        why = gate(cfg)
+        if why:
+            st["state"] = "unconfigured" if not cfg else "absent"
+            st["last_error"] = None if not cfg else why
+            if cfg:
+                logger.info("archiver: %s; nothing to do", why)
+            if not dry_run:
+                _write_json(status_path, st)
+            return st
+        mount = Path(cfg["mount"])
+        hw = float(cfg.get("high_water_pct", 90))
+        dtype_cfg = str(cfg.get("archive_dtype", "f16"))
+        evict_first = [Path(p) for p in (cfg.get("evict_first") or [])]
+        drive_root = mount / "timestd" / _station()
+        st["present"], st["state"] = True, "ok"
+        raw_root = data_root / "raw_buffer"
+        try:
+            if not dry_run:
+                drive_root.mkdir(parents=True, exist_ok=True)
+                chans = sorted(c.name for c in raw_root.iterdir() if c.is_dir()) \
+                    if raw_root.is_dir() else []
+                _write_json(drive_root / "station.json", {
+                    "station": _station(), "channels": chans,
+                    "reporter": os.environ.get("SIGMOND_REPORTER_ID", ""),
+                    "grid": os.environ.get("SIGMOND_GRID", ""),
+                    "written_utc": st["run_utc"]})
+            room = make_room(drive_root, mount, hw, evict_first, today, usage=_usage,
+                             dry_run=dry_run)
+            st["evicted"] = room["evicted"]
+            if dry_run:
+                st["would_evict"] = room["evicted"]
+            failures_path = drive_root / ".archive-failures.json"
+            try:
+                failures = json.loads(failures_path.read_text())
+            except (OSError, ValueError):
+                failures = {}
+            pending = list(closed_files(raw_root, now))
+            behind = 0
+            if room["full"]:
+                st["state"] = "full"
+                behind = len([1 for b, _ in pending
+                              if not (drive_root / b.relative_to(data_root)).exists()])
+                pending = []
+            for i, (b, j) in enumerate(pending):
+                rel = str(b.relative_to(data_root))
+                dst_dir = drive_root / b.parent.relative_to(data_root)
+                if failures.get(rel, 0) >= MAX_FAILURES:
+                    behind += 1
+                    continue
+                if dry_run:
+                    if not (dst_dir / b.name).exists():
+                        behind += 1
+                    continue
+                if i and i % 50 == 0:
+                    room = make_room(drive_root, mount, hw, evict_first, today, usage=_usage)
+                    st["evicted"] += room["evicted"]
+                    if room["full"]:
+                        st["state"] = "full"
+                        behind += len(pending) - i
+                        break
+                try:
+                    outcome = copy_one(b, j, dst_dir, dtype_cfg)
+                except VerifyError as exc:
+                    failures[rel] = failures.get(rel, 0) + 1
+                    logger.error("archiver: %s (failure %d of %d)", exc, failures[rel], MAX_FAILURES)
+                    behind += 1
+                    continue
+                except ArchiveIOError as exc:
+                    st["state"], st["last_error"] = "error", str(exc)
+                    logger.error("archiver: drive error, ending this run: %s", exc)
+                    behind += len(pending) - i
+                    break
+                if outcome != "skipped":
+                    st["copied"] += 1
+                    st["bytes_copied"] += (dst_dir / b.name).stat().st_size
+                    st["converted"] += outcome == "converted"
+                    st["kept_f32"] += outcome == "kept_f32"
+            st["behind"] = behind
+            st["failures"] = sum(1 for n in failures.values() if n >= MAX_FAILURES)
+            if not dry_run:
+                if failures:
+                    _write_json(failures_path, failures)
+                if st["state"] == "ok":
+                    room = make_room(drive_root, mount, hw, evict_first, today, usage=_usage)
+                    st["evicted"] += room["evicted"]
+                    if room["full"]:
+                        st["state"] = "full"
+            st["percent"] = _usage(mount)[2]
+            st["channels"] = _held(drive_root, iq_codec.DTYPE_F16 if dtype_cfg == "f16"
+                                   else iq_codec.DTYPE_F32, previous, today)
+            st["day_bytes"] = previous.pop("day_bytes_new", {})
+            st["bytes_per_day"] = _bytes_per_day(st["day_bytes"]) or _bytes_per_day(
+                {f"{c}/{v['newest']}": v["bytes"] // max(v["days"], 1)
+                 for c, v in st["channels"].items()})
+        except OSError as exc:
+            st["state"], st["last_error"] = "error", f"{type(exc).__name__}: {exc}"
+            logger.error("archiver: drive error, ending this run: %s", exc)
+        if not dry_run:
+            _write_json(status_path, st)
+        logger.info("archiver: %s; copied %d (%d to F16, %d kept F32), %d behind, deleted %s",
+                    st["state"], st["copied"], st["converted"], st["kept_f32"], st["behind"],
+                    st["evicted"] or "nothing")
+        return st
+    finally:
+        lock.close()

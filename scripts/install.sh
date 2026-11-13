@@ -743,11 +743,18 @@ for tf in \
     timestd-pipeline-watchdog.service timestd-pipeline-watchdog.timer \
     timestd-prune.service timestd-prune.timer \
     timestd-events.service timestd-events.timer \
+    timestd-archive.service timestd-archive.timer \
     timestd-vtec.service \
     timestd-alert@.service
 do
     copy_unit "$PROJECT_DIR/systemd/$tf" && ((UPDATED_COUNT++)) || true
 done
+
+# ── Archiver: copies closed raw IQ to the archive drive `smd archive add`
+# attached.  Enabled everywhere; each run exits quietly without
+# /etc/sigmond/archive.toml or with the drive away.
+systemctl daemon-reload 2>/dev/null || true
+systemctl enable --now timestd-archive.timer 2>/dev/null || true
 
 # ── Event-response keeper: enable the timer only on a station that has
 # /etc/hf-timestd/events.toml (the units are installed everywhere).

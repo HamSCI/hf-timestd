@@ -1,0 +1,21 @@
+[Unit]
+Description=hf-timestd archiver: copy closed raw IQ to the archive drive (smd archive add)
+Documentation=https://github.com/HamSCI/sigmond/blob/main/docs/superpowers/specs/2026-11-12-archive-drive-design.md
+# Nothing to do without /etc/sigmond/archive.toml; the run exits quietly then.
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=timestd
+Group=timestd
+ExecStart=/opt/git/sigmond/hf-timestd/venv/bin/python -m hf_timestd archive run
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=timestd-archive
+# The recorder must never wait on the drive.
+IOSchedulingClass=idle
+CPUSchedulingPolicy=idle
+Nice=19
+# The lock file the archiver holds while it runs.
+RuntimeDirectory=timestd-archive
+RuntimeDirectoryPreserve=yes

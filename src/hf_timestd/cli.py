@@ -1807,9 +1807,45 @@ def f16_report_main(argv=None) -> int:
     return _cmd_f16_report(parser.parse_args(argv))
 
 
+def _cmd_archive_run(args) -> int:
+    """`archive run`: one archiver pass (timestd-archive.service).  0 unless
+    the drive errored; an absent drive is not a failure."""
+    from . import archiver
+    st = archiver.run(config_path=Path(args.config), data_root=Path(args.data_root),
+                      dry_run=args.dry_run)
+    if args.dry_run:
+        print(json.dumps(st, indent=2, sort_keys=True))
+    return 1 if st.get('state') == 'error' else 0
+
+
+def _cmd_archive_status(args) -> int:
+    """`archive status`: the last run's status document."""
+    from . import archiver
+    try:
+        st = json.loads(archiver.STATUS_PATH.read_text())
+    except (OSError, ValueError):
+        print('no archiver run recorded yet')
+        return 1
+    if args.json:
+        print(json.dumps(st, indent=2, sort_keys=True))
+        return 0
+    print(f"last run {st.get('run_utc')}: {st.get('state')}, copied {st.get('copied')}, "
+          f"behind {st.get('behind')}, failures {st.get('failures')}")
+    for ch, v in sorted((st.get('channels') or {}).items()):
+        print(f"  {ch:<14} {v['days']:>4} days  {v['oldest']} to {v['newest']}  "
+              f"{v['bytes'] / 1e9:8.1f} GB  {v['dtype']}")
+    if st.get('last_error'):
+        print(f"  last error: {st['last_error']}")
+    return 0
+
+
 def _handle_archive(args, parser):
     if getattr(args, 'archive_command', None) == 'f16-report':
         return _cmd_f16_report(args)
+    if getattr(args, 'archive_command', None) == 'run':
+        return _cmd_archive_run(args)
+    if getattr(args, 'archive_command', None) == 'status':
+        return _cmd_archive_status(args)
     parser.print_help()
     return 1
 
@@ -2251,6 +2287,16 @@ Per-service overrides in [services] take precedence over the profile.
                     'fell back to complex64), 2 neither F16 chunks nor '
                     'fallbacks in the window.')
     _add_f16_report_args(f16_report_p)
+    run_p = archive_sub.add_parser('run',
+        help='One archiver pass: copy closed raw IQ to the archive drive (F16), make room')
+    run_p.add_argument('--config', default='/etc/sigmond/archive.toml',
+        help='The drive sigmond attached (default /etc/sigmond/archive.toml)')
+    run_p.add_argument('--data-root', default='/var/lib/timestd',
+        help='Data root directory (default /var/lib/timestd)')
+    run_p.add_argument('--dry-run', action='store_true',
+        help='Report what it would copy and delete; change nothing')
+    status_p = archive_sub.add_parser('status', help="The archiver's last run")
+    status_p.add_argument('--json', action='store_true', help='Print the status document')
 
     events_parser = subparsers.add_parser('events',
         help='Event response: ship ordered windows of the raw buffer to the server')
