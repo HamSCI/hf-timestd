@@ -31,7 +31,7 @@ HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/BPM time standard bro
 
 **Signal Reception & Recording:**
 - **ka9q-python integration** — Python interface to Phil Karn's radiod for channel creation, RTP reception, resequencing, gap detection
-- **Multi-channel IQ recording** — 9 channels × 24 kHz IQ, binary `.bin.zst` + JSON metadata sidecars
+- **Multi-channel IQ recording** — 9 channels × 24 kHz IQ, binary `.bin.zst` + JSON metadata sidecars. `[recorder] archive_dtype` picks the sample format: `complex64` (the default, 8 bytes a sample) or `f16` (4 bytes a sample, zstd only). The `f16` trial covers B4 and ND only; other stations keep the default.
 - **RTP timestamp preservation** — GPS+PPS authoritative timestamps (~50 μs) via radiod's `GPS_TIME`/`RTP_TIMESNAP`
 
 **Time Signal Detection:**
@@ -61,7 +61,7 @@ HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/BPM time standard bro
 - **HFPropagationModel** — Multi-mode delay prediction with Ne(h) integration
 - **IonoDataService** — WAM-IPE (NOAA S3) + GIRO ionosonde real-time data
 - **IRI-2020 / IONEX / parametric** — Tiered fallback chain for ionospheric parameters
-- **PHaRLAP ray tracing** — 2D numerical ray tracing via pyLAP with spatially varying IRI-2020 Ne(h) grid (auto-scaled, 1 sample per 500 km); advisory physics overlay with a `hf-timestd raytrace` CLI. See [docs/PHARLAP_RAYTRACING.md](docs/PHARLAP_RAYTRACING.md).
+- **PHaRLAP ray tracing** — 2D numerical ray tracing via pyLAP with spatially varying IRI-2020 Ne(h) grid (auto-scaled, 1 sample per 500 km); advisory physics overlay with a `hf-timestd raytrace` CLI. `scripts/ensure-pylap.sh` builds pyLAP into the venv at a pinned commit and never builds an unpinned tree. See [docs/PHARLAP_RAYTRACING.md](docs/PHARLAP_RAYTRACING.md).
 
 **WWV/WWVH Test Signal Analysis:**
 - **Minutes :08/:44** — Multi-tone power (2, 3, 4, 5 kHz), Frequency Selectivity Score, chirp delay spread, transient detection

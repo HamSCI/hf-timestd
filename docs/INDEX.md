@@ -32,7 +32,7 @@ are marked ★ — when two docs disagree, the canonical one wins.
 |-----|-------------------|
 | [METROLOGY.md](METROLOGY.md) ★ | **The canonical timing reference.** T-tier hierarchy, the §4.5–§4.6 timing-authority invariant, error budget, chrony feeds (FUSE/HPPS), the clock-health watchdog. |
 | [design/T6_EDGE_METHODS_COMPARED.md](design/T6_EDGE_METHODS_COMPARED.md) | How wd-record (Newell) and hf-timestd each find the TS-1 PPS edge; pros and cons; five measurements to compare them. Start here to understand T6. |
-| [design/T3_FUSION_EXPLAINED.md](design/T3_FUSION_EXPLAINED.md) | How FUSION establishes T3: marker → L1 → L2 → fusion → three sinks; the host-clock loop and its guards. Start here to understand T3. |
+| [design/T3_FUSION_EXPLAINED.md](design/T3_FUSION_EXPLAINED.md) | How FUSION establishes T3: marker → L1 → L2 → fusion → three sinks; the host-clock loop and its guards. Start here to understand T3. A station runs T3 as a shadow until its config sets `[timing.t3] admitted = true`; the default leaves it false. A design for automatic admission, [superpowers/specs/2026-11-12-t3-automatic-admission-design.md](superpowers/specs/2026-11-12-t3-automatic-admission-design.md), awaits review; the code does not do it yet. |
 | [design/STATION-TIMING-ESTIMATOR.md](design/STATION-TIMING-ESTIMATOR.md) | One estimator on the sample counter: the two states, the refusals in order, the step rule, and what it does not provide. Companion to its design spec [superpowers/specs/2026-09-08-station-timing-estimator-design.md](superpowers/specs/2026-09-08-station-timing-estimator-design.md). Library only — nothing constructs it yet. |
 | [TIMING-PIPELINE-WIRING.md](TIMING-PIPELINE-WIRING.md) | Runtime wiring of RTP / chrony / fusion and the SHM producers. |
 | [BPSK-PPS-DETECTION-METHODS.md](BPSK-PPS-DETECTION-METHODS.md) | The five BPSK PPS edge-detection methods (HPPS matched-filter; HFPS diff feed wired but disabled by default). |
@@ -71,7 +71,7 @@ are marked ★ — when two docs disagree, the canonical one wins.
 | [STATION_SETUP_GUIDE.md](STATION_SETUP_GUIDE.md) · PSWS_SETUP_GUIDE.md and NASA_EARTHDATA_SETUP.md → **[hamsci-physics](https://github.com/HamSCI/hamsci-physics/tree/main/docs)** | First-time site setup here; PSWS upload and NASA Earthdata setup moved with the science products. |
 | [commands/hf-timestd.md](commands/hf-timestd.md) | Real `hf-timestd` output from AC0G-B4, one section per read-only command, feeding the station Commands page. |
 | [PIPELINE_VERIFICATION.md](PIPELINE_VERIFICATION.md) | Pipeline verification procedure. |
-| [WWVB-INTEGRATION.md](WWVB-INTEGRATION.md) | WWVB 60 kHz fusion source (Layer 4 — currently gated off, awaiting validation). |
+| [WWVB-INTEGRATION.md](WWVB-INTEGRATION.md) | WWVB 60 kHz source. Since v3.85 the config template turns WWVB decoding on (`[wwvb] enabled = true`); decoding names the date and time from the radio. The fusion feed stays off (`feed_fusion = false`) until a station's decodes pass validation. |
 | Web dashboard → **[station-web](https://github.com/mijahauan/station-web)** | The operator web UI left this repo in the 2026-09-06 split (Phase 5). It reads the same `/var/lib/timestd` products; run and document it there. |
 
 ## Subdirectories
