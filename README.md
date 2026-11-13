@@ -45,7 +45,7 @@ HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/BPM time standard bro
 - **Probabilistic discriminator** — Logistic regression model for station ID confidence scoring
 
 **Time Code Decoding:**
-- **WWV/WWVH BCD** — 100 Hz subcarrier extraction for station identification and time confirmation
+- **WWV/WWVH BCD** — 100 Hz subcarrier extraction for station identification; on the dedicated WWV channels the decoder also reads the second-3 leap-second warning once a minute
 - **Leap second hold** — the fusion Kalman coasts through the month-end boundary when the broadcasts announce a leap second (WWVB's advance notice and WWV's BCD second-3 warning on the dedicated 20/25 MHz channels, both carried on the L1 row as `leap_second_notice`)
 
 **Ionospheric Science:**
