@@ -55,14 +55,7 @@ class T3ShadowComparator:
     def _t6_index(t6_anchor: Optional[NativeAnchor],
                   t6_map: Optional[CounterMap]) -> Optional[float]:
         """The input-sample index of T6's anchor sample, or None."""
-        if t6_anchor is None or t6_map is None:
-            return None
-        # The anchor ticks at its own rate; the map must describe that same
-        # counter (a 24 kHz anchor through a 96 kHz map lands elsewhere).
-        if (int(t6_anchor.sample_rate_hz) * t6_map.ilen
-                != t6_map.olen * t6_map.input_samprate):
-            return None
-        return T3ShadowComparator._index_near(t6_map, t6_anchor.anchor_rtp)
+        return t6_anchor_input_index(t6_anchor, t6_map)
 
     @staticmethod
     def t3_minus_t6_ms(summary: Optional[dict], t6_anchor: Optional[NativeAnchor],
@@ -146,3 +139,16 @@ class T3ShadowComparator:
             "t3_state": s.get("state"),
             "t3_sigma_ms": s.get("sigma_ms"),
         }
+
+
+def t6_anchor_input_index(t6_anchor: Optional[NativeAnchor],
+                          t6_map: Optional[CounterMap]) -> Optional[float]:
+    """The input-sample index of T6's anchor sample, or None."""
+    if t6_anchor is None or t6_map is None:
+        return None
+    # The anchor ticks at its own rate; the map must describe that same
+    # counter (a 24 kHz anchor through a 96 kHz map lands elsewhere).
+    if (int(t6_anchor.sample_rate_hz) * t6_map.ilen
+            != t6_map.olen * t6_map.input_samprate):
+        return None
+    return T3ShadowComparator._index_near(t6_map, t6_anchor.anchor_rtp)
