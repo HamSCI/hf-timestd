@@ -131,6 +131,25 @@ def _write_part(dst_dir: Path, name: str, data: bytes) -> Path:
     return part
 
 
+def _read_back(p: Path) -> bytes:
+    """Read a just-written file from the drive, not from the page cache, so
+    the check covers the drive and its bridge too."""
+    fd = os.open(p, os.O_RDONLY)
+    try:
+        try:
+            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+        except (AttributeError, OSError):
+            pass
+        chunks = []
+        while True:
+            b = os.read(fd, 1 << 20)
+            if not b:
+                return b"".join(chunks)
+            chunks.append(b)
+    finally:
+        os.close(fd)
+
+
 def _fsync_dir(d: Path) -> None:
     fd = os.open(d, os.O_RDONLY)
     try:
@@ -149,8 +168,8 @@ def _unlink_quiet(*paths: Path) -> None:
 
 def copy_one(src_bin: Path, src_json: Path, dst_dir: Path, archive_dtype: str) -> str:
     """Copy one chunk to ``dst_dir``.  Returns 'copied' (byte for byte),
-    'converted' (complex64 -> F16), 'kept_f32' (F16 would overflow) or
-    'skipped' (already there, or the source is unreadable).  Raises
+    'converted' (complex64 -> F16), 'kept_f32' (F16 would overflow),
+    'skipped' (already there) or 'invalid' (the source cannot be read).  Raises
     ArchiveIOError on a drive error and VerifyError on a mismatch; neither
     leaves a partial file behind."""
     import zstandard as zstd
@@ -168,7 +187,7 @@ def copy_one(src_bin: Path, src_json: Path, dst_dir: Path, archive_dtype: str) -
         blob = src_bin.read_bytes()
     except (OSError, ValueError) as exc:
         logger.warning("archiver: skipping %s: %s", src_bin, exc)
-        return "skipped"
+        return "invalid"
     src_dtype = meta.get("dtype", iq_codec.DTYPE_F32)
 
     outcome, out_blob, out_meta, samples = "copied", blob, meta, None
@@ -178,7 +197,7 @@ def copy_one(src_bin: Path, src_json: Path, dst_dir: Path, archive_dtype: str) -
             samples = iq_codec.decode_iq(raw, iq_codec.DTYPE_F32, 1.0)
         except (zstd.ZstdError, ValueError) as exc:
             logger.warning("archiver: skipping %s: cannot decode: %s", src_bin, exc)
-            return "skipped"
+            return "invalid"
         enc = iq_codec.encode_f16(samples)
         if enc is None:
             outcome = "kept_f32"
@@ -194,10 +213,14 @@ def copy_one(src_bin: Path, src_json: Path, dst_dir: Path, archive_dtype: str) -
     try:
         dst_dir.mkdir(parents=True, exist_ok=True)
         part_bin = _write_part(dst_dir, src_bin.name, out_blob)
-        written = part_bin.read_bytes()
+        written = _read_back(part_bin)
         if outcome == "converted":
-            dec = iq_codec.decode_iq(zstd.ZstdDecompressor().decompress(written),
-                                     iq_codec.DTYPE_F16, iq_codec.F16_SCALE)
+            try:
+                dec = iq_codec.decode_iq(zstd.ZstdDecompressor().decompress(written),
+                                         iq_codec.DTYPE_F16, iq_codec.F16_SCALE)
+            except (zstd.ZstdError, ValueError) as exc:
+                _unlink_quiet(part_bin)
+                raise VerifyError(f"{src_bin}: F16 copy does not decode: {exc}")
             if dec.size != samples.size or not f16_within_rounding(samples, dec):
                 _unlink_quiet(part_bin)
                 raise VerifyError(f"{src_bin}: F16 copy is not within rounding of the source")
@@ -336,7 +359,7 @@ def make_room(drive_root: Path, mount: Path, high_water_pct: float, evict_first:
     True when it is still at or above the mark with nothing left to delete."""
     usage = usage or _usage
     used, cap, pct = usage(mount)
-    res = {"evicted": [], "bytes_freed": 0, "percent": pct, "full": False}
+    res = {"evicted": [], "bytes_freed": 0, "percent": pct, "full": False, "skipped": []}
     if pct < high_water_pct:
         return res
     sim = 0
@@ -347,8 +370,16 @@ def make_room(drive_root: Path, mount: Path, high_water_pct: float, evict_first:
             pct = 100.0 * (used - sim) / cap if cap else 100.0
             logger.info("archiver: [dry run] would delete %s (%.2f GB)", label, size / 1e9)
         else:
-            for d in dirs:
-                shutil.rmtree(d)               # an OSError here is a drive error: the run ends
+            try:
+                for d in dirs:
+                    shutil.rmtree(d)
+            except PermissionError as exc:
+                # Not ours to delete (another user's files, or a hand run as
+                # root left root-owned ones): skip it, never stall archiving.
+                logger.warning("archiver: cannot delete %s (%s); skipping it", label, exc)
+                res["skipped"].append(label)
+                continue
+            # any other OSError is a drive error: the run ends
             logger.info("archiver: deleted %s (%.2f GB) to stay below %s%%",
                         label, size / 1e9, high_water_pct)
             _, _, pct = usage(mount)
@@ -397,6 +428,22 @@ def _held(drive_root: Path, dtype: str, previous: dict, today: date) -> Dict[str
     return out
 
 
+def _orphans(raw_root: Path, now: float, min_age_s: float = 86400) -> int:
+    """Chunks with no sidecar a day after they were written: never archived."""
+    n = 0
+    try:
+        for b in raw_root.glob("*/*/*.bin.zst"):
+            j = b.with_name(b.name[:-len(".bin.zst")] + ".json")
+            try:
+                if not j.exists() and now - b.stat().st_mtime > min_age_s:
+                    n += 1
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return n
+
+
 def _bytes_per_day(day_bytes: Dict[str, int]) -> Optional[float]:
     per_day: Dict[str, int] = {}
     for key, n in day_bytes.items():
@@ -422,7 +469,12 @@ def run(config_path: Path = ARCHIVE_TOML, data_root: Path = DATA_ROOT,
           "present": False, "state": "unconfigured", "channels": {}, "copied": 0,
           "converted": 0, "bytes_copied": 0, "behind": 0, "kept_f32": 0, "failures": 0,
           "last_error": None, "bytes_per_day": None, "evicted": [], "dry_run": dry_run,
-          "percent": None}
+          "percent": None, "invalid": 0, "orphans": 0}
+    if os.geteuid() == 0 and not dry_run:
+        st["state"] = "error"
+        st["last_error"] = ("refusing to run as root: files it writes on the drive would be "
+                            "root's (run as timestd: systemctl start timestd-archive)")
+        return st
     try:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         lock = open(lock_path, "a")
@@ -513,12 +565,16 @@ def run(config_path: Path = ARCHIVE_TOML, data_root: Path = DATA_ROOT,
                     logger.error("archiver: drive error, ending this run: %s", exc)
                     behind += len(pending) - i
                     break
+                if outcome == "invalid":
+                    st["invalid"] += 1
+                    continue
                 if outcome != "skipped":
                     st["copied"] += 1
                     st["bytes_copied"] += (dst_dir / b.name).stat().st_size
                     st["converted"] += outcome == "converted"
                     st["kept_f32"] += outcome == "kept_f32"
             st["behind"] = behind
+            st["orphans"] = _orphans(raw_root, now)
             st["failures"] = sum(1 for n in failures.values() if n >= MAX_FAILURES)
             if not dry_run:
                 if failures:

@@ -222,3 +222,43 @@ def test_lock_dir_unwritable_is_error_not_busy(tmp_path):
     st = A.run(config_path=tmp_path / "none.toml", data_root=tmp_path,
                status_path=tmp_path / "s.json", lock_path=Path("/proc/nope/lock"))
     assert st["state"] == "error" and "lock" in st["last_error"]
+
+
+# ---- final-review fixes
+
+def test_rmtree_permission_skips_candidate(tmp_path, monkeypatch):
+    root = tmp_path / "mnt" / "timestd" / "H"
+    _day(root / "raw_buffer", "A/20261101", 100)
+    _day(root / "raw_buffer", "A/20261102", 100)
+    real = A.shutil.rmtree
+
+    def rm(p, *a, **k):
+        if p.name == "20261101":
+            raise PermissionError(13, "Permission denied")
+        return real(p, *a, **k)
+    monkeypatch.setattr(A.shutil, "rmtree", rm)
+    res = A.make_room(root, tmp_path / "mnt", 60, [], TODAY, usage=Usage(tmp_path / "mnt", 200))
+    assert res["evicted"] == ["20261102"] and res["skipped"] == ["20261101"]
+
+
+def test_root_refused_unless_dry_run(tmp_path, monkeypatch):
+    monkeypatch.setattr(A.os, "geteuid", lambda: 0)
+    st = A.run(config_path=tmp_path / "none.toml", data_root=tmp_path,
+               status_path=tmp_path / "s.json", lock_path=tmp_path / "lock")
+    assert st["state"] == "error" and "root" in st["last_error"]
+
+
+def test_invalid_and_orphans_counted(tmp_path, monkeypatch):
+    import time as _t
+    mount = _env(tmp_path, monkeypatch)
+    monkeypatch.setattr(A, "_usage", Usage(mount, 10**9))
+    d = tmp_path / "ssd" / "raw_buffer" / "A" / "20261112"
+    b, j = _write_chunk(d, 1762905600, _noise())
+    j.write_text("{bad")
+    old = _t.time() - 600
+    os.utime(j, (old, old))
+    orphan = d / "1762905660.bin.zst"
+    orphan.write_bytes(b"x")
+    os.utime(orphan, (_t.time() - 2 * 86400,) * 2)
+    st = _run(tmp_path, _toml(tmp_path, mount))
+    assert st["invalid"] == 1 and st["orphans"] == 1 and st["copied"] == 0

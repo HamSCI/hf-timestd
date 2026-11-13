@@ -116,7 +116,7 @@ def test_bad_sidecar_skipped(tmp_path):
     b, j = _write_chunk(src, 1762732800, _noise())
     j.write_text("{not json")
     dst = tmp_path / "drive" / "C" / "20261110"
-    assert A.copy_one(b, j, dst, "f16") == "skipped"
+    assert A.copy_one(b, j, dst, "f16") == "invalid"
     assert not dst.exists() or not any(dst.iterdir())
 
 
@@ -162,3 +162,30 @@ def test_rounding_bound():
     n = x.copy()
     n[5] = np.nan
     assert not A.f16_within_rounding(n, y)          # NaN positions must match
+
+
+def test_readback_decode_error_is_verify_error(tmp_path, monkeypatch):
+    src = tmp_path / "ssd" / "C" / "20261110"
+    b, j = _write_chunk(src, 1762732800, _noise())
+    dst = tmp_path / "drive" / "C" / "20261110"
+    real = A._read_back
+    monkeypatch.setattr(A, "_read_back", lambda p: b"garbage")
+    with pytest.raises(A.VerifyError):
+        A.copy_one(b, j, dst, "f16")
+    assert list(dst.iterdir()) == []
+
+
+def test_readback_drops_page_cache(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(A.os, "posix_fadvise", lambda fd, o, l, adv: calls.append(adv))
+    src = tmp_path / "ssd" / "C" / "20261110"
+    b, j = _write_chunk(src, 1762732800, _noise())
+    A.copy_one(b, j, tmp_path / "drive", "f16")
+    assert A.os.POSIX_FADV_DONTNEED in calls
+
+
+def test_invalid_sidecar_reports_invalid(tmp_path):
+    src = tmp_path / "ssd" / "C" / "20261110"
+    b, j = _write_chunk(src, 1762732800, _noise())
+    j.write_text("{not json")
+    assert A.copy_one(b, j, tmp_path / "drive", "f16") == "invalid"
