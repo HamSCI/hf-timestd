@@ -57,7 +57,7 @@ def test_f32_source_converted(tmp_path):
     assert meta["dtype"] == "complex-f16"
     assert meta["scale"] == 4096
     assert meta["converted_from"] == "complex64"
-    assert "f16_check" not in meta
+    assert meta["f16_check"] == {"seconds": 60}          # travels with the data (mjh 11-13)
     assert meta["samples_written"] == len(x)
     assert A.f16_within_rounding(x, _decode(dst / b.name, meta))
 

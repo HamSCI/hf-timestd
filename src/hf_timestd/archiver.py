@@ -204,7 +204,7 @@ def copy_one(src_bin: Path, src_json: Path, dst_dir: Path, archive_dtype: str) -
         else:
             outcome = "converted"
             out_blob = zstd.ZstdCompressor(level=ZSTD_LEVEL).compress(enc)
-            out_meta = {k: v for k, v in meta.items() if k != "f16_check"}
+            out_meta = dict(meta)          # f16_check travels with the data (mjh, 2026-11-13)
             out_meta["dtype"] = iq_codec.DTYPE_F16
             out_meta["scale"] = int(iq_codec.F16_SCALE)
             out_meta["converted_from"] = iq_codec.DTYPE_F32
