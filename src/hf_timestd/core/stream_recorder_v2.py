@@ -47,6 +47,7 @@ RADIOD_LIFETIME_FRAMES = 6000
 _CHANNEL_VERIFY_TIMEOUT_S = float(os.environ.get("TIMESTD_CHANNEL_VERIFY_TIMEOUT_S", "20"))
 
 from ka9q import RadiodStream, ChannelInfo, StreamQuality, RadiodControl
+from .anchor_pair import read_anchor_pair
 
 # NOTE (2026-02-03): Bootstrap functionality migrated into MetrologyEngine.
 # The recorder now always archives immediately. MetrologyEngine's fusion_state
@@ -463,8 +464,7 @@ class StreamRecorderV2:
         # multicast group — not the global status multicast, which mixes
         # status packets from ALL decoders and can return the wrong
         # rtp_timesnap for our SSRC.
-        gps_time = getattr(self.channel_info, 'gps_time', None)
-        rtp_snap = getattr(self.channel_info, 'rtp_timesnap', None)
+        gps_time, rtp_snap = read_anchor_pair(self.channel_info) or (None, None)
         if gps_time is not None and rtp_snap is not None:
             if self.archive_writer is not None:
                 # The writer relays the pair to the Offset Judge at this
@@ -627,8 +627,7 @@ class StreamRecorderV2:
         # status packets from ALL decoders and can return the wrong
         # rtp_timesnap for our SSRC.  This block is intentionally identical
         # to the seeding at the end of _create_channel().
-        gps_time = getattr(self.channel_info, 'gps_time', None)
-        rtp_snap = getattr(self.channel_info, 'rtp_timesnap', None)
+        gps_time, rtp_snap = read_anchor_pair(self.channel_info) or (None, None)
         if gps_time is not None and rtp_snap is not None:
             if self.archive_writer is not None:
                 # The writer relays the pair to the Offset Judge at this
@@ -1073,8 +1072,7 @@ class StreamRecorderV2:
         ci = self.channel_info
         if ci is None:
             return
-        gps_time = getattr(ci, 'gps_time', None)
-        rtp_snap = getattr(ci, 'rtp_timesnap', None)
+        gps_time, rtp_snap = read_anchor_pair(ci) or (None, None)
         if gps_time is None or rtp_snap is None:
             return
 

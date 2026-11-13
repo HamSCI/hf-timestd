@@ -56,6 +56,7 @@ from ..quota_manager import QuotaManager
 from .stream_recorder_v2 import StreamRecorderV2, StreamRecorderConfig
 from .quality_snapshot import QualitySnapshotWriter
 from .counter_map_probe import CounterMapProbe
+from .anchor_pair import read_anchor_pair
 from hamsci_dsp.counter_map import CounterMap
 # Module scope: the coast bound is a class attribute, evaluated
 # at import time, and must stay tied to the precision field's
@@ -2075,8 +2076,7 @@ class CoreRecorderV2:
         sr = int(self._wwvb_config.get('sample_rate', 4_000))
 
         def _rtp_to_utc_s(rtp, _ci=channel_info, _sr=sr):
-            gps_time = getattr(_ci, 'gps_time', None)
-            rtp_snap = getattr(_ci, 'rtp_timesnap', None)
+            gps_time, rtp_snap = read_anchor_pair(_ci) or (None, None)
             if gps_time is None or rtp_snap is None:
                 return None
             bt = resolve_buffer_timing(
@@ -2639,9 +2639,8 @@ class CoreRecorderV2:
 
         src_ci = getattr(self, '_t6_channel_info', None)
         edge_rtp = getattr(est, 'edge_rtp', None) if est is not None else None
-        src_snap = getattr(src_ci, 'rtp_timesnap', None) if src_ci else None
+        src_gps, src_snap = read_anchor_pair(src_ci) or (None, None)
         src_rate = getattr(src_ci, 'sample_rate', None) if src_ci else None
-        src_gps = getattr(src_ci, 'gps_time', None) if src_ci else None
 
         # ⚠ Honest note: removing this guard changes no behaviour.  A None
         # estimate reaches transfer_edge as int(None), raises, and the except
@@ -2660,9 +2659,8 @@ class CoreRecorderV2:
                 writer.set_pulse_edge_rtp(None)
                 continue
             dst_ci = getattr(recorder, 'channel_info', None)
-            dst_snap = getattr(dst_ci, 'rtp_timesnap', None) if dst_ci else None
+            dst_gps, dst_snap = read_anchor_pair(dst_ci) or (None, None)
             dst_rate = getattr(dst_ci, 'sample_rate', None) if dst_ci else None
-            dst_gps = getattr(dst_ci, 'gps_time', None) if dst_ci else None
             if None in (dst_snap, dst_rate) or int(dst_rate or 0) <= 0:
                 writer.set_pulse_edge_rtp(None)
                 continue
@@ -2993,8 +2991,8 @@ class CoreRecorderV2:
         for desc, arrival in arrivals.items():
             cmap = maps.get(desc)
             ci = getattr(recorders.get(desc), 'channel_info', None)
-            if not map_fits_raw_pair(cmap, getattr(ci, 'gps_time', None),
-                                     getattr(ci, 'rtp_timesnap', None)):
+            ci_gps, ci_snap = read_anchor_pair(ci) or (None, None)
+            if not map_fits_raw_pair(cmap, ci_gps, ci_snap):
                 cmap = None
             # Fix 1: the channel's least-delayed-arrival floor at this
             # arrival, ``(lead_s, FloorEstimate)`` or None.  Read here, once
@@ -3312,8 +3310,7 @@ class CoreRecorderV2:
         pairing = getattr(self, '_t5_pairing', None)
         ci = getattr(self, '_t6_channel_info', None)
         if pairing is not None and ci is not None:
-            gps_time = getattr(ci, 'gps_time', None)
-            rtp_snap = getattr(ci, 'rtp_timesnap', None)
+            gps_time, rtp_snap = read_anchor_pair(ci) or (None, None)
             if gps_time is not None and rtp_snap is not None:
                 cal = getattr(self, '_t6_calibrator', None)
                 sr = getattr(cal, 'sample_rate', None) if cal is not None else None
@@ -3345,8 +3342,7 @@ class CoreRecorderV2:
             ci = getattr(recorder, 'channel_info', None)
             if ci is None:
                 continue
-            gps_time = getattr(ci, 'gps_time', None)
-            rtp_snap = getattr(ci, 'rtp_timesnap', None)
+            gps_time, rtp_snap = read_anchor_pair(ci) or (None, None)
             if gps_time is None or rtp_snap is None:
                 continue
             cfg = getattr(recorder, 'config', None)
@@ -4045,8 +4041,7 @@ class CoreRecorderV2:
 
         def _obs(ci):
             try:
-                gps = int(getattr(ci, 'gps_time', None))
-                snap = int(getattr(ci, 'rtp_timesnap', None))
+                gps, snap = read_anchor_pair(ci)
                 sr = int(getattr(ci, 'sample_rate', None))
             except (TypeError, ValueError):
                 return None

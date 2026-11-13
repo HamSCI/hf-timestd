@@ -207,7 +207,7 @@ class RingBuffer:
     Typical use (from the recorder):
 
         rb = RingBuffer.create("WWV_20000", sample_rate=24000, ring_seconds=600)
-        rb.update_anchor(channel_info.gps_time, channel_info.rtp_timesnap)
+        rb.update_anchor(*read_anchor_pair(channel_info))
         ...
         rb.write_samples(batch_samples, batch_first_rtp)
         ...
