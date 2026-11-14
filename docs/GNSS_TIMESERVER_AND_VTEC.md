@@ -284,6 +284,26 @@ protocol = "auto"            # or "ubx" / "rtcm3"; auto decides from the first b
 ephemeris_dir = "data/brdc"  # RTCM only; relative to /var/lib/timestd
 ```
 
+For a receiver plugged into this machine by USB, set `device` instead of
+`host` and `port`:
+
+```toml
+[gnss_vtec]
+enabled = true
+device = "/dev/serial/by-id/usb-u-blox_AG_-_www.u-blox.com_u-blox_GNSS_receiver-if00"
+configure_receiver = true    # default; see below
+```
+
+When `device` is set, it wins over `host` and `port`. The service user needs
+the `dialout` group; `install.sh` adds it, and the unit carries
+`SupplementaryGroups=dialout`. Each time the port opens, hf-timestd sends one
+UBX-CFG-VALSET to the receiver's RAM layer. It turns on UBX output on USB plus
+RXM-RAWX and RXM-SFRBX at rate 1. It never writes to flash or battery-backed
+memory, so a power cycle returns the receiver to its stored setup and the next
+open sends the message again. The journal logs ACK, NAK or no answer; a NAK or
+silence is a warning and the reader carries on. Set `configure_receiver =
+false` to send nothing. This key does not apply to `host`/`port` sources.
+
 ```bash
 sudo systemctl enable --now timestd-vtec
 ```

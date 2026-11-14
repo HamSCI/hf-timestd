@@ -36,7 +36,6 @@ When HDF5 saving is enabled, each appended record includes the same fields in
 addition to standard metadata (quality flag, elevation mask, DCB corrected).
 """
 
-import socket
 import logging
 import time
 import sys
@@ -52,6 +51,7 @@ try:
 except ImportError:
     SYSTEMD_AVAILABLE = False
 
+from hf_timestd.core.gnss_source import make_source
 from hf_timestd.core.ubx_parser import UBXParser
 from hf_timestd.core.rtcm3_adapter import RTCM3Adapter, looks_like_rtcm3
 from hf_timestd.core.broadcast_ephemeris import BroadcastEphemeris
@@ -102,6 +102,8 @@ def main():
     parser = argparse.ArgumentParser(description="Real-time VTEC from ZED-F9P")
     parser.add_argument("--host", help="ZED-F9P IP (overrides config)")
     parser.add_argument("--port", type=int, help="ZED-F9P TCP Port (overrides config)")
+    parser.add_argument("--device", help="Local USB serial device, e.g. /dev/ttyACM1 "
+                                         "(overrides host/port and config)")
     parser.add_argument("--download-only", action="store_true", help="Download DCBs and exit")
     parser.add_argument("--config", default="config/timestd-config.toml", help="Path to config file")
     args = parser.parse_args()
@@ -113,13 +115,13 @@ def main():
     logging.getLogger().setLevel(getattr(logging, _level, logging.INFO))
     
     # Determine settings (CLI > Config > Default)
-    host = args.host if args.host else gnss_cfg.get("host", "192.168.0.202")
-    port = args.port if args.port else gnss_cfg.get("port", 2001)
+    # A serial device (CLI or [gnss_vtec] device) takes precedence over host/port.
+    source = make_source(gnss_cfg, host=args.host, port=args.port, device=args.device)
     enabled = gnss_cfg.get("enabled", False)
     
     # If specific args are provided, assume user wants to run regardless of config 'enabled'
     # But if run as a service with no args, respect 'enabled'.
-    if not (args.host or args.port or args.download_only):
+    if not (args.host or args.port or args.device or args.download_only):
         if not enabled:
             # Stay alive in idle so Type=notify is satisfied — exiting here
             # makes systemd flag Result=protocol (READY=1 never sent) and
@@ -242,7 +244,6 @@ def main():
     BATCH_FLUSH_INTERVAL = 60
     last_hdf5_flush = time.time()
     reconnect_delay = 5  # seconds, grows with backoff
-    RECV_SLICE_S = 20.0        # each recv() wait — well inside WatchdogSec=60
     SILENCE_LIMIT_S = 60.0     # this much silence on a live socket => reconnect
     MAX_RECONNECT_DELAY = 120
 
@@ -254,21 +255,12 @@ def main():
     # The UBX parser and TEC analyzer persist across reconnections.
     try:
       while True:
-        # 3. Connect to Stream
-        sock = None
+        # 3. Open the source (TCP connect or serial open + receiver config).
+        # ⛔ Every blocking wait must end well inside WatchdogSec=60; see
+        # hf_timestd.core.gnss_source (AC0G-ND 2026-10-04).
         try:
-            logger.info(f"Connecting to {host}:{port}...")
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            # ⛔ Every blocking wait must end well inside WatchdogSec=60.  A
-            # connected-but-silent receiver used to block recv() for the full
-            # 60 s socket timeout, so systemd killed the process (ABRT,
-            # 'watchdog') before the timeout handler could reconnect: AC0G-ND,
-            # 2026-10-04, three kills in four minutes while its GNSS box sat
-            # silent.  Connect is bounded at 10 s; recv waits in 20 s slices
-            # and pets the watchdog on each; 60 s of silence reconnects.
-            sock.settimeout(10.0)
-            sock.connect((host, port))
-            sock.settimeout(RECV_SLICE_S)
+            logger.info(f"Connecting to {source.describe()}...")
+            source.open()
             logger.info("Connected!")
             reconnect_delay = 5  # reset backoff on success
             last_data_time = time.time()  # reset data watchdog on fresh connection
@@ -285,13 +277,16 @@ def main():
         try:
           while True:
             try:
-                data = sock.recv(4096)
-            except socket.timeout:
+                data = source.read()
+            except OSError as e:     # reset socket, unplugged USB device
+                logger.warning(f"Read failed: {e} — will reconnect")
+                break
+            if data is None:         # the wait ended with no data
                 if SYSTEMD_AVAILABLE:
                     systemd_daemon.notify('WATCHDOG=1')
-                silent_s += RECV_SLICE_S
+                silent_s += source.slice_s
                 if silent_s >= SILENCE_LIMIT_S:
-                    logger.warning(f"No data for {silent_s:.0f}s on a connected socket "
+                    logger.warning(f"No data for {silent_s:.0f}s on an open source "
                                    "— receiver silent; will reconnect")
                     break  # break inner loop → reconnect
                 continue
@@ -493,11 +488,7 @@ def main():
 
           # end inner data loop
         finally:
-            if sock:
-                try:
-                    sock.close()
-                except Exception:
-                    pass
+            source.close()
             # Pet watchdog during reconnection gap
             if SYSTEMD_AVAILABLE:
                 systemd_daemon.notify('WATCHDOG=1')
@@ -515,11 +506,7 @@ def main():
                 logger.info(f"Final flush: {len(hdf5_write_buffer)} VTEC measurements to HDF5")
             except Exception as e:
                 logger.error(f"Failed final HDF5 flush: {e}")
-        if sock:
-            try:
-                sock.close()
-            except Exception:
-                pass
+        source.close()
         if csv_file: csv_file.close()
         if hdf5_writer: hdf5_writer.close()
 

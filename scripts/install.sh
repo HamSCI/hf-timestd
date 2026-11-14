@@ -212,6 +212,12 @@ elif getent group chrony &>/dev/null; then
 fi
 [[ -n "$CHRONY_GROUP" ]] && usermod -a -G "$CHRONY_GROUP" "$INSTALL_USER" 2>/dev/null || true
 
+# Add timestd to dialout so timestd-vtec can open a USB GNSS receiver
+# ([gnss_vtec] device = /dev/ttyACM*, root:dialout 0660).  usermod -a is idempotent.
+if getent group dialout &>/dev/null; then
+    usermod -a -G dialout "$INSTALL_USER" 2>/dev/null || true
+fi
+
 # ── Directories ──
 ensure_dir() {
     mkdir -p "$1"

@@ -254,6 +254,21 @@ title          = "GNSS-VTEC server port"
 example        = "9000"
 required       = false
 
+[gnss_vtec.device]
+title          = "USB serial device of the GNSS receiver"
+help           = """Path of a receiver plugged into this machine, such as
+/dev/ttyACM1 or a /dev/serial/by-id/ name.  When set, it replaces host and
+port.  The timestd user needs the dialout group."""
+example        = "/dev/serial/by-id/usb-u-blox_AG_-_www.u-blox.com_u-blox_GNSS_receiver-if00"
+required       = false
+
+[gnss_vtec.configure_receiver]
+title          = "Configure the USB receiver for raw measurements?"
+help           = """On a serial device, send one UBX-CFG-VALSET to RAM each time
+the port opens.  It turns on RXM-RAWX and RXM-SFRBX and never touches flash.
+Turn OFF to leave the receiver as it is.  Ignored for host/port sources."""
+required       = false
+
 [gnss_vtec.protocol]
 title          = "What the GNSS receiver speaks"
 help           = """auto (default) decides from the first bytes.  ubx is a

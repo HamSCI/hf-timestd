@@ -668,6 +668,13 @@ sqlite_path = "/var/lib/timestd/phase2/timestd.db"
 enabled = false                         # Set to true if you have a GNSS receiver
 host = "<YOUR_GNSS_HOST>"               # IP of GNSS receiver or ser2net bridge
 port = 9000                             # GNSS data stream port (UBX or RTCM3)
+# device: a receiver plugged into this machine by USB.  When set it replaces
+# host and port.  Use the stable name, e.g.
+# device = "/dev/serial/by-id/usb-u-blox_AG_-_www.u-blox.com_u-blox_GNSS_receiver-if00"
+# configure_receiver: on a serial device, send one UBX-CFG-VALSET (RAM layer
+# only, never flash) that turns on RXM-RAWX and RXM-SFRBX each time the port
+# opens.  Set false to leave the receiver alone.  Ignored for host/port.
+# configure_receiver = true
 # protocol: "auto" (default) decides from the first bytes; "ubx" for a u-blox
 # ZED-F9P (RXM-RAWX + NAV-SAT); "rtcm3" for an RTCM 3.3 base stream such as a
 # Quectel LG290P (MSM7 1077 or legacy 1004, plus 1005 antenna position).  An
