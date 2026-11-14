@@ -39,7 +39,8 @@ from typing import Optional, Dict, Any, List, Tuple
 from dataclasses import dataclass, field
 
 from . import f16_check
-from .iq_codec import DTYPE_F16, DTYPE_F32, F16_SCALE, bytes_per_sample, decode_iq, encode_f16
+from .iq_codec import (DTYPE_F16, DTYPE_F32, F16_SCALE, F16Overflow, bytes_per_sample,
+                       decode_iq, iter_f16_blocks)
 
 logger = logging.getLogger(__name__)
 
@@ -208,6 +209,46 @@ class MinuteBuffer:
     @property
     def samples_remaining(self) -> int:
         return max(0, len(self.samples) - self.write_pos)
+
+
+#: complex64 samples per block when a chunk streams into zstd (4 MiB).
+_STREAM_BLOCK_SAMPLES = 1 << 19
+
+#: One memory-heavy flush step at a time across every writer in the
+#: process: a zstd compression or an f16_check.  Every channel's chunk
+#: closes on the same boundary.  A threads=1 zstd context is ZSTDMT with
+#: one worker and holds ~50-60 MB of job buffers whatever the input size;
+#: the check holds ~50 MB at 24 kHz.  Six at once cost ~0.4-0.6 GB that one
+#: at a time does not.  Compression is bulk work with minutes of slack.
+_FLUSH_MEMORY_LOCK = threading.Lock()
+
+
+_malloc_trim = None
+
+
+def _release_freed_heap() -> None:
+    """Hand freed heap back to the kernel (glibc ``malloc_trim``).  Best-effort.
+
+    The f16_check's minute-long arrays (~23 MB each at 24 kHz) fall under
+    glibc's dynamic mmap threshold once an earlier large free has raised it,
+    so they come from the flush thread's own arena, and glibc keeps that
+    memory resident after the free.  Six flush threads each kept ~50 MB
+    between boundaries even with the checks run one at a time (measured:
+    RssAnon 310 MB after a six-channel F16 flush, 86 MB before).  Trimming
+    after each heavy step returns it.  A no-op off glibc.
+    """
+    global _malloc_trim
+    if _malloc_trim is None:
+        try:
+            import ctypes
+            _malloc_trim = ctypes.CDLL("libc.so.6").malloc_trim
+        except (OSError, AttributeError):
+            _malloc_trim = False
+    if _malloc_trim:
+        try:
+            _malloc_trim(0)
+        except Exception:  # noqa: BLE001 — never let a trim fail a flush
+            pass
 
 
 #: Nice increment for the archive flush workers, relative to the recorder.
@@ -1359,6 +1400,68 @@ class BinaryArchiveWriter:
                 )
             buffer.scratch_path = None
     
+    @staticmethod
+    def _iter_raw_blocks(chunk: np.ndarray):
+        """Yield ``chunk`` as zero-copy complex64 slices of the memmap."""
+        step = _STREAM_BLOCK_SAMPLES
+        for start in range(0, len(chunk), step):
+            yield chunk[start:start + step]
+
+    def _write_zstd_streaming(self, path: Path, blocks, total_bytes: int) -> None:
+        """Compress ``blocks`` into ``path`` as one zstd frame, then fsync.
+
+        The compressor gets the total size up front (``size=``), exactly as
+        the one-shot ``compress()`` learned it from its argument, so the
+        frame header and the compressed bytes match the one-shot write
+        (tests/unit/test_archive_flush_streaming.py).  Memory stays at a
+        block in and a block out, where the one-shot write held the whole
+        chunk uncompressed AND compressed — ~2x 115 MB per channel at
+        24 kHz, six channels at once on the same boundary.  The context
+        itself (~50-60 MB, see _FLUSH_MEMORY_LOCK) lives only inside the
+        lock; the fsync runs outside it.
+
+        CRITICAL FIX (2026-01-12), kept: threads=1.  Multi-threaded
+        compression across 9 channels simultaneously stalled the recorder.
+        threads=1 also fixes the bytes: threads=0 writes a different frame.
+        """
+        import zstandard as zstd
+        with open(path, 'wb') as f:
+            with _FLUSH_MEMORY_LOCK:
+                cctx = zstd.ZstdCompressor(level=self.config.compression_level, threads=1)
+                cobj = cctx.compressobj(size=total_bytes)
+                for block in blocks:
+                    out = cobj.compress(block)
+                    if out:
+                        f.write(out)
+                f.write(cobj.flush())
+                del cobj, cctx   # free the context's job buffers inside the lock
+                _release_freed_heap()
+            f.flush()
+            os.fsync(f.fileno())
+            written = f.tell()
+        if written:
+            logger.debug(f"zstd compression: {total_bytes} -> {written} "
+                         f"({total_bytes / written:.1f}x)")
+
+    def _run_f16_check(self, chunk: np.ndarray, minute_boundary: int,
+                       f16_extra: Dict[str, Any]) -> None:
+        """Measure the F16 rounding on the chunk's first minute, into f16_extra.
+
+        Under ``_FLUSH_MEMORY_LOCK``: one heavy step at a time across every
+        channel in the process.  Never blocks the write.
+        """
+        try:
+            n = min(len(chunk), int(self.config.sample_rate) * 60)
+            head = chunk[:n]
+            with _FLUSH_MEMORY_LOCK:
+                f16_extra['f16_check'] = f16_check.measure(
+                    np.asarray(head),
+                    decode_iq(b''.join(iter_f16_blocks(head)), DTYPE_F16, F16_SCALE),
+                    self.config.sample_rate)
+                _release_freed_heap()
+        except Exception as e:  # the check never blocks the write
+            logger.warning(f"f16_check failed for chunk {minute_boundary}: {e}")
+
     def _flush_minute(self, buffer: MinuteBuffer) -> bool:
         """Write completed minute buffer to disk with disk full handling."""
         bin_path = None
@@ -1378,70 +1481,67 @@ class BinaryArchiveWriter:
                 bin_path = minute_dir / f"{buffer.minute_boundary}.bin"
             json_path = minute_dir / f"{buffer.minute_boundary}.json"
             
-            # Write binary data (just the filled portion)
+            # Write binary data (just the filled portion).  The zstd path
+            # streams the chunk out of the scratch memmap in blocks: never
+            # a whole-chunk copy, never the whole compressed output in
+            # memory (see _write_zstd_streaming).
             actual_samples = min(buffer.write_pos, self.samples_per_chunk)
-            raw_data = None
+            chunk = buffer.samples[:actual_samples]
             dtype_name = 'complex64'
             f16_extra: Dict[str, Any] = {}
-            if compression == 'zstd' and self.config.archive_dtype == 'f16':
-                chunk = buffer.samples[:actual_samples]
-                raw_data = encode_f16(chunk)
-                if raw_data is None:
-                    f16_extra['f16_fallback'] = 'overflow'
-                    logger.warning(
-                        f"F16 overflow in chunk {buffer.minute_boundary} "
-                        f"({self.config.channel_name}): storing complex64"
-                    )
-                else:
-                    dtype_name = DTYPE_F16
-                    f16_extra['scale'] = F16_SCALE
-                    if self.config.f16_check and actual_samples > 0:
-                        try:
-                            # Slice first: the check reads only the first minute.
-                            n = min(actual_samples, int(self.config.sample_rate) * 60)
-                            f16_extra['f16_check'] = f16_check.measure(
-                                np.asarray(chunk[:n]),
-                                decode_iq(raw_data[:n * bytes_per_sample(DTYPE_F16)],
-                                          DTYPE_F16, F16_SCALE),
-                                self.config.sample_rate)
-                        except Exception as e:  # the check never blocks the write
-                            logger.warning(f"f16_check failed for chunk {buffer.minute_boundary}: {e}")
-            if raw_data is None:
-                raw_data = buffer.samples[:actual_samples].tobytes()
-            
+            want_f16 = compression == 'zstd' and self.config.archive_dtype == 'f16'
+            stored_bytes = actual_samples * bytes_per_sample(
+                DTYPE_F16 if want_f16 else DTYPE_F32)
+
             # Check disk space before writing (raw size + some overhead)
-            if not self._check_disk_space(minute_dir, len(raw_data) + 10000):
+            if not self._check_disk_space(minute_dir, stored_bytes + 10000):
                 self.write_errors += 1
                 return False
-            
+
             # Atomic write: write to temp file first
             bin_path_tmp = bin_path.with_suffix(bin_path.suffix + '.tmp')
-            
+
             # Apply compression if configured
             if compression == 'zstd':
                 try:
-                    import zstandard as zstd
-                    # CRITICAL FIX (2026-01-12): Use threads=1 to avoid resource contention/hangs.
-                    # Multi-threaded compression across 9 channels simultaneously was causing 
-                    # the recorder service to stall/hang. Single-threaded is safer on low-core systems.
-                    cctx = zstd.ZstdCompressor(level=self.config.compression_level, threads=1)
-                    compressed_data = cctx.compress(raw_data)
-                    with open(bin_path_tmp, 'wb') as f:
-                        f.write(compressed_data)
-                        f.flush()
-                        os.fsync(f.fileno())
-                    compression_ratio = len(raw_data) / len(compressed_data)
-                    logger.debug(f"zstd compression: {len(raw_data)} -> {len(compressed_data)} ({compression_ratio:.1f}x)")
+                    import zstandard  # noqa: F401  (fallback below if absent)
+                    zstd_ok = True
                 except ImportError:
+                    zstd_ok = False
+                if zstd_ok:
+                    wrote_f16 = False
+                    if want_f16:
+                        try:
+                            self._write_zstd_streaming(
+                                bin_path_tmp, iter_f16_blocks(chunk), stored_bytes)
+                            wrote_f16 = True
+                        except F16Overflow:
+                            self._cleanup_partial_write(bin_path_tmp)
+                            f16_extra['f16_fallback'] = 'overflow'
+                            logger.warning(
+                                f"F16 overflow in chunk {buffer.minute_boundary} "
+                                f"({self.config.channel_name}): storing complex64"
+                            )
+                    if wrote_f16:
+                        dtype_name = DTYPE_F16
+                        f16_extra['scale'] = F16_SCALE
+                        if self.config.f16_check and actual_samples > 0:
+                            self._run_f16_check(chunk, buffer.minute_boundary, f16_extra)
+                    else:
+                        self._write_zstd_streaming(
+                            bin_path_tmp, self._iter_raw_blocks(chunk),
+                            actual_samples * bytes_per_sample(DTYPE_F32))
+                else:
                     logger.warning("zstandard not installed, falling back to uncompressed")
                     bin_path = minute_dir / f"{buffer.minute_boundary}.bin"
                     bin_path_tmp = bin_path.with_suffix('.bin.tmp')
-                    buffer.samples[:actual_samples].tofile(bin_path_tmp)
+                    chunk.tofile(bin_path_tmp)
                     dtype_name = 'complex64'   # the fallback file holds F32
                     f16_extra = {}
             elif compression == 'lz4':
                 try:
                     import lz4.frame
+                    raw_data = chunk.tobytes()
                     compressed_data = lz4.frame.compress(raw_data, compression_level=self.config.compression_level)
                     with open(bin_path_tmp, 'wb') as f:
                         f.write(compressed_data)
@@ -1449,15 +1549,17 @@ class BinaryArchiveWriter:
                         os.fsync(f.fileno())
                     compression_ratio = len(raw_data) / len(compressed_data)
                     logger.debug(f"lz4 compression: {len(raw_data)} -> {len(compressed_data)} ({compression_ratio:.1f}x)")
+                    del raw_data, compressed_data
                 except ImportError:
                     logger.warning("lz4 not installed, falling back to uncompressed")
                     bin_path = minute_dir / f"{buffer.minute_boundary}.bin"
                     bin_path_tmp = bin_path.with_suffix('.bin.tmp')
-                    buffer.samples[:actual_samples].tofile(bin_path_tmp)
+                    chunk.tofile(bin_path_tmp)
             else:
                 # No compression - direct write
-                buffer.samples[:actual_samples].tofile(bin_path_tmp)
-            
+                chunk.tofile(bin_path_tmp)
+            del chunk
+
             # Write metadata sidecar.  The sidecar lands BEFORE the bin is
             # renamed into place: a crash between the two must never leave
             # a bin without the sidecar that names its dtype (an F16 chunk

@@ -9,7 +9,7 @@ returns None for them and the caller falls back to complex64.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Iterator, Optional
 
 import numpy as np
 
@@ -21,30 +21,50 @@ _F16_MAX = 65504.0  # largest finite binary16 value
 _BLOCK = 1 << 20  # float32 components scaled and checked per step (4 MB)
 
 
+class F16Overflow(ValueError):
+    """A finite scaled component exceeds the binary16 range."""
+
+
+def iter_f16_blocks(samples: np.ndarray, block: int = _BLOCK) -> Iterator[bytes]:
+    """Yield the F16 encoding of ``samples`` as successive byte blocks.
+
+    Each block holds ``block`` float32 components (``block // 2`` complex
+    samples), so memory stays at a few blocks however long the input.  The
+    concatenated blocks equal ``encode_f16(samples)``.  Raises
+    ``F16Overflow`` at the first block holding a finite scaled component
+    beyond the binary16 range; blocks already yielded are then invalid.
+    """
+    interleaved = np.ascontiguousarray(samples, dtype=np.complex64).view(np.float32).reshape(-1)
+    scale = np.float32(F16_SCALE)
+    scaled_buf = np.empty(min(block, interleaved.size), dtype=np.float32)
+    out_buf = np.empty(scaled_buf.size, dtype="<f2")
+    for start in range(0, interleaved.size, block):
+        part = interleaved[start:start + block]
+        scaled = scaled_buf[:part.size]
+        np.multiply(part, scale, out=scaled)
+        big = np.abs(scaled) > _F16_MAX  # NaN compares False; inf compares True
+        if big.any() and np.isfinite(scaled[big]).any():
+            raise F16Overflow(f"component beyond binary16 at index >= {start}")
+        out = out_buf[:part.size]
+        out[:] = scaled
+        yield out.tobytes()
+
+
 def encode_f16(samples: np.ndarray) -> Optional[bytes]:
     """Encode complex samples as little-endian interleaved binary16 bytes.
 
     Returns None when any finite scaled component exceeds the binary16 range.
     NaN and inf pass through unchanged and never trigger the fallback.
 
-    Works in blocks of ``_BLOCK`` components into one preallocated binary16
-    array, so a 600 s chunk needs the output plus a few MB, not several
-    full-size float32 temporaries.  The bytes equal
-    ``(x * F16_SCALE).astype("<f2")`` on the interleaved float32 view.
+    Works in blocks of ``_BLOCK`` components (see ``iter_f16_blocks``), so a
+    600 s chunk needs the output plus a few MB, not several full-size
+    float32 temporaries.  The bytes equal ``(x * F16_SCALE).astype("<f2")``
+    on the interleaved float32 view.
     """
-    interleaved = np.ascontiguousarray(samples, dtype=np.complex64).view(np.float32).reshape(-1)
-    out = np.empty(interleaved.size, dtype="<f2")
-    scale = np.float32(F16_SCALE)
-    scaled_buf = np.empty(min(_BLOCK, interleaved.size), dtype=np.float32)
-    for start in range(0, interleaved.size, _BLOCK):
-        block = interleaved[start:start + _BLOCK]
-        scaled = scaled_buf[:block.size]
-        np.multiply(block, scale, out=scaled)
-        big = np.abs(scaled) > _F16_MAX  # NaN compares False; inf compares True
-        if big.any() and np.isfinite(scaled[big]).any():
-            return None
-        out[start:start + block.size] = scaled
-    return out.tobytes()
+    try:
+        return b"".join(iter_f16_blocks(samples))
+    except F16Overflow:
+        return None
 
 
 def decode_iq(raw: bytes, dtype: str, scale: float = 1.0) -> np.ndarray:
