@@ -161,6 +161,30 @@ infer the absence of a TS-1 from the absence of USB — which is exactly why a
 fresh install ships `t6_pps.enabled = false` and why TS-1 presence alone does
 not raise the tier.
 
+**A TS-1 shared through a splitter.** When a splitter feeds one TS-1 to
+several stations, only the station that holds its USB can probe it. On every
+other station the operator declares it once. Run `ts1 probe` on the station
+with the USB and note the host name, the board id and `TS1_TX_HZ`. Then, on the
+station without the USB, run `sudo ts1 trust <host> <board_id> <tx_hz>` and
+`sudo /usr/local/sbin/sigmond-site-timing`. The trust command reads the RX888
+rate from the station's radiod config and records the TS-1 with the folded
+`frequency_hz` in `/etc/sigmond/ts1-trust.toml`. Site-timing then writes
+`enabled = true` and that frequency, names the source in a comment, and
+restarts the recorder and fusion. It acts only when the station has no TS-1 of
+its own and `[timing.t6_pps]` still reads `enabled = false`, so it never
+overrides an operator or a local probe. The station with the USB can also
+advertise the TS-1 on the LAN as the mDNS service `_ts1._tcp`, through
+sigmond's `sigmond-ts1-advertise.timer`, and `ts1 lan` lists what a station
+sees. That advertisement serves only as a cross-check, because any device on
+the LAN could imitate it. When it agrees, the journal says so. When it
+contradicts the declaration, names the board twice, carries a bad timestamp or
+reports no GPS lock, site-timing does not arm. When none reaches the station,
+site-timing arms from the declaration and logs that it could not cross-check.
+Multicast reaches only one network segment, so a decoder VM behind its Proxmox
+host's private link sees no advertisement unless that host passes mDNS
+through. Each station still has to hear the pilot, learn its own chain delay
+and pass the T6 acceptance battery before T6 takes authority.
+
 The interactive path handles this: it asks "Do you have a BPSK PPS injector?"
 and takes a frequency. Two gaps remain:
 
