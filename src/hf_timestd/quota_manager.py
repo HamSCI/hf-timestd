@@ -425,6 +425,22 @@ class QuotaManager:
 
         return result
 
+    def _archive_gate(self, entries: List[DayEntry], usage_percent: float) -> List[DayEntry]:
+        """Drop raw_iq entries the archive drive does not hold yet
+        (archive-before-evict; see archiver.raw_day_may_leave)."""
+        from . import archiver
+        verdict = {}
+        out = []
+        for e in entries:
+            if e.category == 'raw_iq':
+                if e.date_str not in verdict:
+                    verdict[e.date_str] = archiver.raw_day_may_leave(
+                        self.data_root, e.date_str, usage_percent)
+                if not verdict[e.date_str]:
+                    continue
+            out.append(e)
+        return out
+
     def enforce_quota(self) -> dict:
         """
         Enforce storage policy in three stages:
@@ -468,7 +484,7 @@ class QuotaManager:
         logger.info(f"Need to free {bytes_to_free / 1024**3:.2f} GB "
                    f"to reach {target_percent:.1f}%")
 
-        entries = self.scan_day_entries()
+        entries = self._archive_gate(self.scan_day_entries(), percent)
 
         if not entries:
             logger.warning("No day-entries eligible for deletion")

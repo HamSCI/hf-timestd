@@ -469,7 +469,7 @@ def run(config_path: Path = ARCHIVE_TOML, data_root: Path = DATA_ROOT,
           "present": False, "state": "unconfigured", "channels": {}, "copied": 0,
           "converted": 0, "bytes_copied": 0, "behind": 0, "kept_f32": 0, "failures": 0,
           "last_error": None, "bytes_per_day": None, "evicted": [], "dry_run": dry_run,
-          "percent": None, "invalid": 0, "orphans": 0}
+          "percent": None, "invalid": 0, "orphans": 0, "evict_refused": 0}
     if os.geteuid() == 0 and not dry_run:
         st["state"] = "error"
         st["last_error"] = ("refusing to run as root: files it writes on the drive would be "
@@ -522,6 +522,7 @@ def run(config_path: Path = ARCHIVE_TOML, data_root: Path = DATA_ROOT,
             room = make_room(drive_root, mount, hw, evict_first, today, usage=_usage,
                              dry_run=dry_run)
             st["evicted"] = room["evicted"]
+            refused = list(room.get("skipped", []))
             if dry_run:
                 st["would_evict"] = room["evicted"]
             failures_path = drive_root / ".archive-failures.json"
@@ -549,6 +550,7 @@ def run(config_path: Path = ARCHIVE_TOML, data_root: Path = DATA_ROOT,
                 if i and i % 50 == 0:
                     room = make_room(drive_root, mount, hw, evict_first, today, usage=_usage)
                     st["evicted"] += room["evicted"]
+                    refused += room.get("skipped", [])
                     if room["full"]:
                         st["state"] = "full"
                         behind += len(pending) - i
@@ -582,8 +584,14 @@ def run(config_path: Path = ARCHIVE_TOML, data_root: Path = DATA_ROOT,
                 if st["state"] == "ok":
                     room = make_room(drive_root, mount, hw, evict_first, today, usage=_usage)
                     st["evicted"] += room["evicted"]
+                    refused += room.get("skipped", [])
                     if room["full"]:
                         st["state"] = "full"
+            st["evict_refused"] = len(set(refused))
+            if refused and st["state"] == "full" and not st["last_error"]:
+                st["last_error"] = (f"cannot delete {len(set(refused))} day folder(s) on the drive "
+                                    f"(permission denied), e.g. {sorted(set(refused))[0]}: make them "
+                                    f"writable by timestd")
             st["percent"] = _usage(mount)[2]
             st["channels"] = _held(drive_root, iq_codec.DTYPE_F16 if dtype_cfg == "f16"
                                    else iq_codec.DTYPE_F32, previous, today)
@@ -644,3 +652,54 @@ def export_f32(src_root: Path, dst: Path, channel: str, start_utc: datetime,
             n += 1
         day += timedelta(days=1)
     return n
+
+
+# ---------------------------------------------------------------------------
+# archive-before-evict: the SSD keeps a raw day until the drive holds it
+# ---------------------------------------------------------------------------
+# KPH2, 2026-11-14: the resource guardian evicted raw_buffer/20261112 while the
+# archiver was blocked, and 835 of its 864 chunks were lost.  With an archive
+# drive configured, every SSD eviction of raw IQ (resource guardian, quota
+# manager) asks raw_day_may_leave() first.
+
+EVICT_EMERGENCY_PERCENT = 95.0     # past this the recorder's own room wins
+
+
+def raw_day_archived(data_root: Path, day: str, config_path: Optional[Path] = None) -> bool:
+    """Every closed chunk of raw_buffer/*/<day>/ on the SSD has its sidecar on
+    the archive drive.  False when the drive is away or not configured."""
+    cfg = _load_config(Path(config_path or ARCHIVE_TOML))
+    if gate(cfg):
+        return False
+    drive = Path(cfg["mount"]) / "timestd" / _station() / "raw_buffer"
+    raw = Path(data_root) / "raw_buffer"
+    try:
+        for ch in raw.iterdir():
+            d = ch / day
+            if not d.is_dir():
+                continue
+            for b in d.glob("*.bin.zst"):
+                stem = b.name[:-len(".bin.zst")]
+                if not (drive / ch.name / day / f"{stem}.json").exists():
+                    return False
+    except OSError:
+        return False
+    return True
+
+
+def raw_day_may_leave(data_root: Path, day: str, usage_percent: float,
+                      config_path: Optional[Path] = None) -> bool:
+    """May the SSD delete this raw day now?  Yes without an archive drive,
+    yes once the drive holds every chunk, yes past the emergency mark."""
+    path = Path(config_path or ARCHIVE_TOML)
+    if not path.exists():
+        return True
+    if usage_percent >= EVICT_EMERGENCY_PERCENT:
+        logger.warning("archive-before-evict: disk at %.1f%%; raw day %s may go even if not "
+                       "on the archive drive", usage_percent, day)
+        return True
+    if raw_day_archived(data_root, day, path):
+        return True
+    logger.warning("archive-before-evict: keeping raw day %s on the SSD: not all of it is on "
+                   "the archive drive yet", day)
+    return False

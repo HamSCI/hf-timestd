@@ -626,6 +626,17 @@ class ResourceGuardian:
                 seen.add(date_str)
                 yield ('raw_day', date_str)
 
+    def _usage_percent(self) -> float:
+        try:
+            u = shutil.disk_usage(self.data_root)
+            return 100.0 * u.used / u.total if u.total else 100.0
+        except OSError:
+            return 100.0
+
+    def _raw_day_may_leave(self, date_str: str) -> bool:
+        from .. import archiver
+        return archiver.raw_day_may_leave(self.data_root, date_str, self._usage_percent())
+
     def _evict_unit(self, kind: str, unit) -> int:
         if kind == 'file':
             try:
@@ -637,6 +648,8 @@ class ResourceGuardian:
         if kind == 'raw_day':
             freed = 0
             raw = self.data_root / 'raw_buffer'
+            if not self._raw_day_may_leave(unit):
+                return 0
             try:
                 for channel_dir in raw.iterdir():
                     date_dir = channel_dir / unit
@@ -775,9 +788,10 @@ class ResourceGuardian:
 
         total_freed = 0
 
-        # 1. raw_buffer/CHANNEL/YYYYMMDD/ directories
+        # 1. raw_buffer/CHANNEL/YYYYMMDD/ directories (kept until the archive
+        #    drive holds them, short of an emergency: archive-before-evict)
         raw_dir = self.data_root / 'raw_buffer'
-        if raw_dir.exists():
+        if raw_dir.exists() and self._raw_day_may_leave(date_str):
             try:
                 for channel_dir in raw_dir.iterdir():
                     date_dir = channel_dir / date_str
