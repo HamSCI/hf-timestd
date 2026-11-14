@@ -78,6 +78,28 @@ over the last few days.  If the reference stations find T3's sigma too small at 
 station distrusts its night sigma until the model improves.  The reference stations keep the
 others honest.
 
+### Route 3: a station with no T2 either
+
+Michael, 2026-11-14.  Fleet calibration lives in `sigmondb_public`, so it travels over HTTPS.  "No
+T2" therefore covers two different stations.
+
+A station whose firewall blocks NTP (UDP 123) but passes HTTPS has no T2, yet still reads the
+calibration.  Its host clock drifts with nothing to discipline it, so T3 has nothing to beat.  It
+admits T3 on fleet calibration alone: the same test as route 2, the reference stations' finding
+that T3's sigma held honest for this hour of day over the last few days.  When that test fails, the
+station runs on its undisciplined clock and says so loudly.
+
+A station with no internet at all reads no calibration.  A copy cached at install or at its last
+connection serves while young, with sigma growing as it ages, and stops counting at the age limit.
+After that the station labels its data with T3 and T3's stated sigma, marked uncalibrated.  When
+the data reaches sigmondb, the calibration for those days already waits there, and consumers judge
+the labels after the fact.  We expose and never correct, so the station needed the calibration only
+as a record, never in real time.  Such a station stands outside the fleet's terms in any case: it
+cannot upload while offline.
+
+On every route T3 still passes its self-checks, which need no reference.  It never names the wrong
+second, and a jump over 0.5 s withdraws it at once.
+
 ### Day and night need no special rule
 
 At night T3's sigma rises (the B4 run shows why), and T2 wins the comparison on its own.  At dawn
@@ -207,8 +229,7 @@ fleet calibration for 04Z".
 - **Rob: the public servers.**  Which hosts and port serve the public read-only interface (8123
   on wsprdaemon.org and wd1-wd3 didn't answer from the devbox), and can they carry
   `sigmondb_public`?
-- **A station with no T2 either.**  A station with no internet time has nothing for T3 to beat.
-  Does route 2 then admit T3 on fleet calibration alone?
+- ~~A station with no T2 either.~~  Settled 2026-11-14: route 3.
 
 ## Left to the builder
 

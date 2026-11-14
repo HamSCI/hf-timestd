@@ -601,7 +601,7 @@ Each task names its dependency.  None of them may reach a real server in tests. 
 
 ### Task B4: Route 2, admission by sigma under fleet calibration
 
-**Depends on:** B2 for production data; the `t3_calibration` table on the public servers.  Build and test now with `FakeSigmondb`.  The rule for a station with no T2 waits on Decisions, question 1; until then such a station stays withheld with `"withheld: no T2 to compare against"`.
+**Depends on:** B2 for production data; the `t3_calibration` table on the public servers.  Build and test now with `FakeSigmondb`.  The rule for a station with no T2 follows spec route 3 (settled 2026-11-14): with calibration reachable it admits on calibration alone; with none (or an expired cache) it labels its data with T3 and T3's stated sigma, marked `"uncalibrated"`.  A task for route 3 still needs writing.
 
 **Files:**
 - Create: `src/hf_timestd/core/fleet_calibration.py`
@@ -711,7 +711,7 @@ def test_no_offset_no_estimate():
 
 ## Decisions needed before Phase B
 
-1. **A station with no T2 either.**  A station with no internet time has nothing for T3 to beat.  Does route 2 then admit T3 on fleet calibration alone?
+1. ~~A station with no T2 either.~~  Settled 2026-11-14: spec route 3.
    - (a) Yes: admit when the fleet calibration holds for the hour, with no sigma comparison.
    - (b) Yes, with a bar: admit when the calibration holds and T3's claim stays within the T3 tier's own ceiling, `CROSS_BENCH_SIGMA_CEILING_MS_BY_TIER["T3"]` = 20 ms.
    - (c) No: T3 stays a shadow, and the station labels with its free-running host clock.
