@@ -27,6 +27,10 @@ RECEIVER_CONFIG_KEYS = [
     ("CFG_USBOUTPROT_UBX", 1),
     ("CFG_MSGOUT_UBX_RXM_RAWX_USB", 1),
     ("CFG_MSGOUT_UBX_RXM_SFRBX_USB", 1),
+    # live_vtec takes each satellite's elevation from NAV-SAT; a factory
+    # ZED-F9T sends none, so without this no satellite passes the 20 deg mask
+    # and no VTEC comes out (N8UR, 2026-11-14).
+    ("CFG_MSGOUT_UBX_NAV_SAT_USB", 1),
 ]
 
 # UBX-ACK-ACK / UBX-ACK-NAK for CFG-VALSET (class 0x06, id 0x8A): the frame is
@@ -136,7 +140,7 @@ class SerialSource:
         """⛔ The ONLY bytes this program writes to the receiver.
 
         One UBX-CFG-VALSET to the RAM layer: UBX on the USB port, RXM-RAWX and
-        RXM-SFRBX at rate 1.  Re-sent at every open, because RAM does not
+        RXM-SFRBX and NAV-SAT at rate 1.  Re-sent at every open, because RAM does not
         survive a receiver power cycle.  Waits a bounded time for ACK/NAK; a
         NAK or silence logs a warning and the reader carries on."""
         self._port.write(build_receiver_config())
@@ -153,14 +157,14 @@ class SerialSource:
                     self._pending = buf[i + _ACK_LEN:]
                     self.config_result = result
                     if result == "ack":
-                        logger.info(f"{self.device}: receiver ACKed RAWX/SFRBX "
+                        logger.info(f"{self.device}: receiver ACKed RAWX/SFRBX/NAV-SAT "
                                     "configuration (RAM layer)")
                     else:
                         logger.warning(f"{self.device}: receiver NAKed the "
-                                       "RAWX/SFRBX configuration; carrying on")
+                                       "RAWX/SFRBX/NAV-SAT configuration; carrying on")
                     return
         self.config_result = "none"
-        logger.warning(f"{self.device}: no answer to the RAWX/SFRBX configuration "
+        logger.warning(f"{self.device}: no answer to the RAWX/SFRBX/NAV-SAT configuration "
                        f"within {self._ack_wait_s:.0f}s; carrying on")
 
     def read(self) -> Optional[bytes]:

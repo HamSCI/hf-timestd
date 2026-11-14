@@ -22,7 +22,7 @@ SCRIPT = Path(__file__).resolve().parents[2] / 'scripts' / 'live_vtec.py'
 ACK = bytes.fromhex('b5620501020006 8a'.replace(' ', '')) + b'\x00\x00'   # checksum not checked
 NAK = bytes.fromhex('b5620500020006 8a'.replace(' ', '')) + b'\x00\x00'
 KEYS = {'CFG_MSGOUT_UBX_RXM_RAWX_USB', 'CFG_MSGOUT_UBX_RXM_SFRBX_USB',
-        'CFG_USBOUTPROT_UBX'}
+        'CFG_MSGOUT_UBX_NAV_SAT_USB', 'CFG_USBOUTPROT_UBX'}
 
 
 class FakePort:
@@ -59,14 +59,14 @@ def _src(port, configure=True, **kw):
                            opener=lambda: port, **kw)
 
 
-def test_valset_frame_is_ram_only_with_the_three_keys():
+def test_valset_frame_is_ram_only_with_the_four_keys():
     frame = gs.build_receiver_config()
     msg = UBXReader(BytesIO(frame), msgmode=SET, quitonerror=ERR_RAISE).read()[1]
     assert msg.identity == 'CFG-VALSET'
     assert (msg.ram, msg.bbr, msg.flash) == (1, 0, 0)
     for k in KEYS:
         assert getattr(msg, k) == 1
-    assert len([a for a in dir(msg) if a.startswith('CFG_')]) == 3
+    assert len([a for a in dir(msg) if a.startswith('CFG_')]) == 4
 
 
 def test_config_keys_exist_in_pyubx2():

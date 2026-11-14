@@ -298,7 +298,7 @@ When `device` is set, it wins over `host` and `port`. The service user needs
 the `dialout` group; `install.sh` adds it, and the unit carries
 `SupplementaryGroups=dialout`. Each time the port opens, hf-timestd sends one
 UBX-CFG-VALSET to the receiver's RAM layer. It turns on UBX output on USB plus
-RXM-RAWX and RXM-SFRBX at rate 1. It never writes to flash or battery-backed
+RXM-RAWX, RXM-SFRBX and NAV-SAT at rate 1. It never writes to flash or battery-backed
 memory, so a power cycle returns the receiver to its stored setup and the next
 open sends the message again. The journal logs ACK, NAK or no answer; a NAK or
 silence is a warning and the reader carries on. Set `configure_receiver =
