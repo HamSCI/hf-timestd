@@ -1696,8 +1696,15 @@ def _handle_events(args, parser):
     return 0
 
 
-F16_ERR_LIMIT_DB = -40.0
-F16_DPHI_LIMIT_MRAD = 1.0
+# Limits from what F16 does to a measurement (f16-check-limits, 2026-11-15).
+# Rounding 30 dB under the floor lifts the noise by 0.004 dB; a phase error
+# 0.03 of the block's thermal phase noise is the same -30 dB on the carrier.
+# A chunk judges its passband-mean error and its phase ratio; one written
+# before those existed falls back to its worst-bin error (never under the
+# mean) and leaves its phase unjudged, since a flat mrad limit fails every
+# deep fade.
+F16_ERR_LIMIT_DB = -30.0
+F16_DPHI_RATIO_LIMIT = 0.03
 
 
 def _f16_collect(data_root: Path, days: int):
@@ -1717,7 +1724,10 @@ def _f16_collect(data_root: Path, days: int):
             continue
         ch = channels.setdefault(sidecar.parent.parent.name, {
             'f16_chunks': 0, 'fallbacks': 0, 'not_measured': 0,
-            'worst_err_over_floor_db': None, 'worst_carrier_dphi_rms_mrad': None})
+            'phase_unjudged': 0, 'failed_chunks': 0,
+            'worst_err_over_floor_db': None, 'worst_err_over_floor_db_mean': None,
+            'worst_carrier_dphi_rms_mrad': None,
+            'worst_carrier_dphi_over_thermal_rms': None})
         if meta.get('f16_fallback'):
             ch['fallbacks'] += 1
         if meta.get('dtype') != 'complex-f16':
@@ -1725,15 +1735,24 @@ def _f16_collect(data_root: Path, days: int):
         ch['f16_chunks'] += 1
         chk = meta.get('f16_check') or {}
         err = _f16_metric(chk.get('err_over_floor_db_max'))
+        err_mean = _f16_metric(chk.get('err_over_floor_db_mean'))
         dphi = _f16_metric(chk.get('carrier_dphi_rms_mrad'))
-        if err is None or dphi is None:
+        ratio = _f16_metric(chk.get('carrier_dphi_over_thermal_rms'))
+        judged_err = err_mean if err_mean is not None else err
+        if judged_err is None or (ratio is None and dphi is None):
             ch['not_measured'] += 1
-        if err is not None:
-            w = ch['worst_err_over_floor_db']
-            ch['worst_err_over_floor_db'] = err if w is None else max(w, err)
-        if dphi is not None:
-            w = ch['worst_carrier_dphi_rms_mrad']
-            ch['worst_carrier_dphi_rms_mrad'] = dphi if w is None else max(w, dphi)
+        if ratio is None and dphi is not None:
+            ch['phase_unjudged'] += 1
+        if (judged_err is not None and judged_err > F16_ERR_LIMIT_DB) or \
+                (ratio is not None and ratio > F16_DPHI_RATIO_LIMIT):
+            ch['failed_chunks'] += 1
+        for key, v in (('worst_err_over_floor_db', err),
+                       ('worst_err_over_floor_db_mean', err_mean),
+                       ('worst_carrier_dphi_rms_mrad', dphi),
+                       ('worst_carrier_dphi_over_thermal_rms', ratio)):
+            if v is not None:
+                w = ch[key]
+                ch[key] = v if w is None else max(w, v)
     # A channel whose chunks all fell back to complex64 stays in the report:
     # a strong-signal channel is exactly what the trial probes.
     return {name: ch for name, ch in channels.items()
@@ -1748,9 +1767,7 @@ def _f16_metric(value):
 
 
 def _f16_verdict(ch) -> str:
-    err, dphi = ch['worst_err_over_floor_db'], ch['worst_carrier_dphi_rms_mrad']
-    if (err is not None and err > F16_ERR_LIMIT_DB) or \
-            (dphi is not None and dphi > F16_DPHI_LIMIT_MRAD):
+    if ch['failed_chunks']:
         return 'FAIL'
     if ch['f16_chunks'] == 0:
         return 'FALLBACK'
@@ -1774,20 +1791,26 @@ def _cmd_f16_report(args) -> int:
         overall, rc = 'FAIL', 1
     if args.json:
         print(json.dumps({'days': args.days, 'limits': {
-            'err_over_floor_db': F16_ERR_LIMIT_DB,
-            'carrier_dphi_rms_mrad': F16_DPHI_LIMIT_MRAD},
+            'err_over_floor_db_mean': F16_ERR_LIMIT_DB,
+            'carrier_dphi_over_thermal_rms': F16_DPHI_RATIO_LIMIT},
             'channels': channels, 'verdict': overall}, indent=2))
         return rc
     fmt = lambda v, f: '-' if v is None else f % v
     print(f"F16 archive check, last {args.days} UTC day(s) "
-          f"(limits: err <= {F16_ERR_LIMIT_DB:g} dB over floor, "
-          f"dphi <= {F16_DPHI_LIMIT_MRAD:g} mrad)")
+          f"(limits: err <= {F16_ERR_LIMIT_DB:g} dB over floor, passband mean; "
+          f"dphi <= {F16_DPHI_RATIO_LIMIT:g} of thermal phase noise)")
     for name, c in sorted(channels.items()):
+        err = c['worst_err_over_floor_db_mean']
+        err_s = (f"err={fmt(c['worst_err_over_floor_db'], '%.1f')} dB (worst bin)"
+                 if err is None else f"err={err:.1f} dB")
         print(f"{name:<14} f16={c['f16_chunks']:<5} fallbacks={c['fallbacks']:<3} "
-              f"not_measured={c['not_measured']:<4} "
-              f"err={fmt(c['worst_err_over_floor_db'], '%.1f')} dB  "
-              f"dphi={fmt(c['worst_carrier_dphi_rms_mrad'], '%.3f')} mrad  "
-              f"{c['verdict']}")
+              f"not_measured={c['not_measured']:<4} failed={c['failed_chunks']:<3} "
+              f"{err_s}  dphi/thermal="
+              f"{fmt(c['worst_carrier_dphi_over_thermal_rms'], '%.4f')}  "
+              f"{c['verdict']}"
+              + (f"  ({c['phase_unjudged']} older chunks: phase unjudged, "
+                 f"flat dphi {fmt(c['worst_carrier_dphi_rms_mrad'], '%.2f')} mrad)"
+                 if c['phase_unjudged'] else ''))
     print(f"Overall: {overall}")
     return rc
 

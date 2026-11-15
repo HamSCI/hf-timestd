@@ -92,7 +92,9 @@ def test_f16_check_lands_in_sidecar(tmp_path):
     w = _writer(tmp_path, compression="zstd", archive_dtype="f16")
     w.config.sample_rate = 100
     d, b, side = _flush(w, _samples(w.samples_per_chunk))
-    assert set(side["f16_check"]) == {"err_over_floor_db_max", "carrier_dphi_rms_mrad", "seconds"}
+    assert set(side["f16_check"]) == {"err_over_floor_db_max", "err_over_floor_db_mean",
+                                      "carrier_dphi_rms_mrad", "carrier_dphi_over_thermal_rms",
+                                      "seconds"}
 
 
 def test_unknown_archive_dtype_rejected(tmp_path):

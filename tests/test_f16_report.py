@@ -12,7 +12,7 @@ def _today():
 
 
 def _write(root, channel, day, start, err=-60.0, dphi=0.2, seconds=60,
-           dtype="complex-f16", fallback=None, check=True):
+           dtype="complex-f16", fallback=None, check=True, err_mean=None, ratio=None):
     d = root / "raw_buffer" / channel / day
     d.mkdir(parents=True, exist_ok=True)
     meta = {"dtype": dtype}
@@ -23,6 +23,10 @@ def _write(root, channel, day, start, err=-60.0, dphi=0.2, seconds=60,
     if check:
         meta["f16_check"] = {"err_over_floor_db_max": err,
                              "carrier_dphi_rms_mrad": dphi, "seconds": seconds}
+        if err_mean is not None:
+            meta["f16_check"]["err_over_floor_db_mean"] = err_mean
+        if ratio is not None:
+            meta["f16_check"]["carrier_dphi_over_thermal_rms"] = ratio
     (d / f"{start}.json").write_text(json.dumps(meta))
 
 
@@ -48,16 +52,49 @@ def test_report_pass(tmp_path, capsys):
 
 
 def test_report_fail_on_one_bad_chunk(tmp_path, capsys):
-    _write(tmp_path, "WWV_10000", _today(), 1, err=-60.0, dphi=0.2)
-    _write(tmp_path, "WWV_10000", _today(), 2, err=-60.0, dphi=1.5)
+    _write(tmp_path, "WWV_10000", _today(), 1, err_mean=-60.0, ratio=0.001)
+    _write(tmp_path, "WWV_10000", _today(), 2, err_mean=-60.0, ratio=0.05)
     rc, out = _run(tmp_path, capsys)
     assert rc == 1 and "FAIL" in out
 
 
 def test_report_fail_on_error_over_floor(tmp_path, capsys):
-    _write(tmp_path, "WWV_5000", _today(), 1, err=-39.0, dphi=0.2)
+    _write(tmp_path, "WWV_5000", _today(), 1, err=-29.0, dphi=0.2)
     rc, _ = _run(tmp_path, capsys)
     assert rc == 1
+    _write(tmp_path, "WWV_5000", _today(), 2, err=-50.0, err_mean=-29.0, ratio=0.001)
+    rc, _ = _run(tmp_path, capsys)
+    assert rc == 1
+
+
+def test_mean_error_judges_when_present(tmp_path, capsys):
+    """The worst Welch bin runs ~2 dB over the mean by chance; the mean is
+    what the rounding adds to the noise (ND 15 MHz, 2026-11-14)."""
+    _write(tmp_path, "WWV_15000", _today(), 1, err=-28.0, err_mean=-31.0, ratio=0.01)
+    rc, out = _run(tmp_path, capsys, "--json")
+    ch = json.loads(out)["channels"]["WWV_15000"]
+    assert rc == 0 and ch["verdict"] == "PASS"
+    assert ch["worst_err_over_floor_db_mean"] == -31.0
+    assert ch["worst_err_over_floor_db"] == -28.0
+
+
+def test_legacy_flat_dphi_is_reported_not_judged(tmp_path, capsys):
+    """A flat 1 mrad fails deep-fade blocks whose thermal phase noise is
+    radians; chunks written before the ratio carry only the flat number."""
+    _write(tmp_path, "WWV_20000", _today(), 1, err=-60.0, dphi=3.7)
+    rc, out = _run(tmp_path, capsys, "--json")
+    ch = json.loads(out)["channels"]["WWV_20000"]
+    assert rc == 0 and ch["verdict"] == "PASS"
+    assert ch["phase_unjudged"] == 1 and ch["not_measured"] == 0
+    assert ch["worst_carrier_dphi_rms_mrad"] == 3.7
+
+
+def test_phase_ratio_judges(tmp_path, capsys):
+    _write(tmp_path, "WWV_20000", _today(), 1, err=-60.0, dphi=3.7, ratio=0.02)
+    rc, out = _run(tmp_path, capsys, "--json")
+    ch = json.loads(out)["channels"]["WWV_20000"]
+    assert rc == 0 and ch["phase_unjudged"] == 0
+    assert ch["worst_carrier_dphi_over_thermal_rms"] == 0.02
 
 
 def test_report_no_f16_exits_2(tmp_path, capsys):
