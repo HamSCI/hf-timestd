@@ -140,8 +140,15 @@ def cmd_config_apply(args) -> int:
     config_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = config_path.with_suffix(config_path.suffix + ".part")
     tmp.write_text(text, encoding="utf-8")
+    # The rewrite keeps the file's owner and mode (timestd's 0640 on a
+    # station); a new file gets 0644.
     try:
-        tmp.chmod(0o644)
+        if config_path.is_file():
+            st = config_path.stat()
+            tmp.chmod(st.st_mode & 0o7777)
+            os.chown(tmp, st.st_uid, st.st_gid)
+        else:
+            tmp.chmod(0o644)
     except PermissionError:
         pass
     tmp.replace(config_path)
@@ -208,7 +215,9 @@ def _serialize_toml(d: dict, parent: str = "") -> str:
             array_of_tables.append((k, v))
         else:
             scalars.append((k, v))
-    if scalars:
+    # An empty table keeps its header: dropping it changes what the file
+    # says (KPH2 2026-11-16 lost [timing.provenance] this way).
+    if scalars or (parent and not d):
         if parent:
             lines.append(f"[{parent}]")
         for k, v in scalars:
