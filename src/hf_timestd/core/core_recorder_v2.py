@@ -54,6 +54,7 @@ from ka9q import discover_channels, RadiodControl, ChannelInfo, StreamQuality, E
 
 from ..quota_manager import QuotaManager
 from .stream_recorder_v2 import StreamRecorderV2, StreamRecorderConfig
+from .binary_archive_writer import DEFAULT_ARCHIVE_DTYPE
 from .quality_snapshot import QualitySnapshotWriter
 from .counter_map_probe import CounterMapProbe
 from .anchor_pair import read_anchor_pair
@@ -416,10 +417,10 @@ class CoreRecorderV2:
         self.recorder_config = config.get('recorder', {})
         # Fail at startup, not at the first chunk flush, on a bad archive_dtype.
         from .binary_archive_writer import f16_compression_warning, validate_archive_dtype
-        validate_archive_dtype(self.recorder_config.get('archive_dtype', 'complex64'))
+        validate_archive_dtype(self.recorder_config.get('archive_dtype', DEFAULT_ARCHIVE_DTYPE))
         # One warning per process, not one per channel's writer.
         f16_warning = f16_compression_warning(
-            self.recorder_config.get('archive_dtype', 'complex64'),
+            self.recorder_config.get('archive_dtype', DEFAULT_ARCHIVE_DTYPE),
             self.recorder_config.get('compression', 'none'))
         if f16_warning:
             logger.warning(f16_warning)
@@ -1708,7 +1709,7 @@ class CoreRecorderV2:
                         if self.recorder_config.get('hot_buffer_root') else None,
                     compression=self.recorder_config.get('compression', 'none'),
                     compression_level=self.recorder_config.get('compression_level', 3),
-                    archive_dtype=self.recorder_config.get('archive_dtype', 'complex64'),
+                    archive_dtype=self.recorder_config.get('archive_dtype', DEFAULT_ARCHIVE_DTYPE),
                     file_duration_sec=self.recorder_config.get('file_duration_sec', 600),
                     use_digital_rf=self.recorder_config.get('save_digital_rf', False),
                     destination=self.data_destination,

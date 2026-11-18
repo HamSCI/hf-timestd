@@ -98,7 +98,7 @@ class StreamRecorderConfig:
     raw_buffer_file_duration_sec: int = 3600
     compression: str = 'none'  # 'none', 'zstd', or 'lz4'
     compression_level: int = 3  # zstd: 1-22, lz4: 1-12
-    archive_dtype: str = 'complex64'  # 'complex64' or 'f16' ([recorder] archive_dtype)
+    archive_dtype: str = 'f16'  # 'f16' (default, binary_archive_writer.DEFAULT_ARCHIVE_DTYPE) or 'complex64'
     file_duration_sec: int = 600  # Raw IQ file chunk duration (seconds)
     # Place chunk boundaries on the detected TS-1 pulse rather than on
     # radiod's GPS_TIME/RTP_TIMESNAP arithmetic.  ⛔ DEFAULT OFF.  Reachable

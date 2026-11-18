@@ -81,8 +81,15 @@ def test_lz4_and_none_ignore_f16(tmp_path, comp):
     assert "scale" not in side and "f16_check" not in side
 
 
-def test_default_unchanged(tmp_path):
+def test_default_is_f16(tmp_path):
     w = _writer(tmp_path, compression="zstd")
+    d, b, side = _flush(w, _samples(w.samples_per_chunk))
+    assert side["dtype"] == "complex-f16"
+    assert side["scale"] == 4096.0
+
+
+def test_complex64_still_selectable(tmp_path):
+    w = _writer(tmp_path, compression="zstd", archive_dtype="complex64")
     d, b, side = _flush(w, _samples(w.samples_per_chunk))
     assert side["dtype"] == "complex64"
     assert "scale" not in side and "f16_check" not in side and "f16_fallback" not in side
@@ -213,8 +220,15 @@ def test_zstd_f16_startup_is_quiet_and_names_the_format(tmp_path, caplog):
     assert fmt and "complex-f16" in fmt[0] and "zstd" in fmt[0]
 
 
-def test_default_startup_names_complex64(tmp_path, caplog):
+def test_default_startup_names_f16(tmp_path, caplog):
     with caplog.at_level(logging.INFO):
         _writer(tmp_path, compression="zstd")
+    fmt = [r.getMessage() for r in caplog.records if "Format:" in r.getMessage()]
+    assert fmt and "complex-f16" in fmt[0]
+
+
+def test_complex64_startup_names_complex64(tmp_path, caplog):
+    with caplog.at_level(logging.INFO):
+        _writer(tmp_path, compression="zstd", archive_dtype="complex64")
     fmt = [r.getMessage() for r in caplog.records if "Format:" in r.getMessage()]
     assert fmt and "complex64" in fmt[0] and "complex-f16" not in fmt[0]

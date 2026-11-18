@@ -57,7 +57,7 @@ def test_read_chunk_f16_amplitude(tmp_path):
 
 def test_mixed_day_reads_both(tmp_path):
     x = _samples(200)
-    f32 = _writer(tmp_path, compression="zstd", f16_check=False)
+    f32 = _writer(tmp_path, compression="zstd", archive_dtype="complex64", f16_check=False)
     _flush_at(f32, 1_000_000, x)
     f16 = _writer(tmp_path, compression="zstd", archive_dtype="f16", f16_check=False)
     _flush_at(f16, 1_000_002, x)

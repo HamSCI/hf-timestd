@@ -31,7 +31,7 @@ HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/BPM time standard bro
 
 **Signal Reception & Recording:**
 - **ka9q-python integration** — Python interface to Phil Karn's radiod for channel creation, RTP reception, resequencing, gap detection
-- **Multi-channel IQ recording** — 9 channels × 24 kHz IQ, binary `.bin.zst` + JSON metadata sidecars. `[recorder] archive_dtype` picks the sample format: `complex64` (the default, 8 bytes a sample) or `f16` (4 bytes a sample, zstd only). The `f16` trial covers B4 and ND only; other stations keep the default.
+- **Multi-channel IQ recording** — 9 channels × 24 kHz IQ, binary `.bin.zst` + JSON metadata sidecars. `[recorder] archive_dtype` picks the sample format: `f16` (the default, 4 bytes a sample, zstd only) or `complex64` (8 bytes a sample). Every reader gets complex64 either way.
 - **RTP timestamp preservation** — GPS+PPS authoritative timestamps (~50 μs) via radiod's `GPS_TIME`/`RTP_TIMESNAP`
 
 **Time Signal Detection:**

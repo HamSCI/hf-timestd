@@ -11,8 +11,9 @@ for incoming data.  No per-system tuning is needed — the guardian
 auto-sizes everything from the workload.
 
 Data budget (per channel per day, at 24 kHz IQ):
-    raw_buffer      ~15.4 GB (IQ binary archive, 24 kHz × 8 B × 86400 s;
-                              half that with archive_dtype = "f16")
+    raw_buffer      ~15.4 GB (IQ binary archive, 24 kHz × 8 B × 86400 s,
+                              before zstd; half that with archive_dtype =
+                              "f16", the default)
     phase2           ~4 GB   (HDF5 data products)
     ────────────────────────
     subtotal        ~18 GB/channel/day  (or ~4 GB with tiered storage)
@@ -59,7 +60,7 @@ from enum import Enum
 from pathlib import Path
 from typing import List, Optional, Set
 
-from .binary_archive_writer import validate_archive_dtype
+from .binary_archive_writer import DEFAULT_ARCHIVE_DTYPE, validate_archive_dtype
 from .iq_codec import DTYPE_F16, DTYPE_F32, bytes_per_sample
 
 logger = logging.getLogger(__name__)
@@ -167,7 +168,7 @@ class ResourceGuardian:
         evict_grace_sec: float = EVICT_GRACE_SEC,
         evict_low_water_percent: float = EVICT_LOW_WATER_PERCENT,
         clock=time.monotonic,
-        archive_dtype: str = 'complex64',
+        archive_dtype: str = DEFAULT_ARCHIVE_DTYPE,
     ):
         self.data_root = Path(data_root)
         self.n_channels = n_channels
@@ -1057,7 +1058,7 @@ class ResourceGuardian:
         try:
             with open(config_path, 'rb') as f:
                 value = tomllib.load(f).get('recorder', {}).get(
-                    'archive_dtype', 'complex64')
+                    'archive_dtype', DEFAULT_ARCHIVE_DTYPE)
         except OSError:
             return 'complex64'
         except tomllib.TOMLDecodeError as e:

@@ -84,6 +84,9 @@ class TimingSnapshot:
 
 
 ARCHIVE_DTYPES = ('complex64', 'f16')
+# F16 passed its B4/ND trial (2026-11-15) and became the fleet default on
+# 2026-11-18: half the raw bytes, every reader still gets complex64.
+DEFAULT_ARCHIVE_DTYPE = 'f16'
 
 
 def validate_archive_dtype(value: Any) -> str:
@@ -136,12 +139,11 @@ class BinaryArchiveConfig:
     # See docs/design/ARCHIVE_BOUNDARY_ON_THE_EDGE.md §5.
     boundary_on_pulse: bool = False
 
-    # Archive sample format.  "complex64" (F32, default) or "f16": zstd
-    # chunks store interleaved float16 at the fixed iq_codec.F16_SCALE, half
-    # the bytes.  Other compressions ignore "f16".  Set by [recorder]
-    # archive_dtype (B4/ND trial); see docs/superpowers/specs/
-    # 2026-11-11-f16-archive-design.md.
-    archive_dtype: str = 'complex64'
+    # Archive sample format.  "f16" (default): zstd chunks store interleaved
+    # float16 at the fixed iq_codec.F16_SCALE, half the bytes; other
+    # compressions ignore it.  "complex64" keeps F32.  Set by [recorder]
+    # archive_dtype; see docs/superpowers/specs/2026-11-11-f16-archive-design.md.
+    archive_dtype: str = DEFAULT_ARCHIVE_DTYPE
     # While F16 runs, measure the rounding's fine-detail cost on each chunk's
     # first minute and record it in the sidecar (one Welch PSD per chunk,
     # in the flush worker).

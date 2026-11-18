@@ -69,7 +69,7 @@ def _one_shot(raw: bytes, level=3) -> bytes:
 @pytest.mark.parametrize("fill_frac", [1.0, 0.5, 0.0])
 def test_complex64_bytes_match_one_shot(tmp_path, monkeypatch, fill_frac):
     monkeypatch.setattr(baw, "_STREAM_BLOCK_SAMPLES", 1000)   # many blocks, ragged tail
-    w = _writer(tmp_path)
+    w = _writer(tmp_path, archive_dtype="complex64")
     x = _samples(w.samples_per_chunk)
     fill = int(w.samples_per_chunk * fill_frac)
     blob, side = _flush(w, x, fill=fill)
@@ -80,7 +80,7 @@ def test_complex64_bytes_match_one_shot(tmp_path, monkeypatch, fill_frac):
 
 def test_complex64_bytes_match_one_shot_at_station_scale(tmp_path):
     """Real block size, a chunk many blocks long (24 kHz, 60 s)."""
-    w = _writer(tmp_path, sample_rate=24000, file_duration_sec=60)
+    w = _writer(tmp_path, sample_rate=24000, file_duration_sec=60, archive_dtype="complex64")
     x = _samples(w.samples_per_chunk, seed=3)
     blob, _ = _flush(w, x)
     assert blob == _one_shot(x.tobytes())

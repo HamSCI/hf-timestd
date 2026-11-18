@@ -77,7 +77,7 @@ def _guardian(tmp_path, **kw):
 
 
 def test_size_prediction_uses_configured_dtype(tmp_path):
-    f32 = _guardian(tmp_path)
+    f32 = _guardian(tmp_path, archive_dtype="complex64")
     f16 = _guardian(tmp_path, archive_dtype="f16")
     assert f32.raw_per_ch_per_day == 24000 * 86400 * bytes_per_sample(DTYPE_F32)
     assert f16.raw_per_ch_per_day * 2 == f32.raw_per_ch_per_day
