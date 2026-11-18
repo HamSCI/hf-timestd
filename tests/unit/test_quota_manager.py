@@ -544,6 +544,76 @@ class TestEnforceQuota:
         assert result['files_deleted'] >= 1
 
 
+    def _stub_usage(self, mock_du, used, total=100_000_000):
+        mock_du.return_value.used = used
+        mock_du.return_value.total = total
+        mock_du.return_value.free = total - used
+
+    def test_full_disk_with_only_guarded_raw_days_evicts_oldest_raw(self, data_root):
+        # AB4EJ 2026-11-18: ~50 GB of raw IQ a day on a 251 GB disk.  The
+        # recorder's 7-day guard left no raw day eligible, and the disk
+        # filled to 100% ("No day-entries eligible for deletion").
+        m = QuotaManager(data_root=data_root, threshold_percent=80.0,
+                         min_days_to_keep=7)
+        days = {n: _old_date(n) for n in range(6)}       # today .. 5 days back
+        dirs = {n: _populate_raw_iq(data_root, 'WWV_10000', d) for n, d in days.items()}
+        with patch('hf_timestd.quota_manager.shutil.disk_usage') as mock_du:
+            # 81%: need 6 MB to reach 75%, far more than every test file
+            self._stub_usage(mock_du, 81_000_000)
+            result = m.enforce_quota()
+        assert not dirs[5].exists() and not dirs[2].exists()
+        assert dirs[0].exists() and dirs[1].exists()      # GRAPE's floor holds
+        assert result['files_deleted'] == 4
+
+    def test_relaxed_guard_evicts_oldest_first_and_stops_at_target(self, data_root):
+        m = QuotaManager(data_root=data_root, threshold_percent=80.0,
+                         min_days_to_keep=7)
+        dirs = {n: _populate_raw_iq(data_root, 'WWV_10000', _old_date(n)) for n in range(6)}
+        with patch('hf_timestd.quota_manager.shutil.disk_usage') as mock_du:
+            # 75% target on a 2000-byte disk at 81%: frees 120 bytes, two
+            # 100-byte days, the two oldest
+            self._stub_usage(mock_du, 1620, total=2000)
+            m.enforce_quota()
+        assert not dirs[5].exists() and not dirs[4].exists()
+        assert all(dirs[n].exists() for n in (0, 1, 2, 3))
+
+    def test_fallback_warns_once_a_day(self, data_root, caplog):
+        m = QuotaManager(data_root=data_root, threshold_percent=80.0,
+                         min_days_to_keep=7)
+        for run in range(2):
+            _populate_raw_iq(data_root, 'WWV_%d' % run, _old_date(5))
+            with patch('hf_timestd.quota_manager.shutil.disk_usage') as mock_du:
+                self._stub_usage(mock_du, 1620, total=2000)
+                m.enforce_quota()
+        assert sum('raw guard shortened' in r.getMessage() for r in caplog.records) == 1
+
+    def test_guard_holds_below_threshold(self, data_root):
+        m = QuotaManager(data_root=data_root, threshold_percent=80.0,
+                         min_days_to_keep=7)
+        dirs = {n: _populate_raw_iq(data_root, 'WWV_10000', _old_date(n)) for n in range(6)}
+        with patch('hf_timestd.quota_manager.shutil.disk_usage') as mock_du:
+            self._stub_usage(mock_du, 79_000_000)
+            m.enforce_quota()
+        assert all(d.exists() for d in dirs.values())
+
+    def test_guarded_days_wait_while_older_days_cover_the_need(self, data_root):
+        m = QuotaManager(data_root=data_root, threshold_percent=80.0,
+                         min_days_to_keep=7)
+        old = _populate_raw_iq(data_root, 'WWV_10000', _old_date(10))
+        guarded = _populate_raw_iq(data_root, 'WWV_10000', _old_date(5))
+        with patch('hf_timestd.quota_manager.shutil.disk_usage') as mock_du:
+            self._stub_usage(mock_du, 1620, total=2000)   # needs 120 bytes
+            m.enforce_quota()
+        # the guarded day goes only because the 10-day-old one freed 100 of 120
+        assert not old.exists() and not guarded.exists()
+        guarded2 = _populate_raw_iq(data_root, 'WWV_15000', _old_date(5))
+        _populate_raw_iq(data_root, 'WWV_15000', _old_date(10))
+        with patch('hf_timestd.quota_manager.shutil.disk_usage') as mock_du:
+            self._stub_usage(mock_du, 1590, total=2000)   # needs 90 bytes
+            m.enforce_quota()
+        assert guarded2.exists()
+
+
 # =============================================================================
 # get_storage_inventory / get_status
 # =============================================================================

@@ -77,6 +77,7 @@ class QuotaManager:
         self.dry_run = dry_run
         self.archive_root = Path(archive_root) if archive_root else None
         self.derived_max_days = derived_max_days
+        self._guard_warned_day = None     # the fallback warns once a UTC day
 
         # Managed directories
         self.raw_buffer_dir = self.data_root / 'raw_buffer'
@@ -98,12 +99,14 @@ class QuotaManager:
     # Day-entry discovery
     # ------------------------------------------------------------------
 
-    def _protected_dates(self) -> set:
-        """Dates that must never be deleted (today, yesterday, + guard)."""
+    def _protected_dates(self, min_days: Optional[int] = None) -> set:
+        """Dates that must never be deleted (today, yesterday, + guard).
+        ``min_days`` overrides the guard; it never drops below two days."""
         today = datetime.now(timezone.utc).date()
         protected = set()
+        keep = self.min_days_to_keep if min_days is None else min_days
         # Always protect today and yesterday (GRAPE needs yesterday at 01:01)
-        for delta in range(max(2, self.min_days_to_keep)):
+        for delta in range(max(2, keep)):
             d = today - timedelta(days=delta)
             protected.add(d.strftime('%Y%m%d'))
         return protected
@@ -486,21 +489,49 @@ class QuotaManager:
 
         entries = self._archive_gate(self.scan_day_entries(), percent)
 
-        if not entries:
-            logger.warning("No day-entries eligible for deletion")
-            return result
-
-        logger.info(f"Found {len(entries)} deletable day-entries")
-
         bytes_freed = 0
         items_deleted = 0
 
+        if entries:
+            logger.info(f"Found {len(entries)} deletable day-entries")
+        done = set()
         for entry in entries:
             if bytes_freed >= bytes_to_free:
                 break
             freed = self._delete_entry(entry)
             bytes_freed += freed
             items_deleted += 1
+            done.add(entry.path)
+
+        # The guard (min_days_to_keep) can hold more raw IQ than the disk:
+        # ~50 GB a day on a 251 GB disk, and AB4EJ filled to 100% on
+        # 2026-11-18 with "No day-entries eligible for deletion" while the
+        # recorder, the uploader and every client's spool stopped writing.
+        # Past the threshold a full disk costs more than the guard keeps, so
+        # the guarded raw days go too, oldest first, down to GRAPE's floor
+        # (today and yesterday), through the same archive-before-evict gate.
+        if bytes_freed < bytes_to_free:
+            floor = self._protected_dates(min_days=2)
+            guarded = [e for e in self._archive_gate(self._scan_raw_iq(floor), percent)
+                       if e.path not in done]
+            guarded.sort(key=lambda e: e.date_str)
+            today = datetime.now(timezone.utc).strftime('%Y%m%d')
+            if guarded and self._guard_warned_day != today:
+                self._guard_warned_day = today
+                logger.warning(
+                    "Disk %.1f%% over %.1f%% and the %d-day guard leaves too little to "
+                    "evict: removing guarded raw days oldest first (today and yesterday "
+                    "stay; raw guard shortened, warned once a day)",
+                    percent, self.threshold_percent, self.min_days_to_keep)
+            for entry in guarded:
+                if bytes_freed >= bytes_to_free:
+                    break
+                bytes_freed += self._delete_entry(entry)
+                items_deleted += 1
+
+        if not items_deleted:
+            logger.warning("No day-entries eligible for deletion")
+            return result
 
         result['files_deleted'] += items_deleted
         result['bytes_freed'] += bytes_freed
