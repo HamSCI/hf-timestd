@@ -7,10 +7,12 @@ The classes come from the KPH1 tree of 2026-11-16.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -28,6 +30,24 @@ SINK_CLASSES: Dict[str, str] = {
     "raw_buffer": "raw",
     "upload": "sent",
 }
+
+
+_DAY_RE = re.compile(r"\d{8}")
+_SQLITE_SUFFIXES = (".db", ".db-wal", ".db-shm", ".db-journal")
+
+
+@dataclass(frozen=True)
+class Item:
+    """Same fields as sigmond's client_kit.Item; kept here so listing works
+    without the kit."""
+    path: str
+    bytes: int
+    cls: str
+    mtime: float
+
+
+def _is_sqlite(name: str) -> bool:
+    return name.endswith(_SQLITE_SUFFIXES) or ".sqlite" in name
 
 
 def class_of(name: str) -> str:
@@ -77,17 +97,17 @@ def _tree(path: Path):
     return total, newest
 
 
-def list_items(data_root: Path):
+def list_items(data_root: Path) -> List[Item]:
     """Every holding of the data root as a client_kit.Item.
 
     raw: one item per raw_buffer/<channel>/<YYYYMMDD> directory.
     pinned: one item per entry (listed so holdings count it; never deleted).
-    sent, derived: one item per file.
+    sent, derived: one item per file.  SQLite files (live databases with
+    their -wal/-shm/-journal) are never listed: trim must not take one apart.
+    A raw day directory must be named YYYYMMDD.
     """
-    kit = load_kit()
-    Item = kit.Item
     root = Path(data_root)
-    items: List = []
+    items: List[Item] = []
     try:
         entries = sorted(root.iterdir())
     except OSError:
@@ -101,7 +121,8 @@ def list_items(data_root: Path):
                 continue
             for ch in chans:
                 try:
-                    days = sorted(d for d in ch.iterdir() if d.is_dir())
+                    days = sorted(d for d in ch.iterdir()
+                                  if d.is_dir() and _DAY_RE.fullmatch(d.name))
                 except OSError:
                     continue
                 for d in days:
@@ -114,6 +135,8 @@ def list_items(data_root: Path):
             if e.is_dir() and not e.is_symlink():
                 for dirpath, _dn, files in os.walk(e):
                     for f in files:
+                        if _is_sqlite(f):
+                            continue
                         p = Path(dirpath) / f
                         try:
                             st = p.lstat()
@@ -142,11 +165,9 @@ def sinks(data_root: Path, rate_bytes_per_day: int) -> List[dict]:
 
 def sinks_for(data_root: Path, now: Optional[float] = None) -> List[dict]:
     """sinks() with the raw rate measured from the tree."""
-    kit = load_kit()
-    rate = 0
-    if kit is not None:
-        raw = [i for i in list_items(data_root) if i.cls == "raw"]
-        rate = kit.written_per_day(raw, now if now is not None else time.time())
+    t = now if now is not None else time.time()
+    rate = sum(i.bytes for i in list_items(data_root)
+               if i.cls == "raw" and t - DAY < i.mtime <= t + DAY)
     return sinks(data_root, rate)
 
 
@@ -160,8 +181,12 @@ def delete_item(item, now: float) -> bool:
     if item.cls == "pinned":
         return False
     p = Path(item.path)
+    if item.cls != "raw" and _is_sqlite(p.name):
+        return False
     if item.cls == "raw":
         day = p.name
+        if not _DAY_RE.fullmatch(day):
+            return False
         recent = {_utc_day(now), _utc_day(now - DAY)}
         if day in recent:
             return False

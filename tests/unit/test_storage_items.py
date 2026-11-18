@@ -5,10 +5,15 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, "/home/mjh/hamsci/repos/sigmond/lib")
+_SIG = os.environ.get("SIGMOND_LIB_FOR_TESTS") or str(
+    Path(__file__).resolve().parents[3] / "sigmond" / "lib")
+if os.path.isdir(_SIG):
+    sys.path.insert(0, _SIG)
+pytest.importorskip("sigmond.storage.client_kit")
 
 from hf_timestd import archiver, storage_items as si  # noqa: E402
 
@@ -79,7 +84,8 @@ def test_delete_never_today_or_yesterday(tmp_path, off):
     assert si.delete_item(item, NOW) is False and d.exists()
 
 
-def test_delete_old_day(tmp_path):
+def test_delete_old_day(tmp_path, monkeypatch):
+    monkeypatch.setattr(archiver, "ARCHIVE_TOML", tmp_path / "no-archive.toml")
     d = _mk(tmp_path, f"raw_buffer/C/{_day(4)}/a.bin.zst").parent
     item = [i for i in si.list_items(tmp_path) if i.cls == "raw"][0]
     assert si.delete_item(item, NOW) is True and not d.exists()
@@ -107,9 +113,67 @@ def test_cli_holdings_and_unsupported(tree, tmp_path):
     cfg = tmp_path / "c.toml"
     cfg.write_text(f'[recorder]\nproduction_data_root = "{tree}"\n')
     env = dict(os.environ, TIMESTD_CONFIG=str(cfg),
-               PYTHONPATH="/home/mjh/hamsci/repos/sigmond/lib")
+               PYTHONPATH=_SIG)
     out = subprocess.run([sys.executable, "-m", "hf_timestd.cli", "storage", "holdings", "--json"],
                          env=env, capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
     j = json.loads(out.stdout)
     assert j["bytes_by_class"]["raw"] == 310
+
+
+def test_sqlite_files_never_listed(tmp_path):
+    for n in ("timestd.db", "timestd.db-wal", "timestd.db-shm", "x.db-journal", "y.sqlite3"):
+        _mk(tmp_path, f"phase2/{n}")
+    _mk(tmp_path, "phase2/keep.csv")
+    _mk(tmp_path, "upload/z.db")
+    got = sorted(Path(i.path).name for i in si.list_items(tmp_path))
+    assert got == ["keep.csv"]
+    gone = si.Item(str(tmp_path / "phase2/timestd.db"), 1, "derived", 0.0)
+    assert si.delete_item(gone, NOW) is False
+    assert (tmp_path / "phase2/timestd.db").exists()
+
+
+def test_non_date_dir_not_a_raw_day(tmp_path, monkeypatch):
+    monkeypatch.setattr(archiver, "ARCHIVE_TOML", tmp_path / "no-archive.toml")
+    d = _mk(tmp_path, "raw_buffer/C/junk/a.bin.zst").parent
+    assert [i for i in si.list_items(tmp_path) if i.cls == "raw"] == []
+    item = si.Item(str(d), 1, "raw", 0.0)
+    assert si.delete_item(item, NOW) is False and d.exists()
+
+
+def test_list_items_without_kit(tree, monkeypatch):
+    monkeypatch.setattr(si, "load_kit", lambda: None)
+    assert si.list_items(tree)
+    assert len(si.sinks_for(tree)) == 3
+
+
+def test_unrelated_command_does_not_walk_tree(monkeypatch, capsys):
+    def boom(*a, **k):
+        raise AssertionError("tree walked")
+    monkeypatch.setattr(si, "list_items", boom)
+    monkeypatch.setattr(sys, "argv", ["hf-timestd", "version"])
+    from hf_timestd import cli
+    cli.main(["version"])  # would raise AssertionError if the tree were walked
+
+
+class _Block:
+    def find_spec(self, name, path=None, target=None):
+        if name == "sigmond" or name.startswith("sigmond."):
+            raise ImportError("blocked for test")
+        return None
+
+
+@pytest.mark.parametrize("verb", [["holdings", "--json"], ["trim", "--fit-bytes", "0"]])
+def test_unsupported_without_sigmond(verb, monkeypatch, capsys):
+    for k in [k for k in sys.modules if k == "sigmond" or k.startswith("sigmond.")]:
+        monkeypatch.delitem(sys.modules, k)
+    monkeypatch.setattr(sys, "path", [p for p in sys.path if "sigmond" not in p])
+    monkeypatch.setattr(sys, "meta_path", [_Block()] + sys.meta_path)
+    monkeypatch.setattr(si, "SIGMOND_LIB", "/nonexistent/lib")
+    monkeypatch.setenv("TIMESTD_CONFIG", "/nonexistent/c.toml")
+    monkeypatch.setattr(sys, "argv", ["hf-timestd", "storage"] + verb)
+    from hf_timestd import cli
+    with pytest.raises(SystemExit) as e:
+        cli.main(["storage"] + verb)
+    assert e.value.code == 0
+    assert json.loads(capsys.readouterr().out.strip().splitlines()[-1]) == {"unsupported": True}

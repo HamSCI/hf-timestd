@@ -2348,10 +2348,17 @@ Per-service overrides in [services] take precedence over the profile.
     events_run.add_argument('--config', '-c', default='/etc/hf-timestd/events.toml',
         help='Keeper configuration (default /etc/hf-timestd/events.toml)')
 
-    from . import storage_items
-    if not storage_items.add_verbs(subparsers, storage_items.resolve_data_root()):
+    # Only `storage ...` walks the data root (to measure the raw floor).
+    _wired = False
+    if (argv if argv is not None else sys.argv[1:])[:1] == ['storage']:
+        try:
+            from . import storage_items
+            _wired = storage_items.add_verbs(subparsers, storage_items.resolve_data_root())
+        except Exception as exc:
+            logging.warning("storage verbs unavailable: %s", exc)
+    if not _wired:
         st_p = subparsers.add_parser('storage',
-            help='storage capacity verbs (unsupported: sigmond kit not found)')
+            help='storage capacity verbs (contract 17.7; needs sigmond)')
         st_p.add_argument('rest', nargs=argparse.REMAINDER)
 
     args = parser.parse_args(argv)
