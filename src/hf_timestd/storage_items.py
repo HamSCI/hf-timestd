@@ -101,16 +101,48 @@ def _tree(path: Path):
     return total, newest
 
 
-def _archived(root: Path, day: str, ch: Path) -> bool:
-    """This channel's day holds a chunk and the whole day sits on the archive
-    drive."""
+STATUS_FRESH_S = 3600.0
+STATUS_FUTURE_S = 60.0
+
+
+def _archived_days(now: float, status_path: Optional[Path] = None):
+    """Predicate (channel, day) -> bool from the archiver's own status file,
+    read once.  Never touches the archive drive: listing must answer within
+    sigmond's 10 s, and an away or asleep drive stalls any stat of it.
+
+    A day counts as archived only when the latest archiver run was fresh, ok,
+    saw the drive, and left nothing behind: behind == 0 (closed chunks not yet
+    copied or past the failure cap), failures == 0, invalid == 0 (chunks the
+    copy refused), orphans == 0 (chunks that never got a sidecar, which
+    `behind` does not count), and the channel's drive range covers the day.
+    Deleting stays gated by archiver.raw_day_may_leave.
+    """
     from . import archiver
+    never = lambda ch, day: False  # noqa: E731
     try:
-        if not any((ch / day).glob("*.bin.zst")):
+        st = json.loads(Path(status_path or archiver.STATUS_PATH).read_text())
+        run = datetime.strptime(st["run_utc"], "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc).timestamp()
+        if not (-STATUS_FUTURE_S <= now - run <= STATUS_FRESH_S):
+            return never
+        if (st.get("state") != "ok" or st.get("present") is not True
+                or st.get("behind") != 0 or st.get("failures") != 0
+                or st.get("invalid", 0) != 0 or st.get("orphans", 0) != 0
+                or st.get("dry_run")):
+            return never
+        chans = st["channels"]
+        if not isinstance(chans, dict):
+            return never
+    except (OSError, ValueError, KeyError, TypeError):
+        return never
+
+    def archived(ch: str, day: str) -> bool:
+        c = chans.get(ch)
+        try:
+            return bool(c) and c["oldest"] <= day <= c["newest"]
+        except (KeyError, TypeError):
             return False
-        return bool(archiver.raw_day_archived(root, day))
-    except Exception:
-        return False
+    return archived
 
 
 def raw_written_24h(data_root: Path, now: Optional[float] = None) -> int:
@@ -139,7 +171,8 @@ def written_per_day(data_root: Path, items: List[Item], now: Optional[float] = N
     return other + raw_written_24h(data_root, t)
 
 
-def list_items(data_root: Path, now: Optional[float] = None) -> List[Item]:
+def list_items(data_root: Path, now: Optional[float] = None,
+               status_path: Optional[Path] = None) -> List[Item]:
     """Every holding of the data root as a client_kit.Item.
 
     raw: one item per raw_buffer/<channel>/<YYYYMMDD> directory.
@@ -147,13 +180,14 @@ def list_items(data_root: Path, now: Optional[float] = None) -> List[Item]:
     sent, derived: one item per file.  SQLite files (live databases with
     their -wal/-shm/-journal) are never listed: trim must not take one apart.
     A raw day directory must be named YYYYMMDD.  A raw day older than
-    yesterday (UTC) that the archive drive already holds in full is class
+    yesterday (UTC) that the archiver's status file reports copied is class
     `sent`: it goes first.  Files under any `state` directory, and derived
     files written in the last two hours, are listed as pinned.
     """
     t = now if now is not None else time.time()
     root = Path(data_root)
     recent = {_utc_day(t), _utc_day(t - DAY)}
+    archived = _archived_days(t, status_path)
     items: List[Item] = []
     try:
         entries = sorted(root.iterdir())
@@ -175,7 +209,7 @@ def list_items(data_root: Path, now: Optional[float] = None) -> List[Item]:
                 for d in days:
                     n, m = _tree(d)
                     kind = "raw"
-                    if d.name not in recent and _archived(root, d.name, ch):
+                    if d.name not in recent and archived(ch.name, d.name):
                         kind = "sent"
                     items.append(Item(str(d), n, kind, m))
         elif cls == "pinned":
@@ -298,9 +332,42 @@ def add_verbs(subparsers, data_root: Path) -> bool:
         delete=lambda it: _delete_or_raise(it),
         floor_bytes=rate["floor_bytes"],
         final_policy=RAW_POLICY,
+        apply_policy=lambda policy, fit: (
+            final_raw(data_root, fit) if policy == RAW_POLICY else
+            {"held_bytes": sum(i.bytes for i in list_items(data_root)),
+             "bytes_by_class": {}, "refused": True,
+             "reason": f"policy {policy} is not handled by this client"}),
     )
     _file_level_holdings(subparsers, kit, data_root)
     return True
+
+
+def final_raw(data_root: Path, fit_bytes: int, now: Optional[float] = None) -> dict:
+    """give-up-oldest:raw with the spec's order: archived raw days (`sent`)
+    first, then the rest, oldest first.  May go below the floor; delete_item
+    still holds today, yesterday and the archive gate."""
+    t = now if now is not None else time.time()
+    items = list_items(data_root, t)
+    remaining = sum(i.bytes for i in items)
+    days = [i for i in items if i.cls in ("raw", "sent") and _is_raw_day_path(Path(i.path))]
+    chosen = sorted((i for i in days if i.cls == "sent"), key=lambda i: i.mtime) + \
+        sorted((i for i in days if i.cls == "raw"), key=lambda i: i.mtime)
+    gone, errors = set(), []
+    for it in chosen:
+        if remaining <= fit_bytes:
+            break
+        if delete_item(it, t):
+            gone.add(it.path)
+            remaining -= it.bytes
+        else:
+            errors.append(f"{it.path}: held back (recent, pinned, or not yet archived)")
+    left = [i for i in items if i.path not in gone]
+    by: Dict[str, int] = {}
+    for i in left:
+        by[i.cls] = by.get(i.cls, 0) + i.bytes
+    return {"held_bytes": sum(i.bytes for i in left), "bytes_by_class": by,
+            "refused": False,
+            "reason": ("could not delete " + ", ".join(errors)) if errors else ""}
 
 
 def _file_level_holdings(subparsers, kit, data_root: Path) -> None:

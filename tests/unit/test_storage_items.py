@@ -182,8 +182,25 @@ def test_unsupported_without_sigmond(verb, monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out.strip().splitlines()[-1]) == {"unsupported": True}
 
 
-def _archive_all(monkeypatch, days):
-    monkeypatch.setattr(archiver, "raw_day_archived", lambda root, day, *a, **k: day in days)
+def _archive_all(monkeypatch, days, tmp=None):
+    """Make the archiver's status file report these days copied (channel C)."""
+    from pathlib import Path as _P
+    import tempfile
+    d = _P(tempfile.mkdtemp())
+    status = d / "archive-status.json"
+    ds = sorted(days)
+    _write_status(status, oldest=ds[0], newest=ds[-1])
+    monkeypatch.setattr(archiver, "STATUS_PATH", status)
+    return status
+
+
+def _write_status(path, run=None, oldest="19000101", newest="29991231", **over):
+    t = run if run is not None else NOW
+    st = {"run_utc": datetime.fromtimestamp(t, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+          "state": "ok", "present": True, "behind": 0, "failures": 0, "invalid": 0,
+          "orphans": 0, "channels": {"C": {"oldest": oldest, "newest": newest, "days": 7}}}
+    st.update(over)
+    path.write_text(json.dumps(st))
 
 
 def test_events_staging_and_state_dirs_pinned(tmp_path):
@@ -235,7 +252,7 @@ def test_archived_raw_day_is_sent_and_others_stay_raw(tmp_path, monkeypatch):
     _mk(tmp_path, f"raw_buffer/C/{_day(0)}/a.bin.zst")
     got = {Path(i.path).name: i.cls for i in si.list_items(tmp_path, NOW)}
     assert got[_day(5)] == "sent"
-    assert got[_day(4)] == "raw"
+    assert got[_day(4)] == "sent"  # inside the drive's range
     assert got[_day(1)] == got[_day(0)] == "raw"
 
 
@@ -281,3 +298,85 @@ def test_cli_holdings_reports_file_level_rate(tmp_path):
                          env=env, capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
     assert json.loads(out.stdout)["bytes_written_per_day"] == 1000
+
+
+def _status_case(tmp_path, monkeypatch, **kw):
+    _mk(tmp_path / "data", f"raw_buffer/C/{_day(5)}/a.bin.zst")
+    sp = tmp_path / "st.json"
+    if kw.pop("absent", False):
+        pass
+    else:
+        _write_status(sp, **kw)
+    cls = [i.cls for i in si.list_items(tmp_path / "data", NOW, status_path=sp)]
+    return cls[0]
+
+
+@pytest.mark.parametrize("kw,want", [
+    ({}, "sent"),
+    ({"absent": True}, "raw"),
+    ({"run": NOW - 7200}, "raw"),
+    ({"run": NOW + 600}, "raw"),
+    ({"behind": 3}, "raw"),
+    ({"failures": 1}, "raw"),
+    ({"invalid": 1}, "raw"),
+    ({"orphans": 2}, "raw"),
+    ({"state": "full"}, "raw"),
+    ({"present": False}, "raw"),
+    ({"channels": {"OTHER": {"oldest": "19000101", "newest": "29991231"}}}, "raw"),
+    ({"oldest": _day(3)}, "raw"),
+    ({"newest": _day(7)}, "raw"),
+])
+def test_sent_decided_by_status_file(tmp_path, monkeypatch, kw, want):
+    assert _status_case(tmp_path, monkeypatch, **kw) == want
+
+
+def test_garbled_status_is_raw(tmp_path):
+    _mk(tmp_path, f"raw_buffer/C/{_day(5)}/a.bin.zst")
+    sp = tmp_path / "bad.json"
+    sp.write_text("{nope")
+    assert [i.cls for i in si.list_items(tmp_path, NOW, status_path=sp)
+            if "raw_buffer" in i.path] == ["raw"]
+
+
+def test_listing_never_touches_archive_drive(tmp_path, monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("archive drive touched")
+    for n in ("raw_day_archived", "gate", "_is_mount", "_uuid_matches", "_load_config"):
+        monkeypatch.setattr(archiver, n, boom)
+    monkeypatch.setattr(os.path, "ismount", boom)
+    _archive_all(monkeypatch, {_day(5)})
+    _mk(tmp_path, f"raw_buffer/C/{_day(5)}/a.bin.zst")
+    assert [i.cls for i in si.list_items(tmp_path, NOW) if "raw_buffer" in i.path] == ["sent"]
+
+
+def test_final_takes_archived_day_before_unarchived(tmp_path, monkeypatch):
+    monkeypatch.setattr(archiver, "ARCHIVE_TOML", tmp_path / "no-archive.toml")
+    d5 = _mk(tmp_path / "data", f"raw_buffer/C/{_day(5)}/a.bin.zst", 100, 5).parent
+    d3 = _mk(tmp_path / "data", f"raw_buffer/C/{_day(3)}/a.bin.zst", 100, 3).parent
+    sp = tmp_path / "st.json"
+    _write_status(sp, oldest=_day(5), newest=_day(5))
+    monkeypatch.setattr(archiver, "STATUS_PATH", sp)
+    ans = si.final_raw(tmp_path / "data", 150, NOW)
+    assert not d5.exists() and d3.exists()
+    assert ans["held_bytes"] == 100 and ans["refused"] is False
+    si.final_raw(tmp_path / "data", 0, NOW)
+    assert not d3.exists()
+
+
+@needs_kit
+def test_cli_final_uses_sent_first(tmp_path, monkeypatch):
+    cfgdir, data = tmp_path, tmp_path / "data"
+    d5 = _mk(data, f"raw_buffer/C/{_day(5)}/a.bin.zst", 100, 5).parent
+    d3 = _mk(data, f"raw_buffer/C/{_day(3)}/a.bin.zst", 100, 3).parent
+    cfg = cfgdir / "c.toml"
+    cfg.write_text(f'[recorder]\nproduction_data_root = "{data}"\n')
+    # the child process reads the real STATUS_PATH; point it via a sitecustomize-free route
+    status = cfgdir / "st.json"
+    _write_status(status, oldest=_day(5), newest=_day(5))
+    code = ("import sys; from hf_timestd import archiver; archiver.STATUS_PATH=__import__('pathlib').Path(%r);"
+            "archiver.ARCHIVE_TOML=__import__('pathlib').Path('/nonexistent');"
+            "from hf_timestd import cli; cli.main(['storage','final','--fit-bytes','150'])" % str(status))
+    env = dict(os.environ, TIMESTD_CONFIG=str(cfg), PYTHONPATH=_SIG)
+    out = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    assert not d5.exists() and d3.exists()
