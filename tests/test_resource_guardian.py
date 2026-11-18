@@ -556,3 +556,30 @@ class TestGuardianLedgerGate:
         assert s.bytes_cleaned > 0
         assert not (tmp_data_root / 'phase2' / 'CH1' / 'L1' / 'L1_20260101.h5').exists()
         assert any(r.levelno >= logging.WARNING for r in caplog.records)
+
+
+class TestPreflightLedgerGate:
+    def _setup(self, root):
+        _day(root, '20260101', raw_bytes=10000, phase2_bytes=5000)
+        g = ResourceGuardian(data_root=str(root), n_channels=1, sample_rate=24000)
+        return g, _du(500 * GB, 425 * GB)          # 85 %: over 80 %, under 95 %
+
+    def test_preflight_defers_to_ledger(self, tmp_data_root, caplog):
+        g, du = self._setup(tmp_data_root)
+        with patch('hf_timestd.core.resource_guardian.ledger_manages_us',
+                   return_value=True), \
+             patch('shutil.disk_usage', return_value=du), \
+             caplog.at_level(logging.INFO):
+            assert g.preflight_check() is True
+        assert (tmp_data_root / 'raw_buffer' / 'CH1' / '20260101').exists()
+        assert (tmp_data_root / 'phase2' / 'CH1' / 'L1' / 'L1_20260101.h5').exists()
+        assert sum('ledger' in r.getMessage().lower() and 'Preflight' in r.getMessage()
+                   for r in caplog.records) == 1
+
+    def test_preflight_evicts_without_ledger(self, tmp_data_root):
+        g, du = self._setup(tmp_data_root)
+        with patch('hf_timestd.core.resource_guardian.ledger_manages_us',
+                   return_value=False), \
+             patch('shutil.disk_usage', return_value=du):
+            assert g.preflight_check() is True
+        assert not (tmp_data_root / 'phase2' / 'CH1' / 'L1' / 'L1_20260101.h5').exists()

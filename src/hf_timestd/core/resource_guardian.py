@@ -285,7 +285,11 @@ class ResourceGuardian:
                     headroom_bytes,
                     int(stat.total * (1.0 - DISK_WARN_PERCENT / 100.0)),
                 )
-                if stat.free < target_free:
+                if stat.free < target_free and self._ledger_owns_headroom():
+                    logger.info(
+                        "Preflight: the sigmond ledger manages hf-timestd; "
+                        "startup headroom eviction deferred to it")
+                elif stat.free < target_free:
                     deficit_gb = (target_free - stat.free) / GB
                     logger.warning(
                         f"Preflight: disk at {used_pct:.1f}%% "

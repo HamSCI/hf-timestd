@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_STATUS_PATH = Path("/run/sigmond/storage-status.json")
 CLIENT_NAME = "hf-timestd"
+FUTURE_SLACK_S = 60
 
 
 def ledger_manages_us(status_path: Path = DEFAULT_STATUS_PATH,
@@ -27,9 +28,12 @@ def ledger_manages_us(status_path: Path = DEFAULT_STATUS_PATH,
     has managed true (hf-timestd may have one row per store)."""
     try:
         doc = json.loads(Path(status_path).read_text())
+        # Format written by sigmond lib/sigmond/storage/tick.py: "%Y-%m-%dT%H:%M:%SZ".
         stamp = datetime.strptime(doc["generated_at"], "%Y-%m-%dT%H:%M:%SZ")
         generated = stamp.replace(tzinfo=timezone.utc).timestamp()
-        if now() - generated > max_age_s:
+        age = now() - generated
+        # A future stamp beyond 60 s means a host clock ran away: not managed.
+        if age > max_age_s or age < -FUTURE_SLACK_S:
             return False
         return any(isinstance(r, dict)
                    and r.get("client") == CLIENT_NAME

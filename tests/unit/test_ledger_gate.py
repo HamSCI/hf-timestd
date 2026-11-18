@@ -51,6 +51,12 @@ def test_stale_false(tmp_path):
     assert ledger_manages_us(p, now=lambda: _gen_epoch() + 900) is True
 
 
+def test_future_stamp_is_stale(tmp_path):
+    p = _write(tmp_path / "s.json", [_row()])
+    assert ledger_manages_us(p, now=lambda: _gen_epoch() - 61) is False
+    assert ledger_manages_us(p, now=lambda: _gen_epoch() - 60) is True
+
+
 def test_unmanaged_row_false(tmp_path):
     p = _write(tmp_path / "s.json", [_row(managed=False), _row("other", True)])
     assert ledger_manages_us(p, now=lambda: _gen_epoch()) is False
