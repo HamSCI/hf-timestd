@@ -105,6 +105,20 @@ kind = "link"
 src  = "systemd/timestd-vtec.service"
 dst  = "/etc/systemd/system/timestd-vtec.service"
 
+# Archiver (2026-11-13): copies closed raw IQ to the archive drive.  Linked
+# here so `smd update` reaches stations installed before it existed (AB4EJ
+# ran a drive for five days with nothing on it); each run exits quietly
+# without /etc/sigmond/archive.toml.
+[[install.steps]]
+kind = "link"
+src  = "systemd/timestd-archive.service"
+dst  = "/etc/systemd/system/timestd-archive.service"
+
+[[install.steps]]
+kind = "link"
+src  = "systemd/timestd-archive.timer"
+dst  = "/etc/systemd/system/timestd-archive.timer"
+
 # Config template — never overwritten if already present.
 [[install.steps]]
 kind      = "render"
@@ -168,6 +182,8 @@ units = [
     # skips (ConditionPathExists) on a station with no events.toml, so the
     # timer stays quiet until that station is enrolled with wd30.
     "timestd-events.timer",
+    # Archiver: listed so every station runs it; no drive, no work.
+    "timestd-archive.timer",
     # GRAPE (grape-daily.timer, grape-upload-retry.timer) MOVED to
     # hamsci-physics in the 2026-08-24 split, along with its upload pipeline
     # block; grape-daily keeps its operator-facing unit name there.
