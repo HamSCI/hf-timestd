@@ -6,6 +6,7 @@ The classes come from the KPH1 tree of 2026-11-16.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -17,6 +18,8 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 DAY = 86400.0
+# A derived file written within this window may still be open: never a trim item.
+LIVE_WINDOW = 2 * 3600.0
 RAW_DIR = "raw_buffer"
 RAW_POLICY = "give-up-oldest:raw"
 
@@ -27,6 +30,7 @@ SINK_CLASSES: Dict[str, str] = {
     "state": "pinned",
     "authority_history.db": "pinned",
     "status": "pinned",
+    "events-staging": "pinned",
     "raw_buffer": "raw",
     "upload": "sent",
 }
@@ -97,16 +101,59 @@ def _tree(path: Path):
     return total, newest
 
 
-def list_items(data_root: Path) -> List[Item]:
+def _archived(root: Path, day: str, ch: Path) -> bool:
+    """This channel's day holds a chunk and the whole day sits on the archive
+    drive."""
+    from . import archiver
+    try:
+        if not any((ch / day).glob("*.bin.zst")):
+            return False
+        return bool(archiver.raw_day_archived(root, day))
+    except Exception:
+        return False
+
+
+def raw_written_24h(data_root: Path, now: Optional[float] = None) -> int:
+    """Bytes of raw_buffer files modified in the last 24 h (file mtimes, so a
+    day directory that closed yesterday does not count whole)."""
+    t = now if now is not None else time.time()
+    total = 0
+    for dirpath, _dn, files in os.walk(Path(data_root) / RAW_DIR):
+        for f in files:
+            try:
+                st = (Path(dirpath) / f).lstat()
+            except OSError:
+                continue
+            if t - DAY < st.st_mtime <= t + DAY:
+                total += st.st_size
+    return total
+
+
+def written_per_day(data_root: Path, items: List[Item], now: Optional[float] = None) -> int:
+    """Bytes written in the last 24 h: file-level for raw_buffer, item-level
+    for everything else."""
+    t = now if now is not None else time.time()
+    raw_prefix = str(Path(data_root) / RAW_DIR) + os.sep
+    other = sum(i.bytes for i in items
+                if not i.path.startswith(raw_prefix) and t - DAY < i.mtime <= t + DAY)
+    return other + raw_written_24h(data_root, t)
+
+
+def list_items(data_root: Path, now: Optional[float] = None) -> List[Item]:
     """Every holding of the data root as a client_kit.Item.
 
     raw: one item per raw_buffer/<channel>/<YYYYMMDD> directory.
     pinned: one item per entry (listed so holdings count it; never deleted).
     sent, derived: one item per file.  SQLite files (live databases with
     their -wal/-shm/-journal) are never listed: trim must not take one apart.
-    A raw day directory must be named YYYYMMDD.
+    A raw day directory must be named YYYYMMDD.  A raw day older than
+    yesterday (UTC) that the archive drive already holds in full is class
+    `sent`: it goes first.  Files under any `state` directory, and derived
+    files written in the last two hours, are listed as pinned.
     """
+    t = now if now is not None else time.time()
     root = Path(data_root)
+    recent = {_utc_day(t), _utc_day(t - DAY)}
     items: List[Item] = []
     try:
         entries = sorted(root.iterdir())
@@ -127,13 +174,17 @@ def list_items(data_root: Path) -> List[Item]:
                     continue
                 for d in days:
                     n, m = _tree(d)
-                    items.append(Item(str(d), n, "raw", m))
+                    kind = "raw"
+                    if d.name not in recent and _archived(root, d.name, ch):
+                        kind = "sent"
+                    items.append(Item(str(d), n, kind, m))
         elif cls == "pinned":
             n, m = _tree(e)
             items.append(Item(str(e), n, "pinned", m))
         else:
             if e.is_dir() and not e.is_symlink():
                 for dirpath, _dn, files in os.walk(e):
+                    in_state = "state" in Path(dirpath).relative_to(e).parts
                     for f in files:
                         if _is_sqlite(f):
                             continue
@@ -142,7 +193,11 @@ def list_items(data_root: Path) -> List[Item]:
                             st = p.lstat()
                         except OSError:
                             continue
-                        items.append(Item(str(p), st.st_size, cls, st.st_mtime))
+                        kind = cls
+                        if cls == "derived" and (
+                                in_state or t - st.st_mtime < LIVE_WINDOW):
+                            kind = "pinned"
+                        items.append(Item(str(p), st.st_size, kind, st.st_mtime))
             else:
                 n, m = _tree(e)
                 items.append(Item(str(e), n, cls, m))
@@ -157,22 +212,26 @@ def sinks(data_root: Path, rate_bytes_per_day: int) -> List[dict]:
         {"kind": "file", "target": str(root / RAW_DIR), "schema_ref": None,
          "retention_days": 0, "mb_per_day": rate_bytes_per_day / 1e6,
          "floor_bytes": 2 * int(rate_bytes_per_day),
-         "final_policy": RAW_POLICY, "classes": ["raw"]},
+         "final_policy": RAW_POLICY, "classes": ["raw", "sent"]},
         {"kind": "file", "target": str(root), "schema_ref": None,
-         "retention_days": 0, "mb_per_day": 0, "classes": ["derived", "sent"]},
+         "retention_days": 0, "mb_per_day": 0,
+         "classes": ["derived", "sent", "pinned"]},
     ]
 
 
 def sinks_for(data_root: Path, now: Optional[float] = None) -> List[dict]:
     """sinks() with the raw rate measured from the tree."""
     t = now if now is not None else time.time()
-    rate = sum(i.bytes for i in list_items(data_root)
-               if i.cls == "raw" and t - DAY < i.mtime <= t + DAY)
-    return sinks(data_root, rate)
+    return sinks(data_root, raw_written_24h(data_root, t))
 
 
 def _utc_day(ts: float) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y%m%d")
+
+
+def _is_raw_day_path(p: Path) -> bool:
+    """raw_buffer/<channel>/<day>: the shape of a raw item, whatever its class."""
+    return p.parent.parent.name == RAW_DIR
 
 
 def delete_item(item, now: float) -> bool:
@@ -181,9 +240,9 @@ def delete_item(item, now: float) -> bool:
     if item.cls == "pinned":
         return False
     p = Path(item.path)
-    if item.cls != "raw" and _is_sqlite(p.name):
+    if _is_sqlite(p.name) and not _is_raw_day_path(p):
         return False
-    if item.cls == "raw":
+    if _is_raw_day_path(p):
         day = p.name
         if not _DAY_RE.fullmatch(day):
             return False
@@ -202,6 +261,11 @@ def delete_item(item, now: float) -> bool:
         shutil.rmtree(p)
         return True
     if p.is_dir():
+        return False
+    try:
+        if now - p.lstat().st_mtime < LIVE_WINDOW:
+            return False
+    except OSError:
         return False
     p.unlink()
     return True
@@ -235,7 +299,26 @@ def add_verbs(subparsers, data_root: Path) -> bool:
         floor_bytes=rate["floor_bytes"],
         final_policy=RAW_POLICY,
     )
+    _file_level_holdings(subparsers, kit, data_root)
     return True
+
+
+def _file_level_holdings(subparsers, kit, data_root: Path) -> None:
+    """Replace the kit's `storage holdings` so bytes_written_per_day counts raw
+    files by their own mtimes (the kit counts a whole day directory)."""
+    def do_holdings(args) -> int:
+        items = list_items(data_root)
+        print(json.dumps({"bytes_by_class": kit.holdings(items), "estimated": False,
+                          "bytes_written_per_day": written_per_day(data_root, items)}))
+        return 0
+    try:
+        storage = subparsers.choices["storage"]
+        for act in storage._actions:
+            ch = getattr(act, "choices", None)
+            if ch and "holdings" in ch:
+                ch["holdings"].set_defaults(func=do_holdings)
+    except Exception:
+        pass
 
 
 def _delete_or_raise(item):

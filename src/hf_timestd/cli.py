@@ -2396,8 +2396,10 @@ Per-service overrides in [services] take precedence over the profile.
     elif args.command == 'storage':
         if hasattr(args, 'func'):
             sys.exit(args.func(args))
+        # Contract: an unsupported verb exits 2, so sigmond unregisters us
+        # instead of keeping a managed client whose trims all fail.
         print(json.dumps({"unsupported": True}))
-        sys.exit(0)
+        sys.exit(2)
     elif args.command == 'status':
         _handle_status(args)
     elif args.command == 'daemon':

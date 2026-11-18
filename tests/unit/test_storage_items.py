@@ -13,9 +13,9 @@ _SIG = os.environ.get("SIGMOND_LIB_FOR_TESTS") or str(
     Path(__file__).resolve().parents[3] / "sigmond" / "lib")
 if os.path.isdir(_SIG):
     sys.path.insert(0, _SIG)
-pytest.importorskip("sigmond.storage.client_kit")
-
 from hf_timestd import archiver, storage_items as si  # noqa: E402
+
+needs_kit = pytest.mark.skipif(si.load_kit() is None, reason="sigmond client kit absent")
 
 NOW = time.time()
 
@@ -42,7 +42,7 @@ def tree(tmp_path):
     _mk(r, "status/s.json")
     _mk(r, "upload/u.tar")
     for n in ("phase2", "products", "timing", "t3_shadow", "wwvb", "mystery"):
-        _mk(r, f"{n}/f.dat")
+        _mk(r, f"{n}/f.dat", age_days=1)
     _mk(r, "archive-status.json")
     _mk(r, f"raw_buffer/WWV_10000/{_day(5)}/a.bin.zst", 300, 5)
     _mk(r, f"raw_buffer/WWV_10000/{_day(5)}/a.json", 10, 4.9)
@@ -66,8 +66,9 @@ def test_sinks_shape(tmp_path):
     pinned, raw, rest = s
     assert pinned["classes"] == ["pinned"] and "final_policy" not in pinned
     assert raw["target"] == str(tmp_path / "raw_buffer")
+    assert raw["classes"] == ["raw", "sent"]
     assert raw["final_policy"] == "give-up-oldest:raw" and raw["floor_bytes"] == 2000
-    assert rest["target"] == str(tmp_path) and set(rest["classes"]) == {"derived", "sent"}
+    assert rest["target"] == str(tmp_path) and set(rest["classes"]) == {"derived", "sent", "pinned"}
 
 
 def test_raw_items_are_day_dirs(tree):
@@ -98,6 +99,7 @@ def test_delete_respects_archive_gate(tmp_path, monkeypatch):
     assert si.delete_item(item, NOW) is False and d.exists()
 
 
+@needs_kit
 def test_pinned_never_deleted_or_chosen(tree):
     kit = si.load_kit()
     items = si.list_items(tree)
@@ -109,6 +111,7 @@ def test_pinned_never_deleted_or_chosen(tree):
             assert os.path.exists(i.path)
 
 
+@needs_kit
 def test_cli_holdings_and_unsupported(tree, tmp_path):
     cfg = tmp_path / "c.toml"
     cfg.write_text(f'[recorder]\nproduction_data_root = "{tree}"\n')
@@ -175,5 +178,106 @@ def test_unsupported_without_sigmond(verb, monkeypatch, capsys):
     from hf_timestd import cli
     with pytest.raises(SystemExit) as e:
         cli.main(["storage"] + verb)
-    assert e.value.code == 0
+    assert e.value.code == 2
     assert json.loads(capsys.readouterr().out.strip().splitlines()[-1]) == {"unsupported": True}
+
+
+def _archive_all(monkeypatch, days):
+    monkeypatch.setattr(archiver, "raw_day_archived", lambda root, day, *a, **k: day in days)
+
+
+def test_events_staging_and_state_dirs_pinned(tmp_path):
+    for rel in ("events-staging/state.json", "events-staging/w/win.bin",
+                "phase2/WWV_10/state/k.json", "products/x/state/y/z.json"):
+        _mk(tmp_path, rel, age_days=3)
+    _mk(tmp_path, "phase2/WWV_10/old.csv", age_days=3)
+    items = {Path(i.path).name: i.cls for i in si.list_items(tmp_path)}
+    assert items["events-staging"] == "pinned"
+    assert items["k.json"] == "pinned" and items["z.json"] == "pinned"
+    assert items["old.csv"] == "derived"
+
+
+def test_fresh_derived_file_never_a_trim_item(tmp_path):
+    _mk(tmp_path, "phase2/WWV_10/open.csv")
+    _mk(tmp_path, "phase2/WWV_10/old.csv", age_days=1)
+    cls = {Path(i.path).name: i for i in si.list_items(tmp_path)}
+    assert cls["open.csv"].cls == "pinned" and cls["old.csv"].cls == "derived"
+    forged = si.Item(cls["open.csv"].path, 1, "derived", NOW)
+    assert si.delete_item(forged, NOW) is False
+    assert (tmp_path / "phase2/WWV_10/open.csv").exists()
+
+
+@needs_kit
+def test_tiny_fit_trim_spares_state_events_and_fresh(tmp_path, monkeypatch):
+    cfgdir, tmp_path = tmp_path, tmp_path / "data"
+    monkeypatch.setattr(archiver, "ARCHIVE_TOML", tmp_path / "no-archive.toml")
+    keep = [_mk(tmp_path, "phase2/WWV_10/state/k.json", age_days=3),
+            _mk(tmp_path, "events-staging/state.json", age_days=3),
+            _mk(tmp_path, "events-staging/orders.json", age_days=3),
+            _mk(tmp_path, "phase2/WWV_10/fresh.csv")]
+    gone = _mk(tmp_path, "phase2/WWV_10/old.csv", age_days=3)
+    day = _mk(tmp_path, f"raw_buffer/C/{_day(5)}/a.bin.zst", 100, 5).parent
+    cfg = cfgdir / "c.toml"
+    cfg.write_text(f'[recorder]\nproduction_data_root = "{tmp_path}"\n')
+    env = dict(os.environ, TIMESTD_CONFIG=str(cfg), PYTHONPATH=_SIG)
+    out = subprocess.run([sys.executable, "-m", "hf_timestd.cli", "storage", "trim",
+                          "--fit-bytes", "1"], env=env, capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    assert all(k.exists() for k in keep)
+    assert not gone.exists()
+
+
+def test_archived_raw_day_is_sent_and_others_stay_raw(tmp_path, monkeypatch):
+    _archive_all(monkeypatch, {_day(5), _day(1), _day(0)})
+    _mk(tmp_path, f"raw_buffer/C/{_day(5)}/a.bin.zst")
+    _mk(tmp_path, f"raw_buffer/C/{_day(4)}/a.bin.zst")
+    _mk(tmp_path, f"raw_buffer/C/{_day(1)}/a.bin.zst")
+    _mk(tmp_path, f"raw_buffer/C/{_day(0)}/a.bin.zst")
+    got = {Path(i.path).name: i.cls for i in si.list_items(tmp_path, NOW)}
+    assert got[_day(5)] == "sent"
+    assert got[_day(4)] == "raw"
+    assert got[_day(1)] == got[_day(0)] == "raw"
+
+
+@needs_kit
+def test_sent_raw_day_goes_before_derived_and_gate_holds(tmp_path, monkeypatch):
+    monkeypatch.setattr(archiver, "ARCHIVE_TOML", tmp_path / "no-archive.toml")
+    _archive_all(monkeypatch, {_day(5)})
+    _mk(tmp_path, "phase2/WWV_10/old.csv", age_days=3)
+    _mk(tmp_path, f"raw_buffer/C/{_day(5)}/a.bin.zst", 100, 5)
+    items = si.list_items(tmp_path, NOW)
+    chosen = si.load_kit().choose_trim(items, 10**6, 0)
+    assert chosen == []
+    chosen = si.load_kit().choose_trim(items, 150, 0)
+    assert [i.cls for i in chosen][0] == "sent"
+    monkeypatch.setattr(archiver, "raw_day_may_leave", lambda *a, **k: False)
+    assert si.delete_item(chosen[0], NOW) is False
+
+
+def test_written_rate_is_file_level(tmp_path):
+    # yesterday's day dir: files spread over the day; only the last 24 h counts
+    ydir = f"raw_buffer/C/{_day(1)}"
+    _mk(tmp_path, f"{ydir}/early.bin.zst", 1000, age_days=1.5)
+    _mk(tmp_path, f"{ydir}/mid.bin.zst", 1000, age_days=1.2)
+    _mk(tmp_path, f"{ydir}/late.bin.zst", 1000, age_days=0.5)
+    _mk(tmp_path, f"raw_buffer/C/{_day(0)}/now.bin.zst", 1000, age_days=0.1)
+    assert si.raw_written_24h(tmp_path, NOW) == 2000
+    sink = si.sinks_for(tmp_path, NOW)[1]
+    assert sink["floor_bytes"] == 4000
+    items = si.list_items(tmp_path, NOW)
+    assert si.written_per_day(tmp_path, items, NOW) == 2000
+
+
+@needs_kit
+def test_cli_holdings_reports_file_level_rate(tmp_path):
+    cfgdir, tmp_path = tmp_path, tmp_path / "data"
+    ydir = f"raw_buffer/C/{_day(1)}"
+    _mk(tmp_path, f"{ydir}/early.bin.zst", 1000, age_days=1.5)
+    _mk(tmp_path, f"{ydir}/late.bin.zst", 1000, age_days=0.5)
+    cfg = cfgdir / "c.toml"
+    cfg.write_text(f'[recorder]\nproduction_data_root = "{tmp_path}"\n')
+    env = dict(os.environ, TIMESTD_CONFIG=str(cfg), PYTHONPATH=_SIG)
+    out = subprocess.run([sys.executable, "-m", "hf_timestd.cli", "storage", "holdings", "--json"],
+                         env=env, capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout)["bytes_written_per_day"] == 1000
