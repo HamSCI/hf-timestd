@@ -380,3 +380,36 @@ def test_cli_final_uses_sent_first(tmp_path, monkeypatch):
     out = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
     assert not d5.exists() and d3.exists()
+
+
+def test_final_survives_a_delete_that_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(archiver, "ARCHIVE_TOML", tmp_path / "no-archive.toml")
+    monkeypatch.setattr(archiver, "STATUS_PATH", tmp_path / "none.json")
+    data = tmp_path / "data"
+    d5 = _mk(data, f"raw_buffer/C/{_day(5)}/a.bin.zst", 100, 5).parent
+    d3 = _mk(data, f"raw_buffer/C/{_day(3)}/a.bin.zst", 100, 3).parent
+    real = si.delete_item
+
+    def flaky(item, now):
+        if item.path == str(d5):
+            raise PermissionError("root-owned")
+        return real(item, now)
+    monkeypatch.setattr(si, "delete_item", flaky)
+    ans = si.final_raw(data, 0, NOW)
+    assert d5.exists() and not d3.exists()
+    assert str(d5) in ans["reason"] and "root-owned" in ans["reason"]
+    assert ans["held_bytes"] == 100
+
+
+@needs_kit
+def test_final_other_policy_uses_kit_and_refusal_has_holdings(tmp_path, monkeypatch):
+    monkeypatch.setattr(archiver, "ARCHIVE_TOML", tmp_path / "no-archive.toml")
+    monkeypatch.setattr(archiver, "STATUS_PATH", tmp_path / "none.json")
+    kit = si.load_kit()
+    data = tmp_path / "data"
+    old = _mk(data, "phase2/WWV_10/old.csv", 100, 3)
+    raw = _mk(data, f"raw_buffer/C/{_day(5)}/a.bin.zst", 100, 5)
+    ans = si.apply_final(kit, data, "give-up-oldest:derived", 0, 0, NOW)
+    assert not old.exists() and raw.exists() and ans["refused"] is False
+    ans = si.apply_final(kit, data, "bogus", 0, 0, NOW)
+    assert ans["refused"] is True and ans["bytes_by_class"] == {"raw": 100}

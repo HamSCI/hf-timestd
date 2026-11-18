@@ -332,14 +332,28 @@ def add_verbs(subparsers, data_root: Path) -> bool:
         delete=lambda it: _delete_or_raise(it),
         floor_bytes=rate["floor_bytes"],
         final_policy=RAW_POLICY,
-        apply_policy=lambda policy, fit: (
-            final_raw(data_root, fit) if policy == RAW_POLICY else
-            {"held_bytes": sum(i.bytes for i in list_items(data_root)),
-             "bytes_by_class": {}, "refused": True,
-             "reason": f"policy {policy} is not handled by this client"}),
+        apply_policy=lambda policy, fit: apply_final(kit, data_root, policy, fit,
+                                                     rate["floor_bytes"]),
     )
     _file_level_holdings(subparsers, kit, data_root)
     return True
+
+
+def apply_final(kit, data_root: Path, policy: str, fit_bytes: int, floor_bytes: int,
+                now: Optional[float] = None) -> dict:
+    """Only give-up-oldest:raw takes the sent-then-raw order; any other
+    give-up-oldest:<class> follows the kit's generic path."""
+    if policy == RAW_POLICY:
+        return final_raw(data_root, fit_bytes, now)
+    t = now if now is not None else time.time()
+    items = list_items(data_root, t)
+    kind, _, cls = policy.partition(":")
+    if kind != "give-up-oldest" or cls not in kit.CLASSES or cls == "pinned":
+        return kit._answer(items, True, f"policy {policy} is not handled by this client")
+    chosen = kit.choose_trim(items, fit_bytes, floor_bytes, final=True, classes=[cls])
+    left, errors = kit._delete_all(chosen, lambda it: _delete_or_raise(it), items)
+    return kit._answer(left, False,
+                       ("could not delete " + ", ".join(errors)) if errors else "")
 
 
 def final_raw(data_root: Path, fit_bytes: int, now: Optional[float] = None) -> dict:
@@ -356,7 +370,12 @@ def final_raw(data_root: Path, fit_bytes: int, now: Optional[float] = None) -> d
     for it in chosen:
         if remaining <= fit_bytes:
             break
-        if delete_item(it, t):
+        try:
+            ok = delete_item(it, t)
+        except Exception as exc:  # a failed delete leaves the item held
+            errors.append(f"{it.path}: {exc}")
+            continue
+        if ok:
             gone.add(it.path)
             remaining -= it.bytes
         else:
