@@ -134,15 +134,18 @@ def _handle_inventory(args):
             # Output sinks per instance. HDF5 is the canonical L1/L2
             # artefact. (The CONTRACT v0.6 §17 ClickHouse staging sink was
             # removed — hf-timestd stages L2 events to SQLite, not ClickHouse.)
-            data_sinks = [
-                {
+            # Contract v0.9 §17.7: one sink per storage class group.
+            try:
+                from . import storage_items
+                data_sinks = storage_items.sinks_for(Path(data_root))
+            except Exception:
+                data_sinks = [{
                     'kind':           'file',
                     'target':         data_root,
                     'schema_ref':     None,
-                    'retention_days': 0,        # operator-managed
-                    'mb_per_day':     0,        # not estimated yet
-                },
-            ]
+                    'retention_days': 0,
+                    'mb_per_day':     0,
+                }]
 
             instances.append({
                 'instance':                    'default',
@@ -197,7 +200,7 @@ def _handle_inventory(args):
         'client':           'hf-timestd',
         'version':          version,
         'git':              GIT_INFO,
-        'contract_version': '0.8',
+        'contract_version': '0.9',
         'config_path':      str(config_path),
         'log_paths': {
             # As of v6.12 every timestd-* unit writes to journald.
@@ -1886,7 +1889,7 @@ def main(argv=None):
     # Quiet stderr for sigmond client-contract subcommands so they emit
     # exactly one JSON document on stdout and nothing on stderr unless
     # something is wrong.  This must run before any logging.info() calls.
-    _contract_quiet = any(arg in ('inventory', 'validate') for arg in sys.argv[1:3])
+    _contract_quiet = any(arg in ('inventory', 'validate', 'storage') for arg in sys.argv[1:3])
 
     # §11: startup log level from env (overrides hard-coded INFO default).
     _env_level = _resolve_log_level(default=logging.INFO)
@@ -2345,6 +2348,12 @@ Per-service overrides in [services] take precedence over the profile.
     events_run.add_argument('--config', '-c', default='/etc/hf-timestd/events.toml',
         help='Keeper configuration (default /etc/hf-timestd/events.toml)')
 
+    from . import storage_items
+    if not storage_items.add_verbs(subparsers, storage_items.resolve_data_root()):
+        st_p = subparsers.add_parser('storage',
+            help='storage capacity verbs (unsupported: sigmond kit not found)')
+        st_p.add_argument('rest', nargs=argparse.REMAINDER)
+
     args = parser.parse_args(argv)
 
     # If no command specified, show help
@@ -2377,6 +2386,11 @@ Per-service overrides in [services] take precedence over the profile.
             sys.exit(configurator.cmd_config_apply(args))
         print("usage: hf-timestd config {show|apply}", file=sys.stderr)
         sys.exit(2)
+    elif args.command == 'storage':
+        if hasattr(args, 'func'):
+            sys.exit(args.func(args))
+        print(json.dumps({"unsupported": True}))
+        sys.exit(0)
     elif args.command == 'status':
         _handle_status(args)
     elif args.command == 'daemon':

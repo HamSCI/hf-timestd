@@ -66,12 +66,12 @@ class V07ContractVersionTests(unittest.TestCase):
     keeping them in lockstep avoids spurious warnings on every
     `smd diag` run."""
 
-    def test_contract_version_is_08(self):
+    def test_contract_version_is_09(self):
         with tempfile.TemporaryDirectory() as d:
             cfg = Path(d) / "timestd-config.toml"
             cfg.write_text(MINIMAL_TOML)
             payload = _run_inventory(cfg)
-        self.assertEqual(payload['contract_version'], '0.8')
+        self.assertEqual(payload['contract_version'], '0.9')
 
 
 class V07TimingAuthorityFieldTests(unittest.TestCase):
