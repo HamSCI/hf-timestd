@@ -60,6 +60,7 @@ from enum import Enum
 from pathlib import Path
 from typing import List, Optional, Set
 
+from ..ledger_gate import ledger_manages_us
 from .binary_archive_writer import DEFAULT_ARCHIVE_DTYPE, validate_archive_dtype
 from .iq_codec import DTYPE_F16, DTYPE_F32, bytes_per_sample
 
@@ -206,6 +207,7 @@ class ResourceGuardian:
         self.min_ram_bytes = n_channels * RAM_PER_CHANNEL + RAM_SYSTEM_HEADROOM
 
         self.evict_policy = evict_policy
+        self._ledger_managed = False      # last gate reading, for one log line per change
         self.evict_grace_sec = float(evict_grace_sec)
         self.evict_low_water_percent = float(evict_low_water_percent)
         self._clock = clock
@@ -408,6 +410,21 @@ class ResourceGuardian:
     # 2. Runtime watchdog
     # ------------------------------------------------------------------
 
+    def _ledger_owns_headroom(self) -> bool:
+        """Read the ledger gate (never cached); log one line per change."""
+        managed = ledger_manages_us()
+        if managed != self._ledger_managed:
+            self._ledger_managed = managed
+            if managed:
+                logger.info("The sigmond storage ledger manages hf-timestd: "
+                            "proactive headroom eviction steps aside "
+                            "(the %.0f%% emergency eviction stays)",
+                            DISK_HARD_STOP_PERCENT)
+            else:
+                logger.info("The sigmond storage ledger no longer manages "
+                            "hf-timestd: proactive headroom eviction resumes")
+        return managed
+
     def watchdog_check(self, force: bool = False) -> ResourceStatus:
         """Periodic check: ensure headroom for incoming data.
 
@@ -509,7 +526,12 @@ class ResourceGuardian:
             self._over_since = None
 
         # --- Primary mechanism: budget-based headroom ---
-        if state == ResourceState.OK and disk_free < headroom_bytes:
+        # While the sigmond ledger manages hf-timestd it owns proactive
+        # eviction.  The >= 95 % path above stays as the safety net.
+        ledger_owns = self._ledger_owns_headroom()
+        if ledger_owns and state == ResourceState.OK and disk_free < headroom_bytes:
+            pass
+        elif state == ResourceState.OK and disk_free < headroom_bytes:
             n_days_before = len(self._collect_all_dates())
             bytes_cleaned = self._ensure_headroom(headroom_bytes)
             try:

@@ -30,6 +30,8 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Tuple, Optional, Dict
 from dataclasses import dataclass
 
+from .ledger_gate import ledger_manages_us
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
@@ -78,6 +80,7 @@ class QuotaManager:
         self.archive_root = Path(archive_root) if archive_root else None
         self.derived_max_days = derived_max_days
         self._guard_warned_day = None     # the fallback warns once a UTC day
+        self._ledger_managed = False      # last gate reading, for one log line per change
 
         # Managed directories
         self.raw_buffer_dir = self.data_root / 'raw_buffer'
@@ -454,6 +457,29 @@ class QuotaManager:
 
         Returns dict compatible with the previous file-level QuotaManager.
         """
+        # While the sigmond ledger manages hf-timestd it owns retention.
+        # The gate is read on every pass; only the log line remembers.
+        managed = ledger_manages_us()
+        if managed != self._ledger_managed:
+            self._ledger_managed = managed
+            if managed:
+                logger.info("The sigmond storage ledger manages hf-timestd: "
+                            "the percentage quota deletes nothing while it does")
+            else:
+                logger.info("The sigmond storage ledger no longer manages "
+                            "hf-timestd: the percentage quota resumes")
+        if managed:
+            _, _, percent = self.get_disk_usage()
+            return {
+                'initial_usage_percent': percent,
+                'threshold_percent': self.threshold_percent,
+                'files_deleted': 0, 'bytes_freed': 0,
+                'dirs_archived': 0, 'archive_bytes_freed': 0,
+                'final_usage_percent': percent,
+                'dry_run': self.dry_run,
+                'ledger_managed': True,
+            }
+
         # Step 1: proactive retention trim of derived data
         retention_result = self.enforce_retention()
 

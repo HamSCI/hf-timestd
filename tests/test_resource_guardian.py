@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tests for ResourceGuardian — universal, self-sizing resource management."""
 
+import logging
 import os
 import shutil
 import time
@@ -496,3 +497,62 @@ class TestGuardianHysteresis:
         assert g.evict_policy == 'alert_only'
         assert g.evict_grace_sec == 300
         assert g.evict_low_water_percent == 88.0
+
+
+# ======================================================================
+# The sigmond ledger replaces proactive headroom eviction; the >=95 %
+# emergency path stays.
+# ======================================================================
+
+class TestGuardianLedgerGate:
+    def _g(self, root, clk, **kw):
+        return ResourceGuardian(data_root=str(root), n_channels=1,
+                                sample_rate=24000, clock=clk, **kw)
+
+    def test_headroom_eviction_defers_to_ledger(self, tmp_data_root, caplog):
+        clk = _Clock()
+        _day(tmp_data_root, '20260101', raw_bytes=10000, phase2_bytes=5000)
+        g = self._g(tmp_data_root, clk)
+        total = int(g.daily_disk_budget * 10)
+        du = _du(total, int(total * 0.92))            # free 0.8 day < 1 day headroom, < 95 %
+        with patch('hf_timestd.core.resource_guardian.ledger_manages_us',
+                   return_value=True), \
+             patch('shutil.disk_usage', return_value=du), \
+             caplog.at_level(logging.INFO, logger='hf_timestd.core.resource_guardian'):
+            s = g.watchdog_check(force=True)
+            clk.advance(120)
+            g.watchdog_check(force=True)
+        assert s.state == ResourceState.OK
+        assert s.bytes_cleaned == 0
+        assert (tmp_data_root / 'raw_buffer' / 'CH1' / '20260101').exists()
+        ledger = [r for r in caplog.records if 'ledger' in r.getMessage().lower()]
+        assert len(ledger) == 1
+
+    def test_headroom_eviction_unchanged_without_ledger(self, tmp_data_root):
+        clk = _Clock()
+        _day(tmp_data_root, '20260101', raw_bytes=10000, phase2_bytes=5000)
+        g = self._g(tmp_data_root, clk)
+        total = int(g.daily_disk_budget * 10)
+        with patch('hf_timestd.core.resource_guardian.ledger_manages_us',
+                   return_value=False), \
+             patch('shutil.disk_usage',
+                   return_value=_du(total, int(total * 0.92))):
+            s = g.watchdog_check(force=True)
+        assert s.state == ResourceState.CLEANED
+
+    def test_guardian_emergency_still_evicts(self, tmp_data_root, caplog):
+        clk = _Clock()
+        _day(tmp_data_root, '20260101', raw_bytes=10000, phase2_bytes=5000)
+        g = self._g(tmp_data_root, clk, evict_grace_sec=600,
+                    evict_low_water_percent=90.0)
+        fake = _live_du(tmp_data_root, fill_bytes=24000, total_bytes=40000)  # ~97.5 %
+        with patch('hf_timestd.core.resource_guardian.ledger_manages_us',
+                   return_value=True), \
+             patch('shutil.disk_usage', side_effect=fake), \
+             caplog.at_level(logging.WARNING):
+            assert g.watchdog_check(force=True).state == ResourceState.STOP
+            clk.advance(601)
+            s = g.watchdog_check(force=True)
+        assert s.bytes_cleaned > 0
+        assert not (tmp_data_root / 'phase2' / 'CH1' / 'L1' / 'L1_20260101.h5').exists()
+        assert any(r.levelno >= logging.WARNING for r in caplog.records)
