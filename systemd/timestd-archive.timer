@@ -3,6 +3,7 @@ Description=hf-timestd archiver, every 10 minutes
 
 [Timer]
 OnBootSec=5min
+OnActiveSec=5min
 OnUnitActiveSec=10min
 Persistent=true
 

@@ -4,6 +4,7 @@ Documentation=https://github.com/HamSCI/hf-timestd
 
 [Timer]
 OnBootSec=120
+OnActiveSec=120
 OnUnitActiveSec=300
 AccuracySec=30
 
