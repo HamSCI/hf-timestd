@@ -436,6 +436,14 @@ class CoreRecorderV2:
         # When source is 'phase-engine', use its status multicast address
         # (from ka9q.phase_engine_status or the well-known default 239.99.1.1)
         # instead of the radiod status address.
+        # The radiod's status name as configured, kept before discovery
+        # rewrites ``status_address`` (to an IP, or to the phase-engine's
+        # 239.99.1.1).  t6-anchor.json carries it so a client can refuse an
+        # anchor that belongs to another radiod.
+        from ..config_utils import resolve_ka9q_status as _cfg_status
+        self._configured_status_name = (
+            config.get('status_address')
+            or _cfg_status({'ka9q': ka9q_section}) or '')
         if self.engine_type == 'phase-engine':
             self.status_address = ka9q_section.get(
                 'phase_engine_status', '239.99.1.1'
@@ -1432,6 +1440,7 @@ class CoreRecorderV2:
                     # act on it, so a re-fused plane reaches the ring
                     # within one revalidation tick.
                     self._refresh_t3_native_anchor()
+                    self._publish_t6_anchor()
                     for _rec in list(self.recorders.values()):
                         _rec.revalidate_radiod_pair()
                     self._refresh_counter_maps()
@@ -3109,6 +3118,49 @@ class CoreRecorderV2:
             return False
         return (auth.get('state') == 'AUTHORITATIVE'
                 and not (auth.get('violations') or []))
+
+    def _publish_t6_anchor(self) -> None:
+        """Write /run/hf-timestd/t6-anchor.json (60 s tick).
+
+        Never raises: a failed write logs one warning and the recorder
+        goes on.  Nothing is written without an anchor and a counter map;
+        the old file then ages out at the reader's 120 s limit.
+        """
+        try:
+            publisher = getattr(self, '_t6_anchor_publisher', None)
+            if publisher is None:
+                from .t6_anchor_publisher import T6AnchorPublisher
+                publisher = self._t6_anchor_publisher = T6AnchorPublisher()
+            anchor = getattr(self, '_t6_native_anchor', None)
+            t6_map = self._t6_map_for_anchor(
+                anchor, getattr(self, '_t6_counter_map', None))
+            if anchor is None or t6_map is None:
+                return
+            auth = self._t6_authority_status() or {}
+            counter_epoch_id = f"input-{t6_map.input_epoch_gps_s:.3f}"
+            summary = None
+            try:
+                store = getattr(self, '_t3_shadow_store', None)
+                summary = store.read_summary() if store is not None else None
+            except Exception:  # noqa: BLE001
+                summary = None
+            reg_id = (summary or {}).get('counter_epoch_id')
+            reg_map = (summary or {}).get('counter_map') or {}
+            reg_epoch = reg_map.get('input_epoch_gps_s')
+            # Take the registration's id only when it names this same run.
+            if (reg_id and isinstance(reg_epoch, (int, float))
+                    and abs(reg_epoch - t6_map.input_epoch_gps_s) <= 0.5):
+                counter_epoch_id = str(reg_id)
+            publisher.maybe_publish(
+                anchor=anchor, t6_map=t6_map,
+                authoritative=self._t6_anchor_is_authoritative(),
+                authority_state=str(auth.get('state') or 'UNKNOWN'),
+                sigma_ns=auth.get('sigma_ns'),
+                counter_epoch_id=counter_epoch_id,
+                radiod_status=getattr(self, '_configured_status_name', '') or '',
+                radiod_address=str(getattr(self, 'status_address', '') or ''))
+        except Exception as exc:  # noqa: BLE001 - never disturb recording
+            logger.warning(f"t6-anchor publish failed: {exc}")
 
     def _refresh_t3_native_anchor(self) -> None:
         """Re-derive the T3 anchor from the verified registration.
