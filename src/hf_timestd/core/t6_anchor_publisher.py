@@ -37,17 +37,29 @@ ASSUMED_U_EPOCH_NS = 230.0     # the transport bound, when no sigma is measured
 COVERAGE_K = 2.0
 
 
+def sigma_is_corrupt(sigma_ns) -> bool:
+    """A sigma that is present but not a finite, non-negative number.
+    None is absent, not corrupt."""
+    if sigma_ns is None:
+        return False
+    if isinstance(sigma_ns, bool) or not isinstance(sigma_ns, (int, float)):
+        return True
+    return not (math.isfinite(sigma_ns) and sigma_ns >= 0)
+
+
 def build_t6_anchor(*, anchor, t6_map, authoritative: bool, authority_state: str,
                     sigma_ns: Optional[float], counter_epoch_id: str,
                     radiod_status: str, radiod_address: str = "",
                     now_utc_iso: str) -> dict:
     """The anchor document.
 
-    ``radiod_status`` is the status name as configured, before discovery
+    An authoritative anchor with a corrupt sigma gets a null index, so the
+    reader refuses the file; the tie's error is unknown, and no number is
+    invented for it.  ``radiod_status`` is the status name as configured, before discovery
     rewrites the address.  ``radiod_address`` is the address in use.
     """
     index = None
-    if authoritative:
+    if authoritative and not sigma_is_corrupt(sigma_ns):
         index = t6_anchor_input_index(anchor, t6_map)
         if index is not None:
             index = float(index)
@@ -99,8 +111,47 @@ def _utc_iso_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# A registration summary older than this no longer speaks for the run.  The
+# registration re-fuses every 60 s; three missed ticks mean its writer is gone.
+SUMMARY_MAX_AGE_S = 180.0
+EPOCH_TOL_S = 0.5
+
+
+class CounterEpochIdHolder:
+    """Chooses ``counter_epoch_id`` once per counter-map epoch and holds it.
+
+    The registration's id counts only while its summary is fresh and names
+    the same epoch within 0.5 s.  Otherwise the id is ``input-<epoch>``.  The
+    choice never changes within a run, so a summary that comes and goes
+    cannot flip the id; a new epoch chooses again.
+    """
+
+    def __init__(self):
+        self._held = None          # (epoch_gps_s, id)
+
+    def get(self, t6_map, summary: Optional[dict], summary_age_s: Optional[float]) -> str:
+        epoch = float(t6_map.input_epoch_gps_s)
+        if self._held is not None and abs(self._held[0] - epoch) <= EPOCH_TOL_S:
+            return self._held[1]
+        chosen = f"input-{epoch:.3f}"
+        try:
+            reg_id = (summary or {}).get("counter_epoch_id")
+            reg_epoch = ((summary or {}).get("counter_map") or {}).get("input_epoch_gps_s")
+            if (reg_id and isinstance(reg_epoch, (int, float))
+                    and summary_age_s is not None
+                    and 0 <= summary_age_s <= SUMMARY_MAX_AGE_S
+                    and abs(reg_epoch - epoch) <= EPOCH_TOL_S):
+                chosen = str(reg_id)
+        except Exception:  # noqa: BLE001
+            pass
+        self._held = (epoch, chosen)
+        return chosen
+
+
 class T6AnchorPublisher:
-    """One write per 60 s at most.  A failure logs and returns False."""
+    """One write per 60 s at most.  A failure returns False.  The log speaks
+    on a change of state only: one WARNING when writes start failing, one INFO
+    when they recover; one WARNING when a corrupt sigma first blanks the index."""
 
     def __init__(self, path: Path = ANCHOR_PATH,
                  mono_fn: Callable[[], float] = time.monotonic,
@@ -109,6 +160,8 @@ class T6AnchorPublisher:
         self._mono = mono_fn
         self._interval = interval_s
         self._last: Optional[float] = None
+        self._failing = False
+        self._sigma_warned = False
         self.write_failures = 0
 
     def maybe_publish(self, **kw) -> bool:
@@ -118,11 +171,22 @@ class T6AnchorPublisher:
         self._last = now
         if kw.get("anchor") is None or kw.get("t6_map") is None:
             return False
+        corrupt = bool(kw.get("authoritative")) and sigma_is_corrupt(kw.get("sigma_ns"))
+        if corrupt and not self._sigma_warned:
+            logger.warning(f"t6-anchor.json: authoritative anchor with corrupt "
+                           f"sigma {kw.get('sigma_ns')!r}; index withheld")
+        self._sigma_warned = corrupt
         try:
             kw.setdefault("now_utc_iso", _utc_iso_now())
             write_t6_anchor(build_t6_anchor(**kw), self.path)
-            return True
         except Exception as exc:  # noqa: BLE001 - never stop the recorder
             self.write_failures += 1
-            logger.warning(f"t6-anchor.json not written ({self.path}): {exc}")
+            if not self._failing:
+                logger.warning(f"t6-anchor.json not written ({self.path}): {exc}")
+            self._failing = True
             return False
+        if self._failing:
+            logger.info(f"t6-anchor.json writes recovered after "
+                        f"{self.write_failures} failure(s)")
+        self._failing = False
+        return True

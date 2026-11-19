@@ -3137,23 +3137,26 @@ class CoreRecorderV2:
             if anchor is None or t6_map is None:
                 return
             auth = self._t6_authority_status() or {}
-            counter_epoch_id = f"input-{t6_map.input_epoch_gps_s:.3f}"
-            summary = None
+            holder = getattr(self, '_t6_epoch_id_holder', None)
+            if holder is None:
+                from .t6_anchor_publisher import CounterEpochIdHolder
+                holder = self._t6_epoch_id_holder = CounterEpochIdHolder()
+            summary = age = None
             try:
                 store = getattr(self, '_t3_shadow_store', None)
-                summary = store.read_summary() if store is not None else None
+                if store is not None:
+                    summary = store.read_summary()
+                    if summary is not None:
+                        age = store.summary_age_s(summary)
             except Exception:  # noqa: BLE001
-                summary = None
-            reg_id = (summary or {}).get('counter_epoch_id')
-            reg_map = (summary or {}).get('counter_map') or {}
-            reg_epoch = reg_map.get('input_epoch_gps_s')
-            # Take the registration's id only when it names this same run.
-            if (reg_id and isinstance(reg_epoch, (int, float))
-                    and abs(reg_epoch - t6_map.input_epoch_gps_s) <= 0.5):
-                counter_epoch_id = str(reg_id)
+                summary = age = None
+            counter_epoch_id = holder.get(t6_map, summary, age)
+            # Same predicate as _t6_anchor_is_authoritative, from one read.
+            authoritative = (auth.get('state') == 'AUTHORITATIVE'
+                             and not (auth.get('violations') or []))
             publisher.maybe_publish(
                 anchor=anchor, t6_map=t6_map,
-                authoritative=self._t6_anchor_is_authoritative(),
+                authoritative=authoritative,
                 authority_state=str(auth.get('state') or 'UNKNOWN'),
                 sigma_ns=auth.get('sigma_ns'),
                 counter_epoch_id=counter_epoch_id,

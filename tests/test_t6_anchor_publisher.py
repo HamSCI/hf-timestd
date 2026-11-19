@@ -18,7 +18,7 @@ from synth_origins import ILEN, counter_map_for, olen_for, rtp_at  # noqa: E402
 
 from hf_timestd.core.native_anchor import NativeAnchor  # noqa: E402
 from hf_timestd.core.t6_anchor_publisher import (  # noqa: E402
-    T6AnchorPublisher, build_t6_anchor, write_t6_anchor,
+    CounterEpochIdHolder, T6AnchorPublisher, build_t6_anchor, write_t6_anchor,
 )
 
 F_IN = 64_800_000
@@ -70,9 +70,21 @@ def test_measured_sigma_else_assumed(fake_anchor, fake_map):
     assert (a["k"], a["p"]) == (2.0, None)
 
 
-def test_non_finite_sigma_is_assumed(fake_anchor, fake_map):
-    a = build_t6_anchor(**_kw(fake_anchor, fake_map, sigma_ns=float("nan")))
-    assert (a["u_epoch_ns"], a["a_level_provenance"]) == (230.0, "assumed")
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -1.0])
+def test_corrupt_sigma_withholds_the_index(fake_anchor, fake_map, bad):
+    d = build_t6_anchor(**_kw(fake_anchor, fake_map, sigma_ns=bad))
+    assert d["anchor_input_index"] is None
+    assert (d["u_epoch_ns"], d["a_level_provenance"]) == (230.0, "assumed")
+
+
+def test_corrupt_sigma_warns_once(tmp_path, fake_anchor, fake_map, caplog):
+    pub = T6AnchorPublisher(path=tmp_path / "a.json", mono_fn=iter(range(0, 1000, 61)).__next__)
+    kw = _kw(fake_anchor, fake_map, sigma_ns=float("nan"))
+    kw.pop("now_utc_iso")
+    with caplog.at_level("WARNING"):
+        pub.maybe_publish(**kw)
+        pub.maybe_publish(**kw)
+    assert len([r for r in caplog.records if "corrupt sigma" in r.message]) == 1
 
 
 def test_status_and_address_kept(fake_anchor, fake_map):
@@ -130,9 +142,57 @@ def test_publisher_writes_once_a_minute(tmp_path, fake_anchor, fake_map):
     assert pub.maybe_publish(**kw) is True
 
 
-def test_publisher_write_failure_returns_false(tmp_path, fake_anchor, fake_map):
-    pub = T6AnchorPublisher(path=tmp_path / "no-such-dir" / "t6.json",
-                            mono_fn=lambda: 1.0)
+def test_publisher_write_failure_logs_on_change_only(tmp_path, fake_anchor, fake_map, caplog):
+    now = [0.0]
+    d = tmp_path / "sub"
+    pub = T6AnchorPublisher(path=d / "t6.json", mono_fn=lambda: now[0])
     kw = _kw(fake_anchor, fake_map)
     kw.pop("now_utc_iso")
-    assert pub.maybe_publish(**kw) is False
+    with caplog.at_level("INFO"):
+        assert pub.maybe_publish(**kw) is False
+        n = len(caplog.records)
+        assert n == 1 and caplog.records[0].levelname == "WARNING"
+        now[0] += 61
+        assert pub.maybe_publish(**kw) is False
+        assert len(caplog.records) == n          # nothing new
+        d.mkdir()
+        now[0] += 61
+        assert pub.maybe_publish(**kw) is True
+        assert caplog.records[-1].levelname == "INFO"
+    assert pub.write_failures == 2
+
+
+def test_epoch_id_held_for_the_run(fake_map):
+    h = CounterEpochIdHolder()
+    good = {"counter_epoch_id": "pair-9",
+            "counter_map": {"input_epoch_gps_s": fake_map.input_epoch_gps_s}}
+    first = h.get(fake_map, None, None)             # no summary yet
+    assert first.startswith("input-")
+    for summ, age in [(good, 10.0), (None, None), (good, 10.0)]:
+        assert h.get(fake_map, summ, age) == first  # never flips mid-run
+
+
+def test_epoch_id_takes_fresh_registration_then_holds(fake_map):
+    h = CounterEpochIdHolder()
+    good = {"counter_epoch_id": "pair-9",
+            "counter_map": {"input_epoch_gps_s": fake_map.input_epoch_gps_s}}
+    assert h.get(fake_map, good, 10.0) == "pair-9"
+    assert h.get(fake_map, None, None) == "pair-9"
+    assert h.get(fake_map, good, 10.0) == "pair-9"
+
+
+def test_stale_or_other_epoch_summary_is_refused(fake_map):
+    good = {"counter_epoch_id": "pair-9",
+            "counter_map": {"input_epoch_gps_s": fake_map.input_epoch_gps_s}}
+    assert CounterEpochIdHolder().get(fake_map, good, 500.0).startswith("input-")
+    other = {"counter_epoch_id": "pair-9",
+             "counter_map": {"input_epoch_gps_s": fake_map.input_epoch_gps_s + 3600}}
+    assert CounterEpochIdHolder().get(fake_map, other, 10.0).startswith("input-")
+
+
+def test_new_epoch_gets_its_own_id(fake_map):
+    h = CounterEpochIdHolder()
+    a = h.get(fake_map, None, None)
+    m2 = counter_map_for(T6_K0, 96_000, epoch_gps_s=fake_map.input_epoch_gps_s + 7200)
+    b = h.get(m2, None, None)
+    assert a != b and h.get(m2, None, None) == b
