@@ -1716,14 +1716,19 @@ class OffsetJudge:
         gps_time_ns: int,
         rtp_timesnap: int,
         sample_rate: int,
+        pair_age_s: float = 0.0,
     ) -> None:
         """Adopt a radiod (GPS_TIME, RTP_TIMESNAP) pair for one source.
 
         Called by the owning client at every anchor adoption (channel
         creation, radiod-restart reseed, status-driven re-anchor).  The
         pair is assumed FRESH at the moment of the call (it comes from
-        the client's own per-source status stream).  Deduplicated by
-        (gps_time_ns, rtp_timesnap).
+        the client's own per-source status stream) unless ``pair_age_s``
+        says how long ago the counter stood at ``rtp_timesnap``.  An
+        anchor round trip re-adopts a pair taken minutes or hours
+        earlier; read as fresh, its age became the offset (AB4EJ
+        2026-11-19: +2911 s, every chunk labelled 48 min ahead).
+        Deduplicated by (gps_time_ns, rtp_timesnap).
 
         A pair change beyond the plausibility threshold, or an RTP
         counter wrap, fractures the segment (spec §5).
@@ -1734,6 +1739,8 @@ class OffsetJudge:
         sample_rate = int(sample_rate)
         gps_unix = gps_time_ns_to_unix(gps_time_ns)
         mono_now = self._mono()
+        # The monotonic moment the counter stood at rtp_timesnap.
+        mono_at_pair = mono_now - max(0.0, float(pair_age_s))
 
         with self._lock:
             st = self._sources.get(source_key)
@@ -1744,7 +1751,7 @@ class OffsetJudge:
                     rtp_timesnap=rtp_timesnap,
                     sample_rate=sample_rate,
                     gps_unix=gps_unix,
-                    mono_at_pair=mono_now,
+                    mono_at_pair=mono_at_pair,
                 )
                 self._sources[source_key] = st
                 logger.info(
@@ -1775,7 +1782,7 @@ class OffsetJudge:
                 st.rtp_timesnap = rtp_timesnap
                 st.sample_rate = sample_rate
                 st.gps_unix = gps_unix
-                st.mono_at_pair = mono_now
+                st.mono_at_pair = mono_at_pair
 
             # Measure at every anchor adoption (spec §3), using the
             # newest bench reading if we have one.
