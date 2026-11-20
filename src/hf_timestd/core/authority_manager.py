@@ -25,6 +25,7 @@ import json
 import logging
 import math
 import os
+import re
 import subprocess
 import tempfile
 import uuid
@@ -34,6 +35,9 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, Tuple, TYPE_CHECKING
 
 from hf_timestd.core.clock_stability import phase_point_from_summary
+from hf_timestd.core.t3_admission import AdmissionMode
+from hf_timestd.core.t3_admission_policy import (
+    AdmissionDecision, MinuteEvidence, T3AdmissionPolicy)
 from hf_timestd.core.host_clock_integrity import (
     DEFAULT_FAULT_MS as HOST_CLOCK_DEFAULT_FAULT_MS,
     DEFAULT_RATE_SUSPECT_PPM as HOST_CLOCK_DEFAULT_RATE_SUSPECT_PPM,
@@ -298,16 +302,28 @@ class AuthorityManager:
         t3_shadow_record: Optional["T3ShadowRecord"] = None,
         judge_status_path: Path = Path("/run/hf-timestd/offset_judge.json"),
         registration_store: Optional["RegistrationStore"] = None,
-        t3_admitted: bool = False,
+        t3_policy: Optional[T3AdmissionPolicy] = None,
+        t3_admitted: Optional[bool] = None,
     ):
         self.probes = list(probes)
-        # Ruling B (Michael, 2026-10-30): ``[timing.t3] admitted``.  Until
-        # it reads true, T3 publishes no authority: its probe result reads
-        # unavailable with ``NOT_ADMITTED_REASON``, so a station without T6
-        # falls through to T2, and the registration block claims no
-        # source.  False by default: a caller that forgets it gets the
-        # closed regime.
-        self.t3_admitted = bool(t3_admitted)
+        # Task A6: the admission policy decides each minute whether T3 may
+        # hold authority (``[timing.t3] admission``).  While T3 stays
+        # unadmitted its probe result reads unavailable with the
+        # decision's reason, so a station without T6 falls through to T2,
+        # and the registration block claims no source.  ``t3_admitted``
+        # stays so tests can stay short: True builds a policy in mode ON,
+        # False one in mode OFF.  Neither builds mode AUTO, which starts
+        # closed: a caller that forgets both gets the closed regime until
+        # the evidence admits T3.  A given policy wins over the flag.
+        if t3_policy is None:
+            if t3_admitted is None:
+                mode = AdmissionMode.AUTO
+            else:
+                mode = AdmissionMode.ON if t3_admitted else AdmissionMode.OFF
+            t3_policy = T3AdmissionPolicy(mode)
+        self.t3_policy = t3_policy
+        # True while the policy step fails in a streak (one ERROR each).
+        self._t3_policy_failing = False
         # Task 15: the per-minute T3 shadow row (stream ``minutes``).  None =
         # no rows and no station transition counter.  ``judge_status_path``
         # is the offset judge's publication, read once per minute row for its
@@ -414,19 +430,35 @@ class AuthorityManager:
         # The sentinel differs from every real value, None included.
         self._t3_reason_announced: object = _UNANNOUNCED
 
+    @property
+    def t3_decision(self) -> AdmissionDecision:
+        """The standing admission decision: the one the last minute row
+        produced (or the policy's initial one)."""
+        return self.t3_policy.decision
+
+    @property
+    def t3_admitted(self) -> bool:
+        """Read-only: whether T3 holds admission now
+        (``t3_decision.admitted``)."""
+        return bool(self.t3_decision.admitted)
+
     def _close_unadmitted_t3(self, results: Dict[str, ProbeResult]) -> None:
         """Ruling B (2026-10-30): an unadmitted T3 holds no rung.
 
         Rewrites the T3 result in place, before hysteresis and selection,
-        as unavailable with ``NOT_ADMITTED_REASON``.  The probe's own
-        reason, and any offset it measured, stay in the result for the
+        as unavailable with the standing decision's reason.  The probe's
+        own reason, and any offset it measured, stay in the result for the
         snapshot and the shadow row.  A no-op once admitted, and when no
-        T3 probe is registered."""
-        if self.t3_admitted:
+        T3 probe is registered.
+
+        Reads the standing decision: this tick's minute row, which may
+        change it, comes after ``_write_state``, so a change reaches the
+        rung on the next tick (30 s in production)."""
+        decision = self.t3_decision
+        if decision.admitted:
             return
         if not any(getattr(p, "t_level", None) == "T3" for p in self.probes):
             return
-        from hf_timestd.core.t3_admission import NOT_ADMITTED_REASON
         r = results.get("T3")
         if r is None:
             return
@@ -442,7 +474,7 @@ class AuthorityManager:
         # host-clock pairs.
         results["T3"] = dataclasses.replace(
             r, available=False, witness_only=False,
-            reason=NOT_ADMITTED_REASON, detail=detail)
+            reason=decision.reason, detail=detail)
 
     def _note_t3(self, results: Dict[str, ProbeResult]) -> Optional[str]:
         """Announce T3's state once, at start and on any change.
@@ -459,8 +491,15 @@ class AuthorityManager:
         r = results.get("T3")
         reason = None if (r is not None and r.available) else (
             (r.reason if r is not None else None) or "no T3 result")
-        if reason != self._t3_reason_announced:
-            self._t3_reason_announced = reason
+        # Task A6: the admission reason carries counts and statistics
+        # ("window filling (3 of 20 minutes)", medians, "pending 60 of
+        # 300 s") that move every minute.  The announcement keys on the
+        # reason with its numbers masked, so it repeats when the kind of
+        # reason changes, not once a minute.  The published field keeps
+        # the full text.
+        key = None if reason is None else _NUMBER_RE.sub("#", reason)
+        if key != self._t3_reason_announced:
+            self._t3_reason_announced = key
             if reason is None:
                 log.warning("T3 available again: the T3 rung may hold "
                             "authority")
@@ -542,24 +581,35 @@ class AuthorityManager:
         The minute comes from ``now_fn``.  In production that is the host
         clock (``datetime.now``), and that is acceptable here only because
         the value is a record stamp: it names the row (``utc_minute``), its
-        day file, and the transition counter's log window, and it enters no
-        timing arithmetic.  Nothing computed from it reaches authority.json,
-        the snapshot, chrony or any tier decision.  A host-clock step at
-        worst repeats or skips one row; ``seq`` and ``process_id`` let a
-        reader see it.
+        day file, the transition counter's log window and the admission
+        policy's minutes (which minutes fall in its window, how long a
+        change has held), and it enters no timing arithmetic: no offset,
+        sigma or label is computed from it, and nothing reaches chrony.
+        A host-clock step at worst repeats or skips one row (the policy
+        ignores a repeated or earlier minute); ``seq`` and ``process_id``
+        let a reader see it.
 
-        Never raises: the record is diagnostic, and the tick has already
-        published authority.json.  A failure streak logs one ERROR, so a bug
-        in the row cannot silently cost the whole record.
+        Task A6: the row also feeds the admission policy.  The manager
+        builds it on the first tick of each new minute whether or not a
+        record exists: build the row, let the policy observe it, write the
+        decision into the row (``admission``), then append when a record
+        exists.  The decision changes after this tick published
+        authority.json, so it reaches authority.json on the next tick.
+
+        Never raises: the tick has already published authority.json.  A
+        failure streak logs one ERROR, so a bug in the row cannot silently
+        cost the whole record.  The row step and the policy step keep
+        separate streaks.  A failing row feeds the policy nothing; a
+        failing policy leaves the standing decision in force and the row
+        still lands, carrying that decision.
         """
-        if self.t3_shadow_record is None:
-            return
         try:
             # Record stamp only -- see the docstring.
             utc_minute = int(self.now_fn().timestamp()) // 60 * 60
             reg = self._published_registration
             counter = self._t3_station_transitions
-            if counter is not None and isinstance(reg, dict):
+            if (self.t3_shadow_record is not None and counter is not None
+                    and isinstance(reg, dict)):
                 # Ruling C (N-2): a summary written in a minute that saw a
                 # radiod run change belongs to the restart that metrology
                 # already announced, once, at WARNING.
@@ -579,8 +629,10 @@ class AuthorityManager:
                 return
             self._t3_shadow_last_minute = utc_minute
             row = self._t3_shadow_minute_row(state, results, utc_minute)
-            self.t3_shadow_record.append(row)
-            self._t3_shadow_seq += 1
+            row["admission"] = self._observe_t3_minute(row)
+            if self.t3_shadow_record is not None:
+                self.t3_shadow_record.append(row)
+                self._t3_shadow_seq += 1
             self._t3_shadow_failing = False
         except Exception as exc:  # noqa: BLE001 -- diagnostic only
             if not self._t3_shadow_failing:
@@ -589,6 +641,23 @@ class AuthorityManager:
             else:
                 log.debug("T3 shadow minute row failed: %r", exc)
             self._t3_shadow_failing = True
+
+    def _observe_t3_minute(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        """Feed one minute row to the admission policy; return the
+        decision's block for the row.  On failure the standing decision
+        stays, its block goes in the row, and one ERROR marks the streak.
+        """
+        try:
+            self.t3_policy.observe(MinuteEvidence.from_row(row))
+            self._t3_policy_failing = False
+        except Exception as exc:  # noqa: BLE001 -- never raise into the tick
+            if not self._t3_policy_failing:
+                log.error("T3 admission step failed: %r; the standing "
+                          "decision stays until a minute succeeds", exc)
+            else:
+                log.debug("T3 admission step failed: %r", exc)
+            self._t3_policy_failing = True
+        return self.t3_decision.to_block()
 
     def _t3_shadow_minute_row(
         self,
@@ -1365,6 +1434,15 @@ class AuthorityManager:
         if getattr(state, "t3_unavailable_reason", None) is not None:
             payload["t3_unavailable_reason"] = state.t3_unavailable_reason
 
+        # Additive v1 extension (Task A6): the standing T3 admission
+        # decision, on every tick.  Read before this tick's minute row, so
+        # it names the decision the rung and the registration block used.
+        decision = self.t3_decision
+        try:
+            payload["t3_admission"] = decision.to_block()
+        except Exception as e:  # noqa: BLE001 -- never cost authority.json
+            log.debug("t3_admission block raised: %s", e)
+
         # Additive v1 extension: governor_radiod names which radiod's
         # RTP timebase this Fusion offset is computed against (§4.5.1
         # multi-radiod clarification). Omitted when no provider is
@@ -1391,7 +1469,8 @@ class AuthorityManager:
             store = self._registration_store_or_default()
             summary = store.read_summary()
             payload["registration"] = registration_block(
-                store, summary=summary, admitted=self.t3_admitted)
+                store, summary=summary, admitted=bool(decision.admitted),
+                admission_reason=decision.reason)
             self._published_registration = payload["registration"]
             self._published_summary = summary if isinstance(summary, dict) else None
         except Exception as e:
@@ -1594,6 +1673,8 @@ def _flatten_t3(snapshot: Dict[str, Any], r: Optional[ProbeResult]) -> None:
 
 _UNANNOUNCED = object()
 _UNREAD = object()
+# A number inside a T3 unavailability reason (see AuthorityManager._note_t3).
+_NUMBER_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
 
 # The sign of every offset in a T3 shadow minute row, carried in each row so
 # the analysis never has to guess.  "Reading minus truth" throughout.
@@ -1623,6 +1704,7 @@ def registration_block(
     summary: Any = _UNREAD,
     *,
     admitted: bool = False,
+    admission_reason: Optional[str] = None,
 ) -> dict:
     """The T3 origin's provenance for authority.json (spec §7).
 
@@ -1649,10 +1731,12 @@ def registration_block(
     returned block, in every state, carries ``age_s`` — ``None`` only when
     there is no summary at all.
 
-    ``admitted`` (Ruling B, 2026-10-30): ``[timing.t3] admitted``.  Until it
-    reads true, an ACQUIRED plane governs nothing, so the block keeps
-    ``source="label"`` and adds ``"admission": NOT_ADMITTED_REASON``.  The
-    state and the detail fields stay as published, for the record.
+    ``admitted`` (Ruling B, 2026-10-30; Task A6): whether T3 holds
+    admission.  While it does not, an ACQUIRED plane governs nothing, so
+    the block keeps ``source="label"`` and adds ``"admission"``: the
+    caller's ``admission_reason`` (the admission decision's reason), or
+    ``NOT_ADMITTED_REASON`` when the caller gives none.  The state and the
+    detail fields stay as published, for the record.
     """
     from .registration_store import RegistrationStore as _RegistrationStore
 
@@ -1689,6 +1773,8 @@ def registration_block(
     if state == "WITNESS" and not stale and "residual_vs_t6_ms" in s:
         block["residual_vs_t6_ms"] = s.get("residual_vs_t6_ms")
     if withheld:
-        from hf_timestd.core.t3_admission import NOT_ADMITTED_REASON
-        block["admission"] = NOT_ADMITTED_REASON
+        if admission_reason is None:
+            from hf_timestd.core.t3_admission import NOT_ADMITTED_REASON
+            admission_reason = NOT_ADMITTED_REASON
+        block["admission"] = admission_reason
     return block

@@ -10,7 +10,7 @@ import logging
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +71,56 @@ class T3ShadowRecord:
                     self._pruned_day = self._latest_day
         except Exception as e:  # noqa: BLE001  never propagate
             logger.debug(f"T3ShadowRecord unexpected failure: {e!r}")
+
+    def read_recent(self, since_utc_minute: int) -> List[dict]:
+        """The stream's ``minute`` rows at or after ``since_utc_minute``,
+        oldest first.
+
+        Reads only the day files that can hold such minutes.  Skips a line
+        that does not parse, is not a JSON object, or carries no integer
+        ``utc_minute``, and every row of another ``kind``.  Sorted by
+        ``utc_minute`` (stable, so a repeated minute keeps file order):
+        the admission policy's seed drops any minute at or before the
+        newest it has seen.  Never raises; a failure returns what it read
+        so far, or nothing.
+        """
+        rows: List[dict] = []
+        try:
+            since = int(since_utc_minute)
+            first_day = datetime.fromtimestamp(
+                since, tz=timezone.utc).strftime("%Y%m%d")
+            days = []
+            for p in self.directory.iterdir():
+                m = self._name_re.match(p.name)
+                if m and m.group(1) >= first_day:
+                    days.append((m.group(1), p))
+            for _day, path in sorted(days):
+                try:
+                    with open(path, "r", encoding="utf-8") as fh:
+                        lines = fh.readlines()
+                except Exception as e:  # noqa: BLE001
+                    logger.debug(f"T3ShadowRecord cannot read {path}: {e!r}")
+                    continue
+                for line in lines:
+                    try:
+                        row = json.loads(line)
+                    except Exception:  # noqa: BLE001 -- a torn or bad line
+                        continue
+                    if not isinstance(row, dict) or row.get("kind") != "minute":
+                        continue
+                    minute = row.get("utc_minute")
+                    if isinstance(minute, bool) or not isinstance(minute, int):
+                        continue
+                    if minute >= since:
+                        rows.append(row)
+        except Exception as e:  # noqa: BLE001  never propagate
+            logger.debug(f"T3ShadowRecord '{self.stream}' read_recent "
+                         f"failed: {e!r}")
+        try:
+            rows.sort(key=lambda r: r["utc_minute"])
+        except Exception:  # noqa: BLE001
+            return []
+        return rows
 
     def _note_failure(self, message: str) -> None:
         if not self._failing:

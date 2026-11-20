@@ -20,7 +20,9 @@ from hf_timestd.core.authority_manager import (
     Probe,
 )
 from hf_timestd.core.anchor_closure import anchor_closure_enabled
-from hf_timestd.core.t3_admission import t3_admitted
+from hf_timestd.core.clock_stability import STABILITY_HISTORY_MIN
+from hf_timestd.core.t3_admission import t3_admission_mode
+from hf_timestd.core.t3_admission_policy import T3AdmissionPolicy
 from hf_timestd.core.bpsk_pps_probe import BpskPpsProbe
 from hf_timestd.core.mdns_fusion_advertiser import MdnsFusionAdvertiser
 from hf_timestd.core.chrony_tracking_probe import (
@@ -475,6 +477,7 @@ def build_authority_runner_from_config(
             resolve_ssrc=SsrcByFrequency(str(_fe_status), float(_fe_freq)),
         )
 
+    t3_policy = T3AdmissionPolicy(t3_admission_mode(config))
     manager = AuthorityManager(
         probes=probes,
         output_path=authority_output_path,
@@ -503,7 +506,24 @@ def build_authority_runner_from_config(
         host_clock_alarm_repeat_sec=host_clock_alarm_repeat_sec,
         t3_shadow_record=t3_shadow_record,
         judge_status_path=judge_status_path,
-        # Ruling B (2026-10-30): an unadmitted T3 publishes no authority.
-        t3_admitted=t3_admitted(config),
+        # Task A6: the admission policy, in the mode ``[timing.t3]
+        # admission`` names, decides each minute whether T3 holds authority.
+        t3_policy=t3_policy,
     )
+    # Warm start: a restart (a deploy) must not withhold T3 for a whole
+    # window.  The seed reads the last STABILITY_HISTORY_MIN minutes of the
+    # shadow record.  ``now_minute`` comes from the manager's now_fn as a
+    # record stamp only: it picks which rows to read, the same stamp the
+    # rows themselves carry, and enters no timing arithmetic.  A failure
+    # logs one WARNING and the policy starts empty (closed in auto mode).
+    if t3_shadow_record is not None:
+        try:
+            now_minute = int(manager.now_fn().timestamp()) // 60 * 60
+            n = t3_policy.seed(t3_shadow_record.read_recent(
+                now_minute - STABILITY_HISTORY_MIN * 60))
+            log.info("T3 admission: seeded from %d shadow minute rows; %s",
+                     n, t3_policy.decision.reason)
+        except Exception as exc:  # noqa: BLE001 -- a bad seed costs only the warm start
+            log.warning("T3 admission: seed from the shadow record failed "
+                        "(%r); starting with an empty window", exc)
     return AuthorityRunner(manager=manager, interval_sec=interval_sec)

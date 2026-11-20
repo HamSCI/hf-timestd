@@ -180,3 +180,44 @@ def test_a_late_row_does_not_prune_again(tmp_path):
     old.write_text("{}\n")
     rec.append({"utc_minute": _ts(2026, 10, 29, 23, 59)})  # late row
     assert old.exists()
+
+
+# ── read_recent (Task A6: the admission policy's warm start) ──────────
+
+
+def test_read_recent_returns_minute_rows_since_a_minute_sorted(tmp_path):
+    rec = T3ShadowRecord("minutes", tmp_path)
+    day1, day2 = _ts(2026, 11, 12, 23, 58), _ts(2026, 11, 13, 0, 1)
+    old = _ts(2026, 11, 10, 12, 0)
+    for m in (day2, day1 + 60, day1, old):
+        rec.append(_minute_row(m))
+    rec.append({"kind": "transition", "utc_minute": day2 + 60})
+    rows = rec.read_recent(day1)
+    assert [r["utc_minute"] for r in rows] == [day1, day1 + 60, day2]
+    assert all(r["kind"] == "minute" for r in rows)
+    # A later since drops the earlier rows of the same day file.
+    assert [r["utc_minute"] for r in rec.read_recent(day1 + 60)] == [
+        day1 + 60, day2]
+
+
+def test_read_recent_skips_bad_lines_and_other_streams(tmp_path):
+    rec = T3ShadowRecord("minutes", tmp_path)
+    m = _ts(2026, 11, 13, 12, 0)
+    rec.append(_minute_row(m))
+    path = next(tmp_path.glob("minutes-*.jsonl"))
+    with open(path, "a") as fh:
+        fh.write("{torn line\n")
+        fh.write("[1, 2]\n")
+        fh.write('{"kind": "minute", "utc_minute": "soon"}\n')
+        fh.write('{"kind": "minute", "utc_minute": true}\n')
+    rec.append(_minute_row(m + 60))
+    T3ShadowRecord("minutes_b", tmp_path).append(_minute_row(m + 120))
+    assert [r["utc_minute"] for r in rec.read_recent(m)] == [m, m + 60]
+
+
+def test_read_recent_never_raises(tmp_path):
+    assert T3ShadowRecord("minutes", tmp_path / "absent").read_recent(0) == []
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a file where the directory should be")
+    assert T3ShadowRecord("minutes", blocker).read_recent(0) == []
+    assert T3ShadowRecord("minutes", tmp_path).read_recent("x") == []

@@ -33,6 +33,7 @@ SR = 24000
 WALL0 = 1_800_000_000.0
 KEY = ("hf-status.local", 0xABCD1234)
 NOT_ADMITTED = "not admitted (shadow run pending)"
+MODE_OFF = 'off ([timing.t3] admission = "off")'
 T3_OFF_S = 0.010        # the stand-alone T3 sits 10 ms from truth
 
 
@@ -343,13 +344,16 @@ def _authority(tmp_path, *, t3_available, **kw):
 
 
 def test_unadmitted_t3_publishes_no_authority(tmp_path):
-    m = _authority(tmp_path, t3_available=True)
+    # Task A6: t3_admitted=False builds the policy in mode off, and the
+    # published reason names the mode.
+    m = _authority(tmp_path, t3_available=True, t3_admitted=False)
     for _ in range(3):
         state = m.tick()
     assert state.t_level_active == "T2"
     published = json.loads((tmp_path / "authority.json").read_text())
     assert published["t_level_active"] == "T2"
-    assert published["t3_unavailable_reason"] == NOT_ADMITTED
+    assert published["t3_unavailable_reason"] == MODE_OFF
+    assert published["registration"]["admission"] == MODE_OFF
     # The registration block keeps the record, and claims no source.
     assert published["registration"]["state"] == "ACQUIRED"
     assert published["registration"]["source"] == "label"
