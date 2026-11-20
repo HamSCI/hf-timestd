@@ -335,7 +335,7 @@ def test_the_runner_seeds_the_policy_from_the_record(tmp_path):
 
 def test_a_seed_failure_warns_once_and_starts_empty(tmp_path, monkeypatch,
                                                     caplog):
-    def boom(self, since):
+    def boom(self, since, until_utc_minute=None):
         raise OSError("disk gone")
     monkeypatch.setattr(T3ShadowRecord, "read_recent", boom)
     with caplog.at_level(logging.WARNING):
@@ -343,4 +343,60 @@ def test_a_seed_failure_warns_once_and_starts_empty(tmp_path, monkeypatch,
     warnings = [r for r in caplog.records
                 if r.levelno == logging.WARNING and "seed" in r.getMessage()]
     assert len(warnings) == 1 and "disk gone" in warnings[0].getMessage()
+    assert runner.manager.t3_decision.n_pairs == 0
+
+
+# ── fix round 1 (review of A6) ───────────────────────────────────────
+
+
+def test_the_announcement_repeats_when_only_the_reference_changes(
+        tmp_path, caplog):
+    """Masking the numbers must leave tier names alone: "T6" and "T4"
+    differ."""
+    m = _authority(tmp_path)
+    t2_better = ("withheld: T2 tracks {ref} better (median 0.40 vs 0.30 ms, "
+                 "p95 0.90 vs 0.80 ms)")
+    with caplog.at_level(logging.WARNING):
+        for ref in ("T6", "T6", "T4"):
+            m._note_t3({"T3": ProbeResult(
+                "T3", False, reason=t2_better.format(ref=ref))})
+    lines = [r for r in caplog.records if "T3 UNAVAILABLE" in r.getMessage()]
+    assert len(lines) == 2
+    assert "tracks T4 better" in lines[-1].getMessage()
+
+
+def test_a_row_that_keeps_failing_withdraws_within_one_window(
+        tmp_path, caplog):
+    """A persistent row bug must not freeze an admission: each failed
+    minute feeds the policy empty evidence, so the reference-loss hold
+    runs out within one window (failure closes T3 in auto mode)."""
+    clock = _Clock()
+    m = _authority(tmp_path, clock=clock, record=False)
+    _run(m, clock, ROWS_TO_ADMIT)
+    assert m.t3_decision.admitted is True
+    window_min = m.t3_decision.stability.window_s // 60
+
+    def boom(*a, **k):
+        raise RuntimeError("row builder bug")
+    m._t3_shadow_minute_row = boom
+    with caplog.at_level(logging.DEBUG):
+        _run(m, clock, window_min + 1)
+    assert m.t3_decision.admitted is False
+    assert m.t3_decision.reason.startswith("withheld:")
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errors) == 1
+    # No record exists here: the ERROR names the admission evidence.
+    assert "admission" in errors[0].getMessage()
+    assert "minutes record is incomplete" not in errors[0].getMessage()
+
+
+def test_the_runner_seeds_no_row_stamped_after_now(tmp_path):
+    """A host clock that stepped back leaves rows stamped in the future.
+    The seed must not take them: the policy would then ignore every live
+    minute until the clock caught up."""
+    now = int(datetime.now(timezone.utc).timestamp()) // 60 * 60
+    record = T3ShadowRecord("minutes", tmp_path / "t3_shadow")
+    for k in range(1, 26):
+        record.append(_seed_row(now + 60 * k))
+    runner = _runner(tmp_path)
     assert runner.manager.t3_decision.n_pairs == 0

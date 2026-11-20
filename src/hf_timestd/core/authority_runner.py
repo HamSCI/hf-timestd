@@ -512,7 +512,9 @@ def build_authority_runner_from_config(
     )
     # Warm start: a restart (a deploy) must not withhold T3 for a whole
     # window.  The seed reads the last STABILITY_HISTORY_MIN minutes of the
-    # shadow record.  ``now_minute`` comes from the manager's now_fn as a
+    # shadow record, and nothing stamped after now: a row from before a
+    # host-clock step back would put the policy's last minute in the
+    # future, and it would ignore live minutes until the clock caught up.  ``now_minute`` comes from the manager's now_fn as a
     # record stamp only: it picks which rows to read, the same stamp the
     # rows themselves carry, and enters no timing arithmetic.  A failure
     # logs one WARNING and the policy starts empty (closed in auto mode).
@@ -520,7 +522,8 @@ def build_authority_runner_from_config(
         try:
             now_minute = int(manager.now_fn().timestamp()) // 60 * 60
             n = t3_policy.seed(t3_shadow_record.read_recent(
-                now_minute - STABILITY_HISTORY_MIN * 60))
+                now_minute - STABILITY_HISTORY_MIN * 60,
+                until_utc_minute=now_minute))
             log.info("T3 admission: seeded from %d shadow minute rows; %s",
                      n, t3_policy.decision.reason)
         except Exception as exc:  # noqa: BLE001 -- a bad seed costs only the warm start

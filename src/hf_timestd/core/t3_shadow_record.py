@@ -72,9 +72,12 @@ class T3ShadowRecord:
         except Exception as e:  # noqa: BLE001  never propagate
             logger.debug(f"T3ShadowRecord unexpected failure: {e!r}")
 
-    def read_recent(self, since_utc_minute: int) -> List[dict]:
-        """The stream's ``minute`` rows at or after ``since_utc_minute``,
-        oldest first.
+    def read_recent(self, since_utc_minute: int,
+                    until_utc_minute: Optional[int] = None) -> List[dict]:
+        """The stream's ``minute`` rows at or after ``since_utc_minute``
+        and, when ``until_utc_minute`` is given, at or before it; oldest
+        first.  The upper bound keeps out rows stamped in the future by a
+        host clock that later stepped back.
 
         Reads only the day files that can hold such minutes.  Skips a line
         that does not parse, is not a JSON object, or carries no integer
@@ -87,6 +90,7 @@ class T3ShadowRecord:
         rows: List[dict] = []
         try:
             since = int(since_utc_minute)
+            until = None if until_utc_minute is None else int(until_utc_minute)
             first_day = datetime.fromtimestamp(
                 since, tz=timezone.utc).strftime("%Y%m%d")
             days = []
@@ -111,7 +115,7 @@ class T3ShadowRecord:
                     minute = row.get("utc_minute")
                     if isinstance(minute, bool) or not isinstance(minute, int):
                         continue
-                    if minute >= since:
+                    if minute >= since and (until is None or minute <= until):
                         rows.append(row)
         except Exception as e:  # noqa: BLE001  never propagate
             logger.debug(f"T3ShadowRecord '{self.stream}' read_recent "

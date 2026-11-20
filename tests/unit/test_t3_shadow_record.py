@@ -221,3 +221,13 @@ def test_read_recent_never_raises(tmp_path):
     blocker.write_text("a file where the directory should be")
     assert T3ShadowRecord("minutes", blocker).read_recent(0) == []
     assert T3ShadowRecord("minutes", tmp_path).read_recent("x") == []
+
+
+def test_read_recent_stops_at_an_upper_bound(tmp_path):
+    rec = T3ShadowRecord("minutes", tmp_path)
+    m = _ts(2026, 11, 13, 23, 59)
+    for k in range(4):                      # crosses into the next day file
+        rec.append(_minute_row(m + 60 * k))
+    got = rec.read_recent(m, until_utc_minute=m + 60)
+    assert [r["utc_minute"] for r in got] == [m, m + 60]
+    assert len(rec.read_recent(m)) == 4     # no bound: all of them

@@ -628,7 +628,16 @@ class AuthorityManager:
             if utc_minute == self._t3_shadow_last_minute:
                 return
             self._t3_shadow_last_minute = utc_minute
-            row = self._t3_shadow_minute_row(state, results, utc_minute)
+            try:
+                row = self._t3_shadow_minute_row(state, results, utc_minute)
+            except Exception:
+                # A row that cannot be built is a minute with no evidence.
+                # Fed as such, a persistent row bug withdraws an AUTO
+                # admission through the reference-loss hold within one
+                # window, instead of freezing the standing decision
+                # (failure closes T3 in auto mode).
+                self._observe_empty_t3_minute(utc_minute)
+                raise
             row["admission"] = self._observe_t3_minute(row)
             if self.t3_shadow_record is not None:
                 self.t3_shadow_record.append(row)
@@ -636,11 +645,25 @@ class AuthorityManager:
             self._t3_shadow_failing = False
         except Exception as exc:  # noqa: BLE001 -- diagnostic only
             if not self._t3_shadow_failing:
-                log.error("T3 shadow minute row failed: %r; the minutes "
-                          "record is incomplete until a row succeeds", exc)
+                log.error("T3 shadow minute row failed: %r; until a row "
+                          "succeeds the admission policy gets empty "
+                          "evidence for each minute%s", exc,
+                          "" if self.t3_shadow_record is None
+                          else ", and the minutes record misses it")
             else:
                 log.debug("T3 shadow minute row failed: %r", exc)
             self._t3_shadow_failing = True
+
+    def _observe_empty_t3_minute(self, utc_minute: int) -> None:
+        """Feed the policy a minute with no evidence (no pair, no phase, no
+        sigmas).  Never raises."""
+        try:
+            self.t3_policy.observe(MinuteEvidence(
+                utc_minute=utc_minute, pair=None, phase=None,
+                t3_sigma_ms=None, t2_sigma_ms=None,
+                whole_second_unresolved=False))
+        except Exception as exc:  # noqa: BLE001 -- never raise into the tick
+            log.debug("T3 admission: empty minute failed: %r", exc)
 
     def _observe_t3_minute(self, row: Dict[str, Any]) -> Dict[str, Any]:
         """Feed one minute row to the admission policy; return the
@@ -1674,7 +1697,9 @@ def _flatten_t3(snapshot: Dict[str, Any], r: Optional[ProbeResult]) -> None:
 _UNANNOUNCED = object()
 _UNREAD = object()
 # A number inside a T3 unavailability reason (see AuthorityManager._note_t3).
-_NUMBER_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
+# The lookbehind spares tier names: "T6" and "T4" stay apart, so a change of
+# reference still announces.
+_NUMBER_RE = re.compile(r"(?<![A-Za-z])[-+]?\d+(?:\.\d+)?")
 
 # The sign of every offset in a T3 shadow minute row, carried in each row so
 # the analysis never has to guess.  "Reading minus truth" throughout.
