@@ -39,34 +39,55 @@ T3_OFF_S = 0.010        # the stand-alone T3 sits 10 ms from truth
 # ── the switch ───────────────────────────────────────────────────────
 
 
-def test_the_switch_fails_closed():
+def test_admission_mode_reads_the_new_key_and_maps_the_old(caplog):
     from hf_timestd.core.t3_admission import (
         NOT_ADMITTED_REASON,
-        admitted_from_config,
+        AdmissionMode,
+        admission_mode_from_config as f,
+        t3_admitted,
     )
 
     assert NOT_ADMITTED_REASON == NOT_ADMITTED
-    assert admitted_from_config(None) is False
-    assert admitted_from_config({}) is False
-    assert admitted_from_config({"timing": {"t3": {}}}) is False
-    assert admitted_from_config({"timing": {"t3": {"admitted": False}}}) is False
-    assert admitted_from_config({"timing": {"t3": {"admitted": "true"}}}) is False
-    assert admitted_from_config({"timing": {"t3": "yes"}}) is False
-    assert admitted_from_config({"timing": {"t3": {"admitted": True}}}) is True
+    assert f(None) is AdmissionMode.AUTO
+    assert f({}) is AdmissionMode.AUTO
+    assert f({"timing": {"t3": {"admission": "off"}}}) is AdmissionMode.OFF
+    assert f({"timing": {"t3": {"admission": "on"}}}) is AdmissionMode.ON
+    assert f({"timing": {"t3": {"admitted": True}}}) is AdmissionMode.ON
+    assert f({"timing": {"t3": {"admitted": False}}}) is AdmissionMode.AUTO
+    # The new key wins when both appear.
+    assert f({"timing": {"t3": {"admission": "off", "admitted": True}}}) is AdmissionMode.OFF
+    # Malformed values fall back to the default and log a WARNING.
+    for bad in ({"timing": {"t3": {"admission": "onn"}}},
+                {"timing": {"t3": {"admitted": "true"}}},
+                {"timing": {"t3": "yes"}}):
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            assert f(bad) is AdmissionMode.AUTO
+        assert any(r.levelname == "WARNING" for r in caplog.records)
+    # The deprecated bool shim (Task A7 removes it): only "on" opens.
+    assert t3_admitted({"timing": {"t3": {"admitted": True}}}) is True
+    assert t3_admitted({"timing": {"t3": {"admitted": False}}}) is False
+    assert t3_admitted({"timing": {"t3": {"admission": "auto"}}}) is False
+    assert t3_admitted({}) is False
 
 
-def test_the_template_ships_the_switch_off():
+def test_the_template_ships_admission_auto():
     from pathlib import Path
 
     import toml
 
-    from hf_timestd.core.t3_admission import admitted_from_config
-
     path = (Path(__file__).resolve().parents[2]
             / "config" / "timestd-config.toml.template")
     cfg = toml.loads(path.read_text(encoding="utf-8"))
-    assert cfg["timing"]["t3"]["admitted"] is False
-    assert admitted_from_config(cfg) is False
+    assert cfg["timing"]["t3"] == {"admission": "auto"}
+
+
+def test_validate_warns_on_the_old_admitted_key():
+    from hf_timestd.cli import retired_key_issues
+
+    issues = retired_key_issues({"timing": {"t3": {"admitted": False}}})
+    assert any("admitted" in i["message"] and "admission" in i["message"]
+               for i in issues)
 
 
 # ── the judge: a clock, benches, and one run ─────────────────────────

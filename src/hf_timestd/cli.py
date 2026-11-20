@@ -269,6 +269,8 @@ RETIRED_KEYS = {
         'T6 calibrator; the legacy per-sample-\u0394\u03c6 calibrator is gone',
     ('timing.l6_pps', 'filter_500hz_notch'):
         'retired 2026-09-04 with the legacy calibrator, the only reader',
+    ('timing.t3', 'admitted'):
+        'replaced by [timing.t3] admission; true reads as "on", false as "auto"',
 }
 # The diff-detector sidecar, its HFPS chrony feed and the persisted
 # chain-delay store (RESIDUE_AUDIT §3.4).  No template and no fleet
