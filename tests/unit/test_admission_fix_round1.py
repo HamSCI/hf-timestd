@@ -85,13 +85,14 @@ def test_the_recorder_reads_the_switch_from_its_config(tmp_path, monkeypatch):
             "output_dir": str(tmp_path / f"rec-{admitted}"),
             "ka9q": {"status": "hf-status.local"},
             "timing": {"t3": {"admitted": admitted}}})
-        # Task A7: one gate, built from the mode this config names; the
-        # judge keeps the bool until Task A8 hands it the gate.
+        # Task A7: one gate, built from the mode this config names.  Task
+        # A8: the judge gets that gate itself, not a bool.
         from hf_timestd.core.t3_admission import AdmissionMode
         mode = AdmissionMode.ON if admitted else AdmissionMode.AUTO
         assert rec._t3_admission_mode is mode
         assert rec._t3_gate.mode is mode
-        assert seen["t3_admitted"] is admitted
+        assert seen["t3_gate"] is rec._t3_gate
+        assert "t3_admitted" not in seen
 
 
 def test_metrology_reads_the_switch_from_its_config(tmp_path, monkeypatch):

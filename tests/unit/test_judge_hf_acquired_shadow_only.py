@@ -1,4 +1,4 @@
-"""The tick registration stays out of the judge's adoption until step 7.
+"""The tick registration stays out of adoption until T3 holds admission.
 
 Review of T3 steps 2-5, finding C1 (proofs/review-t3-steps2-5.md,
 2026-10-22).  Step 5 took FusionBench out of the judge's default benches.
@@ -8,11 +8,15 @@ adopt the registration and correct ring and archive labels by it while
 authority.json says T2.  Michael's ruling 4 lets the registration win T3
 only after its shadow run beside T6 on B4 (step 7 of the ruled order).
 
-So, until step 7:
+So, while T3 lacks admission:
   * an ``hf_acquired`` reading is never adopted.  It still feeds the
     shadow residuals, so the shadow run has its numbers;
   * any reading whose ``detail["authoritative"]`` is False (a WITNESS-
     state plane) is never adopted, whatever its bench.
+
+Since Task A8 the T3 admission gate decides; these judges carry no gate,
+so they build the closed fixed gate.  ``test_judge_t3_follows_admission``
+shows adoption following the gate, under the cross-bench gate.
 """
 
 import json

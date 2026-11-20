@@ -733,8 +733,9 @@ class CoreRecorderV2:
         # process builds ONE admission gate from it.  The gate follows the
         # decision the fusion service's authority manager publishes in
         # authority.json; the 60 s revalidation tick refreshes it (in
-        # ``_refresh_t3_native_anchor``) and the T3 anchor holder asks it.
-        from .t3_admission import AdmissionMode, t3_admission_mode
+        # ``_refresh_t3_native_anchor``); the T3 anchor holder, the offset
+        # judge and the judge's T3 bench ask it.
+        from .t3_admission import t3_admission_mode
         from .t3_admission_gate import T3AdmissionGate
         self._t3_admission_mode = t3_admission_mode(config)
         self._t3_gate = T3AdmissionGate(self._t3_admission_mode)
@@ -770,13 +771,11 @@ class CoreRecorderV2:
         if _oj_cfg.get('enabled', True):
             try:
                 from .offset_judge import OffsetJudge
-                # Task A8 hands the judge the gate itself.  Until then it
-                # keeps today's bool: admitted only in mode ON (old
-                # ``admitted = true`` configs read ON), so auto stays
-                # closed in the judge.
+                # The judge asks the process's one T3 admission gate at
+                # decision time; the 60 s revalidation tick refreshes it.
                 self._offset_judge = OffsetJudge(
                     config=_oj_cfg, anchor_closure=self._anchor_closure,
-                    t3_admitted=(self._t3_admission_mode is AdmissionMode.ON))
+                    t3_gate=self._t3_gate)
                 self._offset_judge.start()
             except Exception as e:
                 logger.error(
@@ -869,7 +868,8 @@ class CoreRecorderV2:
                 self._offset_judge.add_bench(
                     LbeT5Bench(provider=self._t5_bench_state))
                 self._offset_judge.add_bench(
-                    HfAcquiredBench(provider=self._hf_acquired_bench_state))
+                    HfAcquiredBench(provider=self._hf_acquired_bench_state,
+                                    clock_provider=self._t3_gate.clock))
                 logger.info("OffsetJudge: T6 (NativeAnchor) + T5 (LB-142x "
                             "pairing) + T3 (hf_acquired) benches wired")
             except Exception as e:

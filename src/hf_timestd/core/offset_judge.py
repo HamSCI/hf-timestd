@@ -61,7 +61,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Deque, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Callable, Deque, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -75,6 +75,10 @@ from .leap_second import gps_leap_seconds_at_gps_time
 # import is safe at module scope (registration_store stays lazy because
 # constructing a default store touches the filesystem path).
 from .registration_acquirer import ORIGIN_SIGMA_FLOOR_MS
+
+if TYPE_CHECKING:  # annotations only; the judge imports these lazily
+    from .clock_stability import ClockStability
+    from .t3_admission_gate import T3AdmissionGate
 
 logger = logging.getLogger(__name__)
 
@@ -971,6 +975,16 @@ class HfAcquiredBench:
     registration's in quadrature; a named but empty floor falls back to the
     latest arrival with NativeAnchorBench's transport bound.  An arrival of
     four elements or fewer keeps the pre-floor reading.
+
+    Task A8, the clock term: ``clock_provider()`` returns the station's
+    published ``ClockStability`` (the recorder passes the T3 admission
+    gate's ``clock``), or None.  The registration's origin was measured
+    ``registration_age_s`` ago and has been carried forward on the radiod
+    clock since, so with a measured drift D ns/s the reading's sigma
+    gains D x age in quadrature, and the registration stays fresh until
+    that term reaches the 1 ms origin floor: ``1e6 / D`` seconds, held
+    between ``FRESHNESS_S`` and the stability's ``window_s``.  Without a
+    measured drift the bench reads as before.
     """
 
     TIER = "T3"
@@ -982,12 +996,57 @@ class HfAcquiredBench:
                  provider: Callable[
                      [], Optional[Dict[str, Tuple[int, float, int]]]],
                  store=None, mono_fn: Callable[[], float] = time.monotonic,
-                 time_fn: Callable[[], float] = time.time):
+                 time_fn: Callable[[], float] = time.time,
+                 clock_provider: Callable[[], Optional["ClockStability"]] = (
+                     lambda: None)):
         from .registration_store import RegistrationStore
         self._provider = provider
         self._store = store if store is not None else RegistrationStore()
         self._mono = mono_fn
         self._time = time_fn
+        self._clock_provider = clock_provider
+
+    def _clock_drift_ns_per_s(self) -> Tuple[Optional[float], Optional[float]]:
+        """(drift_ns_per_s, window_s) from the published clock stability,
+        or (None, None) while it is unmeasured.
+
+        Builder choice (the conservative side): a drift that is None, not
+        finite, or not above zero counts as unmeasured.  ``ClockStability``
+        publishes ``abs(slope) + sigma``, so a real measurement is always
+        positive; a zero would otherwise read as a perfect clock and stretch
+        freshness to the whole window with no clock term.  A provider that
+        raises counts as unmeasured too: it keeps today's bench."""
+        try:
+            cs = self._clock_provider()
+        except Exception:  # noqa: BLE001 -- clock trouble keeps today's bench
+            return None, None
+        if cs is None:
+            return None, None
+        try:
+            drift = float(cs.drift_ns_per_s)
+            window_s = float(cs.window_s)
+        except (AttributeError, TypeError, ValueError):
+            return None, None
+        if not (math.isfinite(drift) and drift > 0.0
+                and math.isfinite(window_s)):
+            return None, None
+        return drift, window_s
+
+    def _freshness_s(self, drift: Optional[float],
+                     window_s: Optional[float]) -> float:
+        """How old the registration may be and still read.
+
+        Builder choice: the age at which the clock term ``drift x age``
+        reaches the 1 ms origin floor (``ORIGIN_SIGMA_FLOOR_MS``), clamped
+        to [FRESHNESS_S, window_s].  The lower clamp keeps a crystal clock
+        no worse off than today; the upper one keeps a GPSDO clock from
+        carrying an origin past the window that admitted it.  Unmeasured
+        stability keeps FRESHNESS_S."""
+        if drift is None:
+            return self.FRESHNESS_S
+        hi = max(self.FRESHNESS_S, float(window_s))
+        limit = ORIGIN_SIGMA_FLOOR_MS * 1e6 / drift
+        return min(max(limit, self.FRESHNESS_S), hi)
 
     @staticmethod
     def _one_run(summary_map, live_map) -> bool:
@@ -1044,7 +1103,9 @@ class HfAcquiredBench:
         if s.get("verified") is not True:
             return None
         reg_age = self._time() - float(s.get("written_at", 0))
-        if reg_age > self.FRESHNESS_S:
+        drift, window_s = self._clock_drift_ns_per_s()
+        fresh_s = self._freshness_s(drift, window_s)
+        if reg_age > fresh_s:
             return None
         sr = float(s["sample_rate"])
         # Fix round 1 F1/F2: the arrival's RTP counter must be the SAME
@@ -1071,6 +1132,14 @@ class HfAcquiredBench:
         # actually measured.
         sigma_ms = max(float(s["sigma_ms"]), ORIGIN_SIGMA_FLOOR_MS)
         sigma_ns = sigma_ms * 1e6
+        # Task A8: the clock term.  The origin has ridden the radiod clock
+        # for reg_age seconds; a measured drift grows its error with age.
+        clock_detail = {}
+        if drift is not None:
+            clock_ns = drift * max(reg_age, 0.0)
+            sigma_ns = math.hypot(sigma_ns, clock_ns)
+            clock_detail = {"clock_term_ns": round(clock_ns, 1),
+                            "freshness_s": round(fresh_s, 1)}
         floor_detail = {}
         if len(tuple(arrival)) > 4:
             # Fix 1: the least-delayed arrival, not the latest, hands the
@@ -1095,7 +1164,7 @@ class HfAcquiredBench:
         from .registration_store import registration_refusal
         refusal = registration_refusal(
             s, now=self._time(),
-            stale_s=self.FRESHNESS_S, sample_rate=int(arrival_sample_rate),
+            stale_s=fresh_s, sample_rate=int(arrival_sample_rate),
         )
         return BenchReading(
             utc=utc, mono=float(arrival_mono), sigma_ns=sigma_ns,
@@ -1104,7 +1173,7 @@ class HfAcquiredBench:
                     "raw_pair_residual_ms": s.get("raw_pair_residual_ms"),
                     "registration_age_s": round(reg_age, 1),
                     "authoritative": refusal is None,
-                    "refusal": refusal, **floor_detail},
+                    "refusal": refusal, **clock_detail, **floor_detail},
             plane="label",
         )
 
@@ -1200,21 +1269,21 @@ class OffsetJudge:
     # Tier preference, best first (P1 bench set + holdover).
     TIER_ORDER = ("T6", "T5", "T4", "T3", "T2", "T1", "T0")
 
-    # Benches that witness but are never adopted (review of T3 steps 2-5,
-    # finding C1, 2026-10-22).  The tick registration may win the judge's
-    # T3 slot only after its shadow run beside T6 on B4 (Michael's ruling
-    # 4; step 7 of the ruled order).  Until then its readings feed the
-    # shadow residuals and the label-plane anchor, and never correct a
-    # label.  Nor do they vote in witness dissent (final review I-1,
-    # 2026-10-30), which reaches chrony through the HPPS precision.
-    # Step 7 removes it from this set.
+    # Benches that witness but are never adopted while T3 lacks admission
+    # (review of T3 steps 2-5, finding C1, 2026-10-22; final review I-1,
+    # 2026-10-30).  While shadow-only, a reading feeds the shadow
+    # residuals and never corrects a label, and it casts no vote in
+    # witness dissent, which reaches chrony through the HPPS precision.
     #
-    # Paired with ``[timing.t3] admitted`` (``t3_admission.py``, Michael's
-    # ruling B, 2026-10-30).  Until that switch reads true the judge also
-    # keeps T3 out of the label-plane tracker, out of
-    # ``label_plane_anchor`` and out of §18.  Step 7 flips the switch and
-    # empties this set together; either alone leaves T3 half admitted.
-    SHADOW_ONLY_BENCHES = frozenset({"hf_acquired"})
+    # One decision now drives this and every other T3 surface in the
+    # judge: the T3 admission gate (``t3_admission_gate.py``, Task A8).
+    # The old pairing -- ``[timing.t3] admitted`` flipped together with
+    # emptying a fixed set -- no longer applies.  ``_shadow_only`` asks
+    # the gate at decision time, and ``_t3_closed`` asks the same gate,
+    # so T3 cannot end up half admitted.  An admitted reading may be
+    # adopted only through the existing cross-bench gate
+    # (``_select_bench_locked``).
+    _T3_GATED_BENCHES = frozenset({"hf_acquired"})
 
     def __init__(
         self,
@@ -1226,14 +1295,21 @@ class OffsetJudge:
         mono_fn: Callable[[], float] = time.monotonic,
         alert_runner: Optional[Callable[..., subprocess.CompletedProcess]] = None,
         anchor_closure: bool = False,
+        t3_gate: Optional["T3AdmissionGate"] = None,
         t3_admitted: bool = False,
     ):
         cfg = dict(config or {})
-        # Ruling B (2026-10-30): until ``[timing.t3] admitted`` reads true,
-        # a T3 reading reaches the shadow residuals and nothing else here
-        # (see ``_t3_closed``).  False by default, so a caller that forgets
-        # the flag gets the closed regime.
-        self.t3_admitted = bool(t3_admitted)
+        # Ruling B (2026-10-30), Task A8: until the T3 admission gate says
+        # admitted, a T3 reading reaches the shadow residuals and nothing
+        # else here (see ``_t3_closed`` and ``_shadow_only``).  The judge
+        # reads the gate at decision time and never refreshes it; the
+        # recorder does that on its revalidation tick.  Without a gate,
+        # ``t3_admitted`` builds a fixed one, False by default, so a caller
+        # that forgets both gets the closed regime.
+        if t3_gate is None:
+            from .t3_admission_gate import T3AdmissionGate
+            t3_gate = T3AdmissionGate.fixed(bool(t3_admitted))
+        self._t3_gate = t3_gate
         # Task 17a: the registration anchor closure is opt-in
         # ([timing.registration] anchor_closure).  While it is off the
         # judge stays exactly where c7b2106 left it -- §18's
@@ -2049,11 +2125,29 @@ class OffsetJudge:
             if tier in self.TIER_ORDER else len(self.TIER_ORDER)
         )
 
+    @property
+    def t3_admitted(self) -> bool:
+        """Does T3 hold admission now?  Read-only: the gate decides."""
+        return self._t3_admitted_now()
+
+    def _t3_admitted_now(self) -> bool:
+        """The gate's answer: an attribute read, no I/O.  A gate that
+        raises reads as not admitted (closed side)."""
+        try:
+            return bool(self._t3_gate.admitted())
+        except Exception:  # noqa: BLE001 -- gate trouble closes T3
+            return False
+
+    def _shadow_only(self, bench: Optional[str]) -> bool:
+        """Is this bench shadow-only right now?  ``hf_acquired`` is,
+        exactly while the gate says T3 is not admitted."""
+        return bench in self._T3_GATED_BENCHES and not self._t3_admitted_now()
+
     def _adoptable(self, r: BenchReading) -> bool:
         """May this reading be adopted?  Not if its bench is shadow-only,
         and not if it says it is not authoritative."""
         detail = r.detail or {}
-        if detail.get("bench") in self.SHADOW_ONLY_BENCHES:
+        if self._shadow_only(detail.get("bench")):
             return False
         # The change-alarm latch (spec §5): while a T6 chain-delay change
         # stands, T6 is not adoptable at all.
@@ -2064,13 +2158,13 @@ class OffsetJudge:
     def _t3_closed(self, tier: Optional[str]) -> bool:
         """Is this a T3 reading or anchor the station has not admitted?
 
-        Ruling B (Michael, 2026-10-30): until ``[timing.t3] admitted``
-        reads true, T3 reaches nothing beyond its own shadow record and
+        Ruling B (Michael, 2026-10-30), Task A8: until the admission gate
+        says admitted, T3 reaches nothing beyond its own shadow record and
         its published summary.  Here that closes the label-plane tracker
         (N-1), ``label_plane_anchor`` and §18's label anchor.  The shadow
         residuals and the ``t3_shadow`` block stay open: B4's shadow run
         needs them."""
-        return tier == "T3" and not self.t3_admitted
+        return tier == "T3" and not self._t3_admitted_now()
 
     def _select_bench_locked(
         self, readings: List[BenchReading]
@@ -2101,7 +2195,7 @@ class OffsetJudge:
         sigma_ns is the secondary sort key within one tier.
         """
         # Adoption is for authoritative readings only.  A shadow-only
-        # bench (SHADOW_ONLY_BENCHES) and any reading that says it is not
+        # bench (``_shadow_only``) and any reading that says it is not
         # authoritative (a WITNESS-state plane) still reach the shadow
         # residuals through tick(), but never this selection.
         readings = [r for r in readings if self._adoptable(r)]
@@ -3533,8 +3627,15 @@ class OffsetJudge:
         # registration may sit any distance from T6 until stage 0 settles
         # the chain delay, and two witnesses can convict.  Joined by T4,
         # it widened the HPPS precision chrony sees.  Michael's ruling:
-        # T3 votes nowhere until step 7 admits it.  Its row stays in
+        # T3 votes nowhere until admitted.  Its row stays in
         # shadow_residuals for the record.
+        #
+        # Task A8, builder choice (the closed side): an admitted reading
+        # votes only if it is authoritative.  A plane the one gate
+        # (``registration_refusal``) refuses -- a WITNESS-state plane on a
+        # T6 station, say -- may not place UTC, so it may not convict
+        # the bench that does either.  Only HfAcquiredBench sets
+        # ``authoritative``; every other bench votes as before.
         voters: Dict[str, Dict] = {}
         if adopted is not None:
             for r in readings:
@@ -3548,7 +3649,10 @@ class OffsetJudge:
                     "vs_tier": adopted.tier,
                 }
                 shadows[r.tier] = row
-                if (r.detail or {}).get("bench") in self.SHADOW_ONLY_BENCHES:
+                detail = r.detail or {}
+                if self._shadow_only(detail.get("bench")):
+                    continue
+                if detail.get("authoritative", True) is False:
                     continue
                 voters[r.tier] = row
         self._shadow_residuals = shadows

@@ -10,6 +10,7 @@ from hf_timestd.core import offset_judge
 from hf_timestd.core.chain_delay_store import ChainDelayRecord
 from hf_timestd.core.core_recorder_v2 import chain_delay_identity_for
 from hf_timestd.core.offset_judge import BenchReading, OffsetJudge
+from hf_timestd.core.t3_admission_gate import T3AdmissionGate
 
 
 class FakeClock:
@@ -331,7 +332,9 @@ def test_a_confirmed_record_is_never_overwritten_by_the_learner(tmp_path):
 
 def test_t3_readings_stay_out_of_the_t6_learner(tmp_path):
     j = learning_judge(tmp_path)
-    j.t3_admitted = True   # an admitted T3 feeds its own tracker (Ruling B)
+    # An admitted T3 feeds its own tracker (Ruling B).  The gate decides
+    # (Task A8), so admission arrives as a fixed gate.
+    j._t3_gate = T3AdmissionGate.fixed(True)
     clock = j._test_clock
     for _ in range(60):
         clock.wall += 10.0
@@ -356,7 +359,9 @@ def test_learn_off_feeds_t6_to_the_label_plane_as_today(tmp_path):
 def test_without_a_record_t6_uses_the_config_term_not_t3s(tmp_path):
     """With learning on, the T3 tracker never supplies T6's plane term."""
     j = learning_judge(tmp_path, label_plane_offset_ns=-16_500_000.0)
-    j.t3_admitted = True   # an admitted T3 feeds its own tracker (Ruling B)
+    # An admitted T3 feeds its own tracker (Ruling B).  The gate decides
+    # (Task A8), so admission arrives as a fixed gate.
+    j._t3_gate = T3AdmissionGate.fixed(True)
     clock = j._test_clock
     for _ in range(60):
         clock.wall += 10.0

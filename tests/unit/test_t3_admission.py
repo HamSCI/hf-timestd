@@ -453,21 +453,26 @@ def test_admitted_t3_may_hold_authority(tmp_path):
     assert published["t3_unavailable_reason"] == "probe says no"
 
 
-def test_admitted_shadow_only_t3_still_never_dissents(tmp_path):
-    """Admission alone does not give hf_acquired a vote: it stays in
-    SHADOW_ONLY_BENCHES until step 7 removes it, together with the switch."""
+@pytest.mark.parametrize("authoritative", [False, True])
+def test_admitted_t3_dissents_only_when_authoritative(tmp_path, authoritative):
+    """Task A8: one decision drives the vote too.  Admitted, hf_acquired is
+    no longer shadow-only and votes in witness dissent, but only while its
+    reading is authoritative: a WITNESS-state plane the one gate refuses
+    still never convicts T6 (builder choice, the closed side)."""
     from tests.unit.test_shadow_only_never_dissents import (
+        OFF_S as _OFF_S,
         _Bench as _DBench,
         _Clock as _DClock,
         _hpps_floor,
-        _hf_acquired,
         _t4 as _dt4,
     )
 
     clock = _DClock()
     t6 = _DBench(clock, "T6", 10_000.0, "native_anchor", plane="label")
+    t3 = _DBench(clock, "T3", 1_000_000.0, "hf_acquired", offset_s=_OFF_S,
+                 plane="label", authoritative=authoritative)
     judge = OffsetJudge(config={"enabled": True, "upgrade_polls": 1},
-                        benches=[t6, _dt4(clock), _hf_acquired(clock)],
+                        benches=[t6, _dt4(clock), t3],
                         publish_path=tmp_path / "offset_judge.json",
                         time_fn=clock.wall, mono_fn=lambda: clock.mono,
                         t3_admitted=True)
@@ -482,5 +487,9 @@ def test_admitted_shadow_only_t3_still_never_dissents(tmp_path):
         clock.mono += 10.0
     assert judge._best.tier == "T6"
     assert "T3" in judge._shadow_residuals
-    assert judge._dissent is None
-    assert _hpps_floor(judge) is None
+    if authoritative:
+        assert judge._dissent is not None and "T3" in judge._dissent.tiers
+        assert _hpps_floor(judge) is not None
+    else:
+        assert judge._dissent is None
+        assert _hpps_floor(judge) is None

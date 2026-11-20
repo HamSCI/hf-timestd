@@ -7,8 +7,11 @@ dissent treated every shadow entry as a witness.  T3 joined by one more
 witness at a similar offset could then convict T6, and the recorder's
 HPPS push would widen its ``precision`` to chrony on T3's word.
 
-Michael's ruling: T3 votes nowhere until step 7 admits it.  The reading
-stays in ``shadow_residuals`` for the record, and nothing else.
+Michael's ruling: T3 votes nowhere until admitted.  The reading stays in
+``shadow_residuals`` for the record, and nothing else.  Since Task A8 the
+T3 admission gate decides; these judges carry no gate, so they build the
+closed fixed gate.  ``test_judge_t3_follows_admission`` covers the open
+side.
 """
 
 from types import SimpleNamespace
