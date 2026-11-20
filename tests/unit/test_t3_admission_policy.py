@@ -305,3 +305,46 @@ def test_honesty_sees_every_pair():
         policy.observe(ev(i))
     assert isinstance(policy.honesty, SigmaHonesty)
     assert policy.honesty.by_hour()[0].n == 30
+
+
+def test_a_sparse_good_pair_during_reference_loss_does_not_end_the_hold():
+    # Pairs 0..30 with T3 winning, then none except one good pair at 50.
+    # Favourable evidence must not withdraw sooner than no evidence at all,
+    # and one sparse pair must not stretch the grace either.
+    _, decisions = run([ev(i) for i in range(31)]
+                       + [ev(i) if i == 50 else ev(i, no_pair=True)
+                          for i in range(31, 70)])
+    assert decisions[50].admitted is True
+    assert decisions[50].route == "reference"
+    assert decisions[59].admitted is True
+    assert decisions[60].admitted is False
+    assert decisions[60].reason == "withheld: no reference, and no fleet calibration yet"
+
+
+def test_a_jump_ends_the_reference_loss_grace():
+    _, decisions = run([ev(i) for i in range(31)]
+                       + [ev(i, phase=0.0, no_pair=True) for i in range(31, 45)]
+                       + [ev(45, phase=700.0, no_pair=True)]
+                       + [ev(i, phase=700.0, no_pair=True) for i in range(46, 60)])
+    assert decisions[44].admitted is True
+    assert all(not d.admitted for d in decisions[45:])
+    assert decisions[-1].reason == "withheld: no reference, and no fleet calibration yet"
+
+
+def test_seed_counts_no_transitions():
+    policy = T3AdmissionPolicy(AdmissionMode.AUTO)
+    assert policy.seed(_row(i) for i in range(40)) == 40
+    d = policy.decision
+    assert d.admitted is True and d.n_pairs == 30
+    assert d.transitions == 0 and d.since_utc_minute is None
+    # Live minutes count from process start.
+    d = policy.observe(ev(40, 600.0))
+    assert d.admitted is False and d.transitions == 1
+    assert d.since_utc_minute == 40 * 60
+
+
+def test_jump_reasons_name_the_magnitude():
+    _, decisions = run(ev(i, phase=-700.0 if i >= 40 else 0.0) for i in range(41))
+    assert decisions[40].reason == "withdrawn: T3 jumped 700 ms"
+    _, decisions = run(ev(i, -600.0 if i == 40 else 0.3) for i in range(41))
+    assert decisions[40].reason == "withdrawn: T3 named the wrong second (600 ms against T6)"

@@ -246,7 +246,10 @@ class T3AdmissionPolicy:
         self._pairs: Deque[_Pair] = deque()
         self._last_minute: Optional[int] = None
         self._last_phase: Optional[PhasePoint] = None
-        self._last_pair_minute: Optional[int] = None
+        # Reference-loss grace runs from the newest pair the last full
+        # verdict (n >= need) judged.  Sparse pairs after it, too few to
+        # judge, neither end nor stretch the grace.  A jump clears it.
+        self._last_judged_pair_minute: Optional[int] = None
         # A jump holds T3 withdrawn until this minute, in every mode.
         self._jump_until: Optional[int] = None
         self._jump_reason: Optional[str] = None
@@ -277,8 +280,13 @@ class T3AdmissionPolicy:
         teach the policy a window with no stability behind it.  A row whose
         minute repeats or runs backward is not counted.  Changes of
         ``admitted`` during the seed log at INFO, not WARNING: they replay
-        history that the previous process already announced.  Never
-        raises."""
+        history that the previous process already announced.
+
+        The seed restores ``admitted`` and the window, but not the history
+        of changes: afterwards ``transitions`` reads 0 and
+        ``since_utc_minute`` reads None.  Both count from process start.
+        ``since_utc_minute`` None after a seed means "admitted (or
+        withheld) since before this process started".  Never raises."""
         used = 0
         self._seeding = True
         try:
@@ -296,6 +304,8 @@ class T3AdmissionPolicy:
             pass
         finally:
             self._seeding = False
+            self._decision = dataclasses.replace(
+                self._decision, transitions=0, since_utc_minute=None)
         return used
 
     # --------------------------------------------------------------- observe
@@ -341,12 +351,11 @@ class T3AdmissionPolicy:
                     and _num(ev.pair.t2_error_ms) is not None)
         if jump is not None:
             self._pairs.clear()
-            self._last_pair_minute = None
+            self._last_judged_pair_minute = None
         elif complete and not ev.whole_second_unresolved:
             self._pairs.append(_Pair(now, ev.pair.reference,
                                      float(ev.pair.t3_error_ms),
                                      float(ev.pair.t2_error_ms)))
-            self._last_pair_minute = now
         while self._pairs and self._pairs[0].minute <= now - WINDOW_MAX_S:
             self._pairs.popleft()
 
@@ -375,7 +384,7 @@ class T3AdmissionPolicy:
         elif mode is AdmissionMode.ON:
             self._settle(now, True, ROUTE_FORCED, REASON_FORCED, immediate=True)
         else:
-            self._auto(now, ev, complete, window, stats, reference, stab)
+            self._auto(now, ev, window, stats, reference, stab)
 
         if self._jump_until is not None and now >= self._jump_until:
             self._jump_until = None
@@ -393,7 +402,7 @@ class T3AdmissionPolicy:
         if ev.pair is not None:
             err = _num(ev.pair.t3_error_ms)
             if err is not None and abs(err) >= JUMP_MS:
-                return REASON_WRONG_SECOND.format(err=err, ref=ev.pair.reference)
+                return REASON_WRONG_SECOND.format(err=abs(err), ref=ev.pair.reference)
         last = self._last_phase
         if (ev.phase is not None and last is not None
                 and ev.phase.run_id == last.run_id):
@@ -402,7 +411,7 @@ class T3AdmissionPolicy:
             # a step).  A run change starts a new phase origin: no jump.
             step = ev.phase.phase_ms - last.phase_ms
             if math.isfinite(step) and abs(step) >= JUMP_MS:
-                return REASON_JUMPED.format(step=step)
+                return REASON_JUMPED.format(step=abs(step))
         return None
 
     @staticmethod
@@ -414,11 +423,12 @@ class T3AdmissionPolicy:
         return (float(np.median(e3)), float(np.percentile(e3, 95)),
                 float(np.median(e2)), float(np.percentile(e2, 95)))
 
-    def _auto(self, now, ev, complete, window, stats, reference, stab):
+    def _auto(self, now, ev, window, stats, reference, stab):
         need = _need(stab.window_s)
         n = len(window)
         d = self._decision
         if n >= need:
+            self._last_judged_pair_minute = window[-1].minute
             t3m, t3p, t2m, t2p = stats
             if t3m < t2m and t3p < t2p:
                 self._settle(now, True, ROUTE_REFERENCE,
@@ -430,13 +440,25 @@ class T3AdmissionPolicy:
                     immediate=False)
             return
         # Too few pairs to judge.  Reference loss: an admission by reference
-        # with no change pending holds for one window after the last pair.
+        # with no change pending holds for one window after the newest pair
+        # the last full verdict judged.  Whether this minute brought a pair
+        # does not matter: a good sparse pair must not end the hold sooner
+        # than no pair at all (review A5, Important 1).
+        #
+        # Ruling note: the anchor is the newest pair of the last full
+        # verdict, not the minute of that verdict.  The verdict minute lags
+        # the pair by up to window_s - need minutes (pairs 0..30: last full
+        # verdict at 40), and anchoring there would stretch the grace past
+        # one window of reference loss.
+        anchor = self._last_judged_pair_minute
         if (d.admitted and d.route == ROUTE_REFERENCE
-                and self._pending_since is None and not complete
-                and self._last_pair_minute is not None
-                and now - self._last_pair_minute < stab.window_s):
+                and self._pending_since is None
+                and anchor is not None
+                and now - anchor < stab.window_s):
             ref = d.reference or reference
-            m = (now - self._last_pair_minute) // 60
+            # The count runs from the same anchor, so it reads how much of
+            # the grace has gone and reaches window_s/60 as the hold ends.
+            m = (now - anchor) // 60
             self._settle(now, True, ROUTE_REFERENCE,
                          REASON_ADMITTED_HELD.format(ref=ref, m=m),
                          immediate=True)
