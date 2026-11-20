@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, Tuple, TYPE_CHECKING
 
+from hf_timestd.core.clock_stability import phase_point_from_summary
 from hf_timestd.core.host_clock_integrity import (
     DEFAULT_FAULT_MS as HOST_CLOCK_DEFAULT_FAULT_MS,
     DEFAULT_RATE_SUSPECT_PPM as HOST_CLOCK_DEFAULT_RATE_SUSPECT_PPM,
@@ -627,6 +628,17 @@ class AuthorityManager:
                 return None
             return v if math.isfinite(v) else None
 
+        def sigma(level: str) -> Optional[float]:
+            r = results.get(level)
+            v = None if r is None else r.sigma_ms
+            if not isinstance(v, (int, float)) or isinstance(v, bool):
+                return None
+            return float(v) if math.isfinite(v) else None
+
+        # T3's phase and run, for the admission policy's stability estimate;
+        # None when the summary cannot say (phase_point_from_summary).
+        phase = phase_point_from_summary(summary, utc_minute)
+
         counter = self._t3_station_transitions
         return {
             "kind": "minute",
@@ -660,6 +672,10 @@ class AuthorityManager:
             "t3_vs_adopted": vs_adopted("T3"),
             "t4_vs_adopted": vs_adopted("T4"),
             "t5_vs_adopted": vs_adopted("T5"),
+            "t2_vs_adopted": vs_adopted("T2"),
+            "t2_sigma_ms": sigma("T2"),
+            "t3_phase_ms": None if phase is None else phase.phase_ms,
+            "t3_run_id": None if phase is None else phase.run_id,
             # All three offsets come from THIS tick's probe results, so T2
             # and T4 describe the same instant.  Sign conventions, raw:
             #   t6: BpskPpsProbe local_minus_source_ns / 1e6 -- the anchor's
@@ -1590,6 +1606,9 @@ T3_SHADOW_OFFSET_SIGNS: Dict[str, str] = {
     "t3_vs_adopted": "T3 UTC estimate minus adopted bench's, ns",
     "t4_vs_adopted": "T4 UTC estimate minus adopted bench's, ns",
     "t5_vs_adopted": "T5 UTC estimate minus adopted bench's, ns",
+    "t2_vs_adopted": "T2 UTC estimate minus adopted bench's, ns",
+    "t3_phase_ms": ("T3 reference UTC minus the radiod input time, ms: "
+                    "reading minus truth, within one t3_run_id only"),
     "t3_minus_t4": ("t3_vs_adopted.shadow_residual_ns - "
                     "t4_vs_adopted.shadow_residual_ns, same vs_tier"),
 }

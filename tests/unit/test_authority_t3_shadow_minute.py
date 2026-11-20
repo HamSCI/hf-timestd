@@ -19,6 +19,9 @@ import pytest
 from hf_timestd.core import authority_manager as am
 from hf_timestd.core.authority_manager import AuthorityManager, ProbeResult
 from hf_timestd.core.t3_shadow_record import T3ShadowRecord
+from synth_origins import (
+    EPOCH_GPS_S, F_IN, ILEN, counter_map_for, olen_for, rtp_at,
+)
 
 M0 = datetime(2026, 10, 30, 12, 0, 5, tzinfo=timezone.utc)
 M0_EPOCH = int(datetime(2026, 10, 30, 12, 0, 0, tzinfo=timezone.utc).timestamp())
@@ -71,6 +74,22 @@ JUDGE = {
     "shadow_residuals": {"T3": {"shadow_residual_ns": 310000.0,
                                 "sigma_ns": 800000.0, "vs_tier": "T6"}},
 }
+
+
+# A summary with a counter map, so the row can carry T3's phase.  Input
+# sample i carries UTC U0 + i / F_IN, and T3's utc_ref is 0.3 ms late, as in
+# test_t3_shadow_comparator.  The map's own epoch is EPOCH_GPS_S.
+_T3_K0, _T3_BLOCK, _ERR_S = 51, 100, 0.0003
+_O3 = olen_for(24_000)
+_IDX = _T3_BLOCK * ILEN + 240 * ILEN // _O3
+_CMAP = counter_map_for(_T3_K0, 24_000)
+PHASE_SUMMARY = dict(
+    SUMMARY, rtp_ref=(rtp_at(_T3_BLOCK, _T3_K0, _O3) + 240) % 2**32,
+    utc_ref=1_800_000_000 + _IDX / F_IN + _ERR_S, sample_rate=24_000,
+    counter_map=_CMAP.to_dict())
+RUN_EPOCH = EPOCH_GPS_S
+# phase = utc_ref - epoch - input_index / F_IN = (U0 - epoch) + err, by hand:
+EXPECTED_PHASE_MS = ((1_800_000_000 - EPOCH_GPS_S) + _ERR_S) * 1e3
 
 
 @pytest.fixture
@@ -498,3 +517,42 @@ def test_enabled_must_be_a_real_boolean(tmp_path, caplog):
     assert odd.manager.t3_shadow_record is not None
     bad = [r for r in caplog.records if "nope" in r.getMessage()]
     assert len(bad) == 1
+
+
+# ── Task A3: what admission needs ─────────────────────────────────────
+
+
+def test_the_row_carries_t2_vs_adopted_phase_and_run(tmp_path, reg_state):
+    judge = dict(JUDGE, shadow_residuals=dict(
+        JUDGE["shadow_residuals"],
+        T2={"shadow_residual_ns": 510000.0, "sigma_ns": 2e7, "vs_tier": "T6"}))
+    m = _manager(tmp_path, judge=judge, summary=PHASE_SUMMARY)
+    m.tick()
+    (row,) = _rows(tmp_path)
+    assert row["t2_vs_adopted"] == {"shadow_residual_ns": 510000.0,
+                                    "sigma_ns": 2e7, "vs_tier": "T6"}
+    assert row["t2_sigma_ms"] == 20.0
+    assert row["t3_run_id"] == pytest.approx(RUN_EPOCH, abs=1e-6)
+    assert row["t3_phase_ms"] == pytest.approx(EXPECTED_PHASE_MS, abs=1e-3)
+
+
+def test_phase_and_t2_fields_are_none_when_unavailable(tmp_path, reg_state):
+    # SUMMARY has no counter map; no T2 residual in JUDGE; T2 sigma NaN.
+    probes = _probes()
+    probes[2] = FakeProbe("T2", ProbeResult(
+        "T2", True, offset_ms=6.4, sigma_ms=float("nan")))
+    m = _manager(tmp_path, probes=probes)
+    m.tick()
+    (row,) = _rows(tmp_path)
+    assert row["t2_vs_adopted"] is None
+    assert row["t2_sigma_ms"] is None
+    assert row["t3_phase_ms"] is None and row["t3_run_id"] is None
+
+
+def test_offset_signs_name_the_new_fields(tmp_path, reg_state):
+    m = _manager(tmp_path)
+    m.tick()
+    (row,) = _rows(tmp_path)
+    for key in ("t2_vs_adopted", "t3_phase_ms"):
+        assert isinstance(row["offset_signs"].get(key), str)
+        assert "minus" in row["offset_signs"][key]

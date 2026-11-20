@@ -535,3 +535,19 @@ def test_anchor_sign_line_prints_one_convention(fused):
     assert line.endswith(
         "anchor -5.0 ms | NTP pool -5.0 ms | ring−registration +0.0 ms "
         "(d_clock calibrated)"), line
+
+
+# ── the minute row's T2 error ───────────────────────────────────────────
+
+
+def test_a_t2_source_half_a_millisecond_late_reads_plus_half_against_t4():
+    """Chrony's offsets run host - source.  With the host on true UTC and
+    T4's source true, a T2 source 0.5 ms late reads t4 = 0 and t2 = -0.5,
+    so its error (reading minus truth) is +0.5 ms."""
+    from hf_timestd.core.t3_reference_errors import reference_errors
+
+    late_ms = 0.5
+    row = {"t3_shadow": {"t3_minus_t6_ms": 0.1},
+           "t4_offset_ms": 0.0 - 0.0,        # host - S4, S4 on UTC
+           "t2_offset_ms": 0.0 - late_ms}    # host - S2, S2 0.5 ms late
+    assert reference_errors(row).t2_error_ms == pytest.approx(+0.5)
