@@ -1161,10 +1161,27 @@ class HfAcquiredBench:
         # surfaces cannot diverge (fix round 1, C-1).  A WITNESS plane
         # answers as a witness and is refused authority; the judge still
         # gets its residual, chrony never does.
-        from .registration_store import registration_refusal
+        # Fix round 1, I-1: authority never outlasts the store's window.
+        # ``registration_refusal``'s docstring names the ring anchor,
+        # section 18, the sidecar and this FUSE feed as ONE gate that must
+        # never differ on whether a plane may place UTC; the first three ask
+        # with the store's ``stale_s`` (T3RegistrationAnchor).  The clock
+        # term's longer ``fresh_s`` may keep this reading alive for the
+        # shadow residuals, but past the store's window it is a witness:
+        # not adopted, no dissent vote, never label_plane_anchor.
+        from .registration_store import (
+            DEFAULT_STALE_S as _STORE_STALE_S,
+            registration_refusal,
+        )
+        try:
+            store_stale_s = float(getattr(self._store, "stale_s",
+                                          _STORE_STALE_S))
+        except (TypeError, ValueError):
+            store_stale_s = _STORE_STALE_S
         refusal = registration_refusal(
             s, now=self._time(),
-            stale_s=fresh_s, sample_rate=int(arrival_sample_rate),
+            stale_s=min(fresh_s, store_stale_s),
+            sample_rate=int(arrival_sample_rate),
         )
         return BenchReading(
             utc=utc, mono=float(arrival_mono), sigma_ns=sigma_ns,
@@ -1278,9 +1295,14 @@ class OffsetJudge:
     # One decision now drives this and every other T3 surface in the
     # judge: the T3 admission gate (``t3_admission_gate.py``, Task A8).
     # The old pairing -- ``[timing.t3] admitted`` flipped together with
-    # emptying a fixed set -- no longer applies.  ``_shadow_only`` asks
-    # the gate at decision time, and ``_t3_closed`` asks the same gate,
-    # so T3 cannot end up half admitted.  An admitted reading may be
+    # emptying a fixed set -- no longer applies.  ``_shadow_only`` and
+    # ``_t3_closed`` both answer from ``_t3_admitted_now``, which within
+    # one tick returns the single gate read taken at the top of the tick
+    # (fix round 1, M-2).  So every surface agrees within a tick; a
+    # change of decision takes effect on all of them at the next tick.
+    # The writer's section-18 anchor lookup runs outside the tick and
+    # reads the gate directly, so it may see a new decision up to one
+    # tick before the tick surfaces do.  An admitted reading may be
     # adopted only through the existing cross-bench gate
     # (``_select_bench_locked``).
     _T3_GATED_BENCHES = frozenset({"hf_acquired"})
@@ -1310,6 +1332,8 @@ class OffsetJudge:
             from .t3_admission_gate import T3AdmissionGate
             t3_gate = T3AdmissionGate.fixed(bool(t3_admitted))
         self._t3_gate = t3_gate
+        # The gate's answer for the tick in progress; None between ticks.
+        self._t3_tick_admitted: Optional[bool] = None
         # Task 17a: the registration anchor closure is opt-in
         # ([timing.registration] anchor_closure).  While it is off the
         # judge stays exactly where c7b2106 left it -- §18's
@@ -1990,53 +2014,84 @@ class OffsetJudge:
 
         mono_now = self._mono()
         with self._lock:
-            self._host_clock_reading = next(
-                (r for r in readings if r.tier in ("T4", "T2")), None)
-            if self._t2_overrule is not None:
-                # The episode ends when T2 heals, even with T6 already
-                # adopted and the gate no longer asked.
-                from .chrony_source_health import chrony_unhealthy_reason
-                t2 = next((r for r in readings if r.tier == "T2"), None)
-                if t2 is None:
-                    self._t2_overrule_exit_locked(
-                        None, None, "T2 no longer answers")
-                elif chrony_unhealthy_reason(
-                        (t2.detail or {}).get("chrony_health")) is None:
-                    self._t2_overrule_exit_locked(
-                        None, None, "T2 shows no fault now")
-            self._t6_rate = t6_rate
-            self._t3_shadow = t3_shadow
-            self._gpsdo_discipline = gpsdo_state
-            self._gpsdo_detail = gpsdo_detail
-            if chain_request is not None:
-                self._apply_chain_request_locked(chain_request)
-            previous = self._best
-            best = self._select_bench_locked(readings)
-            if best is not None:
-                self._best = best
+            # Fix round 1, M-2: one gate read for the whole tick (see
+            # _t3_admitted_now); cleared on the way out.
+            self._t3_tick_admitted = self._read_t3_gate()
+            try:
+                self._host_clock_reading = next(
+                    (r for r in readings if r.tier in ("T4", "T2")), None)
+                if self._t2_overrule is not None:
+                    # The episode ends when T2 heals, even with T6 already
+                    # adopted and the gate no longer asked.
+                    from .chrony_source_health import chrony_unhealthy_reason
+                    t2 = next((r for r in readings if r.tier == "T2"), None)
+                    if t2 is None:
+                        self._t2_overrule_exit_locked(
+                            None, None, "T2 no longer answers")
+                    elif chrony_unhealthy_reason(
+                            (t2.detail or {}).get("chrony_health")) is None:
+                        self._t2_overrule_exit_locked(
+                            None, None, "T2 shows no fault now")
+                self._t6_rate = t6_rate
+                self._t3_shadow = t3_shadow
+                self._gpsdo_discipline = gpsdo_state
+                self._gpsdo_detail = gpsdo_detail
+                if chain_request is not None:
+                    self._apply_chain_request_locked(chain_request)
+                previous = self._best
+                best = self._select_bench_locked(readings)
+                if best is None and self._t3_withdrawn_locked(previous):
+                    self._drop_t3_holdover_locked(mono_now)
+                if best is not None:
+                    self._best = best
+                    for st in self._sources.values():
+                        self._measure_source_locked(st, best, mono_now)
+                # Shadow-mode residuals: every non-adopted bench vs the
+                # adopted one, refreshed each tick (gate doc).
+                self._observe_label_plane_locked(readings, mono_now)
+                self._select_label_anchor_locked(readings)
+                self._update_shadow_locked(readings, self._best, mono_now)
+                transition = self._tier_transition_locked(
+                    previous, best, readings, mono_now)
+                # Violation + rate evaluation run every tick even in
+                # holdover so sustained windows keep counting / clearing.
                 for st in self._sources.values():
-                    self._measure_source_locked(st, best, mono_now)
-            # Shadow-mode residuals: every non-adopted bench vs the
-            # adopted one, refreshed each tick (gate doc).
-            self._observe_label_plane_locked(readings, mono_now)
-            self._select_label_anchor_locked(readings)
-            self._update_shadow_locked(readings, self._best, mono_now)
-            transition = self._tier_transition_locked(
-                previous, best, readings, mono_now)
-            # Violation + rate evaluation run every tick even in
-            # holdover so sustained windows keep counting / clearing.
-            for st in self._sources.values():
-                self._refresh_rate_locked(st)
-                self._evaluate_violation_locked(st, mono_now)
-                self._evaluate_rate_alarm_locked(st, mono_now)
-            # P4 escalation ladder (spec §9 steps 2-3): decisions under
-            # the lock, I/O (alert channel, request artifact) outside.
-            actions = self._escalation_actions_locked(mono_now)
-            snapshot = self._snapshot_locked(mono_now)
+                    self._refresh_rate_locked(st)
+                    self._evaluate_violation_locked(st, mono_now)
+                    self._evaluate_rate_alarm_locked(st, mono_now)
+                # P4 escalation ladder (spec §9 steps 2-3): decisions under
+                # the lock, I/O (alert channel, request artifact) outside.
+                actions = self._escalation_actions_locked(mono_now)
+                snapshot = self._snapshot_locked(mono_now)
+            finally:
+                self._t3_tick_admitted = None
         self._publish(snapshot)
         self._run_escalation_actions(actions)
         if transition is not None:
             self._append_tier_transition(transition)
+
+    def _t3_withdrawn_locked(self, held: Optional[BenchReading]) -> bool:
+        """Is the held reading a gated T3 the gate has now closed?"""
+        if held is None or held.tier != "T3":
+            return False
+        return self._shadow_only((held.detail or {}).get("bench"))
+
+    def _drop_t3_holdover_locked(self, mono_now: float) -> None:
+        """Fix round 1, M-1: T3 lost admission while adopted, and no other
+        adoptable bench answers.  Holdover would keep publishing the last
+        T3-derived offset, and a jump withdrawal exists precisely because
+        that correction can no longer be trusted: the pre-withdrawal
+        correction must not ride on as T1.  So the judge forgets T3 as
+        the adopted bench and opens a fresh segment on every source; it
+        then publishes no verdict, exactly as with no adoptable bench, and
+        the next adopted bench measures afresh rather than smoothing from
+        T3's offset."""
+        self._best = None
+        self._candidate_tier = None
+        self._candidate_count = 0
+        for st in self._sources.values():
+            self._open_segment_locked(
+                st, cause="t3_withdrawn", delta_ns=None, mono_now=mono_now)
 
     # ── the tier-change log (spec 2026-10-27 §7) ──────────────────────
 
@@ -2127,12 +2182,27 @@ class OffsetJudge:
 
     @property
     def t3_admitted(self) -> bool:
-        """Does T3 hold admission now?  Read-only: the gate decides."""
-        return self._t3_admitted_now()
+        """Does T3 hold admission now?  Read-only: the gate decides.
+        Outside the tick, so it reads the gate itself."""
+        return self._read_t3_gate()
 
     def _t3_admitted_now(self) -> bool:
-        """The gate's answer: an attribute read, no I/O.  A gate that
-        raises reads as not admitted (closed side)."""
+        """Does T3 hold admission for this decision?
+
+        Fix round 1, M-2: inside :meth:`tick` every T3 decision uses the
+        one answer read at the top of the tick's locked section
+        (``_t3_tick_admitted``), so a gate refresh mid-tick cannot leave T3
+        adopted on one surface and closed on another within that tick.
+        Callers outside a tick (the writer's ``_label_anchor_for_locked``,
+        the ``t3_admitted`` property) read the gate directly: an attribute
+        read, no I/O.  A gate that raises reads as not admitted (the
+        closed side)."""
+        snap = self._t3_tick_admitted
+        if snap is not None:
+            return snap
+        return self._read_t3_gate()
+
+    def _read_t3_gate(self) -> bool:
         try:
             return bool(self._t3_gate.admitted())
         except Exception:  # noqa: BLE001 -- gate trouble closes T3
@@ -3630,8 +3700,8 @@ class OffsetJudge:
         # T3 votes nowhere until admitted.  Its row stays in
         # shadow_residuals for the record.
         #
-        # Task A8, builder choice (the closed side): an admitted reading
-        # votes only if it is authoritative.  A plane the one gate
+        # Task A8, builder choice accepted in review (the closed side): an
+        # admitted reading votes only if it is authoritative.  A plane the one gate
         # (``registration_refusal``) refuses -- a WITNESS-state plane on a
         # T6 station, say -- may not place UTC, so it may not convict
         # the bench that does either.  Only HfAcquiredBench sets

@@ -158,6 +158,91 @@ def test_adoption_follows_the_gate(tmp_path):
     assert judge.offset_for(KEY, 0).tier == "T2"
 
 
+def test_a_withdrawal_drops_the_t3_holdover(tmp_path):
+    """Fix round 1, M-1: with T3 adopted and no other adoptable bench, a
+    closing gate leaves no T3-derived verdict: a jump withdrawal must not
+    carry the pre-withdrawal correction forward as holdover."""
+    gate = _Gate(admitted=True)
+    t3 = BenchReading(tier="T3", utc=WALL0 + 0.002, sigma_ns=1_000_000.0,
+                      mono=1000.0,
+                      detail={"bench": "hf_acquired", "authoritative": True},
+                      plane="label")
+    judge = OffsetJudge(config={"enabled": True, "upgrade_polls": 3},
+                        benches=[_Fixed(t3)],
+                        publish_path=tmp_path / "offset_judge.json",
+                        time_fn=lambda: WALL0, mono_fn=lambda: 1000.0,
+                        t3_gate=gate)
+    judge.register_radiod_pair(KEY, _unix_to_gps_ns(WALL0), 0, SR)
+    for _ in range(4):
+        judge.tick()
+    assert judge.offset_for(KEY, 0).tier == "T3"
+    gate.set(False)
+    judge.tick()
+    assert judge.offset_for(KEY, 0) is None
+    assert judge._best is None
+    # Readmitted, the judge measures afresh: nothing carried over.
+    gate.set(True)
+    for _ in range(4):
+        judge.tick()
+    assert judge.offset_for(KEY, 0).tier == "T3"
+
+
+class _CountingGate(_Gate):
+    def __init__(self, admitted):
+        super().__init__(admitted)
+        self.calls = 0
+
+    def admitted(self):
+        self.calls += 1
+        return super().admitted()
+
+
+def test_one_gate_read_per_tick(tmp_path):
+    """Fix round 1, M-2: every T3 decision within one tick uses one read
+    of the gate, so a refresh mid-tick cannot half admit T3."""
+    gate = _CountingGate(admitted=True)
+    judge, clock = _dissent_judge(tmp_path, gate)
+    gate.calls = 0
+    _tick(judge, clock, 5)
+    assert gate.calls == 5
+
+
+def test_a_gate_refresh_swaps_one_snapshot(tmp_path, monkeypatch):
+    """Fix round 1, M-3: a reader running mid-refresh sees the old
+    decision and the old clock together, never the new decision with the
+    old clock."""
+    import hf_timestd.core.t3_admission_gate as tag
+    from hf_timestd.core.t3_admission import AdmissionMode
+    from tests.unit.test_t3_admission_gate import _Mono, _block
+
+    import json as _json
+
+    def write(admitted, published, drift):
+        b = _block(admitted, "r")
+        b["stability"]["drift_ns_per_s"] = drift
+        (tmp_path / "authority.json").write_text(_json.dumps(
+            {"utc_published": published, "t3_admission": b}))
+
+    mono = _Mono()
+    g = T3AdmissionGate(AdmissionMode.AUTO, tmp_path / "authority.json",
+                        mono_fn=mono)
+    write(True, "t0", 1.5); g.refresh(); mono.advance(30)
+    write(True, "t1", 1.5); g.refresh()
+    assert g.admitted() is True and g.clock().drift_ns_per_s == 1.5
+    seen = []
+    real = tag.clock_stability_from_block
+
+    def spy(block):
+        seen.append((g.admitted(), (g.clock() or None) and g.clock().drift_ns_per_s))
+        return real(block)
+
+    monkeypatch.setattr(tag, "clock_stability_from_block", spy)
+    mono.advance(30)
+    write(False, "t2", 9.0); g.refresh()
+    assert seen and seen[0] in ((True, 1.5), (False, 9.0))
+    assert g.admitted() is False and g.clock().drift_ns_per_s == 9.0
+
+
 def test_a_bool_builds_a_fixed_gate(tmp_path):
     on = OffsetJudge(publish_path=tmp_path / "a.json", t3_admitted=True)
     off = OffsetJudge(publish_path=tmp_path / "b.json")
@@ -216,11 +301,42 @@ def test_a_gpsdo_clock_holds_t3_past_180_s(tmp_path):
     # drift 0.001 ns/s, window 7200: a 600 s old registration still reads
     reading = _bench(tmp_path, 600.0, _stability(0.001)).poll()
     assert reading is not None
-    # The one gate downstream uses the same limit, so the reading keeps
-    # its authority.
-    assert reading.detail["authoritative"] is True
-    # ... but never past the window.
+    # ... for the shadow residuals only: past the store's 300 s the ring,
+    # section 18 and the sidecar refuse the plane, so the bench does too
+    # (fix round 1, I-1).
+    assert reading.detail["authoritative"] is False
+    assert reading.detail["refusal"] == "stale"
+    # Within the store's window it keeps its authority past 180 s.
+    assert _bench(tmp_path, 250.0, _stability(0.001)).poll().detail[
+        "authoritative"] is True
+    # ... and it never reads past the clock's window.
     assert _bench(tmp_path, 7300.0, _stability(0.001)).poll() is None
+
+
+def test_authority_never_outlasts_the_store_window(tmp_path):
+    """Fix round 1, I-1: the bench may read longer than the store's
+    ``stale_s``, but it never claims authority longer than the store
+    grants it: ``registration_store.registration_refusal`` names the ring,
+    section 18, the sidecar and the FUSE feed as one gate."""
+    for age, authoritative in ((290.0, True), (310.0, False)):
+        r = _bench(tmp_path, age, _stability(0.001)).poll()
+        assert r is not None and r.detail["authoritative"] is authoritative
+    # A store with a tighter window binds the bench to it.
+    st = RegistrationStore(tmp_path / "reg2", tmp_path / "registration2.json",
+                           time_fn=lambda: U0, stale_s=120.0)
+    st.write_summary(
+        Registration("ep-1", rtp_ref=R0, utc_ref=U0, sample_rate=SR,
+                     sigma_ms=0.5, channel="fused", verified=True,
+                     n_minutes=10, rtp_domain="SHARED_10000"),
+        ["SHARED_10000"], "ACQUIRED", {}, writer="SHARED_10000")
+    r = HfAcquiredBench(
+        provider=lambda: {"SHARED_10000": (R0, 5000.0, SR)}, store=st,
+        mono_fn=lambda: 5000.0, time_fn=lambda: U0 + 150.0,
+        clock_provider=lambda: _stability(0.001)).poll()
+    assert r is not None and r.detail["authoritative"] is False
+    # Unmeasured stability: 180 s stays inside the store's 300 s.
+    r = _bench(tmp_path, 170.0, None).poll()
+    assert r.detail["authoritative"] is True
 
 
 def test_a_crystal_clock_drops_t3_sooner(tmp_path):

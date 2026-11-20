@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -66,6 +67,24 @@ REASON_FORCED_NO_BLOCK = (
 _UNSEEN = object()
 
 
+@dataclass(frozen=True)
+class _Snapshot:
+    """What the readers see, swapped in as ONE attribute by ``refresh``.
+
+    The recorder's revalidation tick refreshes the gate while the offset
+    judge's tick thread and the writer read it.  With the block, its
+    change time and the clock in separate attributes, a reader between
+    two writes could pair a new decision with an old clock.  One
+    reference read is atomic, so each reader sees one refresh's state
+    whole (A8 fix round 1, M-3)."""
+    block: Optional[dict] = None
+    changed_at: Optional[float] = None
+    clock: Optional[ClockStability] = None
+
+
+_EMPTY = _Snapshot()
+
+
 class T3AdmissionGate:
     """The process's view of the published T3 admission decision."""
 
@@ -82,12 +101,12 @@ class T3AdmissionGate:
         self._mono = mono_fn
         # Set only by fixed(): the answer, and refresh() reads nothing.
         self._fixed: Optional[bool] = None
-        # The last utc_published seen, and the monotonic time it changed.
+        # The last utc_published seen.  Only refresh() reads or writes it.
         self._last_published: object = _UNSEEN
-        self._changed_at: Optional[float] = None
-        # The last well-formed t3_admission block, held while it stays fresh.
-        self._block: Optional[dict] = None
-        self._clock: Optional[ClockStability] = None
+        # The last well-formed t3_admission block, the monotonic time
+        # utc_published last changed, and the published clock stability:
+        # one immutable snapshot, replaced whole (see _Snapshot).
+        self._snap: _Snapshot = _EMPTY
         # The current failure streak's kind ("missing", "malformed", ...),
         # None while the file reads well.  One log line per streak.
         self._failure: Optional[str] = None
@@ -111,16 +130,18 @@ class T3AdmissionGate:
 
     # ── the answer: no I/O ───────────────────────────────────────────
 
-    def _fresh_block(self) -> Optional[dict]:
-        if self._block is None or self._changed_at is None:
-            return None
+    def _fresh(self, snap: _Snapshot) -> bool:
+        if snap.block is None or snap.changed_at is None:
+            return False
         try:
-            age = self._mono() - self._changed_at
+            age = self._mono() - snap.changed_at
         except Exception:  # noqa: BLE001 -- a broken clock reads stale
-            return None
-        if age < 0 or age > self._stale_s:
-            return None
-        return self._block
+            return False
+        return 0 <= age <= self._stale_s
+
+    def _fresh_block(self) -> Optional[dict]:
+        snap = self._snap
+        return snap.block if self._fresh(snap) else None
 
     def admitted(self) -> bool:
         if self._fixed is not None:
@@ -148,9 +169,8 @@ class T3AdmissionGate:
         """The published clock stability, from a fresh block only."""
         if self._fixed is not None or self._mode is AdmissionMode.OFF:
             return None
-        if self._fresh_block() is None:
-            return None
-        return self._clock
+        snap = self._snap
+        return snap.clock if self._fresh(snap) else None
 
     # ── the only I/O ─────────────────────────────────────────────────
 
@@ -184,6 +204,7 @@ class T3AdmissionGate:
             self._fail("no_decision", "no well-formed t3_admission block")
             return
         published = doc["utc_published"]
+        changed_at = self._snap.changed_at
         if self._last_published is _UNSEEN:
             # First sight since start (or since a failure): a file a dead
             # fusion service left behind looks just like this, so it does
@@ -191,9 +212,10 @@ class T3AdmissionGate:
             self._last_published = published
         elif published != self._last_published:
             self._last_published = published
-            self._changed_at = self._mono()
-        self._block = block
-        self._clock = clock_stability_from_block(block.get("stability"))
+            changed_at = self._mono()
+        clock = clock_stability_from_block(block.get("stability"))
+        # One assignment: readers see the old state or the new, whole.
+        self._snap = _Snapshot(block=block, changed_at=changed_at, clock=clock)
         if self._failure is not None:
             logger.info("T3 admission gate: %s reads again", self._path)
             self._failure = None
@@ -203,10 +225,8 @@ class T3AdmissionGate:
         # failure the gate wants to see a new write again before it trusts
         # the file (builder choice, the closed side: it costs one refresh
         # interval after a blip).
-        self._block = None
-        self._clock = None
+        self._snap = _EMPTY
         self._last_published = _UNSEEN
-        self._changed_at = None
         if self._failure != kind:
             self._failure = kind
             logger.warning(
