@@ -63,7 +63,8 @@ def _service(tmp_path):
     svc.epoch_tracker = CounterEpochTracker()
     # These tests describe how an ADMITTED T3 labels (8efe42c).  Ruling B
     # (2026-10-30): unadmitted, it labels nothing (test_t3_admission.py).
-    svc._t3_admitted = True
+    from hf_timestd.core.t3_admission_gate import T3AdmissionGate
+    svc._t3_gate = T3AdmissionGate.fixed(True)
     return svc
 
 

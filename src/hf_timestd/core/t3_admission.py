@@ -7,8 +7,10 @@ Three modes::
 
 ``auto`` (the default) lets the station decide.  The fusion service
 compares T3 with T2 over a rolling window and admits T3 while it wins
-and its sigmas stay honest.  It withdraws T3 at once on a jump.  Until
-the policy lands, auto reads as closed.
+and its sigmas stay honest.  It withdraws T3 at once on a jump.  The
+fusion service publishes each decision in ``authority.json``; every
+other process follows it through one ``T3AdmissionGate``
+(``t3_admission_gate``).
 
 ``off`` keeps T3 a shadow.  It acquires, verifies and publishes its
 registration and shadow record, and reaches no label, anchor or
@@ -129,13 +131,3 @@ def t3_admission_mode(
         logger.info("T3 admission: [timing.t3] admission = %s", mode.value)
     return mode
 
-
-def t3_admitted(
-    config: Optional[dict] = None, *, path: Optional[Path] = None
-) -> bool:
-    """Deprecated bool shim: True only in mode ``on``.
-
-    Task A7 removes it once every caller moves to the per-process gate.
-    Until the policy lands, ``auto`` and ``off`` read closed.
-    """
-    return t3_admission_mode(config, path=path) is AdmissionMode.ON

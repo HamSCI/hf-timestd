@@ -8,6 +8,7 @@ judge offset": it is the registration itself, expressed exactly as T6
 expresses its own anchor -- a NativeAnchor.
 """
 
+from hf_timestd.core.t3_admission_gate import T3AdmissionGate
 import pytest
 
 from hf_timestd.core.native_anchor import NativeAnchor, utc_ns_at_rtp
@@ -69,7 +70,7 @@ def _anchor(tmp_path, clock, **kw):
     store = _store(tmp_path, clock)
     _write(store, "ACQUIRED", **kw)
     return T3RegistrationAnchor(
-        store=store, time_fn=lambda: clock[0], anchor_closure=True, admitted=True
+        store=store, time_fn=lambda: clock[0], anchor_closure=True, gate=T3AdmissionGate.fixed(True)
     )
 
 
@@ -114,7 +115,7 @@ def test_only_acquired_carries_a_verified_plane(tmp_path, state):
     store = _store(tmp_path, clock)
     _write(store, state)
     holder = T3RegistrationAnchor(
-        store=store, time_fn=lambda: clock[0], anchor_closure=True, admitted=True
+        store=store, time_fn=lambda: clock[0], anchor_closure=True, gate=T3AdmissionGate.fixed(True)
     )
     decision = holder.refresh(sample_rate=SR, t6_authoritative=False)
     assert decision.anchor is None
@@ -125,7 +126,7 @@ def test_missing_summary_is_no_anchor(tmp_path):
     clock = [WALL0]
     store = _store(tmp_path, clock)
     holder = T3RegistrationAnchor(
-        store=store, time_fn=lambda: clock[0], anchor_closure=True, admitted=True
+        store=store, time_fn=lambda: clock[0], anchor_closure=True, gate=T3AdmissionGate.fixed(True)
     )
     decision = holder.refresh(sample_rate=SR, t6_authoritative=False)
     assert decision.anchor is None and decision.reason == "no_summary"
@@ -157,7 +158,7 @@ def test_incomplete_summary_is_refused(tmp_path):
     store = _store(tmp_path, clock)
     store.write_summary(None, [], "ACQUIRED", {})  # utc_ref/rtp_ref null
     holder = T3RegistrationAnchor(
-        store=store, time_fn=lambda: clock[0], anchor_closure=True, admitted=True
+        store=store, time_fn=lambda: clock[0], anchor_closure=True, gate=T3AdmissionGate.fixed(True)
     )
     decision = holder.refresh(sample_rate=SR, t6_authoritative=False)
     assert decision.anchor is None and decision.reason == "incomplete"
@@ -168,7 +169,7 @@ def test_a_moved_registration_yields_a_moved_anchor(tmp_path):
     store = _store(tmp_path, clock)
     _write(store, "ACQUIRED")
     holder = T3RegistrationAnchor(
-        store=store, time_fn=lambda: clock[0], anchor_closure=True, admitted=True
+        store=store, time_fn=lambda: clock[0], anchor_closure=True, gate=T3AdmissionGate.fixed(True)
     )
     first = holder.refresh(sample_rate=SR, t6_authoritative=False).anchor
     clock[0] += 60.0
@@ -182,7 +183,7 @@ def test_counter_epoch_change_is_reported(tmp_path):
     store = _store(tmp_path, clock)
     _write(store, "ACQUIRED", epoch="ep-1")
     holder = T3RegistrationAnchor(
-        store=store, time_fn=lambda: clock[0], anchor_closure=True, admitted=True
+        store=store, time_fn=lambda: clock[0], anchor_closure=True, gate=T3AdmissionGate.fixed(True)
     )
     assert holder.refresh(sample_rate=SR, t6_authoritative=False).epoch_id == "ep-1"
     _write(store, "ACQUIRED", epoch="ep-2", rtp_ref=7777)
@@ -198,7 +199,7 @@ def test_a_read_failure_never_raises(tmp_path):
             raise OSError("boom")
 
     holder = T3RegistrationAnchor(
-        store=_Boom(), time_fn=lambda: WALL0, anchor_closure=True, admitted=True
+        store=_Boom(), time_fn=lambda: WALL0, anchor_closure=True, gate=T3AdmissionGate.fixed(True)
     )
     decision = holder.refresh(sample_rate=SR, t6_authoritative=False)
     assert decision.anchor is None and decision.reason == "read_failed"
@@ -212,7 +213,7 @@ def test_station_wide_refresh_accepts_the_registrations_own_domain(tmp_path):
     store = _store(tmp_path, clock)
     _write(store, "ACQUIRED", sample_rate=96000)
     holder = T3RegistrationAnchor(
-        store=store, time_fn=lambda: clock[0], anchor_closure=True, admitted=True
+        store=store, time_fn=lambda: clock[0], anchor_closure=True, gate=T3AdmissionGate.fixed(True)
     )
     decision = holder.refresh(t6_authoritative=False)
     assert decision.reason == "acquired"
@@ -247,7 +248,7 @@ def test_an_unverified_plane_is_refused_even_in_the_acquired_state(tmp_path):
         {"counter_epoch_id": "ep-1"},
     )
     holder = T3RegistrationAnchor(
-        store=store, time_fn=lambda: clock[0], anchor_closure=True, admitted=True
+        store=store, time_fn=lambda: clock[0], anchor_closure=True, gate=T3AdmissionGate.fixed(True)
     )
     decision = holder.refresh(t6_authoritative=False)
     assert decision.anchor is None and decision.reason == "unverified"
@@ -273,7 +274,7 @@ def test_a_summary_with_no_verified_key_fails_closed(tmp_path):
             }
 
     holder = T3RegistrationAnchor(
-        store=_Old(), time_fn=lambda: WALL0, anchor_closure=True, admitted=True
+        store=_Old(), time_fn=lambda: WALL0, anchor_closure=True, gate=T3AdmissionGate.fixed(True)
     )
     assert holder.refresh(t6_authoritative=False).reason == "unverified"
 
@@ -343,6 +344,6 @@ def test_the_summary_round_trips_a_verified_fused_plane(tmp_path):
     store.write_summary(fused, kept, "ACQUIRED", {"counter_epoch_id": "ep-1"})
     assert store.read_summary()["verified"] is True
     holder = T3RegistrationAnchor(
-        store=store, time_fn=lambda: clock[0], anchor_closure=True, admitted=True
+        store=store, time_fn=lambda: clock[0], anchor_closure=True, gate=T3AdmissionGate.fixed(True)
     )
     assert holder.refresh(t6_authoritative=False).reason == "acquired"

@@ -4766,9 +4766,12 @@ def run_fusion_service(
         # GRAPE packager.  Best-effort; the timing chain outranks its provenance.
         try:
             from hf_timestd.core.timing_chain_publisher import chains_from_config, publish_chains
-            from hf_timestd.core.t3_admission import t3_admitted
+            from hf_timestd.core.t3_admission import t3_admission_mode
+            # Task A7: the mode, not a decision.  This record goes out once
+            # at start, so it claims T3 only in mode ON; the per-minute
+            # decision reaches readers through authority.json.
             publish_chains(chains_from_config(_auth_config),
-                           t3_admitted=t3_admitted(_auth_config))
+                           t3_admission_mode=t3_admission_mode(_auth_config))
         except Exception as exc:  # noqa: BLE001
             logger.warning("timing chain not published: %s", exc)
         authority_runner.start()

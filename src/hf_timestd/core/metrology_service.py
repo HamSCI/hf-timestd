@@ -273,10 +273,15 @@ class MetrologyService:
 
         # T3 self-registration (spec 2026-09-06): the ticks place the second.
         self.acquirer = RegistrationAcquirer(self.channel_name, self.engine.sample_rate)
-        # Ruling B (2026-10-30): until ``[timing.t3] admitted`` reads true,
-        # the registration runs and publishes, but labels nothing.
-        from .t3_admission import t3_admitted
-        self._t3_admitted = t3_admitted(config)
+        # Task A7: the registration always runs and publishes; it labels
+        # only while this process's one admission gate reads admitted.  The
+        # gate follows the decision authority.json publishes (the same
+        # file the T6 tier comes from) and refreshes once a minute, at the
+        # top of apply_registration.
+        from .t3_admission import t3_admission_mode
+        from .t3_admission_gate import T3AdmissionGate
+        self._t3_gate = T3AdmissionGate(t3_admission_mode(config),
+                                        self._AUTHORITY_JSON_PATH)
         self.reg_store = RegistrationStore()
         self.epoch_tracker = CounterEpochTracker()
         # Task 10: this minute's self-measurement of the held plane
@@ -740,6 +745,11 @@ class MetrologyService:
         logs and falls back to the plane this method was handed."""
         if buffer_timing is None or buffer_timing.source == 'no_timing':
             return buffer_timing
+        # Task A7: once a minute, before anything decides a label.  Never
+        # raises; a failure reads closed in auto mode.
+        gate = getattr(self, "_t3_gate", None)
+        if gate is not None:
+            gate.refresh()
         # Task 13: the minute every shadow row of this call names, from the
         # data (never a clock read); reset so a failed minute writes no
         # stale state or delays.
@@ -1675,11 +1685,12 @@ class MetrologyService:
         contributing = list(kept)
         self._publish_registration(fused, contributing, label_s0, residual_ms, epoch,
                                    waiting=list(waiting))
-        if not getattr(self, "_t3_admitted", False):
-            # Ruling B (2026-10-30): T3 is not admitted.  The plane stays
-            # in the channel file, the summary and the shadow record, and
-            # the engine gets the label plane back: T3 labels nothing until
-            # the B4 shadow run admits it.
+        gate = getattr(self, "_t3_gate", None)
+        if gate is None or not gate.admitted():
+            # T3 is not admitted (Task A7: the gate, refreshed at the top
+            # of apply_registration; no gate reads closed).  The plane
+            # stays in the channel file, the summary and the shadow record,
+            # and the engine gets the label plane back.
             return dataclasses.replace(buffer_timing, origin_source="label",
                                        counter_epoch_id=epoch)
         # I4: the label carried T6's (or whatever incumbent's) provenance;

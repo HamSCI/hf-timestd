@@ -729,10 +729,15 @@ class CoreRecorderV2:
         # two components of one process disagree about the regime.
         from .anchor_closure import anchor_closure_enabled
         self._anchor_closure = anchor_closure_enabled(config)
-        # Ruling B (2026-10-30): ``[timing.t3] admitted``, read once here
-        # and handed to the judge and the T3 anchor holder.
-        from .t3_admission import t3_admitted
-        self._t3_admitted = t3_admitted(config)
+        # Task A7: ``[timing.t3] admission`` resolves once here, and this
+        # process builds ONE admission gate from it.  The gate follows the
+        # decision the fusion service's authority manager publishes in
+        # authority.json; the 60 s revalidation tick refreshes it (in
+        # ``_refresh_t3_native_anchor``) and the T3 anchor holder asks it.
+        from .t3_admission import AdmissionMode, t3_admission_mode
+        from .t3_admission_gate import T3AdmissionGate
+        self._t3_admission_mode = t3_admission_mode(config)
+        self._t3_gate = T3AdmissionGate(self._t3_admission_mode)
 
         # ── Offset Judge (docs/OFFSET-JUDGE-SPEC-2026-08-05.md, P1) ──
         # One judge per core-recorder process (spec §11: no new daemon).
@@ -765,9 +770,13 @@ class CoreRecorderV2:
         if _oj_cfg.get('enabled', True):
             try:
                 from .offset_judge import OffsetJudge
+                # Task A8 hands the judge the gate itself.  Until then it
+                # keeps today's bool: admitted only in mode ON (old
+                # ``admitted = true`` configs read ON), so auto stays
+                # closed in the judge.
                 self._offset_judge = OffsetJudge(
                     config=_oj_cfg, anchor_closure=self._anchor_closure,
-                    t3_admitted=self._t3_admitted)
+                    t3_admitted=(self._t3_admission_mode is AdmissionMode.ON))
                 self._offset_judge.start()
             except Exception as e:
                 logger.error(
@@ -3152,12 +3161,18 @@ class CoreRecorderV2:
         pre-amendment judged-pair behaviour.
         """
         try:
+            # Task A7: this tick is the gate's refresh, so the holder below
+            # asks a decision at most one tick old.  No gate (a recorder
+            # built without __init__) reads closed in the holder.
+            gate = getattr(self, '_t3_gate', None)
+            if gate is not None:
+                gate.refresh()
             holder = getattr(self, '_t3_anchor_holder', None)
             if holder is None:
                 from .t3_registration_anchor import T3RegistrationAnchor
                 holder = T3RegistrationAnchor(
                     anchor_closure=getattr(self, '_anchor_closure', False),
-                    admitted=getattr(self, '_t3_admitted', False))
+                    gate=gate)
                 self._t3_anchor_holder = holder
             holder.refresh(
                 t6_authoritative=self._t6_anchor_is_authoritative()

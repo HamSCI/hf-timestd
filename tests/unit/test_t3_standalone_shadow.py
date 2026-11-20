@@ -83,7 +83,8 @@ def _service(tmp_path):
     svc.epoch_tracker = CounterEpochTracker()
     svc._AUTHORITY_JSON_PATH = tmp_path / "no-authority.json"
     # Admitted, so the T3-only path labels as at 8efe42c (Ruling B).
-    svc._t3_admitted = True
+    from hf_timestd.core.t3_admission_gate import T3AdmissionGate
+    svc._t3_gate = T3AdmissionGate.fixed(True)
     return svc
 
 

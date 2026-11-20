@@ -85,7 +85,12 @@ def test_the_recorder_reads_the_switch_from_its_config(tmp_path, monkeypatch):
             "output_dir": str(tmp_path / f"rec-{admitted}"),
             "ka9q": {"status": "hf-status.local"},
             "timing": {"t3": {"admitted": admitted}}})
-        assert rec._t3_admitted is admitted
+        # Task A7: one gate, built from the mode this config names; the
+        # judge keeps the bool until Task A8 hands it the gate.
+        from hf_timestd.core.t3_admission import AdmissionMode
+        mode = AdmissionMode.ON if admitted else AdmissionMode.AUTO
+        assert rec._t3_admission_mode is mode
+        assert rec._t3_gate.mode is mode
         assert seen["t3_admitted"] is admitted
 
 
@@ -110,7 +115,10 @@ def test_metrology_reads_the_switch_from_its_config(tmp_path, monkeypatch):
         config["metrology"] = {"realtime_iono": False, "physics_products": False}
         svc = ms.MetrologyService(config, "WWV_10000", 10e6,
                                   tmp_path / f"met-{admitted}", "EM38ww")
-        assert svc._t3_admitted is admitted
+        from hf_timestd.core.t3_admission import AdmissionMode
+        assert svc._t3_gate.mode is (
+            AdmissionMode.ON if admitted else AdmissionMode.AUTO)
+        assert svc._t3_gate.authority_path == svc._AUTHORITY_JSON_PATH
 
 
 def test_fusion_reads_the_switch_from_its_own_config_path(tmp_path, monkeypatch):

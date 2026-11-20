@@ -45,7 +45,6 @@ def test_admission_mode_reads_the_new_key_and_maps_the_old(caplog):
         NOT_ADMITTED_REASON,
         AdmissionMode,
         admission_mode_from_config as f,
-        t3_admitted,
     )
 
     assert NOT_ADMITTED_REASON == NOT_ADMITTED
@@ -65,11 +64,10 @@ def test_admission_mode_reads_the_new_key_and_maps_the_old(caplog):
         with caplog.at_level("WARNING"):
             assert f(bad) is AdmissionMode.AUTO
         assert any(r.levelname == "WARNING" for r in caplog.records)
-    # The deprecated bool shim (Task A7 removes it): only "on" opens.
-    assert t3_admitted({"timing": {"t3": {"admitted": True}}}) is True
-    assert t3_admitted({"timing": {"t3": {"admitted": False}}}) is False
-    assert t3_admitted({"timing": {"t3": {"admission": "auto"}}}) is False
-    assert t3_admitted({}) is False
+    # Task A7 removed the deprecated bool shim: each process builds one
+    # T3AdmissionGate from the mode instead.
+    import hf_timestd.core.t3_admission as ta
+    assert not hasattr(ta, "t3_admitted")
 
 
 def test_the_template_ships_admission_auto():
@@ -276,9 +274,9 @@ def _metrology(tmp_path):
 
     svc = _service(tmp_path)
     svc._AUTHORITY_JSON_PATH = tmp_path / "no-authority.json"   # no T6
-    # The shared harness admits T3 (it describes 8efe42c); this one does
-    # not name the switch at all.
-    svc.__dict__.pop("_t3_admitted", None)
+    # The shared harness admits T3 (it describes 8efe42c); this one has
+    # no gate at all, which reads closed.
+    svc.__dict__.pop("_t3_gate", None)
     return svc
 
 
@@ -372,9 +370,21 @@ def test_the_timing_chain_record_claims_no_source_unadmitted(tmp_path, monkeypat
     real = am.registration_block
     monkeypatch.setattr(am, "registration_block",
                         lambda *a, **k: real(_Summary(_ACQUIRED), *a[1:], **k))
+    from hf_timestd.core.t3_admission import AdmissionMode
+
+    # Task A7: the chain record goes out once, at start, so only mode ON
+    # claims a source there; auto's per-minute truth lives in
+    # authority.json.  The default reads auto.
     publish_chains([], tmp_path / "chains.json")
     doc = json.loads((tmp_path / "chains.json").read_text())
     assert doc["registration"]["source"] == "label"
+    assert doc["t3_admission_mode"] == "auto"
+    for mode, source in ((AdmissionMode.AUTO, "label"), (AdmissionMode.OFF, "label"),
+                         (AdmissionMode.ON, "hf_acquired")):
+        publish_chains([], tmp_path / "chains.json", t3_admission_mode=mode)
+        doc = json.loads((tmp_path / "chains.json").read_text())
+        assert doc["registration"]["source"] == source
+        assert doc["t3_admission_mode"] == mode.value
 
 
 # ── 4. admitted: behaviour as at 8efe42c ─────────────────────────────
@@ -393,6 +403,7 @@ def test_admitted_t3_feeds_the_tracker_and_anchors(tmp_path):
 
 
 def test_admitted_t3_reaches_section18_and_the_ring(tmp_path):
+    from hf_timestd.core.t3_admission_gate import T3AdmissionGate
     from hf_timestd.core.t3_registration_anchor import T3RegistrationAnchor
 
     clock = _Clock()
@@ -404,7 +415,7 @@ def test_admitted_t3_reaches_section18_and_the_ring(tmp_path):
     wall = [WALL0]
     holder = T3RegistrationAnchor(store=_acquired_store(tmp_path, wall),
                                   time_fn=lambda: wall[0], anchor_closure=True,
-                                  admitted=True)
+                                  gate=T3AdmissionGate.fixed(True))
     assert holder.refresh(t6_authoritative=False).reason == "acquired"
     assert holder.state() is not None and holder.state().tier == "T3"
 
@@ -412,8 +423,10 @@ def test_admitted_t3_reaches_section18_and_the_ring(tmp_path):
 def test_admitted_t3_labels_metrology(tmp_path):
     from tests.unit.test_metrology_service_registration import T0, _minute
 
+    from hf_timestd.core.t3_admission_gate import T3AdmissionGate
+
     svc = _metrology(tmp_path)
-    svc._t3_admitted = True
+    svc._t3_gate = T3AdmissionGate.fixed(True)
     for k in range(4):
         bt = _minute(svc, k, walk=0.250)
     assert bt.origin_source == "acquired"

@@ -17,6 +17,7 @@ written out beside the assertion, so the comparison stays honest if the
 closure's own arithmetic changes.
 """
 
+from hf_timestd.core.t3_admission_gate import T3AdmissionGate
 import json
 import logging
 
@@ -127,9 +128,9 @@ def test_t3_anchor_stands_down_with_the_flag_off():
     from ``state()`` is exactly that.
     """
     store = _Store(_summary(WALL0))
-    off = T3RegistrationAnchor(store=store, time_fn=lambda: WALL0, admitted=True)
+    off = T3RegistrationAnchor(store=store, time_fn=lambda: WALL0, gate=T3AdmissionGate.fixed(True))
     on = T3RegistrationAnchor(store=store, time_fn=lambda: WALL0, anchor_closure=True,
-                              admitted=True)
+                              gate=T3AdmissionGate.fixed(True))
     # The flag is the ONLY difference; the summary is fully verified and
     # corroborated, so the closure would otherwise stand up.
     assert on.evaluate(t6_authoritative=False).in_force is True

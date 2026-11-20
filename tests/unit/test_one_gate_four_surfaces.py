@@ -20,6 +20,7 @@ there is no honest reading on which those two differ.
 file walks all four surfaces through the same three cases.
 """
 
+from hf_timestd.core.t3_admission_gate import T3AdmissionGate
 import json
 
 import pytest
@@ -166,7 +167,7 @@ def test_state_is_checked_before_the_fields(tmp_path):
 def _anchor_surface(store, clock):
     """Surfaces 1-3: ring, §18 and sidecar all label from this object."""
     holder = T3RegistrationAnchor(
-        store=store, time_fn=lambda: clock[0], anchor_closure=True, admitted=True
+        store=store, time_fn=lambda: clock[0], anchor_closure=True, gate=T3AdmissionGate.fixed(True)
     )
     decision = holder.refresh(t6_authoritative=False)
     return holder.state(), decision.reason

@@ -19,6 +19,8 @@ from typing import List
 
 from hamsci_dsp.timing_map import PAYLOAD_CHAIN_ID, SCHEMA, SYSCLOCK_CHAIN_ID, BudgetTerm, Chain
 
+from hf_timestd.core.t3_admission import AdmissionMode
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_PATH = Path("/run/hf-timestd/timing_chain.json")
@@ -96,19 +98,28 @@ def chains_from_config(cfg: dict) -> List[Chain]:
 
 
 def publish_chains(chains: List[Chain], path: Path = DEFAULT_PATH, *,
-                   t3_admitted: bool = False) -> None:
+                   t3_admission_mode: AdmissionMode = AdmissionMode.AUTO) -> None:
     """Atomic, world-readable, never raises.
 
-    ``t3_admitted``: ``[timing.t3] admitted`` (Ruling B, 2026-10-30); until
-    it reads true the registration block names no T3 source."""
+    ``t3_admission_mode``: ``[timing.t3] admission`` (Task A7), recorded as
+    ``t3_admission_mode``.  The record goes out once, at start, so its
+    registration block claims a T3 source only in mode ON; in auto the
+    per-minute decision lives in authority.json's ``t3_admission``.  The
+    default reads auto, which claims none."""
+    try:
+        mode = AdmissionMode(t3_admission_mode)
+    except ValueError:
+        mode = AdmissionMode.AUTO
     doc = {"schema": SCHEMA,
            "written_utc": datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z"),
-           "chains": [c.to_record() for c in chains]}
+           "chains": [c.to_record() for c in chains],
+           "t3_admission_mode": mode.value}
     # Same provenance block as authority.json (spec §7): a RegistrationStore
     # failure must not stop the chain record from publishing.
     try:
         from hf_timestd.core.authority_manager import registration_block
-        doc["registration"] = registration_block(admitted=t3_admitted)
+        doc["registration"] = registration_block(
+            admitted=(mode is AdmissionMode.ON))
     except Exception as exc:
         logger.debug("registration_block raised: %s", exc)
     try:

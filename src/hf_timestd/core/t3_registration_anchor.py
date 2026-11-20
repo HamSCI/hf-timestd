@@ -100,7 +100,7 @@ class T3RegistrationAnchor:
         time_fn: Callable[[], float] = time.time,
         *,
         anchor_closure: bool = False,
-        admitted: bool = False,
+        gate=None,
     ):
         if store is None:
             from .registration_store import RegistrationStore
@@ -113,10 +113,13 @@ class T3RegistrationAnchor:
         # the flag gets the safe regime, not the one that steered
         # AC0G-ND's clock the wrong way on 2026-09-07.
         self._closure = bool(anchor_closure)
-        # Ruling B (2026-10-30): ``[timing.t3] admitted``.  Until it reads
-        # true the registration anchors nothing, closure or not.  False by
-        # default, for the same reason as the closure.
-        self._admitted = bool(admitted)
+        # Task A7: the process's T3AdmissionGate (``t3_admission_gate``),
+        # which follows the admission decision authority.json publishes.
+        # While it reads closed the registration anchors nothing, closure
+        # or not.  None (the default) reads closed, for the same reason as
+        # the closure.  The owner refreshes the gate; this holder only
+        # asks it, with no I/O.
+        self._gate = gate
         self._decision = T3AnchorDecision(None, None, "not_evaluated")
 
     # ── the current answer ───────────────────────────────────────────
@@ -176,9 +179,11 @@ class T3RegistrationAnchor:
         # never consulted.
         if not self._closure:
             return T3AnchorDecision(None, None, "closure_disabled")
-        if not self._admitted:
+        gate = self._gate
+        if gate is None or not gate.admitted():
             from .t3_admission import NOT_ADMITTED_REASON
-            return T3AnchorDecision(None, None, NOT_ADMITTED_REASON)
+            reason = NOT_ADMITTED_REASON if gate is None else gate.reason()
+            return T3AnchorDecision(None, None, reason)
         if t6_authoritative:
             return T3AnchorDecision(None, None, "t6_authoritative")
         try:

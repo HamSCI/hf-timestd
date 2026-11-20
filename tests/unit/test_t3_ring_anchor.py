@@ -12,6 +12,7 @@ uses on a real ring — so a sign error cannot hide behind a test-local
 re-derivation.
 """
 
+from hf_timestd.core.t3_admission_gate import T3AdmissionGate
 import types
 
 import pytest
@@ -282,7 +283,7 @@ def _core(store, t6_auth=None):
     rec._t6_authority_last_decision = None
     rec._t6_authority_status = lambda: t6_auth
     rec._t3_native_anchor = None
-    rec._t3_anchor_holder = T3RegistrationAnchor(store=store, anchor_closure=True, admitted=True)
+    rec._t3_anchor_holder = T3RegistrationAnchor(store=store, anchor_closure=True, gate=T3AdmissionGate.fixed(True))
     return rec
 
 
