@@ -142,7 +142,7 @@ class StubJudge:
         self.registered = []
         self.flags = []
 
-    def register_radiod_pair(self, key, gps_ns, snap, rate):
+    def register_radiod_pair(self, key, gps_ns, snap, rate, pair_age_s=0.0):
         self.registered.append((key, int(gps_ns), int(snap), int(rate)))
 
     def offset_for(self, key, rtp):
@@ -750,6 +750,74 @@ class TestEndToEnd:
             t = bt.resolve_buffer_timing(m, sample_rate=100)
             # Corrected label lands at 'now', not 1203 s in the past.
             assert abs(t.sample0_utc - now) < 30
+        finally:
+            w.close()
+            judge.stop()
+
+
+# ────────────────────────────────────────────────────────────────────
+# A round-trip restore hands the judge an OLD pair (AB4EJ 2026-11-19)
+# ────────────────────────────────────────────────────────────────────
+
+class TestRestoredPairAge:
+    """AB4EJ 11-19 17:17:55Z: ANCHOR ROUND TRIP restored the mapping in
+    force before 16:29:24; the judge took that pair as fresh and measured
+    +2911 s (the pair's age), so every chunk was labelled 48 min ahead."""
+
+    AGE_S = 2911.0
+
+    def test_judge_reads_true_offset_for_an_aged_pair(self, tmp_path):
+        clock = FakeClock()
+        bench = FakeBench(clock, tier="T4", sigma_ns=1e5)
+        judge = make_judge(clock, tmp_path, bench)
+        # A truthful pair, taken AGE_S ago, registered only now.
+        gps_ns = unix_to_gps_ns(clock.wall - self.AGE_S)
+        judge.register_radiod_pair(KEY, gps_ns, 5000, 24000,
+                                   pair_age_s=self.AGE_S)
+        judge.tick()
+        v = judge.offset_for(KEY, 5000)
+        assert v is not None
+        assert abs(v.offset_ns) < 1e6
+
+    def test_round_trip_restore_keeps_labels_on_time(self, tmp_path):
+        clock = FakeClock(wall=time.time())
+        bench = FakeBench(clock, tier="T4", sigma_ns=1e5)
+        judge = make_judge(clock, tmp_path, bench)
+        rate = 100
+        w = make_writer(tmp_path, judge=judge, key=KEY, sample_rate=rate)
+        try:
+            # Pair A: truthful, adopted at t0.
+            t0 = clock.wall
+            snap_a, gps_a = 10_000, unix_to_gps_ns(t0)
+            w.add_timing_snapshot(gps_time_ns=gps_a, rtp_timesnap=snap_a)
+            judge.tick()
+            # AGE_S later the stream has advanced by AGE_S of samples.
+            clock.advance(self.AGE_S)
+            rtp_now = snap_a + int(self.AGE_S * rate)
+            w.write_samples(np.ones(rate, dtype=np.complex64),
+                            rtp_timestamp=rtp_now & 0xFFFFFFFF)
+            # Pair B: radiod's pair steps +0.9 s; the recorder adopts it ...
+            w.add_timing_snapshot(
+                gps_time_ns=unix_to_gps_ns(clock.wall + 0.9),
+                rtp_timesnap=rtp_now)
+            judge.tick()
+            # ... then radiod lands back on A and the recorder restores it.
+            clock.advance(60.0)
+            rtp_now += 60 * rate
+            w.write_samples(np.ones(rate, dtype=np.complex64),
+                            rtp_timestamp=rtp_now & 0xFFFFFFFF)
+            w.restore_timing_mapping(gps_a, snap_a)
+            judge.tick()
+            v = judge.offset_for(KEY, rtp_now)
+            assert v is not None
+            assert abs(v.offset_ns) < 1e9, (
+                f"judge offset {v.offset_ns/1e9:+.1f} s after the restore")
+            for i in range(1, 6):
+                w.write_samples(np.ones(rate, dtype=np.complex64),
+                                rtp_timestamp=(rtp_now + i * rate) & 0xFFFFFFFF)
+            m = read_sidecars(w)[-1]
+            t = bt.resolve_buffer_timing(m, sample_rate=rate)
+            assert abs(t.sample0_utc - clock.wall) < 30
         finally:
             w.close()
             judge.stop()
