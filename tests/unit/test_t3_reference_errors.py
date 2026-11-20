@@ -95,3 +95,44 @@ def test_garbage_rows_do_not_raise():
     row = _row(t3_minus_t6_ms=0.26)
     json.dumps(row)
     assert reference_errors(row) == ReferencePair("T6", 0.26, None)
+
+
+# ── final review I-2: the judge adopted T3 ───────────────────────────
+#
+# Once T3 holds admission the judge may adopt it.  Then T3 has no shadow
+# residual of its own, and every other bench's *_vs_adopted names "T3":
+# ref_ns = ref - T3, so T3 - ref = -ref_ns and T2 - ref = t2_ns - ref_ns.
+
+
+def test_t4_station_with_t3_adopted_reads_t3_from_the_t4_residual():
+    # T4 sits 1.2 ms after T3: T3's error against T4 reads -1.2 ms.
+    row = _row(t4_vs=(1_200_000.0, "T3"), t4_offset_ms=0.0, t2_offset_ms=-0.6,
+               t2_vs=(5_000_000.0, "T3"))
+    # T2 keeps the host plane on a T4 station, whatever the judge says.
+    assert reference_errors(row) == ReferencePair(
+        "T4", pytest.approx(-1.2), pytest.approx(0.6))
+
+
+def test_t5_station_with_t3_adopted_reads_both_errors_from_the_judge():
+    # T5 sits 0.3 ms before T3 (ref - T3 = -0.3); T2 sits 0.15 ms after
+    # T3 (T2 - T3 = +0.15).  T3 - T5 = +0.3; T2 - T5 = 0.15 - (-0.3) = 0.45.
+    row = _row(t5_vs=(-300_000.0, "T3"), t2_vs=(150_000.0, "T3"))
+    assert reference_errors(row) == ReferencePair(
+        "T5", pytest.approx(0.3), pytest.approx(0.45))
+    # With T4 present T2 keeps the host plane.
+    row = _row(t5_vs=(-300_000.0, "T3"), t2_vs=(150_000.0, "T3"),
+               t4_offset_ms=0.0, t2_offset_ms=-0.4)
+    assert reference_errors(row) == ReferencePair(
+        "T5", pytest.approx(0.3), pytest.approx(0.4))
+    # A T2 residual against another bench gives no T2 error.
+    row = _row(t5_vs=(-300_000.0, "T3"), t2_vs=(150_000.0, "T5"))
+    assert reference_errors(row) == ReferencePair("T5", pytest.approx(0.3), None)
+
+
+def test_t3_adopted_prefers_t5_over_t4_and_a_bad_t5_does_not_fall_through():
+    row = _row(t5_vs=(-300_000.0, "T3"), t4_vs=(1_200_000.0, "T3"),
+               t4_offset_ms=0.0, t2_offset_ms=-0.4)
+    assert reference_errors(row).reference == "T5"
+    row = _row(t5_vs=(float("nan"), "T3"), t4_vs=(1_200_000.0, "T3"),
+               t4_offset_ms=0.0, t2_offset_ms=-0.4)
+    assert reference_errors(row) is None

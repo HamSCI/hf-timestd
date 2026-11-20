@@ -1300,9 +1300,9 @@ class OffsetJudge:
     # one tick returns the single gate read taken at the top of the tick
     # (fix round 1, M-2).  So every surface agrees within a tick; a
     # change of decision takes effect on all of them at the next tick.
-    # The writer's section-18 anchor lookup runs outside the tick and
-    # reads the gate directly, so it may see a new decision up to one
-    # tick before the tick surfaces do.  An admitted reading may be
+    # The section-18 anchor lookup (``_label_anchor_for_locked``) runs
+    # inside the tick, from ``_snapshot_locked``, so it uses the same
+    # gate read as every other tick surface.  An admitted reading may be
     # adopted only through the existing cross-bench gate
     # (``_select_bench_locked``).
     _T3_GATED_BENCHES = frozenset({"hf_acquired"})
@@ -2193,9 +2193,10 @@ class OffsetJudge:
         one answer read at the top of the tick's locked section
         (``_t3_tick_admitted``), so a gate refresh mid-tick cannot leave T3
         adopted on one surface and closed on another within that tick.
-        Callers outside a tick (the writer's ``_label_anchor_for_locked``,
-        the ``t3_admitted`` property) read the gate directly: an attribute
-        read, no I/O.  A gate that raises reads as not admitted (the
+        Callers outside a tick (the ``t3_admitted`` property, say) read
+        the gate directly: an attribute read, no I/O.  The section-18
+        lookup ``_label_anchor_for_locked`` runs inside the tick (from
+        ``_snapshot_locked``) and so takes the tick's answer.  A gate that raises reads as not admitted (the
         closed side)."""
         snap = self._t3_tick_admitted
         if snap is not None:

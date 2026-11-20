@@ -20,7 +20,8 @@ authority.
 
 The old ``admitted`` key maps: true reads as ``on``, false reads as
 ``auto``.  The new key wins when both appear.  A malformed value logs a
-WARNING and reads as ``auto``.
+WARNING and reads as ``auto``.  The value ignores case and surrounding
+space, so ``"Off"`` reads as ``off``.
 
 The mode resolves once per process and goes to the pieces that need it,
 so the recorder, the metrology processes and the fusion service cannot
@@ -50,9 +51,13 @@ class AdmissionMode(str, Enum):
     ON = "on"
 
 
-#: What ``authority.json``'s ``t3_unavailable_reason`` says, and what every
-#: closed surface names, while T3 waits for admission.
-NOT_ADMITTED_REASON = "not admitted (shadow run pending)"
+#: What a closed surface names when it has no decision of its own to
+#: quote: the fixed(False) gate, an anchor holder built without a gate,
+#: and the start-up timing-chain record in auto mode.  The live decision
+#: and its reason sit in ``authority.json``'s ``t3_admission`` block.
+NOT_ADMITTED_REASON = (
+    "not admitted (admission decided each minute in authority.json "
+    "t3_admission)")
 
 _logged = False
 
@@ -82,7 +87,8 @@ def admission_mode_from_config(config: Optional[dict]) -> AdmissionMode:
     if ADMISSION_KEY in node:
         value = node[ADMISSION_KEY]
         try:
-            return AdmissionMode(value)
+            # Case and surrounding space do not matter: "Off" reads off.
+            return AdmissionMode(str(value).strip().lower())
         except ValueError:
             logger.warning(
                 "T3 admission: [timing.t3] admission = %r is not auto, off or "

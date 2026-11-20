@@ -20,6 +20,8 @@ from hf_timestd.core.authority_manager import (
     Probe,
 )
 from hf_timestd.core.anchor_closure import anchor_closure_enabled
+from hf_timestd.core.authority_config import (
+    authority_interval_sec, authority_manager_section)
 from hf_timestd.core.clock_stability import STABILITY_HISTORY_MIN
 from hf_timestd.core.t3_admission import t3_admission_mode
 from hf_timestd.core.t3_admission_policy import T3AdmissionPolicy
@@ -220,11 +222,11 @@ def build_authority_runner_from_config(
     #
     # A dict here is still accepted, for any deployment that genuinely used
     # the old sub-table shape before sigmond claimed the name.
-    auth_cfg = _timing.get("authority_manager", None)
-    if not isinstance(auth_cfg, dict):
-        _legacy = _timing.get("authority", None)
-        auth_cfg = _legacy if isinstance(_legacy, dict) else {}
-    interval_sec = float(auth_cfg.get("interval_sec", 30.0))
+    #
+    # authority_config holds this choice, so the T3 admission gate in the
+    # recorder and metrology processes reads the same interval.
+    auth_cfg = authority_manager_section(config)
+    interval_sec = authority_interval_sec(config)
     hysteresis = int(auth_cfg.get("upgrade_hysteresis", 3))
     a_level_cfg = auth_cfg.get("a_level", "A1")
     # The gpsdo-monitor probe serves two readers: the A-level (below) and

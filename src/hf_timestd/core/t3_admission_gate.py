@@ -4,8 +4,13 @@ The fusion service's authority manager decides each minute whether the
 stand-alone T3 holds admission (``T3AdmissionPolicy``) and publishes the
 decision as ``authority.json``'s ``t3_admission`` block, every 30 s tick,
 next to ``utc_published``.  Every other process -- the recorder and each
-metrology channel -- follows that decision through one gate, so a jump
-withdrawal reaches every surface within a minute.
+metrology channel -- follows that decision through one gate.  A jump
+withdrawal reaches every surface after three lags add up: up to a minute
+until the next shadow row decides it, up to one authority write interval
+until ``authority.json`` shows it, and up to one gate refresh interval
+until a process reads it.  At the defaults (one row a minute, 30 s
+writes, 60 s refreshes) the worst case comes to about two and a half
+minutes.
 
 The gate reads the file only in :meth:`T3AdmissionGate.refresh`, which
 never raises.  :meth:`admitted`, :meth:`reason` and :meth:`clock` read
@@ -16,7 +21,9 @@ Freshness uses no wall clock.  The gate counts the block as fresh only
 after it has seen ``utc_published`` change at least once since it
 started (a file left behind by a dead fusion service never changes), and
 only while that last change lies within ``stale_s`` of ``mono_fn()``.
-The manager writes every 30 s, so the default 120 s spans four ticks.
+The manager writes every 30 s by default, so the default 120 s spans four
+ticks; ``gate_stale_s`` stretches it to four of a longer configured
+interval.
 
 The rules, by mode::
 
@@ -32,11 +39,13 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+from .authority_config import authority_interval_sec, authority_manager_section
 from .clock_stability import ClockStability
 from .t3_admission import NOT_ADMITTED_REASON, AdmissionMode
 from .t3_admission_policy import (
@@ -53,8 +62,34 @@ logger = logging.getLogger(__name__)
 #: same path.
 DEFAULT_AUTHORITY_PATH = Path("/run/hf-timestd/authority.json")
 
-#: Four of the manager's 30 s ticks.
+#: Four of the manager's 30 s ticks, and the floor of ``gate_stale_s``.
 DEFAULT_STALE_S = 120.0
+#: ``gate_stale_s`` allows this many authority write intervals.
+STALE_INTERVALS = 4
+
+
+def gate_stale_s(config: Optional[dict]) -> float:
+    """The gate's ``stale_s`` for a process whose config names the
+    authority manager's interval: ``max(DEFAULT_STALE_S, STALE_INTERVALS *
+    interval_sec)``, so a slower manager does not read as a dead one.  It
+    reads ``[timing.authority_manager] interval_sec`` the way the runner
+    does (``authority_config``).  A malformed, non-finite or non-positive
+    interval logs a WARNING and gives ``DEFAULT_STALE_S``.  Never raises."""
+    try:
+        # float(True) reads 1.0; a boolean names no interval.
+        if isinstance(authority_manager_section(config).get("interval_sec"),
+                      bool):
+            raise ValueError("a boolean")
+        interval = authority_interval_sec(config)
+        if not math.isfinite(interval) or interval <= 0:
+            raise ValueError("not a positive finite number")
+    except Exception as exc:  # noqa: BLE001 -- the default, never a raise
+        logger.warning(
+            "T3 admission gate: [timing.authority_manager] interval_sec "
+            "unusable (%s); stale after %.0f s", exc, DEFAULT_STALE_S)
+        return DEFAULT_STALE_S
+    return max(DEFAULT_STALE_S, STALE_INTERVALS * interval)
+
 
 REASON_NO_BLOCK = (
     "withheld: no fresh admission decision from the authority "
@@ -127,6 +162,10 @@ class T3AdmissionGate:
     @property
     def authority_path(self) -> Path:
         return self._path
+
+    @property
+    def stale_s(self) -> float:
+        return self._stale_s
 
     # ── the answer: no I/O ───────────────────────────────────────────
 

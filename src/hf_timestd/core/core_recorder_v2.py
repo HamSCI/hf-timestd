@@ -736,9 +736,10 @@ class CoreRecorderV2:
         # ``_refresh_t3_native_anchor``); the T3 anchor holder, the offset
         # judge and the judge's T3 bench ask it.
         from .t3_admission import t3_admission_mode
-        from .t3_admission_gate import T3AdmissionGate
+        from .t3_admission_gate import T3AdmissionGate, gate_stale_s
         self._t3_admission_mode = t3_admission_mode(config)
-        self._t3_gate = T3AdmissionGate(self._t3_admission_mode)
+        self._t3_gate = T3AdmissionGate(self._t3_admission_mode,
+                                        stale_s=gate_stale_s(config))
 
         # ── Offset Judge (docs/OFFSET-JUDGE-SPEC-2026-08-05.md, P1) ──
         # One judge per core-recorder process (spec §11: no new daemon).

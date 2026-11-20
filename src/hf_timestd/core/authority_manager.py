@@ -599,9 +599,10 @@ class AuthorityManager:
         Never raises: the tick has already published authority.json.  A
         failure streak logs one ERROR, so a bug in the row cannot silently
         cost the whole record.  The row step and the policy step keep
-        separate streaks.  A failing row feeds the policy nothing; a
-        failing policy leaves the standing decision in force and the row
-        still lands, carrying that decision.
+        separate streaks.  A failing row feeds the policy nothing.  A
+        minute the policy fails on closes T3 in auto and on modes (the
+        policy handles that itself, ``T3AdmissionPolicy._fail``), and the
+        row still lands, carrying the closed decision.
         """
         try:
             # Record stamp only -- see the docstring.
@@ -667,8 +668,11 @@ class AuthorityManager:
 
     def _observe_t3_minute(self, row: Dict[str, Any]) -> Dict[str, Any]:
         """Feed one minute row to the admission policy; return the
-        decision's block for the row.  On failure the standing decision
-        stays, its block goes in the row, and one ERROR marks the streak.
+        decision's block for the row.  The policy never raises: a minute
+        it fails on closes T3 there and logs one ERROR per streak.  The
+        guard below stays as a backstop; should it ever fire, the standing
+        decision stays, its block goes in the row, and one ERROR marks the
+        streak.
         """
         try:
             self.t3_policy.observe(MinuteEvidence.from_row(row))

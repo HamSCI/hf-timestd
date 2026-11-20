@@ -279,9 +279,10 @@ class MetrologyService:
         # file the T6 tier comes from) and refreshes once a minute, at the
         # top of apply_registration.
         from .t3_admission import t3_admission_mode
-        from .t3_admission_gate import T3AdmissionGate
+        from .t3_admission_gate import T3AdmissionGate, gate_stale_s
         self._t3_gate = T3AdmissionGate(t3_admission_mode(config),
-                                        self._AUTHORITY_JSON_PATH)
+                                        self._AUTHORITY_JSON_PATH,
+                                        stale_s=gate_stale_s(config))
         self.reg_store = RegistrationStore()
         self.epoch_tracker = CounterEpochTracker()
         # Task 10: this minute's self-measurement of the held plane

@@ -50,6 +50,13 @@ def _t2_judge_ms(row: dict, tier: str) -> Optional[float]:
     return ns / 1e6 if ns is not None and vs_tier == tier else None
 
 
+def _t2_vs_t3_adopted_ms(row: dict, ref_ns: float) -> Optional[float]:
+    """T2 against a reference when the judge adopted T3: both residuals
+    read "bench minus T3", so T2 - ref = t2_ns - ref_ns."""
+    ns, vs_tier = _vs(row, "t2_vs_adopted")
+    return (ns - ref_ns) / 1e6 if ns is not None and vs_tier == "T3" else None
+
+
 def _t2_error(row: dict, tier: str, *, host_when_t4: bool) -> Optional[float]:
     # T4 present: the host plane, as the 11-01 verdict measured T2.
     if host_when_t4 and _num(row.get("t4_offset_ms")) is not None:
@@ -85,6 +92,21 @@ def reference_errors(row: dict) -> Optional[ReferencePair]:
       the same ``vs_tier``, or ``t3_vs_adopted`` / 1e6 when its
       ``vs_tier`` is "T4"; t2 = host plane.
 
+    Once T3 holds admission the judge may adopt it (a T4- or T5-only
+    station).  The judge then publishes no residual for T3, and every other
+    bench's ``*_vs_adopted`` names ``vs_tier`` "T3": ``ref_ns`` reads
+    reference minus T3.  So:
+
+    - T5, ``t5_vs_adopted`` names "T3": t3 = ``-t5_ns`` / 1e6; t2 = host
+      plane if T4 is present, else ``(t2_ns - t5_ns)`` / 1e6 when
+      ``t2_vs_adopted`` also names "T3".
+    - T4, ``t4_vs_adopted`` names "T3": t3 = ``-t4_ns`` / 1e6; t2 = host
+      plane.
+
+    Without these cases an adopted T3 would read as reference loss, and
+    the policy would withdraw it after one window and admit it again, in a
+    cycle with a false reason (final review I-2).
+
     A minute with T3's error but no T2 error returns a pair whose
     ``t2_error_ms`` is None; the policy must not count it as a win.
     """
@@ -99,11 +121,25 @@ def reference_errors(row: dict) -> Optional[ReferencePair]:
                 "T6", t3, _t2_error(row, "T6", host_when_t4=True))
 
         t3_ns, t3_tier = _vs(row, "t3_vs_adopted")
+        t5_ns, t5_tier = _vs(row, "t5_vs_adopted")
+        if t5_tier == "T3":
+            # The judge adopted T3 (final review I-2): T3 - T5 = -t5_ns.
+            if t5_ns is None:
+                return None
+            if _num(row.get("t4_offset_ms")) is not None:
+                t2 = _t2_host_ms(row)
+            else:
+                t2 = _t2_vs_t3_adopted_ms(row, t5_ns)
+            return ReferencePair("T5", -t5_ns / 1e6, t2)
         if t3_tier == "T5":
             return None if t3_ns is None else ReferencePair(
                 "T5", t3_ns / 1e6, _t2_error(row, "T5", host_when_t4=True))
 
         t4_ns, t4_tier = _vs(row, "t4_vs_adopted")
+        if t4_tier == "T3":
+            # The judge adopted T3: T3 - T4 = -t4_ns; T2 keeps the host plane.
+            return None if t4_ns is None else ReferencePair(
+                "T4", -t4_ns / 1e6, _t2_host_ms(row))
         if t3_tier is not None and t3_tier == t4_tier:
             if t3_ns is None or t4_ns is None:
                 return None

@@ -13,7 +13,9 @@ phase) sets the window and the hold.
 
 Safety outranks everything else.  T3 never names the wrong second and never
 jumps by 0.5 s or more: such a minute withdraws T3 at once, clears the
-window and restarts the fill, in every mode but OFF (criterion 4).
+window and restarts the fill, in every mode but OFF (criterion 4).  A
+minute the policy itself fails on counts the same way: it closes T3 (in
+AUTO and ON) and logs one ERROR per failure streak.
 
 Pure: no file I/O and no clock reads.  The only time the policy knows comes
 from each minute's ``utc_minute`` stamp, which names minutes and never
@@ -70,6 +72,7 @@ REASON_UNRESOLVED = "withheld: T3 has not named the second"
 REASON_OFF = 'off ([timing.t3] admission = "off")'
 REASON_FORCED = 'forced on ([timing.t3] admission = "on"), for testing only'
 REASON_PENDING = "; change pending {s} of {hold} s"
+REASON_POLICY_FAILED = "withheld: admission policy failed ({exc})"
 
 
 def _num(v: Any) -> Optional[float]:
@@ -258,6 +261,8 @@ class T3AdmissionPolicy:
         # The reason the standing state last stood on its own.
         self._standing_reason: str
         self._seeding = False
+        # Inside a failure streak of _observe: one ERROR per streak.
+        self._failing = False
         self._decision = AdmissionDecision.initial(mode)
         self._standing_reason = self._decision.reason
 
@@ -311,12 +316,58 @@ class T3AdmissionPolicy:
     # --------------------------------------------------------------- observe
 
     def observe(self, ev: MinuteEvidence) -> AdmissionDecision:
+        """One minute in, the standing decision out.  Never raises.
+
+        A minute the policy fails on closes T3 in AUTO and ON (final review
+        I-1): a failure that persists must not keep an admitted T3 admitted
+        with no jump detection.  See ``_fail``."""
         try:
-            return self._observe(ev)
+            d = self._observe(ev)
         except Exception as exc:  # noqa: BLE001 -- never raise into the tick
-            logger.error("T3 admission policy failed on minute %r: %r",
+            return self._fail(ev, exc)
+        if self._failing:
+            logger.info("T3 admission policy works again at utc_minute %r",
+                        getattr(ev, "utc_minute", None))
+            self._failing = False
+        return d
+
+    def _fail(self, ev: Any, exc: Exception) -> AdmissionDecision:
+        """Close T3 after a failed minute.  Never raises.
+
+        OFF stays off.  AUTO and ON withhold at once with
+        ``REASON_POLICY_FAILED`` (a transition, logged at WARNING, when T3
+        was admitted).  The failure counts as a jump: the window empties,
+        the reference-loss grace and any pending change end, and a hold
+        follows, so the next good minute cannot re-open T3 at once; AUTO
+        refills from nothing.  One ERROR marks each failure streak."""
+        minute = _minute(getattr(ev, "utc_minute", None))
+        if not self._failing:
+            logger.error("T3 admission policy failed on minute %r: %r; T3 "
+                         "stays withheld until a minute succeeds",
                          getattr(ev, "utc_minute", None), exc)
+        else:
+            logger.debug("T3 admission policy failed on minute %r: %r",
+                         getattr(ev, "utc_minute", None), exc)
+        self._failing = True
+        if self._mode is AdmissionMode.OFF:
             return self._decision
+        reason = REASON_POLICY_FAILED.format(exc=type(exc).__name__)
+        try:
+            now = minute if minute != INVALID_MINUTE else self._last_minute
+            self._pairs.clear()
+            self._last_judged_pair_minute = None
+            self._pending_since = None
+            if now is not None:
+                self._jump_until = now + int(self._stability.hold_s)
+                self._jump_reason = reason
+            self._settle(now, False, None, reason, immediate=True)
+            self._decision = dataclasses.replace(
+                self._decision, n_pairs=0, t3_median_ms=None, t3_p95_ms=None,
+                t2_median_ms=None, t2_p95_ms=None)
+        except Exception:  # noqa: BLE001 -- close whatever else broke
+            self._decision = dataclasses.replace(
+                self._decision, admitted=False, route=None, reason=reason)
+        return self._decision
 
     def _observe(self, ev: MinuteEvidence) -> AdmissionDecision:
         now = ev.utc_minute
@@ -476,7 +527,7 @@ class T3AdmissionPolicy:
         # admitted station one window of grace).
         self._settle(now, False, None, reason, immediate=True)
 
-    def _settle(self, now: int, want: bool, route: Optional[str], reason: str,
+    def _settle(self, now: Optional[int], want: bool, route: Optional[str], reason: str,
                 *, immediate: bool) -> None:
         d = self._decision
         if want == d.admitted:
@@ -500,6 +551,6 @@ class T3AdmissionPolicy:
             d, admitted=want, route=route, reason=reason,
             since_utc_minute=now, transitions=d.transitions + 1)
         level = logging.INFO if self._seeding else logging.WARNING
-        logger.log(level, "T3 admission %s at utc_minute %d: %s%s",
+        logger.log(level, "T3 admission %s at utc_minute %s: %s%s",
                    "granted" if want else "withdrawn", now, reason,
                    " (seed replay)" if self._seeding else "")

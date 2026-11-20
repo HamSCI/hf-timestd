@@ -81,10 +81,16 @@ def test_the_recorder_reads_the_switch_from_its_config(tmp_path, monkeypatch):
     monkeypatch.setattr(crv, "CounterMapProbe", _Dummy)
     for admitted in (True, False):
         seen.clear()
+        timing = {"t3": {"admitted": admitted}}
+        if not admitted:
+            # Final review m-3: the gate's staleness follows the authority
+            # manager's interval: max(120 s, four intervals).
+            timing["authority_manager"] = {"interval_sec": 45.0}
         rec = crv.CoreRecorderV2({
             "output_dir": str(tmp_path / f"rec-{admitted}"),
             "ka9q": {"status": "hf-status.local"},
-            "timing": {"t3": {"admitted": admitted}}})
+            "timing": timing})
+        assert rec._t3_gate.stale_s == (120.0 if admitted else 180.0)
         # Task A7: one gate, built from the mode this config names.  Task
         # A8: the judge gets that gate itself, not a bool.
         from hf_timestd.core.t3_admission import AdmissionMode
@@ -114,12 +120,16 @@ def test_metrology_reads_the_switch_from_its_config(tmp_path, monkeypatch):
             toml.load(str(_cfg_file(tmp_path, admitted))))
         config["timing"]["t3_shadow"] = {"enabled": False}
         config["metrology"] = {"realtime_iono": False, "physics_products": False}
+        if not admitted:
+            # Final review m-3, as for the recorder.
+            config["timing"]["authority_manager"] = {"interval_sec": 45.0}
         svc = ms.MetrologyService(config, "WWV_10000", 10e6,
                                   tmp_path / f"met-{admitted}", "EM38ww")
         from hf_timestd.core.t3_admission import AdmissionMode
         assert svc._t3_gate.mode is (
             AdmissionMode.ON if admitted else AdmissionMode.AUTO)
         assert svc._t3_gate.authority_path == svc._AUTHORITY_JSON_PATH
+        assert svc._t3_gate.stale_s == (120.0 if admitted else 180.0)
 
 
 def test_fusion_reads_the_switch_from_its_own_config_path(tmp_path, monkeypatch):

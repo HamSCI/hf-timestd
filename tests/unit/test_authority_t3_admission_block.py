@@ -400,3 +400,21 @@ def test_the_runner_seeds_no_row_stamped_after_now(tmp_path):
         record.append(_seed_row(now + 60 * k))
     runner = _runner(tmp_path)
     assert runner.manager.t3_decision.n_pairs == 0
+
+
+def test_a_t4_station_with_t3_adopted_keeps_producing_pairs(tmp_path):
+    # Final review I-2: once the judge adopts T3, T4's residual names
+    # vs_tier "T3" and T3 has none of its own.  The rows must still carry
+    # a pair, or the policy reads reference loss and withdraws T3 after
+    # one window, then admits it again, in a cycle.
+    adopted_t3 = {"shadow_residuals": {"T4": {
+        "shadow_residual_ns": -300_000.0, "sigma_ns": 2e6, "vs_tier": "T3"}}}
+    clock = _Clock()
+    m = _authority(tmp_path, clock=clock, judge=adopted_t3)
+    _run(m, clock, ROWS_TO_ADMIT + 70)
+    rows = _rows(tmp_path)
+    assert all(r["admission"]["reference"] == "T4" for r in rows[5:])
+    assert m.t3_decision.admitted is True
+    assert m.t3_decision.reason == "admitted by reference (T4)"
+    assert m.t3_decision.transitions == 1
+    assert m.t3_decision.t3_median_ms == pytest.approx(0.3)

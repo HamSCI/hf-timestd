@@ -40,7 +40,9 @@ def test_block_from_acquired_summary_withholds_the_source_unadmitted(tmp_path):
     )
     b = registration_block(st)
     assert b["source"] == "label" and b["state"] == "ACQUIRED"
-    assert b["admission"] == "not admitted (shadow run pending)"
+    assert b["admission"] == (
+        "not admitted (admission decided each minute in authority.json "
+        "t3_admission)")
 
 
 def test_block_without_summary_is_label(tmp_path):

@@ -32,7 +32,9 @@ from hf_timestd.core.offset_judge import BenchReading, OffsetJudge
 SR = 24000
 WALL0 = 1_800_000_000.0
 KEY = ("hf-status.local", 0xABCD1234)
-NOT_ADMITTED = "not admitted (shadow run pending)"
+NOT_ADMITTED = (
+    "not admitted (admission decided each minute in authority.json "
+    "t3_admission)")
 MODE_OFF = 'off ([timing.t3] admission = "off")'
 T3_OFF_S = 0.010        # the stand-alone T3 sits 10 ms from truth
 
@@ -54,6 +56,10 @@ def test_admission_mode_reads_the_new_key_and_maps_the_old(caplog):
     assert f({"timing": {"t3": {"admission": "on"}}}) is AdmissionMode.ON
     assert f({"timing": {"t3": {"admitted": True}}}) is AdmissionMode.ON
     assert f({"timing": {"t3": {"admitted": False}}}) is AdmissionMode.AUTO
+    # Final review m-6: case and surrounding space do not matter.
+    assert f({"timing": {"t3": {"admission": "Off"}}}) is AdmissionMode.OFF
+    assert f({"timing": {"t3": {"admission": " ON "}}}) is AdmissionMode.ON
+    assert f({"timing": {"t3": {"admission": "AUTO"}}}) is AdmissionMode.AUTO
     # The new key wins when both appear.
     assert f({"timing": {"t3": {"admission": "off", "admitted": True}}}) is AdmissionMode.OFF
     # Malformed values fall back to the default and log a WARNING.
@@ -385,6 +391,11 @@ def test_the_timing_chain_record_claims_no_source_unadmitted(tmp_path, monkeypat
         doc = json.loads((tmp_path / "chains.json").read_text())
         assert doc["registration"]["source"] == source
         assert doc["t3_admission_mode"] == mode.value
+        # Final review m-2: an unadmitted record names the regime truly.
+        if mode is AdmissionMode.OFF:
+            assert doc["registration"]["admission"] == MODE_OFF
+        elif mode is AdmissionMode.AUTO:
+            assert doc["registration"]["admission"] == NOT_ADMITTED
 
 
 # ── 4. admitted: behaviour as at 8efe42c ─────────────────────────────

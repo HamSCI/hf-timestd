@@ -348,3 +348,56 @@ def test_jump_reasons_name_the_magnitude():
     assert decisions[40].reason == "withdrawn: T3 jumped 700 ms"
     _, decisions = run(ev(i, -600.0 if i == 40 else 0.3) for i in range(41))
     assert decisions[40].reason == "withdrawn: T3 named the wrong second (600 ms against T6)"
+
+
+# ── final review I-1: a failing policy closes T3 ─────────────────────
+
+
+def _break_stability(p):
+    def boom():
+        raise RuntimeError("stability broke")
+    p._estimator.stability = boom
+    p._stability_at = None      # recompute on the next minute
+
+
+def test_a_failing_policy_withdraws_at_once_and_logs_once(caplog):
+    caplog.set_level(logging.INFO)
+    p = T3AdmissionPolicy(AdmissionMode.AUTO)
+    decisions = [p.observe(ev(i)) for i in range(30)]
+    assert decisions[24].admitted is True and decisions[29].transitions == 1
+    real = p._estimator.stability
+    _break_stability(p)
+    caplog.clear()
+    failed = [p.observe(ev(i)) for i in range(30, 60)]
+    assert all(not d.admitted for d in failed)
+    assert failed[0].reason == "withheld: admission policy failed (RuntimeError)"
+    assert failed[0].since_utc_minute == 30 * 60
+    assert failed[-1].transitions == 2
+    assert sum(r.levelname == "ERROR" for r in caplog.records) == 1
+    assert sum(r.levelname == "WARNING" for r in caplog.records) == 1
+    # Recovery: the window starts again, as after a jump.
+    p._estimator.stability = real
+    caplog.clear()
+    back = [p.observe(ev(i)) for i in range(60, 100)]
+    assert back[0].admitted is False and back[0].n_pairs <= 1
+    assert first_index(back, admitted=True) == 24
+    # A new failure streak logs again.
+    _break_stability(p)
+    caplog.clear()
+    p.observe(ev(100))
+    p.observe(ev(101))
+    assert sum(r.levelname == "ERROR" for r in caplog.records) == 1
+
+
+def test_a_failing_policy_closes_on_too_and_off_stays_off():
+    on = T3AdmissionPolicy(AdmissionMode.ON)
+    on.observe(ev(0))
+    _break_stability(on)
+    d = on.observe(ev(1))
+    assert d.admitted is False
+    assert d.reason == "withheld: admission policy failed (RuntimeError)"
+    off = T3AdmissionPolicy(AdmissionMode.OFF)
+    _break_stability(off)
+    d = off.observe(ev(0))
+    assert d.admitted is False
+    assert d.reason == 'off ([timing.t3] admission = "off")'

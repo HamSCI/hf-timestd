@@ -118,8 +118,12 @@ def publish_chains(chains: List[Chain], path: Path = DEFAULT_PATH, *,
     # failure must not stop the chain record from publishing.
     try:
         from hf_timestd.core.authority_manager import registration_block
+        reason = None   # registration_block's NOT_ADMITTED_REASON
+        if mode is AdmissionMode.OFF:
+            from hf_timestd.core.t3_admission_policy import REASON_OFF
+            reason = REASON_OFF
         doc["registration"] = registration_block(
-            admitted=(mode is AdmissionMode.ON))
+            admitted=(mode is AdmissionMode.ON), admission_reason=reason)
     except Exception as exc:
         logger.debug("registration_block raised: %s", exc)
     try:

@@ -238,3 +238,23 @@ def test_the_recorder_anchor_follows_the_gate(tmp_path, monkeypatch):
     rec._refresh_t3_native_anchor()
     assert rec._t3_native_anchor is None
     assert rec._t3_anchor_holder.decision.reason == "withdrawn: T3 jumped 700 ms"
+
+
+# ── final review m-3: staleness follows the authority's interval ─────
+
+
+def test_gate_stale_s_follows_the_authority_interval(caplog):
+    from hf_timestd.core.t3_admission_gate import gate_stale_s
+
+    assert gate_stale_s(None) == 120.0
+    assert gate_stale_s({}) == 120.0
+    assert gate_stale_s({"timing": {"authority_manager": {"interval_sec": 10}}}) == 120.0
+    assert gate_stale_s({"timing": {"authority_manager": {"interval_sec": 60}}}) == 240.0
+    # The legacy sub-table counts, as it does for the runner; sigmond's
+    # scalar [timing] authority does not.
+    assert gate_stale_s({"timing": {"authority": {"interval_sec": 60}}}) == 240.0
+    assert gate_stale_s({"timing": {"authority": "rtp"}}) == 120.0
+    # A malformed interval falls back to the default and never raises.
+    for bad in ("soon", float("nan"), float("inf"), -5, True, [1]):
+        assert gate_stale_s(
+            {"timing": {"authority_manager": {"interval_sec": bad}}}) == 120.0
