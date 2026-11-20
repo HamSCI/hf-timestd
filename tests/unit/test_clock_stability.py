@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 from hf_timestd.core.clock_stability import (
-    HOLD_MIN_S, STABILITY_HISTORY_MIN, STABILITY_MIN_POINTS, TAU0_S,
+    EXCURSION_MAX_POINTS, HOLD_MIN_S, STABILITY_HISTORY_MIN, STABILITY_MIN_POINTS, TAU0_S,
     WINDOW_MAX_S, WINDOW_MIN_S, ClockStability, ClockStabilityEstimator,
     PhasePoint, phase_point_from_summary,
 )
@@ -69,9 +69,9 @@ def test_run_boundaries_split_the_series():
     runs = [RUN_A] * 700 + [RUN_B] * 740
     est = _estimator(x, runs)
     assert est.stability().tau_cross_s >= 64 * 60
-    # the step itself would dominate every tau if the series were one run
-    one_run = _estimator(x)
-    assert max(one_run.tdev_by_tau().values()) > 10 * max(est.tdev_by_tau().values())
+    # the step itself would put TDEV near 300 ms / sqrt(6 m) at every tau if
+    # the series stayed one run; split, it holds at the white noise's level
+    assert max(est.tdev_by_tau().values()) < 1.0
 
 
 def test_too_few_points_reads_unmeasured():
@@ -171,24 +171,30 @@ def test_phase_point_is_none_without_a_summary():
 
 # --- fix round 1: drift only from a long current run -------------------------
 
+def _stepped(n_after: int) -> np.ndarray:
+    # white PM 0.5 ms, seed 1, with a +50 ms step n_after points from the end
+    x = np.random.default_rng(1).normal(0.0, 0.5, 1440)
+    x[1440 - n_after:] += 50.0
+    return x
+
+
 def test_a_short_current_run_leaves_drift_unmeasured():
-    # a long first run, then a 3-point current run after a restart
-    rng = np.random.default_rng(1)
-    x = rng.normal(0.0, 0.5, 1440)
-    runs = [RUN_A] * 1437 + [RUN_B] * 3
-    s = _estimator(x, runs).stability()
+    # a step 3 points ago is still pending (EXCURSION_MAX_POINTS): the long
+    # run stays current and its drift stands
+    assert _estimator(_stepped(3)).stability().drift_ns_per_s is not None
+    # once the step holds past EXCURSION_MAX_POINTS it starts the current run
+    s = _estimator(_stepped(EXCURSION_MAX_POINTS + 1)).stability()
     assert s.tau_cross_s is not None
     assert s.drift_ns_per_s is None
     # one point short of STABILITY_MIN_POINTS still reads unmeasured
-    runs = [RUN_A] * (1440 - 119) + [RUN_B] * 119
-    assert _estimator(x, runs).stability().drift_ns_per_s is None
-    runs = [RUN_A] * (1440 - 120) + [RUN_B] * 120
-    assert _estimator(x, runs).stability().drift_ns_per_s is not None
+    assert _estimator(_stepped(119)).stability().drift_ns_per_s is None
+    assert _estimator(_stepped(120)).stability().drift_ns_per_s is not None
 
 
 def test_drift_ignores_the_previous_runs_slope():
-    # first run ramps 1 us per minute; the long current run sits flat
-    x = np.concatenate([1e-3 * np.arange(700), np.zeros(740)])
+    # first run ramps 1 us per minute; after a 50 ms step the long current
+    # run sits flat
+    x = np.concatenate([1e-3 * np.arange(700), np.full(740, 50.0)])
     runs = [RUN_A] * 700 + [RUN_B] * 740
     s = _estimator(x, runs).stability()
     # TDEV is ~0 everywhere, so sigma_y ~ 0 and the flat run's slope is 0
@@ -203,3 +209,48 @@ def test_a_gps_sized_phase_constant_costs_no_precision():
     # the float PhasePoint itself rounds to one ulp of 3.1e11 (~6e-5 ms);
     # TDEV stays at that input quantisation, adding nothing of its own
     assert max(est.tdev_by_tau().values()) < float(np.spacing(3.1e11))
+
+
+# --- fix round 2: runs end at a phase step, not at an epoch id ----------------
+# B4 2026-11-16..20: counter_epoch_id flipped between neighbours one second
+# apart 4164 times in 6569 minutes while the phase held still (median minute
+# step 3 us), so splitting on identity left no run of 120 points and drift
+# read None in every hour.
+
+def test_an_epoch_that_flips_without_a_phase_step_keeps_one_run():
+    rng = np.random.default_rng(5)
+    x = rng.normal(0.0, 0.01, 1440)
+    flipping = [RUN_A if (i // 3) % 2 else RUN_A + 1.0 for i in range(1440)]
+    flipped = _estimator(x, flipping)
+    assert flipped.stability().drift_ns_per_s is not None
+    assert flipped.tdev_by_tau() == pytest.approx(_estimator(x).tdev_by_tau())
+
+
+def test_a_phase_step_splits_within_one_run_id():
+    rng = np.random.default_rng(1)
+    x = rng.normal(0.0, 0.5, 1440)
+    x[700:] += 300.0
+    same_id = _estimator(x)
+    split_by_id = _estimator(x, [RUN_A] * 700 + [RUN_B] * 740)
+    assert same_id.tdev_by_tau() == pytest.approx(split_by_id.tdev_by_tau())
+
+
+def test_a_short_excursion_is_dropped_not_split():
+    # B4 shows whole-millisecond excursions (-6 .. -8 ms) of a few minutes
+    rng = np.random.default_rng(5)
+    x = rng.normal(0.0, 0.01, 1440)
+    clean = _estimator(x).tdev_by_tau()
+    x[1400:1404] -= 7.0
+    est = _estimator(x)
+    assert est.stability().drift_ns_per_s is not None
+    for tau, t in est.tdev_by_tau().items():
+        assert t < 2 * clean[tau]
+
+
+def test_a_level_that_stays_moved_is_a_step_not_an_excursion():
+    rng = np.random.default_rng(5)
+    x = rng.normal(0.0, 0.01, 1440)
+    x[1300:] -= 7.0            # 140 points at the new level: a step
+    s = _estimator(x).stability()
+    assert s.drift_ns_per_s is not None      # the current run holds 140 points
+    assert s.drift_ns_per_s < 1000           # the 7 ms step never enters a slope

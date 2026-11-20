@@ -50,6 +50,16 @@ HOLD_MIN_S = 300
 # drift (white PM 0.5 ms: 6387 ns/s from 2 points), so below this the drift
 # reads None ("unmeasured") while tau_cross_s may still stand.
 DRIFT_MIN_RUN_POINTS = STABILITY_MIN_POINTS
+# Builder choice: a run ends where the phase moves by more than the larger of
+# STEP_MIN_MS and STEP_SIGMAS robust sigmas of the minute-to-minute change.
+# B4 2026-11-16..20: minute steps median 3 us, p95 24 us; 10 real steps of
+# more than 1 ms in 4.6 days.
+STEP_MIN_MS = 1.0
+STEP_SIGMAS = 8.0
+# Builder choice: a move that comes back within this many points is an
+# excursion (B4: whole-millisecond labels of a few minutes) and drops out;
+# one that stays longer starts a new run.
+EXCURSION_MAX_POINTS = 10
 
 # Every TDEV below this (ms) reads as no measurable noise at all.
 _TDEV_FLOOR_MS = 1e-6
@@ -112,22 +122,64 @@ def phase_point_from_summary(summary: Optional[dict],
         return None
 
 
-def _segments(points: List[PhasePoint]) -> List[Tuple[float, np.ndarray, np.ndarray]]:
-    """Split ``points`` into runs.  Each run becomes a regular TAU0_S grid
-    from its first minute to its last, NaN where a minute is missing.
+def _step_threshold_ms(points: List[PhasePoint]) -> float:
+    """The phase move that counts as a step: STEP_SIGMAS robust sigmas
+    (1.4826 MAD) of the minute-to-minute change, never below STEP_MIN_MS."""
+    if len(points) < 3:
+        return STEP_MIN_MS
+    d = np.diff(np.array([p.phase_ms for p in points], float))
+    sigma = 1.4826 * float(np.median(np.abs(d - np.median(d))))
+    return max(STEP_MIN_MS, STEP_SIGMAS * sigma)
 
-    A run ends wherever ``run_id`` changes at all.  The run's phase holds the
-    epoch as a constant, so a refined epoch (the probe keeps the least-late
-    one) steps the phase as surely as a radiod restart does; splitting there
-    keeps either step out of the statistics.  Returns (run_id, grid phase,
-    the raw (seconds, phase) pairs for the slope) per segment."""
-    out = []
+
+def _runs(points: List[PhasePoint]) -> List[List[PhasePoint]]:
+    """Split ``points`` into runs at phase steps, dropping excursions.
+
+    A run ends where the phase moves by more than ``_step_threshold_ms`` from
+    the last point kept and stays moved for more than EXCURSION_MAX_POINTS
+    points.  A move that returns within that many points is an excursion and
+    drops out; so does a move still pending at the end of the history, until
+    it has lasted long enough to call.
+
+    ``run_id`` plays no part.  B4 (2026-11-16..20) flipped its epoch id
+    between neighbours one second apart 4164 times in 6569 minutes while the
+    phase held still; splitting on identity left no run long enough to
+    measure.  A refined epoch or a radiod restart that does move the phase
+    shows up as a step and splits here."""
+    thr = _step_threshold_ms(points)
+    runs: List[List[PhasePoint]] = []
+    cur: List[PhasePoint] = []
     i = 0
     while i < len(points):
-        j = i
-        while j + 1 < len(points) and points[j + 1].run_id == points[i].run_id:
-            j += 1
-        seg = points[i:j + 1]
+        p = points[i]
+        if not cur or abs(p.phase_ms - cur[-1].phase_ms) <= thr:
+            cur.append(p)
+            i += 1
+            continue
+        ref = cur[-1].phase_ms
+        ahead = points[i + 1:i + 1 + EXCURSION_MAX_POINTS]
+        back = next((k for k, q in enumerate(ahead)
+                     if abs(q.phase_ms - ref) <= thr), None)
+        if back is not None:
+            i += 1 + back                 # excursion: resume where it returned
+        elif i + 1 + EXCURSION_MAX_POINTS > len(points):
+            break                         # pending at the end: not yet a step
+        else:
+            runs.append(cur)              # step: the moved level starts a run
+            cur = [p]
+            i += 1
+    if cur:
+        runs.append(cur)
+    return runs
+
+
+def _segments(points: List[PhasePoint]) -> List[Tuple[float, np.ndarray, np.ndarray]]:
+    """Split ``points`` into runs (``_runs``).  Each run becomes a regular
+    TAU0_S grid from its first minute to its last, NaN where a minute is
+    missing or dropped.  Returns (first run_id, grid phase, the raw
+    (seconds, phase) pairs for the slope) per segment."""
+    out = []
+    for seg in _runs(points):
         t0 = seg[0].utc_minute
         slots = [int(round((p.utc_minute - t0) / TAU0_S)) for p in seg]
         # Phase relative to the segment's first point: the ~3e11 ms GPS/Unix
@@ -139,7 +191,6 @@ def _segments(points: List[PhasePoint]) -> List[Tuple[float, np.ndarray, np.ndar
         out.append((seg[0].run_id, grid,
                     np.array([[p.utc_minute - t0, p.phase_ms - x0] for p in seg],
                              float)))
-        i = j + 1
     return out
 
 
