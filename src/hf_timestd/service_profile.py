@@ -39,6 +39,10 @@ SERVICE_UNIT_MAP: Dict[str, str] = {
     'radiod_monitor':    'timestd-radiod-monitor.service',
     'chrony_monitor':    'timestd-chrony-monitor.timer',
     'pipeline_watchdog': 'timestd-pipeline-watchdog.timer',
+    # Restarts the recorder when HPPS (T6's chrony feed) goes dark.  Gated on
+    # [timing.t6_pps] enabled (see active_services()): with T6 off it has
+    # nothing to guard, and sigmond reads this map to decide what to enable.
+    'hpps_watchdog':     'timestd-hpps-watchdog.timer',
     'prune':             'timestd-prune.timer',
 }
 
@@ -57,6 +61,7 @@ PROFILES: Dict[str, Set[str]] = {
 
     'rtp': _ALWAYS_ON | {
         'radiod_monitor', 'pipeline_watchdog',
+        'hpps_watchdog',  # gated by [timing.t6_pps].enabled
         'prune',
     },
 
@@ -68,6 +73,7 @@ PROFILES: Dict[str, Set[str]] = {
                  # multi_broadcast_fusion._read_gnss_vtec() when present,
                  # so this is a natural augmentation of timing production.
         'radiod_monitor', 'pipeline_watchdog',
+        'hpps_watchdog',  # gated by [timing.t6_pps].enabled
         'chrony_monitor', 'prune',
     },
 
@@ -76,6 +82,7 @@ PROFILES: Dict[str, Set[str]] = {
         'vtec',  # gated by [gnss_vtec].enabled — suppressed on hosts
                  # without a GNSS receiver (see active_services())
         'radiod_monitor', 'pipeline_watchdog',
+        'hpps_watchdog',  # gated by [timing.t6_pps].enabled
         'chrony_monitor', 'prune',
     },
 }
@@ -103,6 +110,7 @@ class ServiceProfile:
     profile_name: str
     overrides: Dict[str, bool] = field(default_factory=dict)
     vtec_available: bool = False  # gnss_vtec.enabled in config
+    t6_armed: bool = False        # [timing.t6_pps] enabled in config
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'ServiceProfile':
@@ -126,10 +134,20 @@ class ServiceProfile:
 
         vtec_available = config.get('gnss_vtec', {}).get('enabled', False)
 
+        # The same reading as scripts/hpps-watchdog.sh: the canonical
+        # [timing.t6_pps] or the legacy [timing.l6_pps], armed only by a
+        # literal true.
+        timing = config.get('timing', {}) or {}
+        t6_armed = any(
+            isinstance(timing.get(name), dict)
+            and timing[name].get('enabled') is True
+            for name in ('t6_pps', 'l6_pps'))
+
         return cls(
             profile_name=profile_name,
             overrides=overrides,
             vtec_available=vtec_available,
+            t6_armed=t6_armed,
         )
 
     def active_services(self) -> Set[str]:
@@ -149,6 +167,10 @@ class ServiceProfile:
         # vtec requires gnss_vtec.enabled in addition to profile/override
         if 'vtec' in base and not self.vtec_available:
             base.discard('vtec')
+
+        # hpps_watchdog guards T6's chrony feed; without T6 it has no purpose
+        if not self.t6_armed:
+            base.discard('hpps_watchdog')
 
         return base
 
@@ -190,6 +212,7 @@ class ServiceProfile:
             'profile': self.profile_name,
             'description': PROFILE_DESCRIPTIONS.get(self.profile_name, ''),
             'vtec_available': self.vtec_available,
+            't6_armed': self.t6_armed,
             'services': rows,
         }
 

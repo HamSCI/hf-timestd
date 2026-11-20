@@ -89,6 +89,19 @@ class TestFromConfig:
         })
         assert profile.overrides == {'vtec': True, 'radiod_monitor': False}
 
+    @pytest.mark.parametrize('timing,armed', [
+        ({}, False),
+        ({'t6_pps': {}}, False),
+        ({'t6_pps': {'enabled': False}}, False),
+        ({'t6_pps': {'enabled': 'true'}}, False),   # only a real bool arms
+        ({'t6_pps': {'enabled': True}}, True),
+        ({'l6_pps': {'enabled': True}}, True),      # legacy section name
+    ])
+    def test_t6_armed_from_timing_section(self, timing, armed):
+        # Same reading as scripts/hpps-watchdog.sh's t6_enabled gate.
+        profile = ServiceProfile.from_config({'timing': timing})
+        assert profile.t6_armed is armed
+
     def test_vtec_flag_picked_up_from_gnss_vtec_section(self):
         profile = ServiceProfile.from_config({
             'gnss_vtec': {'enabled': True},
@@ -156,6 +169,31 @@ class TestActiveServices:
         )
         assert 'vtec' in profile.active_services()
 
+    def test_hpps_watchdog_off_unless_t6_armed(self):
+        # HPPS is T6's chrony feed.  With T6 off there is nothing to guard,
+        # so the profile names the watchdog off and sigmond leaves it off.
+        for name in ('rtp', 'fusion', 'full'):
+            assert 'hpps_watchdog' not in ServiceProfile(
+                profile_name=name).active_services()
+            assert 'hpps_watchdog' in ServiceProfile(
+                profile_name=name, t6_armed=True).active_services()
+
+    def test_hpps_watchdog_override_cannot_beat_t6_off(self):
+        profile = ServiceProfile(
+            profile_name='full',
+            overrides={'hpps_watchdog': True},
+            t6_armed=False,
+        )
+        assert 'hpps_watchdog' not in profile.active_services()
+
+    def test_hpps_watchdog_override_can_switch_off_armed(self):
+        profile = ServiceProfile(
+            profile_name='full',
+            overrides={'hpps_watchdog': False},
+            t6_armed=True,
+        )
+        assert 'hpps_watchdog' not in profile.active_services()
+
     def test_inactive_is_complement_of_active(self):
         profile = ServiceProfile(profile_name='fusion')
         active = profile.active_services()
@@ -205,6 +243,9 @@ class TestSummary:
         assert summary['profile'] == 'rtp'
         assert summary['description'] == PROFILE_DESCRIPTIONS['rtp']
         assert summary['vtec_available'] is False
+        assert summary['t6_armed'] is False
+        assert summary['services']['hpps_watchdog']['enabled'] is False
+        assert summary['services']['hpps_watchdog']['unit'] == 'timestd-hpps-watchdog.timer'
         assert set(summary['services']) == set(ALL_SERVICES)
 
         # core_recorder source is 'always'
