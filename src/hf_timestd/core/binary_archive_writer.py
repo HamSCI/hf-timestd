@@ -757,20 +757,42 @@ class BinaryArchiveWriter:
         block.update(self._boundary_fields())
         return block
 
-    def _judge_register_pair(self, gps_time_ns: int, rtp_timesnap: int) -> None:
-        """Forward an adopted radiod pair to the judge (never raises)."""
+    def _judge_register_pair(self, gps_time_ns: int, rtp_timesnap: int,
+                             pair_age_s: float = 0.0) -> None:
+        """Forward an adopted radiod pair to the judge (never raises).
+
+        ``pair_age_s`` > 0 tells the judge the pair is not fresh (a
+        round-trip restore); 0 keeps the judge's fresh-pair reading."""
         judge, key = self._offset_judge, self._judge_source_key
         if judge is None or key is None:
             return
         try:
-            judge.register_radiod_pair(
-                key, gps_time_ns, rtp_timesnap, self.config.sample_rate
-            )
+            if pair_age_s > 0:
+                judge.register_radiod_pair(
+                    key, gps_time_ns, rtp_timesnap, self.config.sample_rate,
+                    pair_age_s=pair_age_s,
+                )
+            else:
+                judge.register_radiod_pair(
+                    key, gps_time_ns, rtp_timesnap, self.config.sample_rate
+                )
         except Exception as e:  # noqa: BLE001 — judge trouble must never disturb recording
             logger.warning(
                 f"{self.config.channel_name}: offset-judge pair registration "
                 f"failed (recording continues uncorrected): {e}"
             )
+
+    def _restored_pair_age_s(self, rtp_timesnap: int) -> float:
+        """How long ago the counter stood at ``rtp_timesnap``: the newest
+        packet's RTP minus the snap, on the sample clock.  0 when no packet
+        has arrived or the snap lies ahead of it."""
+        last = self.last_rtp_timestamp
+        if last is None:
+            return 0.0
+        delta = int((int(last) - int(rtp_timesnap)) & 0xFFFFFFFF)
+        if delta > 0x7FFFFFFF:
+            delta -= 0x100000000
+        return max(0.0, delta / self.config.sample_rate)
 
     def _judge_verdict(self, rtp_timestamp: int) -> Optional[Any]:
         """Current judge verdict for this source, or None (raw mapping).
@@ -966,7 +988,10 @@ class BinaryArchiveWriter:
         # Judge (spec §3 — estimated "at every radiod anchor
         # adoption").  The judge dedupes identical pairs and
         # fractures its segment on implausible steps / RTP wraps.
-        self._judge_register_pair(gps_time_ns, rtp_timesnap)
+        # A restored pair is old: tell the judge how old, or it reads the
+        # pair's age as radiod's offset (AB4EJ 2026-11-19).
+        age_s = self._restored_pair_age_s(rtp_timesnap) if restoring else 0.0
+        self._judge_register_pair(gps_time_ns, rtp_timesnap, pair_age_s=age_s)
         if not self._timing_locked:
             self._timing_locked = True
             wait_dur = ''
