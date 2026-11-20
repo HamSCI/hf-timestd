@@ -167,3 +167,39 @@ def test_phase_point_is_none_without_a_summary():
     assert phase_point_from_summary(None, T0) is None
     assert phase_point_from_summary({}, T0) is None
     assert phase_point_from_summary("garbage", T0) is None
+
+
+# --- fix round 1: drift only from a long current run -------------------------
+
+def test_a_short_current_run_leaves_drift_unmeasured():
+    # a long first run, then a 3-point current run after a restart
+    rng = np.random.default_rng(1)
+    x = rng.normal(0.0, 0.5, 1440)
+    runs = [RUN_A] * 1437 + [RUN_B] * 3
+    s = _estimator(x, runs).stability()
+    assert s.tau_cross_s is not None
+    assert s.drift_ns_per_s is None
+    # one point short of STABILITY_MIN_POINTS still reads unmeasured
+    runs = [RUN_A] * (1440 - 119) + [RUN_B] * 119
+    assert _estimator(x, runs).stability().drift_ns_per_s is None
+    runs = [RUN_A] * (1440 - 120) + [RUN_B] * 120
+    assert _estimator(x, runs).stability().drift_ns_per_s is not None
+
+
+def test_drift_ignores_the_previous_runs_slope():
+    # first run ramps 1 us per minute; the long current run sits flat
+    x = np.concatenate([1e-3 * np.arange(700), np.zeros(740)])
+    runs = [RUN_A] * 700 + [RUN_B] * 740
+    s = _estimator(x, runs).stability()
+    # TDEV is ~0 everywhere, so sigma_y ~ 0 and the flat run's slope is 0
+    assert s.drift_ns_per_s == pytest.approx(0.0, abs=1e-6)
+
+
+def test_a_gps_sized_phase_constant_costs_no_precision():
+    # live phases sit near 3e11 ms; a ramp there must read as cleanly as at 0
+    est = _estimator(3.1e11 + 1e-3 * np.arange(1440))
+    s = est.stability()
+    assert s.drift_ns_per_s == pytest.approx(1000 / 60, rel=1e-6)
+    # the float PhasePoint itself rounds to one ulp of 3.1e11 (~6e-5 ms);
+    # TDEV stays at that input quantisation, adding nothing of its own
+    assert max(est.tdev_by_tau().values()) < float(np.spacing(3.1e11))

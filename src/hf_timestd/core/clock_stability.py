@@ -27,6 +27,9 @@ from typing import Deque, Dict, List, Optional, Tuple
 import numpy as np
 from hamsci_dsp.counter_map import CounterMap
 
+# Coupling: phase_point_from_summary maps rtp -> input index through
+# T3ShadowComparator._index_near (a private helper), so this module shares
+# its wrap and reach rules.  A rename there breaks this import.
 from .t3_shadow_comparator import T3ShadowComparator
 
 # Builder choice: one shadow row a minute, so the phase arrives every 60 s.
@@ -41,6 +44,12 @@ WINDOW_MIN_S = 1800
 WINDOW_MAX_S = 7200
 # Builder choice: the shortest hold; hold_s = max(HOLD_MIN_S, window_s // 4).
 HOLD_MIN_S = 300
+# Builder choice: the current run's slope enters drift_ns_per_s only once the
+# run holds STABILITY_MIN_POINTS points.  A slope over a few noisy minutes
+# after a restart or epoch refinement reads thousands of ns/s with no true
+# drift (white PM 0.5 ms: 6387 ns/s from 2 points), so below this the drift
+# reads None ("unmeasured") while tau_cross_s may still stand.
+DRIFT_MIN_RUN_POINTS = STABILITY_MIN_POINTS
 
 # Every TDEV below this (ms) reads as no measurable noise at all.
 _TDEV_FLOOR_MS = 1e-6
@@ -121,11 +130,15 @@ def _segments(points: List[PhasePoint]) -> List[Tuple[float, np.ndarray, np.ndar
         seg = points[i:j + 1]
         t0 = seg[0].utc_minute
         slots = [int(round((p.utc_minute - t0) / TAU0_S)) for p in seg]
+        # Phase relative to the segment's first point: the ~3e11 ms GPS/Unix
+        # constant never enters the second differences or the slope.
+        x0 = seg[0].phase_ms
         grid = np.full(slots[-1] + 1, np.nan)
         for k, p in zip(slots, seg):
-            grid[k] = p.phase_ms
+            grid[k] = p.phase_ms - x0
         out.append((seg[0].run_id, grid,
-                    np.array([[p.utc_minute - t0, p.phase_ms] for p in seg], float)))
+                    np.array([[p.utc_minute - t0, p.phase_ms - x0] for p in seg],
+                             float)))
         i = j + 1
     return out
 
@@ -199,6 +212,8 @@ class ClockStabilityEstimator:
         if not tdev:
             # Too fragmented to evaluate any tau: conservative, unmeasured.
             return unmeasured
+        # Only synthetic data reaches this branch: a live utc_ref resolves
+        # 0.24 us, so real TDEV never falls below 1e-6 ms.
         if all(v < _TDEV_FLOOR_MS for v in tdev.values()):
             tau_cross = max(tdev)
         else:
@@ -209,9 +224,9 @@ class ClockStabilityEstimator:
         sigma_y_ns_per_s = math.sqrt(3.0) * tdev[tau_cross] * 1e6 / tau_cross
         drift = None
         _, _, raw = segs[-1]
-        # The slope needs two minutes of the current run; with fewer the
-        # drift stays unknown (None) rather than guessed.
-        if len(raw) >= 2:
+        # The slope comes from the current run alone, and only once it holds
+        # DRIFT_MIN_RUN_POINTS points; below that the drift stays None.
+        if len(raw) >= DRIFT_MIN_RUN_POINTS:
             slope_ms_per_s = float(np.polyfit(raw[:, 0], raw[:, 1], 1)[0])
             drift = float(abs(slope_ms_per_s) * 1e6 + sigma_y_ns_per_s)
         return ClockStability(tau_cross_s=int(tau_cross), window_s=window,
