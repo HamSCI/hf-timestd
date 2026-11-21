@@ -229,9 +229,12 @@ the parent directory.
 a name hash, so a remembered port goes stale:
 
 ```bash
-curl -s -u admin:admin http://10.3.2.1:7500/api/proxy/tcp            # hamsci-vpn
-fleet-ssh wd30 'ssh gw2 "curl -s -u admin:admin http://127.0.0.1:7501/api/proxy/tcp"'
+curl -s -u "$FRPS_DASH_AUTH" http://10.3.2.1:7500/api/proxy/tcp      # hamsci-vpn
+fleet-ssh wd30 'ssh gw2 "curl -s -u \"\$FRPS_DASH_AUTH\" http://127.0.0.1:7501/api/proxy/tcp"'
 ```
+
+`FRPS_DASH_AUTH` holds the gateway dashboard's `user:password`.  The
+gateway's administrator keeps it; it never goes in a document.
 
 `lastStartTime` dates the last registration, which is how you tell whether a
 repair landed. Each gateway hashes into its own band, so a port outside the
