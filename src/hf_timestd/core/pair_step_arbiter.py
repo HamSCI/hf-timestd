@@ -37,6 +37,16 @@ T6_AGREE_S = 0.25
 # reads differ by 0.45-1 s (2026-11-13 final review, I2).
 PERSIST_AGREE_S = 0.2
 
+# A confirming read must be a different pair, at least this many seconds of
+# counter after the pending one.  A held archive line triggers a revalidation
+# within a batch, and the 60 s tick can then re-read the same ChannelInfo pair;
+# consecutive status pairs ~0.5 s apart also come from one radiod state and
+# agree almost by construction.  Without the span, one status packet (or one
+# transient offset just after a restart) confirmed itself and stuck below
+# STEADY_LIMIT_S (round 3 re-review, I1-r3).  The 60 s tick's reads always sit
+# further apart than this.
+CONFIRM_MIN_SPAN_S = 5.0
+
 _RTP_WRAP = 2 ** 32
 
 
@@ -117,9 +127,22 @@ class PairStepArbiter:
     def __init__(self, sample_rate: int) -> None:
         self._sample_rate = int(sample_rate)
         self._pending_offset_s: Optional[float] = None
+        self._pending_snap: Optional[int] = None
 
     def reset(self) -> None:
         self._pending_offset_s = None
+        self._pending_snap = None
+
+    def _far_enough(self, rtp_snap: Optional[int]) -> bool:
+        """Does ``rtp_snap`` lie CONFIRM_MIN_SPAN_S or more of counter after
+        the pending pair's snap (signed, wrap-safe)?  A caller that passes
+        no snap gets the pre-2026-11-22 rule (offsets alone)."""
+        if rtp_snap is None or self._pending_snap is None:
+            return rtp_snap is None
+        d = (int(rtp_snap) - self._pending_snap) & 0xFFFFFFFF
+        if d > 0x7FFFFFFF:
+            d -= 0x100000000
+        return d >= CONFIRM_MIN_SPAN_S * self._sample_rate
 
     def _offsets_agree(self, a: float, b: float) -> bool:
         """Equal within PERSIST_AGREE_S modulo one RTP wrap period."""
@@ -128,7 +151,8 @@ class PairStepArbiter:
         return min(d, period - d) <= PERSIST_AGREE_S
 
     def decide(self, diff_s: float, fresh_utc_s: float, implied_utc_s: float,
-               fresh_offset_s: float, t6_utc_s: Optional[float]) -> Verdict:
+               fresh_offset_s: float, t6_utc_s: Optional[float],
+               rtp_snap: Optional[int] = None) -> Verdict:
         """Rules, in order:
 
         1. ``|diff_s| <= STEADY_LIMIT_S``: STEADY; clear any pending step.
@@ -138,25 +162,31 @@ class PairStepArbiter:
            agreeing with neither: fall through to rule 3.
         3. Nothing pending: store ``fresh_offset_s`` and HOLD.
         4. A step pending: ADOPT (and clear it) when the two offsets agree
-           within ``PERSIST_AGREE_S``, wrap-safe; else replace it and HOLD.
+           within ``PERSIST_AGREE_S``, wrap-safe, and ``rtp_snap`` lies at
+           least ``CONFIRM_MIN_SPAN_S`` of counter after the pending snap.
+           Agreeing but too soon (or the same pair again): HOLD and keep the
+           pending read.  Disagreeing: replace it and HOLD.
         """
         if abs(diff_s) <= STEADY_LIMIT_S:
-            self._pending_offset_s = None
+            self.reset()
             return Verdict.STEADY
         if t6_utc_s is not None:
             if abs(implied_utc_s - t6_utc_s) <= T6_AGREE_S:
                 # The GPSDO vouches for the current mapping.
-                self._pending_offset_s = None
+                self.reset()
                 return Verdict.REFUSE_T6
             if abs(fresh_utc_s - t6_utc_s) <= T6_AGREE_S:
                 # The GPSDO vouches for the fresh pair.
-                self._pending_offset_s = None
+                self.reset()
                 return Verdict.ADOPT
             # The GPSDO contradicts both: it vouches for nothing, so the
             # step must persist like any other (the caller logs ERROR).
         pending = self._pending_offset_s
         if pending is not None and self._offsets_agree(pending, fresh_offset_s):
-            self._pending_offset_s = None
-            return Verdict.ADOPT
+            if self._far_enough(rtp_snap):
+                self.reset()
+                return Verdict.ADOPT
+            return Verdict.HOLD          # one read, or too soon: keep the first
         self._pending_offset_s = fresh_offset_s
+        self._pending_snap = None if rtp_snap is None else int(rtp_snap)
         return Verdict.HOLD

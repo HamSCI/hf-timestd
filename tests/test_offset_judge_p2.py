@@ -515,13 +515,17 @@ class TestRevalidation:
             rec.revalidate_radiod_pair()
             assert judge.registered[-1][2] == 5000
             assert ring.anchors == []
+            # The next tick reads the listener's next pair, 60 s on: a
+            # distinct read (PairStepArbiter.CONFIRM_MIN_SPAN_S).
+            gps2, snap2 = gps1 + 60 * 10**9, 777_000 + 60 * 100
+            ci.gps_time, ci.rtp_timesnap = gps2, snap2
             rec.revalidate_radiod_pair()
             # Writer mapping now consistent with the fresh pair...
-            assert abs(w.evaluate_pair(gps1, 777_000)) < 1e-6
+            assert abs(w.evaluate_pair(gps2, snap2)) < 1e-6
             # ...the judge saw the adoption...
-            assert (KEY, gps1, 777_000, 100) in judge.registered
+            assert (KEY, gps2, snap2, 100) in judge.registered
             # ...and the ring was re-anchored at the adoption.
-            assert ring.anchors and ring.anchors[-1][1] == 777_000
+            assert ring.anchors and ring.anchors[-1][1] == snap2
         finally:
             w.close()
 

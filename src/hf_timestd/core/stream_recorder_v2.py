@@ -1373,7 +1373,8 @@ class StreamRecorderV2:
         if abs(diff) > self.REVALIDATE_ADOPT_THRESHOLD_S:
             t6_utc_s = self._valid_t6_utc_s(gps_time, rtp_snap)
         verdict = self._arbiter().decide(
-            diff, fresh_utc_s, implied_utc_s, fresh_offset_s, t6_utc_s)
+            diff, fresh_utc_s, implied_utc_s, fresh_offset_s, t6_utc_s,
+            rtp_snap=rtp_snap)
         contradicted = t6_contradicts_both(
             fresh_utc_s, implied_utc_s, t6_utc_s)
         if contradicted:

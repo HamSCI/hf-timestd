@@ -547,3 +547,98 @@ def test_fallback_label_says_so_in_the_sidecar(tmp_path):
     r._handle_samples(_ramp(100), q)
     (_, _, side), = _drain(w)
     assert side["batch_label"] == "last_packet"
+
+
+# ------------------------------------------------------------ the arbiter under a hold
+#
+# Round 3 re-review, I1-r3: the hold's revalidation and the 60 s tick can read
+# one ChannelInfo pair twice, and consecutive status pairs 0.5 s apart agree
+# almost by construction.  Confirmation needs a second read at least five
+# seconds of counter after the first.
+
+def _restart(r, w, status, n=60):
+    rtp = _stream(r, 30 * SR, 10)
+    t_stop = w._rtp_to_unix_time(rtp)
+    new0 = 0x9000_0000
+    t_new0 = t_stop + 2.0
+    _stream(r, new0, n, start=100_000, rebased_first=True,
+            ci_follows=lambda line: status(line, new0, t_new0))
+    return new0, t_new0
+
+
+def test_one_status_pair_read_twice_does_not_adopt(tmp_path):
+    """P4: radiod's first pair after a restart shows once.  The hold's
+    revalidation holds it; the 60 s tick re-reads the same pair before the
+    listener refreshes.  That is one read, not two."""
+    r, w = _recorder(tmp_path)
+    rtp = _stream(r, 30 * SR, 10)
+    t_new0 = w._rtp_to_unix_time(rtp) + 2.0
+    new0 = 0x9000_0000
+    r.channel_info.set((_gps_ns(t_new0), new0))
+    rtp_new = _stream(r, new0, 2, start=100_000, rebased_first=True)
+    before = w._rtp_timesnap
+    r.revalidate_radiod_pair()                         # the tick, same ChannelInfo
+    assert w._rtp_timesnap == before                   # not adopted
+    # A second pair, five seconds of counter later, confirms.
+    later = new0 + 5 * SR
+    r.channel_info.set((_gps_ns(t_new0 + 5.0), later))
+    _stream(r, rtp_new, 8, start=100_100)
+    assert w._rtp_timesnap == later
+    s = w.get_stats()
+    assert s["held_samples"] == 0 and s["unplaced_samples"] == 0
+    assert _accounted(s) == 20 * 50
+
+
+def test_a_biased_early_pair_does_not_stick(tmp_path):
+    """P3: radiod's first pairs after the restart sit 0.6 s off, later ones
+    true.  The adopted mapping must be the true one, and every sample is
+    counted (the longer wait may overflow the 10 s hold)."""
+    r, w = _recorder(tmp_path)
+
+    def status(line, new0, t_new0):
+        k = (line - new0) // 50
+        if k >= 3 and k % 2 == 1:
+            bias = 0.6 if k < 12 else 0.0
+            r.channel_info.set((_gps_ns(t_new0 + bias + (line - new0) / SR), line))
+    new0, t_new0 = _restart(r, w, status)
+    off = w._gps_time_unix - (t_new0 + (w._rtp_timesnap - new0) / SR)
+    assert abs(off) < 0.01, f"adopted mapping {off:+.3f} s off"
+    for _ in range(3):
+        r.revalidate_radiod_pair()
+    off = w._gps_time_unix - (t_new0 + (w._rtp_timesnap - new0) / SR)
+    assert abs(off) < 0.01
+    s = w.get_stats()
+    assert s["held_samples"] == 0
+    assert _accounted(s) == 70 * 50
+
+
+# ------------------------------------------------------------ the watchdog off the write path
+
+def test_watchdog_capture_does_not_block_the_write_path(tmp_path, monkeypatch):
+    """m1-r3: a restart's mapping jump makes the watchdog run gpspipe and
+    chronyc (up to 15 s).  That must happen off the writer lock and off the
+    receive callback."""
+    from hf_timestd.core import radiod_timing_watchdog as wd
+    gate = threading.Event()
+    started = threading.Event()
+
+    def slow_capture(self, *a, **k):
+        started.set()
+        gate.wait(10)
+    monkeypatch.setattr(wd.RadiodTimingWatchdog, "_capture", slow_capture)
+    monkeypatch.setattr(wd, "_WATCHDOG", None)
+    w = _writer(tmp_path)
+    w.write_samples(_ramp(100), 30 * SR)
+    try:
+        t0 = time.monotonic()
+        # A 2562 s jump: radiod restarted, well past the watchdog's 2 s floor.
+        w.add_timing_snapshot(_gps_ns(w._gps_time_unix + 2562.0), 12_000)
+        took = time.monotonic() - t0
+        assert started.wait(5)                         # the capture did run ...
+        assert took < 1.0, f"the pair adoption waited {took:.1f}s on the capture"
+        t0 = time.monotonic()
+        w.write_samples(_ramp(100), 12_000)            # ... and writing goes on
+        assert time.monotonic() - t0 < 1.0
+    finally:
+        gate.set()
+

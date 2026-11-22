@@ -213,10 +213,18 @@ def _verdict(delta_sec: float, radiod_utc: float, system_now: float,
 class RadiodTimingWatchdog:
     """Host-wide (singleton) watchdog: one evidence bundle per thrash episode."""
 
-    def __init__(self) -> None:
+    def __init__(self, capture_in_background: bool = False) -> None:
         self._lock = threading.Lock()
         self._last_incident_mono: float = -1e18
         self._suppressed_since_last: int = 0
+        # The capture runs gpspipe (up to 10 s) and chronyc (up to 5 s).
+        # The archive writer calls on_mapping_jump under its lock, and since
+        # round 3 a held label line can adopt a restart's step from the RTP
+        # receive callback, which in shared-MultiStream mode delivers every
+        # channel.  The process-wide watchdog therefore captures on a worker
+        # thread; nothing waits for its diagnostics.
+        self._capture_in_background = capture_in_background
+        self.last_capture_thread: Optional[threading.Thread] = None
 
     def on_mapping_jump(self, *, channel: str, gps_time_ns: int,
                         rtp_timesnap: int, radiod_utc: float, old_utc: float,
@@ -237,9 +245,22 @@ class RadiodTimingWatchdog:
                 self._suppressed_since_last = 0
                 self._last_incident_mono = now_mono
             counter_age = (rtp_timesnap / sample_rate) if sample_rate else None
-            self._capture(channel, gps_time_ns, rtp_timesnap, radiod_utc,
-                          old_utc, delta_sec, suppressed, counter_age)
+            args = (channel, gps_time_ns, rtp_timesnap, radiod_utc,
+                    old_utc, delta_sec, suppressed, counter_age)
+            if self._capture_in_background:
+                t = threading.Thread(target=self._capture_logged, args=args,
+                                     name="radiod-timing-capture", daemon=True)
+                self.last_capture_thread = t
+                t.start()
+            else:
+                self._capture(*args)
         except Exception:  # noqa: BLE001 — must never disturb recording
+            logger.exception("radiod timing watchdog: capture failed")
+
+    def _capture_logged(self, *args) -> None:
+        try:
+            self._capture(*args)
+        except Exception:  # noqa: BLE001 — a diagnostics thread
             logger.exception("radiod timing watchdog: capture failed")
 
     def _capture(self, channel, gps_time_ns, rtp_timesnap, radiod_utc, old_utc,
@@ -300,5 +321,5 @@ def get_watchdog() -> RadiodTimingWatchdog:
     if _WATCHDOG is None:
         with _WATCHDOG_LOCK:
             if _WATCHDOG is None:
-                _WATCHDOG = RadiodTimingWatchdog()
+                _WATCHDOG = RadiodTimingWatchdog(capture_in_background=True)
     return _WATCHDOG

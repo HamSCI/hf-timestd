@@ -190,3 +190,70 @@ def test_t6_anchor_in_map_run():
     old = anchor_at(1_024_000, gps_epoch - 3600 + 1_024_000 / 24000)
     assert not t6_anchor_in_map_run(T6Reference(old, cmap), utc_minus_gps)
     assert not t6_anchor_in_map_run(None, utc_minus_gps)
+
+
+# ---------------------------------------------------------------- distinct reads
+#
+# Round 3 re-review (I1-r3): a held archive line triggers a revalidation, and
+# the 60 s tick can then re-read the same ChannelInfo pair before the
+# listener refreshes it.  The persistence rule must see two DISTINCT reads,
+# the second at least CONFIRM_MIN_SPAN_S of counter after the first, or one
+# status packet confirms itself and a biased early pair sticks.
+
+SR = 24000
+
+
+def test_confirm_span_is_five_seconds_of_counter():
+    from hf_timestd.core.pair_step_arbiter import CONFIRM_MIN_SPAN_S
+    assert CONFIRM_MIN_SPAN_S == 5.0
+
+
+def test_one_pair_read_twice_never_confirms():
+    a = PairStepArbiter(SR)
+    snap = 1_000_000
+    assert a.decide(3.2, 103.2, 100.0, 8.2, None, rtp_snap=snap) is Verdict.HOLD
+    assert a.decide(3.2, 103.2, 100.0, 8.2, None, rtp_snap=snap) is Verdict.HOLD
+    assert a.decide(3.2, 108.2, 105.0, 8.2, None,
+                    rtp_snap=snap + 5 * SR) is Verdict.ADOPT
+
+
+def test_a_read_under_five_seconds_later_keeps_waiting_on_the_first():
+    a = PairStepArbiter(SR)
+    snap = 1_000_000
+    assert a.decide(3.2, 103.2, 100.0, 8.2, None, rtp_snap=snap) is Verdict.HOLD
+    assert a.decide(3.2, 103.7, 100.5, 8.2, None,
+                    rtp_snap=snap + SR // 2) is Verdict.HOLD
+    # Five seconds after the FIRST read, not after the second.
+    assert a.decide(3.2, 108.2, 105.0, 8.2, None,
+                    rtp_snap=snap + 5 * SR) is Verdict.ADOPT
+
+
+def test_an_earlier_snap_never_confirms():
+    a = PairStepArbiter(SR)
+    snap = 10_000_000
+    assert a.decide(3.2, 103.2, 100.0, 8.2, None, rtp_snap=snap) is Verdict.HOLD
+    assert a.decide(3.2, 97.2, 94.0, 8.2, None,
+                    rtp_snap=snap - 6 * SR) is Verdict.HOLD
+
+
+def test_confirm_span_is_wrap_aware():
+    a = PairStepArbiter(SR)
+    snap = 2**32 - 1000
+    assert a.decide(3.2, 103.2, 100.0, 8.2, None, rtp_snap=snap) is Verdict.HOLD
+    assert a.decide(3.2, 108.2, 105.0, 8.2, None,
+                    rtp_snap=(snap + 5 * SR) & 0xFFFFFFFF) is Verdict.ADOPT
+
+
+def test_biased_first_reads_give_way_to_true_ones():
+    """P3: the first post-restart pairs sit 0.6 s off, later ones true.  A
+    biased read cannot confirm itself inside five seconds; the true reads
+    that follow replace it and confirm each other."""
+    a = PairStepArbiter(SR)
+    snap = 1_000_000
+    for k in range(5):                                  # biased, 1 s apart
+        assert a.decide(3.8, 103.8, 100.0, 8.8, None,
+                        rtp_snap=snap + k * SR) is Verdict.HOLD
+    assert a.decide(3.2, 108.2, 105.0, 8.2, None,
+                    rtp_snap=snap + 5 * SR) is Verdict.HOLD   # true: replaces
+    assert a.decide(3.2, 113.2, 110.0, 8.2, None,
+                    rtp_snap=snap + 10 * SR) is Verdict.ADOPT

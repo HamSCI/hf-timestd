@@ -267,6 +267,13 @@ def _identity_reference(gps_ns, rtp):
     return cmap, T6Reference(anchor=anchor, t6_map=cmap)
 
 
+def _next_tick(gps_ns, rtp, seconds=60):
+    """radiod's pair as the next 60 s tick reads it: the listener has
+    refreshed ChannelInfo, so the second read is a different pair, later on
+    the same counter (PairStepArbiter.CONFIRM_MIN_SPAN_S)."""
+    return gps_ns + seconds * 10**9, rtp + seconds * SAMPLE_RATE
+
+
 def _messages(caplog, text, level=None):
     return [r for r in caplog.records if text in r.getMessage()
             and (level is None or r.levelno == level)]
@@ -288,10 +295,12 @@ def test_genuine_restart_with_stale_maps_is_adopted(caplog):
     with caplog.at_level(logging.WARNING):
         sr.revalidate_radiod_pair()
         assert writer.add_timing_snapshot.call_count == 0
+        second = _next_tick(RESTART_GPS_NS, RESTART_RTP)
+        sr.channel_info = _pair_ci(*second)
         sr.revalidate_radiod_pair()
 
     assert writer.add_timing_snapshot.call_count == 1
-    assert mapping == [RESTART_GPS_NS, RESTART_RTP]
+    assert mapping == list(second)
     assert not _messages(caplog, 'PAIR STEP REFUSED')
     assert _messages(caplog, 'PAIR STEP ADOPTED (persistent)', logging.WARNING)
 
@@ -312,9 +321,11 @@ def test_restart_with_stale_t6_anchor_is_not_refused(caplog):
 
     with caplog.at_level(logging.WARNING):
         sr.revalidate_radiod_pair()
+        second = _next_tick(RESTART_GPS_NS, RESTART_RTP)
+        sr.channel_info = _pair_ci(*second)
         sr.revalidate_radiod_pair()
 
-    assert mapping == [RESTART_GPS_NS, RESTART_RTP]
+    assert mapping == list(second)
     assert not _messages(caplog, 'PAIR STEP REFUSED')
 
 
@@ -335,6 +346,8 @@ def test_restart_with_late_pair_is_not_refused_forever(caplog):
     with caplog.at_level(logging.WARNING):
         sr.revalidate_radiod_pair()
         assert writer.add_timing_snapshot.call_count == 0
+        late = _next_tick(*late)
+        sr.channel_info = _pair_ci(*late)
         sr.revalidate_radiod_pair()
 
     assert mapping == list(late)
