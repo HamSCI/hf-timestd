@@ -785,9 +785,6 @@ class TestRestoredPairAge:
         judge = make_judge(clock, tmp_path, bench)
         rate = 100
         w = make_writer(tmp_path, judge=judge, key=KEY, sample_rate=rate)
-        # The writer's label gate reads the host clock; here the host
-        # clock is the fake one, which runs ~50 min ahead of time.time().
-        w._host_time = lambda: clock.wall
         try:
             # Pair A: truthful, adopted at t0.
             t0 = clock.wall
@@ -815,9 +812,9 @@ class TestRestoredPairAge:
             judge.tick()
             v = judge.offset_for(KEY, rtp_now)
             assert v is not None
-            assert abs(v.offset_ns) < 1e9, (
+            assert abs(v.offset_ns) < 1e8, (
                 f"judge offset {v.offset_ns/1e9:+.1f} s after the restore")
-            for i in range(1, 6):
+            for i in range(5):
                 w.write_samples(np.ones(rate, dtype=np.complex64),
                                 rtp_timestamp=(rtp_now + i * rate) & 0xFFFFFFFF)
             m = read_sidecars(w)[-1]

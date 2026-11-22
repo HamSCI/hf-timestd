@@ -1685,6 +1685,13 @@ class StreamRecorderV2:
             batch_gap_samples = 0
             if quality.batch_gaps:
                 batch_gap_samples = sum(gap.duration_samples for gap in quality.batch_gaps)
+            # ka9q-python >= 3.28.0 opens a batch on a new RTP line (a
+            # backward jump, a jump past the fill bound, a sequence re-sync)
+            # with a STREAM_INTERRUPTION event; the archive holds that line
+            # until the next GPS_TIME/RTP_TIMESNAP pair places it.
+            batch_rebased = any(
+                getattr(getattr(gap, 'source', None), 'value', None) == 'stream_interruption'
+                for gap in (quality.batch_gaps or ()))
             
             # NOTE (2026-02-03): Bootstrap gating removed. We now always archive immediately.
             # MetrologyEngine's fusion_state handles timing lock internally using wider
@@ -1703,6 +1710,7 @@ class StreamRecorderV2:
                     system_time=system_time,
                     gap_samples=batch_gap_samples,
                     label_source=batch_label_source(quality),
+                    rebased=batch_rebased,
                 )
 
             # Publish the batch into the ring buffer AFTER the archive

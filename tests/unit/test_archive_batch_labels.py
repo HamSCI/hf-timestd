@@ -44,6 +44,14 @@ def _writer(tmp_path):
     return w
 
 
+def _pair(w, k):
+    """A pair continuous with the mapping in force, in whole seconds."""
+    from hf_timestd.core.leap_second import get_current_gps_leap_seconds
+    snap = (w._rtp_timesnap + k * SR) & 0xFFFFFFFF
+    gps_ns = (int(w._gps_time_unix) + k - 315964800 + get_current_gps_leap_seconds()) * 10**9
+    assert w.add_timing_snapshot(gps_ns, snap)
+
+
 def _drain(w):
     """Flush every queued buffer plus the open one; return {boundary: (data, side)}."""
     out = {}
@@ -163,8 +171,12 @@ def test_sidecar_counts_holes_honestly(tmp_path):
     base = 30 * SR
     w.write_samples(np.ones(100, np.complex64), base + 50)     # 50-sample lead hole
     w.write_samples(np.ones(100, np.complex64), base + 150)    # contiguous
+    # A label jump holds the line until radiod's next pair; send one after
+    # each jump (continuous with the mapping, so placement stays exact).
     w.write_samples(np.ones(100, np.complex64), base + 400)    # 150-sample hole
+    _pair(w, 1)
     w.write_samples(np.ones(100, np.complex64), base + 450)    # overlaps 50
+    _pair(w, 1)
     (_, side), = _drain(w).values()
     assert side["samples_written"] == 550                      # highest position, as before
     assert side["samples_covered"] == 350

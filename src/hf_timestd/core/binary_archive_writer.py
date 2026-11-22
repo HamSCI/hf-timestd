@@ -494,14 +494,17 @@ class BinaryArchiveWriter:
 
         # Label faults (ka9q-python >= 3.28.0 re-bases the label after a
         # backward RTP jump or a sequence re-sync).  Every refused sample
-        # lands in one of these counters; see _label_held_out and
+        # lands in one of these counters; see _hold_batch and
         # _write_samples_inner.
         self._expected_label: Optional[int] = None
-        self._label_suspect = False
-        self._held_run = 0
+        self._hold_active = False
+        self._held: "_deque" = _deque()   # (samples, rtp, gap_samples, label_source)
+        self._held_n = 0
         self._last_label_fault_log = 0.0
         self._scratch_seq = 0
-        self._host_time = time.time       # the label gate's clock (tests swap it)
+        self._host_time = time.time       # for a log line only; never decides
+        self.abandoned_chunks = 0
+        self.abandoned_samples = 0
         self.label_discontinuities = 0
         self.unplaced_samples = 0
         self.overlap_samples = 0
@@ -1095,6 +1098,10 @@ class BinaryArchiveWriter:
             self.current_buffer.timing_snapshots.append(snapshot)
         else:
             self._pending_snapshots.append(snapshot)
+
+        # A line held since a label break gets placed under this pair.
+        if self._hold_active:
+            self._release_hold()
         
         return True
     
@@ -1407,6 +1414,7 @@ class BinaryArchiveWriter:
                 f"minute {buffer.minute_boundary} "
                 f"({buffer.write_pos} samples LOST)"
             )
+            self._count_abandoned(buffer)
             self._release_scratch(buffer)
             return True
 
@@ -1474,6 +1482,7 @@ class BinaryArchiveWriter:
             f"{buffer.minute_boundary} after {self.MAX_FLUSH_RETRIES} "
             f"flush failures — {buffer.write_pos} samples LOST"
         )
+        self._count_abandoned(buffer)
         self._release_scratch(buffer)
         return False
 
@@ -1497,6 +1506,11 @@ class BinaryArchiveWriter:
                     logger.debug(f"Cleaned up partial file: {path}")
             except OSError as e:
                 logger.warning(f"Failed to clean up {path}: {e}")
+
+    def _count_abandoned(self, buffer: MinuteBuffer) -> None:
+        """An abandoned buffer's written samples never reach disk: count them."""
+        self.abandoned_chunks += 1
+        self.abandoned_samples += buffer.samples_covered
 
     def _release_scratch(self, buffer: MinuteBuffer) -> None:
         """Release the memmap and unlink its backing scratch file.
@@ -1944,6 +1958,7 @@ class BinaryArchiveWriter:
         system_time: Optional[float] = None,
         gap_samples: int = 0,
         label_source: str = "first_sample",
+        rebased: bool = False,
     ) -> int:
         """
         Write IQ samples to the archive.
@@ -1956,6 +1971,8 @@ class BinaryArchiveWriter:
             label_source: what ``rtp_timestamp`` names: "first_sample"
                 (delivered_rtp_start) or "last_packet" (the fallback for
                 ka9q-python without it).  Recorded in the sidecar.
+            rebased: the stream reported a STREAM_INTERRUPTION for this
+                batch (ka9q-python >= 3.28.0): its label opens a new line.
             
         Returns:
             Number of samples written
@@ -1988,71 +2005,96 @@ class BinaryArchiveWriter:
                 return 0  # Cannot write until we have authoritative timing
 
             n = len(samples)
-            self.last_rtp_timestamp = (int(rtp_timestamp) + n) & 0xFFFFFFFF
-            if self._label_held_out(int(rtp_timestamp), n):
-                self.unplaced_samples += n
+            rtp = int(rtp_timestamp)
+            self.last_rtp_timestamp = (rtp + n) & 0xFFFFFFFF
+            expected = self._expected_label
+            self._expected_label = (rtp + n) & 0xFFFFFFFF
+            jumped = expected is not None and rtp != expected
+            if jumped:
+                self.label_discontinuities += 1
+            # The fallback label jumps whenever a batch's size changes, and
+            # it places as before; holding it would buy nothing.
+            if ((jumped or rebased) and not self._hold_active
+                    and label_source != "last_packet"):
+                self._begin_hold(rtp, expected, rebased)
+            if self._hold_active:
+                self._hold_batch(samples, rtp, gap_samples, label_source)
                 return 0
             self._label_source = label_source
             return self._write_samples_inner(samples, rtp_timestamp, gap_samples)
 
-    # A label that jumps (backward, or forward past ka9q-python's fill
-    # bound) and then maps more than MAX_STALENESS_SECONDS from the host
-    # clock is held out until the mapping places it again -- normally the
-    # new GPS_TIME/RTP_TIMESNAP pair after a radiod restart, a second or
-    # so later.  The host clock only gates here; it never labels a sample.
-    # After this long the writer places the line with the mapping it has
-    # (spec §6: a wrong label is recoverable, a dropped sample is not).
+    # A label that breaks its line (a jump, or a STREAM_INTERRUPTION) may
+    # sit on a new RTP counter the pair in force does not describe: after
+    # a radiod restart the old pair maps it up to 24.8 h away.  The writer
+    # holds such batches, in order, until the next GPS_TIME/RTP_TIMESNAP
+    # pair it adopts -- radiod sends one about twice a second -- and then
+    # replays them under that pair.  _adopt_pair_locked has already told a
+    # continuous pair (a re-sync on the old line: place at once) from a
+    # step (a restart: flush, then place under the new pair), on GPS_TIME
+    # against the old mapping, without the host clock.  The hold keeps at
+    # most this much; only the overflow is dropped (unplaced_samples).
     LABEL_HOLD_SECONDS = 10.0
 
-    def _label_lag_s(self, rtp: int) -> float:
-        verdict = self._judge_verdict(rtp)
-        return self._host_time() - (self._rtp_to_unix_time(rtp)
-                              + self._label_correction_s(verdict))
-
-    def _label_held_out(self, rtp: int, n: int) -> bool:
-        """True when this batch must not be placed yet (caller counts it).
-
-        Before this check a re-based line was placed with the OLD pair: it
-        opened a chunk at whatever boundary the old pair named, up to
-        24.8 h away, and flushed it there.
-        """
-        expected = self._expected_label
-        self._expected_label = (rtp + n) & 0xFFFFFFFF
-        if expected is not None and rtp != expected:
+    def _begin_hold(self, rtp: int, expected: Optional[int], rebased: bool) -> None:
+        self._hold_active = True
+        if expected is None:
+            what = "STREAM_INTERRUPTION"
+        else:
             jump = (rtp - expected) & 0xFFFFFFFF
             if jump > 0x7FFFFFFF:
                 jump -= 0x100000000
-            self.label_discontinuities += 1
-            lag = self._label_lag_s(rtp)
+            what = f"label jumped {jump:+d} samples"
+            if rebased:
+                what += " (STREAM_INTERRUPTION)"
+        # The host lag goes in the log line only: it decides nothing.
+        try:
+            verdict = self._judge_verdict(rtp)
+            lag = self._host_time() - (self._rtp_to_unix_time(rtp)
+                                       + self._label_correction_s(verdict))
+            lag_txt = f"; the pair in force maps it {lag:+.1f}s off the host clock"
+        except Exception:  # noqa: BLE001 -- diagnostics only
+            lag_txt = ""
+        self._label_fault_log(
+            f"{self.config.channel_name}: {what} at rtp={rtp}; holding the "
+            f"line until the next pair{lag_txt}")
+
+    def _hold_batch(self, samples: np.ndarray, rtp: int, gap_samples: int,
+                    label_source: str) -> None:
+        self._held.append((np.array(samples, dtype=np.complex64, copy=True),
+                           rtp, gap_samples, label_source))
+        self._held_n += len(samples)
+        bound = int(self.LABEL_HOLD_SECONDS * self.config.sample_rate)
+        while self._held_n > bound and self._held:
+            old, _, _, _ = self._held.popleft()
+            self._held_n -= len(old)
+            self.unplaced_samples += len(old)
+            self._label_fault_log(
+                f"{self.config.channel_name}: no pair within "
+                f"{self.LABEL_HOLD_SECONDS:.0f}s of held samples; dropped the "
+                f"oldest {len(old)} (unplaced_samples={self.unplaced_samples})")
+
+    def _release_hold(self) -> None:
+        """Replay the held batches, in order, under the pair just adopted."""
+        held, self._held = self._held, _deque()
+        n, self._held_n = self._held_n, 0
+        self._hold_active = False
+        if held:
+            logger.info(
+                f"{self.config.channel_name}: pair adopted; replaying "
+                f"{len(held)} held batch(es), {n} samples")
+        for samples, rtp, gap_samples, label_source in held:
+            self._label_source = label_source
+            self._write_samples_inner(samples, rtp, gap_samples)
+
+    def _drop_held(self, why: str) -> None:
+        """Count whatever is still held as unplaced (no pair came)."""
+        if self._held_n:
             logger.warning(
-                f"{self.config.channel_name}: batch label jumped {jump:+d} "
-                f"samples (expected {expected}, got {rtp}); it maps "
-                f"{lag:+.1f}s from the host clock")
-            if abs(lag) > self.MAX_STALENESS_SECONDS and not self._label_suspect:
-                self._label_suspect = True
-                self._held_run = 0
-                logger.error(
-                    f"{self.config.channel_name}: re-based label maps "
-                    f"{lag:+.1f}s away under the current pair; holding the "
-                    f"line out (unplaced_samples) until a pair places it")
-        if not self._label_suspect:
-            return False
-        lag = self._label_lag_s(rtp)
-        if abs(lag) <= self.MAX_STALENESS_SECONDS:
-            logger.warning(
-                f"{self.config.channel_name}: label line placed again "
-                f"({lag:+.1f}s); {self._held_run} samples were held out")
-            self._label_suspect = False
-            return False
-        if self._held_run >= self.LABEL_HOLD_SECONDS * self.config.sample_rate:
-            logger.error(
-                f"{self.config.channel_name}: no pair placed the re-based "
-                f"line within {self.LABEL_HOLD_SECONDS:.0f}s; placing it with "
-                f"the current mapping ({lag:+.1f}s off the host clock)")
-            self._label_suspect = False
-            return False
-        self._held_run += n
-        return True
+                f"{self.config.channel_name}: {self._held_n} held samples "
+                f"never got a pair ({why}); counted in unplaced_samples")
+        self.unplaced_samples += self._held_n
+        self._held, self._held_n = _deque(), 0
+        self._hold_active = False
 
     def _label_fault_log(self, message: str) -> None:
         """Rate-limited WARNING for refused samples; the counters hold the totals."""
@@ -2350,6 +2392,8 @@ class BinaryArchiveWriter:
         call this.
         """
         with self._lock:
+            if self._hold_active:
+                self._drop_held("flush")
             if self.current_buffer and self.current_buffer.write_pos > 0:
                 self._try_flush(self.current_buffer)
                 self.current_buffer = None
@@ -2389,6 +2433,9 @@ class BinaryArchiveWriter:
             'unplaced_samples': self.unplaced_samples,
             'overlap_samples': self.overlap_samples,
             'dropped_before_start': self.dropped_before_start,
+            'held_samples': self._held_n,
+            'abandoned_chunks': self.abandoned_chunks,
+            'abandoned_samples': self.abandoned_samples,
             'current_buffer_pos': self.current_buffer.write_pos if self.current_buffer else 0,
             'flush_queue_depth': self._flush_queue.qsize(),
         }

@@ -70,6 +70,14 @@ def _drain(w):
     return out
 
 
+def _pair(w, k=1):
+    """radiod's next pair, continuous with the mapping in force, built in
+    whole seconds so the mapping stays exact.  Releases a held line."""
+    snap = (w._rtp_timesnap + k * SR) & 0xFFFFFFFF
+    gps_ns = (int(w._gps_time_unix) + k - GPS_MINUS_UNIX_S) * 10**9
+    assert w.add_timing_snapshot(gps_ns, snap)
+
+
 def _ramp(n, start=1):
     return (np.arange(n) + start).astype(np.complex64)
 
@@ -167,6 +175,7 @@ def test_backward_label_inside_the_chunk_never_overwrites(tmp_path):
     # The label steps back 400: the first 400 positions already hold data.
     y = _ramp(600, start=10_000)
     w.write_samples(y, base + 200)
+    _pair(w)                                           # releases the held batch
     (_, d, side), = _drain(w)
     assert np.array_equal(d[:600], _ramp(600))         # untouched
     assert np.array_equal(d[600:800], y[400:])         # the new part lands
@@ -182,6 +191,7 @@ def test_label_behind_the_chunk_start_is_counted_not_lost_silently(tmp_path):
     w.write_samples(_ramp(spc), base)                  # chunk N, complete
     w.write_samples(_ramp(300), base + spc)            # chunk N+1 opens
     w.write_samples(_ramp(200, start=50_000), base + spc - 500)   # back into N
+    _pair(w)
     chunks = _drain(w)
     assert len(chunks) == 2
     _, d0, side0 = chunks[0]
@@ -193,24 +203,124 @@ def test_label_behind_the_chunk_start_is_counted_not_lost_silently(tmp_path):
 
 def test_rebase_before_the_new_pair_opens_no_chunk_at_a_wrong_boundary(tmp_path):
     """radiod restarted: batches on the new RTP line arrive while the writer
-    still holds the old pair.  The old pair maps them hours away.  The writer
-    holds them out (counted), and places the line once the new pair lands."""
+    still holds the old pair.  The old pair maps them ~200 days away.  The
+    writer holds them, opens no chunk, and replays them in order once the
+    new pair lands."""
     w = _writer(tmp_path)
     base = 30 * SR
     w.write_samples(_ramp(300), base)
     t_resume = w._rtp_to_unix_time(base + 300)
+    boundary = int(t_resume) // 10 * 10
     new_line = 0x9000_0000                             # the old pair maps it ~200 days back
     w.write_samples(_ramp(300, start=1000), new_line)
     w.write_samples(_ramp(300, start=1300), new_line + 300)
-    assert w.get_stats()["unplaced_samples"] == 600
-    # The new pair: counter new_line + 600 stands at t_resume + 2 s, in
-    # the same ten seconds as the first batch.
-    w.add_timing_snapshot(_gps_ns(t_resume + 2.0), new_line + 600)
+    assert w.current_buffer.write_pos == 300           # nothing placed yet
+    assert w.get_stats()["held_samples"] == 600
+    # The new pair: the new line resumes half a second after the old one
+    # stopped, so counter new_line + 600 stands at t_resume + 6.5 s.
+    w.add_timing_snapshot(_gps_ns(t_resume + 6.5), new_line + 600)
     w.write_samples(_ramp(300, start=1600), new_line + 600)
+    stats = w.get_stats()
+    assert stats["unplaced_samples"] == 0 and stats["held_samples"] == 0
     chunks = _drain(w)
-    boundaries = {s["minute_boundary"] for _, _, s in chunks}
-    assert boundaries == {int(t_resume) // 10 * 10}
-    assert sum(s["samples_covered"] for _, _, s in chunks) == 600
+    assert {s["minute_boundary"] for _, _, s in chunks} == {boundary, boundary + 10}
+    assert sum(s["samples_covered"] for _, _, s in chunks) == 1200
+    # The replayed line, in order, across the reopened chunk and the next.
+    replayed = np.concatenate([d[d != 0] for stem, d, _ in chunks if stem != str(boundary)])
+    assert np.array_equal(replayed, _ramp(900, start=1000))
+
+
+# ------------------------------------------------------------ the hold
+
+def _feed(w, rtp, n_batches, size=50, start=1):
+    for k in range(n_batches):
+        w.write_samples(_ramp(size, start=start + k * size), rtp)
+        rtp += size
+    return rtp
+
+
+def test_hold_loses_nothing_with_the_host_clock_200_s_off(tmp_path):
+    """A one-sample backward re-sync on the same line, the mapping still
+    right.  The host clock decides nothing: the next pair releases the hold
+    and every sample is written or counted as overlap."""
+    w = _writer(tmp_path)
+    w._host_time = lambda: time.time() + 200.0
+    rtp = _feed(w, 30 * SR, 5)
+    rtp = _feed(w, rtp - 1, 10, start=1000)            # backward by one sample
+    # radiod's next pair, continuous with the mapping in force.
+    _pair(w)
+    _feed(w, rtp, 30, start=5000)
+    s = w.get_stats()
+    assert s["unplaced_samples"] == 0
+    assert s["overlap_samples"] == 1
+    assert s["samples_written"] + s["overlap_samples"] == 45 * 50
+
+
+def test_stream_interruption_holds_until_the_next_pair(tmp_path):
+    """ka9q-python >= 3.28.0 flags a re-base with a STREAM_INTERRUPTION
+    event; the recorder passes it on, and the writer holds even when the
+    label happens to continue."""
+    from ka9q import GapSource
+    w = _writer(tmp_path)
+    r = StreamRecorderV2.__new__(StreamRecorderV2)
+    r.state = StreamRecorderState.RECORDING
+    r._lock = threading.Lock()
+    r._tap_lock = threading.Lock()
+    r._tap_callbacks = []
+    r.batches_received = r.samples_received = r.samples_written = 0
+    r.archive_writer = w
+    r.ring_buffer = None
+    r.config = SimpleNamespace(description="testchan")
+    rtp = 30 * SR
+
+    def q(gaps=()):
+        return SimpleNamespace(batch_gaps=list(gaps), has_gaps=bool(gaps),
+                               delivered_rtp_start=rtp, total_gaps_filled=0,
+                               completeness_pct=100.0)
+    r._handle_samples(_ramp(100), q())
+    rtp += 100
+    brk = SimpleNamespace(source=GapSource.STREAM_INTERRUPTION, duration_samples=0)
+    r._handle_samples(_ramp(100, start=101), q([brk]))
+    assert w.get_stats()["samples_written"] == 100     # held
+    _pair(w)
+    assert w.get_stats()["samples_written"] == 200     # replayed
+    (_, d, _), = _drain(w)
+    assert np.array_equal(d[d != 0], _ramp(200))
+
+
+def test_hold_past_its_bound_drops_only_the_overflow(tmp_path):
+    w = _writer(tmp_path)
+    bound = int(w.LABEL_HOLD_SECONDS * SR)             # 1000 samples
+    rtp = _feed(w, 30 * SR, 2)
+    rtp = _feed(w, rtp + 7, 24, start=1000)            # 1200 held: 200 over
+    s = w.get_stats()
+    assert s["held_samples"] == bound
+    assert s["unplaced_samples"] == 200
+    _pair(w)
+    s = w.get_stats()
+    assert s["samples_written"] == 100 + bound
+    assert s["unplaced_samples"] == 200
+
+
+def test_close_counts_samples_still_held(tmp_path):
+    w = _writer(tmp_path)
+    rtp = _feed(w, 30 * SR, 2)
+    _feed(w, rtp + 7, 4)
+    with w._lock:
+        w._drop_held("test")
+    assert w.get_stats()["unplaced_samples"] == 200
+    assert w.get_stats()["held_samples"] == 0
+
+
+def test_abandoned_buffers_are_counted(tmp_path):
+    w = _writer(tmp_path)
+    spc = w.samples_per_chunk
+    rtp = 30 * SR
+    for k in range(w._flush_queue.maxsize + 1):        # one more than the queue holds
+        w.write_samples(_ramp(spc), rtp + k * spc)
+    s = w.get_stats()
+    assert s["abandoned_chunks"] == 1
+    assert s["abandoned_samples"] == spc
 
 
 def test_reopened_boundary_never_replaces_the_earlier_file(tmp_path):
