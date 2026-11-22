@@ -785,17 +785,22 @@ class TestRestoredPairAge:
         judge = make_judge(clock, tmp_path, bench)
         rate = 100
         w = make_writer(tmp_path, judge=judge, key=KEY, sample_rate=rate)
+        # The writer's label gate reads the host clock; here the host
+        # clock is the fake one, which runs ~50 min ahead of time.time().
+        w._host_time = lambda: clock.wall
         try:
             # Pair A: truthful, adopted at t0.
             t0 = clock.wall
             snap_a, gps_a = 10_000, unix_to_gps_ns(t0)
             w.add_timing_snapshot(gps_time_ns=gps_a, rtp_timesnap=snap_a)
             judge.tick()
-            # AGE_S later the stream has advanced by AGE_S of samples.
+            # AGE_S later the stream has advanced by AGE_S of samples.  A
+            # batch arrives when its NEWEST sample does, so the one-second
+            # batch delivered now starts one second back.
             clock.advance(self.AGE_S)
             rtp_now = snap_a + int(self.AGE_S * rate)
             w.write_samples(np.ones(rate, dtype=np.complex64),
-                            rtp_timestamp=rtp_now & 0xFFFFFFFF)
+                            rtp_timestamp=(rtp_now - rate) & 0xFFFFFFFF)
             # Pair B: radiod's pair steps +0.9 s; the recorder adopts it ...
             w.add_timing_snapshot(
                 gps_time_ns=unix_to_gps_ns(clock.wall + 0.9),
@@ -805,7 +810,7 @@ class TestRestoredPairAge:
             clock.advance(60.0)
             rtp_now += 60 * rate
             w.write_samples(np.ones(rate, dtype=np.complex64),
-                            rtp_timestamp=rtp_now & 0xFFFFFFFF)
+                            rtp_timestamp=(rtp_now - rate) & 0xFFFFFFFF)
             w.restore_timing_mapping(gps_a, snap_a)
             judge.tick()
             v = judge.offset_for(KEY, rtp_now)

@@ -208,6 +208,35 @@ class MinuteBuffer:
     # inside the chunk used to read as complete.  Batches arrive almost
     # always in order, so this stays one or a few runs long.
     covered_runs: List[List[int]] = field(default_factory=list)
+    # Samples the writer refused for this chunk, by cause: labelled onto
+    # positions already written (kept the earlier ones), or labelled before
+    # the chunk start (an earlier chunk is never reopened).
+    overlap_samples: int = 0
+    dropped_before_start: int = 0
+    # "first_sample" (the resequencer's delivered_rtp_start), "last_packet"
+    # (the pre-3.21 ka9q-python fallback), or "mixed".
+    batch_label: Optional[str] = None
+
+    def free_spans(self, start: int, end: int) -> List[tuple]:
+        """The parts of [start, end) not yet written, in order."""
+        runs = self.covered_runs
+        if not runs or start >= runs[-1][1]:
+            return [(start, end)] if end > start else []
+        spans = []
+        pos = start
+        for a, b in runs:
+            if b <= pos:
+                continue
+            if a >= end:
+                break
+            if a > pos:
+                spans.append((pos, a))
+            pos = max(pos, b)
+            if pos >= end:
+                break
+        if pos < end:
+            spans.append((pos, end))
+        return spans
 
     def note_written(self, start: int, end: int) -> None:
         """Record that positions [start, end) now hold samples."""
@@ -458,8 +487,25 @@ class BinaryArchiveWriter:
             )
         )
         
+        # RTP just past the newest sample handed to the writer (label +
+        # batch length).  _restored_pair_age_s measures from it.
         self.last_rtp_timestamp: Optional[int] = None
         self.cumulative_samples: int = 0  # Total samples processed
+
+        # Label faults (ka9q-python >= 3.28.0 re-bases the label after a
+        # backward RTP jump or a sequence re-sync).  Every refused sample
+        # lands in one of these counters; see _label_held_out and
+        # _write_samples_inner.
+        self._expected_label: Optional[int] = None
+        self._label_suspect = False
+        self._held_run = 0
+        self._last_label_fault_log = 0.0
+        self._scratch_seq = 0
+        self._host_time = time.time       # the label gate's clock (tests swap it)
+        self.label_discontinuities = 0
+        self.unplaced_samples = 0
+        self.overlap_samples = 0
+        self.dropped_before_start = 0
         
         # Timing snapshot tracking for radiod GPS_TIME/RTP_TIMESNAP pairs
         # Deduplicated by rtp_timesnap to avoid storing duplicates
@@ -1138,11 +1184,16 @@ class BinaryArchiveWriter:
         # file.  Anonymous heap stays near zero for the whole fill.
         #
         # Per-channel scratch name (``.<channel>.scratch``) so a
-        # concurrent flush from another channel can't collide.
+        # concurrent flush from another channel can't collide, and a
+        # per-writer sequence number so a chunk reopened at the same
+        # boundary (a pair step mid-chunk) never unlinks the scratch of
+        # the earlier buffer still waiting in the flush queue.
         minute_dir = self._get_minute_dir(chunk_boundary)
         minute_dir.mkdir(parents=True, exist_ok=True)
+        self._scratch_seq += 1
         scratch_path = minute_dir / (
-            f"{chunk_boundary}.{self._sanitize_channel_name()}.scratch"
+            f"{chunk_boundary}.{self._sanitize_channel_name()}"
+            f".{self._scratch_seq}.scratch"
         )
         # Best-effort: clean up any leftover scratch from a previous
         # process crash before we mmap a fresh one.  We hold the writer
@@ -1426,6 +1477,17 @@ class BinaryArchiveWriter:
         self._release_scratch(buffer)
         return False
 
+    @staticmethod
+    def _free_chunk_stem(minute_dir: Path, boundary: int) -> tuple:
+        """(stem, segment) for a chunk at ``boundary`` that replaces no file."""
+        segment = 1
+        while True:
+            stem = str(boundary) if segment == 1 else f"{boundary}.seg{segment}"
+            if not any((minute_dir / f"{stem}{ext}").exists()
+                       for ext in ('.bin', '.bin.zst', '.bin.lz4', '.json')):
+                return stem, segment
+            segment += 1
+
     def _cleanup_partial_write(self, *paths: Path) -> None:
         """Clean up partial files after a failed write."""
         for path in paths:
@@ -1534,15 +1596,21 @@ class BinaryArchiveWriter:
         try:
             minute_dir = self._get_minute_dir(buffer.minute_boundary)
             
-            # Binary file path - extension depends on compression
+            # Binary file path - extension depends on compression.  Never
+            # replace a chunk already on disk: a chunk reopened at the same
+            # boundary (a pair step mid-chunk, a recorder restart, a
+            # re-based label) used to overwrite the earlier file.  The later
+            # one becomes a segment, ``<boundary>.seg<N>``; readers that
+            # parse the stem as an integer skip it.
             compression = self.config.compression.lower()
+            stem, segment = self._free_chunk_stem(minute_dir, buffer.minute_boundary)
             if compression == 'zstd':
-                bin_path = minute_dir / f"{buffer.minute_boundary}.bin.zst"
+                bin_path = minute_dir / f"{stem}.bin.zst"
             elif compression == 'lz4':
-                bin_path = minute_dir / f"{buffer.minute_boundary}.bin.lz4"
+                bin_path = minute_dir / f"{stem}.bin.lz4"
             else:
-                bin_path = minute_dir / f"{buffer.minute_boundary}.bin"
-            json_path = minute_dir / f"{buffer.minute_boundary}.json"
+                bin_path = minute_dir / f"{stem}.bin"
+            json_path = minute_dir / f"{stem}.json"
             
             # Write binary data (just the filled portion).  The zstd path
             # streams the chunk out of the scratch memmap in blocks: never
@@ -1596,7 +1664,7 @@ class BinaryArchiveWriter:
                             actual_samples * bytes_per_sample(DTYPE_F32))
                 else:
                     logger.warning("zstandard not installed, falling back to uncompressed")
-                    bin_path = minute_dir / f"{buffer.minute_boundary}.bin"
+                    bin_path = minute_dir / f"{stem}.bin"
                     bin_path_tmp = bin_path.with_suffix('.bin.tmp')
                     chunk.tofile(bin_path_tmp)
                     dtype_name = 'complex64'   # the fallback file holds F32
@@ -1615,7 +1683,7 @@ class BinaryArchiveWriter:
                     del raw_data, compressed_data
                 except ImportError:
                     logger.warning("lz4 not installed, falling back to uncompressed")
-                    bin_path = minute_dir / f"{buffer.minute_boundary}.bin"
+                    bin_path = minute_dir / f"{stem}.bin"
                     bin_path_tmp = bin_path.with_suffix('.bin.tmp')
                     chunk.tofile(bin_path_tmp)
             else:
@@ -1639,11 +1707,14 @@ class BinaryArchiveWriter:
                 'completeness_pct': 100.0 * actual_samples / self.samples_per_chunk,
                 'gap_count': buffer.gap_count,
                 'gap_samples': buffer.gap_samples,
-                # Honest coverage.  samples_written above is the highest
-                # position written (the bin's length); these count what
-                # inside it actually holds samples.  hole_* covers
-                # [0, samples_written) only: a short tail already shows
-                # as samples_written < samples_expected.
+                # Coverage.  samples_written above is the highest position
+                # written (the bin's length), and completeness_pct follows
+                # it; these count what inside it the writer actually wrote.
+                # samples_covered includes gap fills (gap_samples: zeros, or
+                # interpolation for runs up to 1000 samples), so received
+                # samples = samples_covered - gap_samples.  hole_* covers
+                # [0, samples_written) only: a short tail already shows as
+                # samples_written < samples_expected.
                 'samples_covered': buffer.samples_covered,
                 'hole_samples': actual_samples - buffer.samples_covered,
                 'hole_count': buffer.hole_count,
@@ -1652,7 +1723,14 @@ class BinaryArchiveWriter:
                 # the chunk end continued into the next chunk.  A sidecar
                 # without this field is an older chunk: its F32 batches sit
                 # late by the label error (1440 samples at 24 kHz on B4).
-                'batch_label': 'first_sample',
+                # "last_packet" marks the fallback for ka9q-python without
+                # delivered_rtp_start (placement as old).  overlap_samples
+                # and dropped_before_start count samples refused because
+                # their label fell on positions already written or before
+                # this chunk's start.
+                'batch_label': buffer.batch_label or 'first_sample',
+                'overlap_samples': buffer.overlap_samples,
+                'dropped_before_start': buffer.dropped_before_start,
                 'start_rtp_timestamp': buffer.start_rtp,
                 'start_system_time': buffer.start_system_time,
                 # Authoritative GPS/RTP mapping from the writer — always present
@@ -1702,6 +1780,12 @@ class BinaryArchiveWriter:
                 metadata['timing'] = buffer.judge_timing
             if buffer.anchor_restored:
                 metadata['anchor_restored'] = True
+            if segment > 1:
+                metadata['segment'] = segment
+                logger.warning(
+                    f"{self.config.channel_name}: chunk {buffer.minute_boundary} "
+                    f"already on disk; writing this one as segment {segment} "
+                    f"({stem})")
             metadata.update(f16_extra)
             
             # Atomic write: write to temp file, fsync, then rename
@@ -1858,7 +1942,8 @@ class BinaryArchiveWriter:
         samples: np.ndarray,
         rtp_timestamp: int,
         system_time: Optional[float] = None,
-        gap_samples: int = 0
+        gap_samples: int = 0,
+        label_source: str = "first_sample",
     ) -> int:
         """
         Write IQ samples to the archive.
@@ -1868,6 +1953,9 @@ class BinaryArchiveWriter:
             rtp_timestamp: RTP timestamp of first sample
             system_time: System wall clock time (only used for initial sync)
             gap_samples: Number of gap samples (for statistics)
+            label_source: what ``rtp_timestamp`` names: "first_sample"
+                (delivered_rtp_start) or "last_packet" (the fallback for
+                ka9q-python without it).  Recorded in the sidecar.
             
         Returns:
             Number of samples written
@@ -1898,8 +1986,80 @@ class BinaryArchiveWriter:
                     self._last_waiting_log = now
                 self.timing_drops += len(samples)
                 return 0  # Cannot write until we have authoritative timing
-            
+
+            n = len(samples)
+            self.last_rtp_timestamp = (int(rtp_timestamp) + n) & 0xFFFFFFFF
+            if self._label_held_out(int(rtp_timestamp), n):
+                self.unplaced_samples += n
+                return 0
+            self._label_source = label_source
             return self._write_samples_inner(samples, rtp_timestamp, gap_samples)
+
+    # A label that jumps (backward, or forward past ka9q-python's fill
+    # bound) and then maps more than MAX_STALENESS_SECONDS from the host
+    # clock is held out until the mapping places it again -- normally the
+    # new GPS_TIME/RTP_TIMESNAP pair after a radiod restart, a second or
+    # so later.  The host clock only gates here; it never labels a sample.
+    # After this long the writer places the line with the mapping it has
+    # (spec §6: a wrong label is recoverable, a dropped sample is not).
+    LABEL_HOLD_SECONDS = 10.0
+
+    def _label_lag_s(self, rtp: int) -> float:
+        verdict = self._judge_verdict(rtp)
+        return self._host_time() - (self._rtp_to_unix_time(rtp)
+                              + self._label_correction_s(verdict))
+
+    def _label_held_out(self, rtp: int, n: int) -> bool:
+        """True when this batch must not be placed yet (caller counts it).
+
+        Before this check a re-based line was placed with the OLD pair: it
+        opened a chunk at whatever boundary the old pair named, up to
+        24.8 h away, and flushed it there.
+        """
+        expected = self._expected_label
+        self._expected_label = (rtp + n) & 0xFFFFFFFF
+        if expected is not None and rtp != expected:
+            jump = (rtp - expected) & 0xFFFFFFFF
+            if jump > 0x7FFFFFFF:
+                jump -= 0x100000000
+            self.label_discontinuities += 1
+            lag = self._label_lag_s(rtp)
+            logger.warning(
+                f"{self.config.channel_name}: batch label jumped {jump:+d} "
+                f"samples (expected {expected}, got {rtp}); it maps "
+                f"{lag:+.1f}s from the host clock")
+            if abs(lag) > self.MAX_STALENESS_SECONDS and not self._label_suspect:
+                self._label_suspect = True
+                self._held_run = 0
+                logger.error(
+                    f"{self.config.channel_name}: re-based label maps "
+                    f"{lag:+.1f}s away under the current pair; holding the "
+                    f"line out (unplaced_samples) until a pair places it")
+        if not self._label_suspect:
+            return False
+        lag = self._label_lag_s(rtp)
+        if abs(lag) <= self.MAX_STALENESS_SECONDS:
+            logger.warning(
+                f"{self.config.channel_name}: label line placed again "
+                f"({lag:+.1f}s); {self._held_run} samples were held out")
+            self._label_suspect = False
+            return False
+        if self._held_run >= self.LABEL_HOLD_SECONDS * self.config.sample_rate:
+            logger.error(
+                f"{self.config.channel_name}: no pair placed the re-based "
+                f"line within {self.LABEL_HOLD_SECONDS:.0f}s; placing it with "
+                f"the current mapping ({lag:+.1f}s off the host clock)")
+            self._label_suspect = False
+            return False
+        self._held_run += n
+        return True
+
+    def _label_fault_log(self, message: str) -> None:
+        """Rate-limited WARNING for refused samples; the counters hold the totals."""
+        now = time.monotonic()
+        if now - self._last_label_fault_log > 10.0:
+            logger.warning(message)
+            self._last_label_fault_log = now
     
     # Split-detector trigger (spec §6, replacing the old one-sided
     # wallclock staleness guard): when |wallclock - label| exceeds this,
@@ -2017,17 +2177,27 @@ class BinaryArchiveWriter:
         self,
         samples: np.ndarray,
         rtp_timestamp: int,
-        gap_samples: int = 0
+        gap_samples: int = 0,
+        fill_mask: Optional[np.ndarray] = None,
     ) -> int:
-        """Write samples to the buffer (called with lock held, offset calibrated)."""
+        """Write samples to the buffer (called with lock held, offset calibrated).
+
+        ``fill_mask`` marks the zero-filled positions of ``samples`` and
+        is passed only when this call writes the remainder of a batch
+        split at a chunk end: the batch was interpolated already, and the
+        mask tells this chunk which share of the gap fill it holds.
+        """
         # Ensure complex64
         if samples.dtype != np.complex64:
             samples = samples.astype(np.complex64)
         
         # Phase-preserving gap interpolation
         # ka9q-python fills gaps with exact zeros which breaks phase continuity.
-        # Only scan for gaps if the stream told us it inserted some.
-        if gap_samples > 0:
+        # Only scan for gaps if the stream told us it inserted some.  The
+        # zero mask, taken first, says where the fill lies, so a batch split
+        # across two chunks gives each chunk its own share of the gap.
+        if fill_mask is None and gap_samples > 0:
+            fill_mask = samples == 0
             samples = self._interpolate_gaps(samples)
         
         # Determine which chunk this belongs to FROM RTP TIMESTAMP (GPSDO-disciplined)
@@ -2069,6 +2239,11 @@ class BinaryArchiveWriter:
         # Write to buffer at correct position based on RTP timestamp
         # In RTP mode, samples are positioned by their RTP offset from minute boundary
         buffer = self.current_buffer
+        source = getattr(self, '_label_source', 'first_sample')
+        if buffer.batch_label is None:
+            buffer.batch_label = source
+        elif buffer.batch_label != source:
+            buffer.batch_label = 'mixed'
         
         # Calculate position in buffer DIRECTLY from RTP timestamp
         # This is authoritative - RTP is GPSDO-disciplined
@@ -2080,30 +2255,60 @@ class BinaryArchiveWriter:
         
         # Clamp to valid range
         if sample_position < 0:
-            # Samples before minute boundary - skip them
-            skip_count = -sample_position
+            # Samples before the chunk start.  The writer never reopens an
+            # earlier chunk (its file may be on disk already), so they are
+            # dropped, but counted: a backward label (ka9q-python re-bases
+            # after a backward RTP jump) or a mapping nudge at the seam.
+            skip_count = min(-sample_position, len(samples))
+            buffer.dropped_before_start += skip_count
+            self.dropped_before_start += skip_count
+            self._label_fault_log(
+                f"{self.config.channel_name}: {skip_count} samples labelled "
+                f"before chunk {buffer.minute_boundary}'s start; dropped "
+                f"(counted in dropped_before_start)")
             if skip_count >= len(samples):
-                return 0  # All samples are before the minute
+                return 0
             samples = samples[skip_count:]
+            if fill_mask is not None:
+                fill_mask = fill_mask[skip_count:]
             sample_position = 0
         
         samples_to_write = max(0, min(len(samples), self.samples_per_chunk - sample_position))
 
         if samples_to_write > 0:
-            buffer.samples[sample_position:sample_position + samples_to_write] = samples[:samples_to_write]
+            # Never overwrite a sample already written: write only the
+            # positions still empty and count the rest.  Batches arrive in
+            # order, so this is one free span in the normal case.
+            end = sample_position + samples_to_write
+            overlap = samples_to_write
+            for a, b in buffer.free_spans(sample_position, end):
+                buffer.samples[a:b] = samples[a - sample_position:b - sample_position]
+                buffer.note_written(a, b)
+                overlap -= b - a
+                self.samples_written += b - a
+            if overlap:
+                buffer.overlap_samples += overlap
+                self.overlap_samples += overlap
+                self._label_fault_log(
+                    f"{self.config.channel_name}: {overlap} samples labelled "
+                    f"onto positions chunk {buffer.minute_boundary} already "
+                    f"holds; kept the earlier samples (overlap_samples)")
             # Update write_pos to track highest written position
-            buffer.write_pos = max(buffer.write_pos, sample_position + samples_to_write)
-            buffer.note_written(sample_position, sample_position + samples_to_write)
-            self.samples_written += samples_to_write
+            buffer.write_pos = max(buffer.write_pos, end)
         
-        # Track gaps
+        # Track gaps: this chunk's share of the fill
         if gap_samples > 0:
-            buffer.gap_count += 1
-            buffer.gap_samples += gap_samples
-            self.total_gaps += 1
-        
-        # Update time reference
-        self.last_rtp_timestamp = rtp_timestamp
+            here = gap_samples
+            if fill_mask is not None and len(samples) > samples_to_write:
+                n_fill = int(np.count_nonzero(fill_mask))
+                if n_fill:
+                    here = int(round(gap_samples * int(np.count_nonzero(
+                        fill_mask[:samples_to_write])) / n_fill))
+            if here > 0:
+                buffer.gap_count += 1
+                buffer.gap_samples += here
+                self.total_gaps += 1
+            gap_samples -= here
 
         # A batch that runs past the chunk end: its head went into this
         # chunk, the remainder belongs at the start of the next.  The
@@ -2126,7 +2331,13 @@ class BinaryArchiveWriter:
             rest_rtp = (buffer.start_rtp + sample_position + samples_to_write) & 0xFFFFFFFF
             self.current_buffer = self._start_new_minute(
                 float(next_boundary), rest_rtp, verdict=verdict)
-            samples_to_write += self._write_samples_inner(remainder, rest_rtp, 0)
+            rest_mask = None
+            if fill_mask is not None:
+                rest_mask = fill_mask[samples_to_write:]
+            elif gap_samples > 0:
+                rest_mask = np.zeros(len(remainder), dtype=bool)
+            samples_to_write += self._write_samples_inner(
+                remainder, rest_rtp, gap_samples, fill_mask=rest_mask)
 
         return samples_to_write
 
@@ -2174,6 +2385,10 @@ class BinaryArchiveWriter:
             'stale_drops': self.stale_drops,
             'timing_drops': self.timing_drops,
             'anchor_fault_events': self.anchor_fault_events,
+            'label_discontinuities': self.label_discontinuities,
+            'unplaced_samples': self.unplaced_samples,
+            'overlap_samples': self.overlap_samples,
+            'dropped_before_start': self.dropped_before_start,
             'current_buffer_pos': self.current_buffer.write_pos if self.current_buffer else 0,
             'flush_queue_depth': self._flush_queue.qsize(),
         }

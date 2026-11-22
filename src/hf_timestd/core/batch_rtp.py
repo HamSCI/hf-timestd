@@ -28,3 +28,11 @@ def resolve_batch_rtp(quality, _warned=[False]):
             "falling back to last_rtp_timestamp; batch labels will carry "
             "packet-boundary wobble and slip under stream loss")
     return getattr(quality, 'last_rtp_timestamp', None)
+
+
+def batch_label_source(quality) -> str:
+    """What resolve_batch_rtp's label names for this batch: "first_sample"
+    (delivered_rtp_start) or "last_packet" (the fallback header)."""
+    if getattr(quality, 'delivered_rtp_start', None) is not None:
+        return "first_sample"
+    return "last_packet"

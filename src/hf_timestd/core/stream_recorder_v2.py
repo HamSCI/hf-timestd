@@ -48,7 +48,7 @@ _CHANNEL_VERIFY_TIMEOUT_S = float(os.environ.get("TIMESTD_CHANNEL_VERIFY_TIMEOUT
 
 from ka9q import RadiodStream, ChannelInfo, StreamQuality, RadiodControl
 from .anchor_pair import read_anchor_pair, read_legacy_pair
-from .batch_rtp import resolve_batch_rtp
+from .batch_rtp import batch_label_source, resolve_batch_rtp
 from .pair_step_arbiter import (
     STEADY_LIMIT_S, T6_AGREE_S, PairStepArbiter, T6Reference, Verdict,
     pair_disagreement_s, t6_anchor_in_map_run, t6_contradicts_both,
@@ -1701,7 +1701,8 @@ class StreamRecorderV2:
                     samples=samples,
                     rtp_timestamp=resolve_batch_rtp(quality),
                     system_time=system_time,
-                    gap_samples=batch_gap_samples
+                    gap_samples=batch_gap_samples,
+                    label_source=batch_label_source(quality),
                 )
 
             # Publish the batch into the ring buffer AFTER the archive
