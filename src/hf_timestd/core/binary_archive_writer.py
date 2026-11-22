@@ -203,6 +203,42 @@ class MinuteBuffer:
     # First chunk after an anchor round trip put back the mapping a pair
     # step had replaced (StreamRecorderV2 revalidation).
     anchor_restored: bool = False
+    # Sample positions actually written, as sorted, merged [start, end)
+    # runs.  write_pos only records the highest position, so a hole
+    # inside the chunk used to read as complete.  Batches arrive almost
+    # always in order, so this stays one or a few runs long.
+    covered_runs: List[List[int]] = field(default_factory=list)
+
+    def note_written(self, start: int, end: int) -> None:
+        """Record that positions [start, end) now hold samples."""
+        if end <= start:
+            return
+        runs = self.covered_runs
+        if not runs or start > runs[-1][1]:
+            runs.append([start, end])          # the usual case: in order
+            return
+        if start >= runs[-1][0]:
+            runs[-1][1] = max(runs[-1][1], end)
+            return
+        merged = []
+        for a, b in sorted(runs + [[start, end]]):
+            if merged and a <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], b)
+            else:
+                merged.append([a, b])
+        self.covered_runs = merged
+
+    @property
+    def samples_covered(self) -> int:
+        return sum(b - a for a, b in self.covered_runs)
+
+    @property
+    def hole_count(self) -> int:
+        """Unwritten runs inside [0, write_pos): lead hole plus interior holes."""
+        runs = self.covered_runs
+        if not runs:
+            return 1 if self.write_pos > 0 else 0
+        return len(runs) - 1 + (1 if runs[0][0] > 0 else 0)
 
     @property
     def is_complete(self) -> bool:
@@ -1603,6 +1639,20 @@ class BinaryArchiveWriter:
                 'completeness_pct': 100.0 * actual_samples / self.samples_per_chunk,
                 'gap_count': buffer.gap_count,
                 'gap_samples': buffer.gap_samples,
+                # Honest coverage.  samples_written above is the highest
+                # position written (the bin's length); these count what
+                # inside it actually holds samples.  hole_* covers
+                # [0, samples_written) only: a short tail already shows
+                # as samples_written < samples_expected.
+                'samples_covered': buffer.samples_covered,
+                'hole_samples': actual_samples - buffer.samples_covered,
+                'hole_count': buffer.hole_count,
+                # Each batch was placed by its FIRST delivered sample
+                # (resequencer delivered_rtp_start), and a batch crossing
+                # the chunk end continued into the next chunk.  A sidecar
+                # without this field is an older chunk: its F32 batches sit
+                # late by the label error (1440 samples at 24 kHz on B4).
+                'batch_label': 'first_sample',
                 'start_rtp_timestamp': buffer.start_rtp,
                 'start_system_time': buffer.start_system_time,
                 # Authoritative GPS/RTP mapping from the writer — always present
@@ -2037,12 +2087,13 @@ class BinaryArchiveWriter:
             samples = samples[skip_count:]
             sample_position = 0
         
-        samples_to_write = min(len(samples), self.samples_per_chunk - sample_position)
+        samples_to_write = max(0, min(len(samples), self.samples_per_chunk - sample_position))
 
-        if samples_to_write > 0 and sample_position < self.samples_per_chunk:
+        if samples_to_write > 0:
             buffer.samples[sample_position:sample_position + samples_to_write] = samples[:samples_to_write]
             # Update write_pos to track highest written position
             buffer.write_pos = max(buffer.write_pos, sample_position + samples_to_write)
+            buffer.note_written(sample_position, sample_position + samples_to_write)
             self.samples_written += samples_to_write
         
         # Track gaps
@@ -2053,11 +2104,29 @@ class BinaryArchiveWriter:
         
         # Update time reference
         self.last_rtp_timestamp = rtp_timestamp
-        
+
+        # A batch that runs past the chunk end: its head went into this
+        # chunk, the remainder belongs at the start of the next.  The
+        # writer used to drop the remainder, so each chunk opened with a
+        # zero run as long as the straddling batch's tail.
+        remainder = samples[samples_to_write:]
+        next_boundary = buffer.minute_boundary + self.file_duration_sec
+
         # Check if minute is complete
-        if buffer.is_complete:
+        if buffer.is_complete or len(remainder):
             self._try_flush(buffer)
             self.current_buffer = None
+
+        if len(remainder):
+            # The remainder's first sample sits at position samples_per_chunk
+            # of this chunk, which is the next chunk's boundary by
+            # definition.  Open that chunk by its boundary rather than by
+            # re-deriving time from the RTP label, so rounding in the
+            # mapping cannot reopen this chunk.
+            rest_rtp = (buffer.start_rtp + sample_position + samples_to_write) & 0xFFFFFFFF
+            self.current_buffer = self._start_new_minute(
+                float(next_boundary), rest_rtp, verdict=verdict)
+            samples_to_write += self._write_samples_inner(remainder, rest_rtp, 0)
 
         return samples_to_write
 

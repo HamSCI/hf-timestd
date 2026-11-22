@@ -48,6 +48,7 @@ _CHANNEL_VERIFY_TIMEOUT_S = float(os.environ.get("TIMESTD_CHANNEL_VERIFY_TIMEOUT
 
 from ka9q import RadiodStream, ChannelInfo, StreamQuality, RadiodControl
 from .anchor_pair import read_anchor_pair, read_legacy_pair
+from .batch_rtp import resolve_batch_rtp
 from .pair_step_arbiter import (
     STEADY_LIMIT_S, T6_AGREE_S, PairStepArbiter, T6Reference, Verdict,
     pair_disagreement_s, t6_anchor_in_map_run, t6_contradicts_both,
@@ -1691,10 +1692,14 @@ class StreamRecorderV2:
             # boundaries from GPS_TIME/RTP_TIMESNAP, which works in both RTP and Fusion modes.
             
             # Write to Phase 1 archive (Phase 2/3 handled by separate services)
+            # The writer places a batch by its FIRST sample.  The label is
+            # the resequencer's delivered_rtp_start, never last_rtp_timestamp:
+            # that header names a packet late in the batch, and using it put
+            # every sample 1440 counts (60 ms at 24 kHz) late on B4.
             if self.archive_writer is not None:
                 self.archive_writer.write_samples(
                     samples=samples,
-                    rtp_timestamp=quality.last_rtp_timestamp,
+                    rtp_timestamp=resolve_batch_rtp(quality),
                     system_time=system_time,
                     gap_samples=batch_gap_samples
                 )
