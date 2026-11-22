@@ -663,11 +663,11 @@ def test_route1_outranks_route2_while_a_reference_answers():
 **Interfaces:**
 - Consumes: `CachedTable` (B2).
 - Produces:
-  - `@dataclass(frozen=True) class TransmitterOffset: tx_id: str; kind: str; offset_ms: float; sigma_ms: float; last_confirmed_utc: float; n_confirming: int; built_at_utc: float`
+  - `@dataclass(frozen=True) class TransmitterOffset: tx_id: str; kind: str; offset_ms: float; sigma_ms: float; last_confirmed_utc: float; n_confirming: int; period_s: Optional[float]; built_at_utc: float`
   - `usable_offset(tx_id: str, offsets: Optional[CachedTable], trust: Optional[CachedTable], now_s: float, enabled_kinds: Collection[str]) -> Optional[TransmitterOffset]` — None when the kind is not enabled, no trusted station confirms it, `n_confirming < 1`, or `now_s − last_confirmed_utc > OFFSET_MAX_CONFIRM_AGE_S`.  Otherwise the returned `sigma_ms` = `hypot(sigma_ms, OFFSET_AGE_SIGMA_MS_PER_H × copy_age_h)`.
-  - `@dataclass(frozen=True) class TimingObservation: tx_id: str; input_index: float; run_id: float; emission_nominal_utc_s: float; sigma_ms: float` (the §7.2 spool's record, as this plan assumes it)
+  - `@dataclass(frozen=True) class TimingObservation: tx_id: str; input_index: float; run_id: float; emission_nominal_utc_s: float; sigma_ms: float; arrival_utc_guess_s: float` (the §7.2 spool's record, as this plan assumes it; `arrival_utc_guess_s` is the station's own clock reading of the arrival, good to well under P/2)
   - `@dataclass(frozen=True) class EpochEstimate: tx_id: str; input_index: float; run_id: float; utc_s: float; sigma_ms: float`
-  - `transmitter_epoch_estimate(obs: TimingObservation, offset: Optional[TransmitterOffset], predicted_delay_ms: float, predicted_sigma_ms: float) -> Optional[EpochEstimate]` — the UTC at which input sample `input_index` arrived: `utc_s = emission_nominal_utc_s + offset_ms/1e3 + predicted_delay_ms/1e3`; `sigma_ms = hypot(obs.sigma_ms, predicted_sigma_ms, offset.sigma_ms)`.  None when `offset` is None.  Sign assumed here: a positive `offset_ms` means the transmitter emits late.
+  - `transmitter_epoch_estimate(obs: TimingObservation, offset: Optional[TransmitterOffset], predicted_delay_ms: float, predicted_sigma_ms: float) -> Optional[EpochEstimate]` — the UTC at which input sample `input_index` arrived.  `offset_ms` is a phase modulo the sweep period P = `offset.period_s`, published in [-P/2, P/2) (wsprdaemon-server publish.py, SIGN and RANGE; solver groundwave-4 on).  So the estimate takes the sweep start nearest the arrival, not the one before it: `raw_s = emission_nominal_utc_s + offset_ms/1e3 + predicted_delay_ms/1e3`, then `utc_s = raw_s - P * round((raw_s - arrival_utc_guess_s) / P)`, which folds the residual against the station's own label of the arrival into [-P/2, P/2).  Labelling by the sweep start before the arrival (the floor, as a recorder counts delay_ns) misplaces it by exactly P whenever `offset_ms` < 0, e.g. by 1 s for KFS-OMNI 4.4750 at 958.94 ms (offset about -41 ms).  The fold needs the station's clock within P/2 of UTC, which T3 already assumes.  When `period_s` is None (the group key gave no period) the offset is unfolded: use `raw_s` as is.  `sigma_ms = hypot(obs.sigma_ms, predicted_sigma_ms, offset.sigma_ms)`.  None when `offset` is None.  Sign: a positive `offset_ms` means the transmitter emits late.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -684,6 +684,14 @@ def test_the_epoch_estimate_adds_offset_and_delay():
     e = transmitter_epoch_estimate(obs(emission=1000.0, sigma=0.2), offset(2.5, 0.1803), 3.0, 0.3)
     assert e.utc_s == pytest.approx(1000.0055, abs=1e-9)
     assert e.sigma_ms == pytest.approx(math.sqrt(0.04 + 0.09 + 0.1803 ** 2))
+
+def test_an_early_transmitter_folds_to_the_nearest_sweep_start():
+    # P 1 s, offset -41.06 ms.  The spool labelled the arrival with the sweep start before
+    # it (999.0); the raw sum lands at 998.96194, a whole period early.  The fold moves it to
+    # the sweep start nearest the station's own reading (999.962).
+    e = transmitter_epoch_estimate(obs(emission=999.0, sigma=0.2, arrival_guess=999.962),
+                                   offset(-41.06, 0.1, period_s=1.0), 3.0, 0.3)
+    assert e.utc_s == pytest.approx(999.96194, abs=1e-9)
 
 def test_no_offset_no_estimate():
 ```
