@@ -324,9 +324,9 @@ def test_small_forward_jump_places_at_once_without_any_pair(tmp_path):
 def test_hold_past_its_bound_drops_only_the_overflow(tmp_path):
     w = _writer(tmp_path)
     _silent(w)
-    bound = int(w.LABEL_HOLD_SECONDS * SR)             # 1000 samples
+    bound = int(w.LABEL_HOLD_SECONDS * SR)
     rtp = _feed(w, 30 * SR, 2)
-    rtp = _feed(w, rtp - 7, 24, start=1000)            # backward: 1200 held, 200 over
+    rtp = _feed(w, rtp - 7, bound // 50 + 4, start=1000)   # backward: 200 over the bound
     s = w.get_stats()
     assert s["held_samples"] == bound
     assert s["unplaced_samples"] == 200
@@ -609,7 +609,14 @@ def test_a_biased_early_pair_does_not_stick(tmp_path):
     assert abs(off) < 0.01
     s = w.get_stats()
     assert s["held_samples"] == 0
+    assert s["unplaced_samples"] == 0                  # the 20 s hold covers the wait
     assert _accounted(s) == 70 * 50
+
+
+def test_the_hold_spans_twenty_seconds():
+    """First-pair latency plus CONFIRM_MIN_SPAN_S must fit in the hold
+    (round 4 re-review, m2-r4): 20 s, about 3.8 MB per channel at 24 kHz."""
+    assert BinaryArchiveWriter.LABEL_HOLD_SECONDS == 20.0
 
 
 # ------------------------------------------------------------ the watchdog off the write path
@@ -641,4 +648,37 @@ def test_watchdog_capture_does_not_block_the_write_path(tmp_path, monkeypatch):
         assert time.monotonic() - t0 < 1.0
     finally:
         gate.set()
+
+
+def test_watchdog_capture_gets_a_bounded_join_at_close(tmp_path, monkeypatch):
+    """m3-r4: close() waits about 2 s for an in-flight capture, then goes on."""
+    from hf_timestd.core import radiod_timing_watchdog as wd
+    gate = threading.Event()
+    monkeypatch.setattr(wd.RadiodTimingWatchdog, "_capture",
+                        lambda self, *a, **k: gate.wait(10))
+    monkeypatch.setattr(wd, "_WATCHDOG", None)
+    w = _writer(tmp_path)
+    w.write_samples(_ramp(100), 30 * SR)
+    w.add_timing_snapshot(_gps_ns(w._gps_time_unix + 2562.0), 12_000)
+    capture = wd.get_watchdog().last_capture_thread
+    assert capture is not None and capture.is_alive()
+    try:
+        t0 = time.monotonic()
+        wd.get_watchdog().close(timeout=0.3)           # still blocked: gives up
+        assert 0.25 <= time.monotonic() - t0 < 1.0
+        assert capture.is_alive()
+        gate.set()
+        wd.get_watchdog().close(timeout=2.0)           # finished: joins
+        assert not capture.is_alive()
+    finally:
+        gate.set()
+
+
+def test_writer_close_joins_the_watchdog_capture(tmp_path, monkeypatch):
+    from hf_timestd.core import radiod_timing_watchdog as wd
+    calls = []
+    monkeypatch.setattr(wd, "close_watchdog", lambda timeout=2.0: calls.append(timeout))
+    w = _writer(tmp_path)
+    w.close()
+    assert calls == [2.0]
 

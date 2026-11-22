@@ -133,12 +133,11 @@ class PairStepArbiter:
         self._pending_offset_s = None
         self._pending_snap = None
 
-    def _far_enough(self, rtp_snap: Optional[int]) -> bool:
+    def _far_enough(self, rtp_snap: int) -> bool:
         """Does ``rtp_snap`` lie CONFIRM_MIN_SPAN_S or more of counter after
-        the pending pair's snap (signed, wrap-safe)?  A caller that passes
-        no snap gets the pre-2026-11-22 rule (offsets alone)."""
-        if rtp_snap is None or self._pending_snap is None:
-            return rtp_snap is None
+        the pending pair's snap (signed, wrap-safe)?"""
+        if self._pending_snap is None:
+            return False
         d = (int(rtp_snap) - self._pending_snap) & 0xFFFFFFFF
         if d > 0x7FFFFFFF:
             d -= 0x100000000
@@ -151,8 +150,8 @@ class PairStepArbiter:
         return min(d, period - d) <= PERSIST_AGREE_S
 
     def decide(self, diff_s: float, fresh_utc_s: float, implied_utc_s: float,
-               fresh_offset_s: float, t6_utc_s: Optional[float],
-               rtp_snap: Optional[int] = None) -> Verdict:
+               fresh_offset_s: float, t6_utc_s: Optional[float], *,
+               rtp_snap: int) -> Verdict:
         """Rules, in order:
 
         1. ``|diff_s| <= STEADY_LIMIT_S``: STEADY; clear any pending step.
@@ -188,5 +187,5 @@ class PairStepArbiter:
                 return Verdict.ADOPT
             return Verdict.HOLD          # one read, or too soon: keep the first
         self._pending_offset_s = fresh_offset_s
-        self._pending_snap = None if rtp_snap is None else int(rtp_snap)
+        self._pending_snap = int(rtp_snap)
         return Verdict.HOLD

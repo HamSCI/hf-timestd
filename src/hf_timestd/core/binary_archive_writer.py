@@ -2050,8 +2050,10 @@ class BinaryArchiveWriter:
     # back to the recorder (take_step_request), whose revalidation and
     # PairStepArbiter adopt it; the adoption releases the hold.  No host
     # clock enters.  The hold keeps at most LABEL_HOLD_SECONDS of samples;
-    # only the overflow is dropped (unplaced_samples).
-    LABEL_HOLD_SECONDS = 10.0
+    # only the overflow is dropped (unplaced_samples).  20 s leaves room
+    # for radiod's first post-restart pair plus the arbiter's
+    # CONFIRM_MIN_SPAN_S; it costs ~3.8 MB per channel at 24 kHz.
+    LABEL_HOLD_SECONDS = 20.0
 
     # The smallest gap any supported ka9q-python leaves unfilled: 3.27.0
     # fills up to 960 000 samples, 3.28.0 up to 120 s (or a 64 MiB budget).
@@ -2492,6 +2494,12 @@ class BinaryArchiveWriter:
     def close(self):
         """Close the writer, flushing any pending data."""
         self.flush()
+        # Give an in-flight watchdog capture (a diagnostic) ~2 s to finish.
+        try:
+            from . import radiod_timing_watchdog
+            radiod_timing_watchdog.close_watchdog(timeout=2.0)
+        except Exception:  # noqa: BLE001 -- never block or fail a close
+            pass
         # Stop the worker — send sentinel, then signal stop so the
         # worker exits even if the queue is empty.
         self._flush_stop.set()

@@ -257,6 +257,18 @@ class RadiodTimingWatchdog:
         except Exception:  # noqa: BLE001 — must never disturb recording
             logger.exception("radiod timing watchdog: capture failed")
 
+    def close(self, timeout: float = 2.0) -> None:
+        """Wait up to ``timeout`` seconds for an in-flight background capture.
+
+        The capture thread is a daemon: at process exit it dies with the
+        process, which can lose the last incident record and leave a
+        gpspipe child (10 s timeout) behind briefly.  close() bounds that
+        wait rather than removing it; a diagnostic never holds up shutdown
+        longer than this."""
+        t = self.last_capture_thread
+        if t is not None and t.is_alive():
+            t.join(timeout)
+
     def _capture_logged(self, *args) -> None:
         try:
             self._capture(*args)
@@ -323,3 +335,11 @@ def get_watchdog() -> RadiodTimingWatchdog:
             if _WATCHDOG is None:
                 _WATCHDOG = RadiodTimingWatchdog(capture_in_background=True)
     return _WATCHDOG
+
+
+def close_watchdog(timeout: float = 2.0) -> None:
+    """Bounded join of the process-wide watchdog's capture, if one exists."""
+    w = _WATCHDOG
+    if w is not None:
+        w.close(timeout)
+

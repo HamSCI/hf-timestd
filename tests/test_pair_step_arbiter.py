@@ -6,47 +6,53 @@ from hf_timestd.core.pair_step_arbiter import (
     t6_predicted_utc_s)
 
 
+def _snap(fresh_utc_s, sr=24000):
+    """A counter value for a read taken at ``fresh_utc_s``: the old tests'
+    ticks sit 60 s apart, so their reads sit 60 s of counter apart."""
+    return int(round(fresh_utc_s * sr)) & 0xFFFFFFFF
+
+
 def test_small_disagreement_is_steady():
-    assert PairStepArbiter(24000).decide(0.3, 100.3, 100.0, 5.0, None) is Verdict.STEADY
+    assert PairStepArbiter(24000).decide(0.3, 100.3, 100.0, 5.0, None, rtp_snap=_snap(100.3)) is Verdict.STEADY
 
 
 def test_t6_refuses_step_that_gpsdo_contradicts():
     # fresh pair 1 s off the GPSDO, mapping on it: the ND case
-    assert PairStepArbiter(24000).decide(0.998, 101.0, 100.002, 5.0, 100.0) is Verdict.REFUSE_T6
+    assert PairStepArbiter(24000).decide(0.998, 101.0, 100.002, 5.0, 100.0, rtp_snap=_snap(101.0)) is Verdict.REFUSE_T6
 
 
 def test_t6_adopts_step_that_gpsdo_confirms():
-    assert PairStepArbiter(24000).decide(-0.97, 100.01, 100.98, 5.0, 100.0) is Verdict.ADOPT
+    assert PairStepArbiter(24000).decide(-0.97, 100.01, 100.98, 5.0, 100.0, rtp_snap=_snap(100.01)) is Verdict.ADOPT
 
 
 def test_no_t6_single_step_held():
-    assert PairStepArbiter(24000).decide(0.998, 101.0, 100.0, 6.0, None) is Verdict.HOLD
+    assert PairStepArbiter(24000).decide(0.998, 101.0, 100.0, 6.0, None, rtp_snap=_snap(101.0)) is Verdict.HOLD
 
 
 def test_no_t6_round_trip_never_adopted():
     a = PairStepArbiter(24000)
-    assert a.decide(0.998, 101.0, 100.0, 6.0, None) is Verdict.HOLD
-    assert a.decide(0.001, 160.0, 160.0, 5.0, None) is Verdict.STEADY
+    assert a.decide(0.998, 101.0, 100.0, 6.0, None, rtp_snap=_snap(101.0)) is Verdict.HOLD
+    assert a.decide(0.001, 160.0, 160.0, 5.0, None, rtp_snap=_snap(160.0)) is Verdict.STEADY
 
 
 def test_no_t6_genuine_step_adopted_on_second_tick():
     a = PairStepArbiter(24000)
-    assert a.decide(3.2, 103.2, 100.0, 8.2, None) is Verdict.HOLD
-    assert a.decide(3.2, 163.2, 160.0, 8.21, None) is Verdict.ADOPT
+    assert a.decide(3.2, 103.2, 100.0, 8.2, None, rtp_snap=_snap(103.2)) is Verdict.HOLD
+    assert a.decide(3.2, 163.2, 160.0, 8.21, None, rtp_snap=_snap(163.2)) is Verdict.ADOPT
 
 
 def test_persistence_wrap_safe():
     wrap = 2**32 / 24000
     a = PairStepArbiter(24000)
-    a.decide(3.2, 103.2, 100.0, 8.2, None)
-    assert a.decide(3.2, 163.2, 160.0, 8.2 + wrap, None) is Verdict.ADOPT
+    a.decide(3.2, 103.2, 100.0, 8.2, None, rtp_snap=_snap(103.2))
+    assert a.decide(3.2, 163.2, 160.0, 8.2 + wrap, None, rtp_snap=_snap(163.2)) is Verdict.ADOPT
 
 
 def test_reset_clears_pending_step():
     a = PairStepArbiter(24000)
-    assert a.decide(3.2, 103.2, 100.0, 8.2, None) is Verdict.HOLD
+    assert a.decide(3.2, 103.2, 100.0, 8.2, None, rtp_snap=_snap(103.2)) is Verdict.HOLD
     a.reset()
-    assert a.decide(3.2, 163.2, 160.0, 8.2, None) is Verdict.HOLD
+    assert a.decide(3.2, 163.2, 160.0, 8.2, None, rtp_snap=_snap(163.2)) is Verdict.HOLD
 
 
 def _map(rtp_ref, epoch, ilen=1000, olen=1000, f_in=24000):
@@ -108,42 +114,42 @@ def test_t6_contradicting_both_falls_to_persistence():
     # old run's (3641 s away).  T6 agrees with neither.
     a = PairStepArbiter(24000)
     assert t6_contradicts_both(5000.4, 1359.0, 5000.0)
-    assert a.decide(3641.4, 5000.4, 1359.0, 8.4, 5000.0) is Verdict.HOLD
-    assert a.decide(3641.4, 5060.4, 1419.0, 8.4, 5060.0) is Verdict.ADOPT
+    assert a.decide(3641.4, 5000.4, 1359.0, 8.4, 5000.0, rtp_snap=_snap(5000.4)) is Verdict.HOLD
+    assert a.decide(3641.4, 5060.4, 1419.0, 8.4, 5060.0, rtp_snap=_snap(5060.4)) is Verdict.ADOPT
 
 
 def test_t6_refuse_only_when_mapping_agrees():
     a = PairStepArbiter(24000)
     assert not t6_contradicts_both(101.0, 100.1, 100.0)
-    assert a.decide(0.9, 101.0, 100.1, 5.0, 100.0) is Verdict.REFUSE_T6
+    assert a.decide(0.9, 101.0, 100.1, 5.0, 100.0, rtp_snap=_snap(101.0)) is Verdict.REFUSE_T6
 
 
 def test_t6_rule_clears_pending_step():
     a = PairStepArbiter(24000)
-    assert a.decide(3.2, 103.2, 100.0, 8.2, None) is Verdict.HOLD
+    assert a.decide(3.2, 103.2, 100.0, 8.2, None, rtp_snap=_snap(103.2)) is Verdict.HOLD
     # T6 refuses the same step: the pending step is dropped ...
-    assert a.decide(3.2, 163.2, 160.0, 8.2, 160.0) is Verdict.REFUSE_T6
+    assert a.decide(3.2, 163.2, 160.0, 8.2, 160.0, rtp_snap=_snap(163.2)) is Verdict.REFUSE_T6
     # ... so the next T6-less sighting starts over.
-    assert a.decide(3.2, 223.2, 220.0, 8.2, None) is Verdict.HOLD
+    assert a.decide(3.2, 223.2, 220.0, 8.2, None, rtp_snap=_snap(223.2)) is Verdict.HOLD
 
 
 def test_t6_adopt_clears_pending_step():
     a = PairStepArbiter(24000)
-    assert a.decide(3.2, 103.2, 100.0, 8.2, None) is Verdict.HOLD
-    assert a.decide(-1.0, 159.0, 160.0, 3.0, 159.0) is Verdict.ADOPT
-    assert a.decide(3.2, 223.2, 220.0, 8.2, None) is Verdict.HOLD
+    assert a.decide(3.2, 103.2, 100.0, 8.2, None, rtp_snap=_snap(103.2)) is Verdict.HOLD
+    assert a.decide(-1.0, 159.0, 160.0, 3.0, 159.0, rtp_snap=_snap(159.0)) is Verdict.ADOPT
+    assert a.decide(3.2, 223.2, 220.0, 8.2, None, rtp_snap=_snap(223.2)) is Verdict.HOLD
 
 
 def test_persistence_tolerance_is_0p2_s():
     assert PERSIST_AGREE_S == 0.2
     a = PairStepArbiter(24000)
-    assert a.decide(3.2, 103.2, 100.0, 8.2, None) is Verdict.HOLD
+    assert a.decide(3.2, 103.2, 100.0, 8.2, None, rtp_snap=_snap(103.2)) is Verdict.HOLD
     # Two honest late pairs 0.15 s apart are one step ...
-    assert a.decide(3.35, 163.35, 160.0, 8.35, None) is Verdict.ADOPT
+    assert a.decide(3.35, 163.35, 160.0, 8.35, None, rtp_snap=_snap(163.35)) is Verdict.ADOPT
     b = PairStepArbiter(24000)
-    assert b.decide(3.2, 103.2, 100.0, 8.2, None) is Verdict.HOLD
+    assert b.decide(3.2, 103.2, 100.0, 8.2, None, rtp_snap=_snap(103.2)) is Verdict.HOLD
     # ... but 0.3 s apart they are not.
-    assert b.decide(3.5, 163.5, 160.0, 8.5, None) is Verdict.HOLD
+    assert b.decide(3.5, 163.5, 160.0, 8.5, None, rtp_snap=_snap(163.5)) is Verdict.HOLD
 
 
 def test_t6_prediction_none_when_a_map_is_missing():
@@ -257,3 +263,14 @@ def test_biased_first_reads_give_way_to_true_ones():
                     rtp_snap=snap + 5 * SR) is Verdict.HOLD   # true: replaces
     assert a.decide(3.2, 113.2, 110.0, 8.2, None,
                     rtp_snap=snap + 10 * SR) is Verdict.ADOPT
+
+
+def test_decide_demands_the_snap():
+    """rtp_snap is keyword-only with no default: a caller cannot fall back
+    to the offsets-only rule by forgetting it (round 4 re-review, m1-r4)."""
+    import pytest
+    a = PairStepArbiter(SR)
+    with pytest.raises(TypeError):
+        a.decide(3.2, 103.2, 100.0, 8.2, None)
+    with pytest.raises(TypeError):
+        a.decide(3.2, 103.2, 100.0, 8.2, None, 1_000_000)
