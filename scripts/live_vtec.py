@@ -53,7 +53,7 @@ except ImportError:
 
 from hf_timestd.core.gnss_source import make_source
 from hf_timestd.core.ubx_parser import UBXParser
-from hf_timestd.core.rtcm3_adapter import RTCM3Adapter, looks_like_rtcm3
+from hf_timestd.core.rtcm3_adapter import RTCM3Adapter, config_station_ecef, looks_like_rtcm3
 from hf_timestd.core.broadcast_ephemeris import BroadcastEphemeris
 from hf_timestd.core.brdc_fetcher import BrdcFetcher, DEFAULT_BRDC_URL
 from hf_timestd.core.gnss_tec import GNSSTECAnalyzer
@@ -307,7 +307,9 @@ def main():
             if parser is None:
                 sniff += data
                 if protocol == "rtcm3" or (protocol == "auto" and looks_like_rtcm3(sniff)):
-                    parser = RTCM3Adapter(ephemeris)
+                    # The station's own position stands in until the receiver
+                    # sends a plausible 1005/1006 (a rover sends zeros).
+                    parser = RTCM3Adapter(ephemeris, fallback_ecef=config_station_ecef(config))
                     parser_since = time.time()
                     brdc_fetcher = BrdcFetcher(
                         gnss_cfg.get("ephemeris_dir", "data/brdc"), ephemeris,

@@ -34,7 +34,7 @@ from typing import Dict, Iterator, List, Optional, Tuple
 
 from hf_timestd.core.broadcast_ephemeris import (
     C, F_L1, F_L2, F_L5, GPS_EPOCH, GPS_UTC_LEAP_S, SECONDS_PER_WEEK,
-    BroadcastEphemeris, elevation_azimuth,
+    BroadcastEphemeris, elevation_azimuth, geodetic_to_ecef,
 )
 
 logger = logging.getLogger(__name__)
@@ -94,6 +94,34 @@ def looks_like_rtcm3(data: bytes, need: int = 2) -> bool:
     return True
 
 
+# Distance from the Earth's centre a real antenna can sit at: below the
+# geoid's minimum radius less a margin, up to a high mountain or tower.
+_ECEF_RADIUS_MIN_M = 6_340_000.0
+_ECEF_RADIUS_MAX_M = 6_400_000.0
+
+
+def plausible_ecef(pos: Tuple[float, float, float]) -> bool:
+    """True when ``pos`` (ECEF m) lies near the Earth's surface.  A receiver
+    that is not a surveyed base sends RTCM 1005/1006 with a zero position."""
+    return _ECEF_RADIUS_MIN_M <= math.hypot(*pos) <= _ECEF_RADIUS_MAX_M
+
+
+def config_station_ecef(config: dict) -> Optional[Tuple[float, float, float]]:
+    """The station position from hf-timestd's config ([station] latitude,
+    longitude, optional altitude_m) as ECEF m, or None when absent or not
+    usable."""
+    st = (config or {}).get('station') or {}
+    try:
+        lat, lon = float(st['latitude']), float(st['longitude'])
+        h = float(st.get('altitude_m', 0.0) or 0.0)
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+        return None
+    pos = geodetic_to_ecef(lat, lon, h)
+    return pos if plausible_ecef(pos) else None
+
+
 class RTCM3Adapter:
     """RTCM3 bytes in, UBX-shaped ``(class, id, payload)`` triples out.
 
@@ -106,7 +134,10 @@ class RTCM3Adapter:
     """
 
     def __init__(self, ephemeris: Optional[BroadcastEphemeris] = None,
-                 now=time.time, leap_s: int = GPS_UTC_LEAP_S):
+                 now=time.time, leap_s: int = GPS_UTC_LEAP_S,
+                 fallback_ecef: Optional[Tuple[float, float, float]] = None):
+        """``fallback_ecef``: the station position from config (ECEF m), used
+        until a plausible RTCM 1005/1006 position arrives."""
         from pyrtcm import RTCMReader  # station venvs carry it via pyubx2
         self._parse = RTCMReader.parse
         # ⛔ `is None`, never `or`: an EMPTY BroadcastEphemeris is falsy (it has
@@ -118,13 +149,20 @@ class RTCM3Adapter:
         self._now = now
         self.leap_s = leap_s
         self.buffer = b''
-        self.station_ecef: Optional[Tuple[float, float, float]] = None
+        if fallback_ecef is not None and not plausible_ecef(fallback_ecef):
+            raise ValueError(f"configured station position {fallback_ecef} is not near the Earth's surface")
+        self.station_ecef: Optional[Tuple[float, float, float]] = fallback_ecef
+        self._pos_source = 'config' if fallback_ecef is not None else None
+        self.implausible_arp = 0
         self.counts: Dict[str, int] = {}
         self.no_ephemeris: set = set()
 
     # The analyzer and live_vtec only need process_data(); status() is for logs.
     def status(self) -> str:
-        pos = 'known' if self.station_ecef else 'NOT YET (needs RTCM 1005/1006)'
+        pos = {'rtcm': 'known (RTCM 1005/1006)', 'config': 'known from config'}.get(
+            self._pos_source, 'NOT YET (needs RTCM 1005/1006)')
+        if self.implausible_arp:
+            pos += f"; {self.implausible_arp} implausible 1005/1006 position(s) ignored"
         return (f"RTCM types seen {dict(sorted(self.counts.items()))}; antenna position "
                 f"{pos}; {len(self.ephem)} GPS ephemerides"
                 + (f"; no ephemeris for G{sorted(self.no_ephemeris)}" if self.no_ephemeris else ''))
@@ -172,7 +210,16 @@ class RTCM3Adapter:
             ident = getattr(msg, 'identity', '?')
             self.counts[ident] = self.counts.get(ident, 0) + 1
             if ident in ('1005', '1006'):
-                self.station_ecef = (msg.DF025, msg.DF026, msg.DF027)
+                arp = (msg.DF025, msg.DF026, msg.DF027)
+                if plausible_ecef(arp):
+                    self.station_ecef, self._pos_source = arp, 'rtcm'
+                else:
+                    if not self.implausible_arp:
+                        logger.warning("RTCM %s antenna position %s is not near the Earth's surface "
+                                       "(not a surveyed base?); ignored%s", ident, arp,
+                                       "; using the configured station position"
+                                       if self._pos_source == 'config' else "")
+                    self.implausible_arp += 1
             elif ident in ('1077', '1074'):
                 yield from self._epoch(*self._from_msm(msg))
             elif ident == '1004':

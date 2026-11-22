@@ -35,8 +35,24 @@ WGS84_F = 1.0 / 298.257223563
 
 # ─── geometry ──────────────────────────────────────────────────────────────
 
+def geodetic_to_ecef(lat_deg: float, lon_deg: float, h_m: float = 0.0) -> Tuple[float, float, float]:
+    """WGS-84 (lat deg, lon deg, height m) -> ECEF (m)."""
+    e2 = WGS84_F * (2 - WGS84_F)
+    lat, lon = math.radians(lat_deg), math.radians(lon_deg)
+    n = WGS84_A / math.sqrt(1 - e2 * math.sin(lat) ** 2)
+    return ((n + h_m) * math.cos(lat) * math.cos(lon),
+            (n + h_m) * math.cos(lat) * math.sin(lon),
+            (n * (1 - e2) + h_m) * math.sin(lat))
+
+
 def ecef_to_geodetic(x: float, y: float, z: float) -> Tuple[float, float, float]:
-    """WGS-84 ECEF (m) -> (lat rad, lon rad, height m), Bowring iteration."""
+    """WGS-84 ECEF (m) -> (lat rad, lon rad, height m), Bowring iteration.
+
+    Raises ValueError for the Earth's centre: a receiver that is not a
+    surveyed base sends a zero RTCM 1005 position, and the iteration then
+    divides by zero (AC0G-ND's timestd-vtec, 2026-11-21)."""
+    if math.hypot(x, y, z) < 1.0:
+        raise ValueError("ECEF position at the Earth's centre has no geodetic coordinates")
     e2 = WGS84_F * (2 - WGS84_F)
     lon = math.atan2(y, x)
     p = math.hypot(x, y)
