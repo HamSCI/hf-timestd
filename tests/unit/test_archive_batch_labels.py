@@ -171,8 +171,23 @@ def test_sidecar_counts_holes_honestly(tmp_path):
     base = 30 * SR
     w.write_samples(np.ones(100, np.complex64), base + 50)     # 50-sample lead hole
     w.write_samples(np.ones(100, np.complex64), base + 150)    # contiguous
-    # A label jump holds the line until radiod's next pair; send one after
-    # each jump (continuous with the mapping, so placement stays exact).
+    w.write_samples(np.ones(100, np.complex64), base + 400)    # 150-sample hole
+    w.write_samples(np.ones(100, np.complex64), base + 450)    # overlaps 50
+    (_, side), = _drain(w).values()
+    assert side["samples_written"] == 550                      # highest position, as before
+    assert side["samples_covered"] == 350
+    assert side["hole_samples"] == 200
+    assert side["hole_count"] == 2
+
+
+def test_sidecar_counts_holes_honestly_with_pairs_between(tmp_path):
+    """The same feed with radiod's pair adopted after each jump: the
+    counts do not change."""
+    w = _writer(tmp_path)
+    base = 30 * SR
+    w.write_samples(np.ones(100, np.complex64), base + 50)     # 50-sample lead hole
+    w.write_samples(np.ones(100, np.complex64), base + 150)    # contiguous
+    # Pairs continuous with the mapping, so placement stays exact.
     w.write_samples(np.ones(100, np.complex64), base + 400)    # 150-sample hole
     _pair(w, 1)
     w.write_samples(np.ones(100, np.complex64), base + 450)    # overlaps 50

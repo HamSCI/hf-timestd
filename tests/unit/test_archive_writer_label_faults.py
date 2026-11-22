@@ -70,9 +70,12 @@ def _drain(w):
     return out
 
 
-def _pair(w, k=1):
+def _pair(w, k=1, near=None):
     """radiod's next pair, continuous with the mapping in force, built in
-    whole seconds so the mapping stays exact.  Releases a held line."""
+    whole seconds so the mapping stays exact.  ``near``: put its snap at
+    the whole second at or below that counter (a pair on a held line)."""
+    if near is not None:
+        k = ((near - w._rtp_timesnap) & 0xFFFFFFFF) // SR
     snap = (w._rtp_timesnap + k * SR) & 0xFFFFFFFF
     gps_ns = (int(w._gps_time_unix) + k - GPS_MINUS_UNIX_S) * 10**9
     assert w.add_timing_snapshot(gps_ns, snap)
@@ -167,6 +170,15 @@ def test_mapping_nudge_at_the_seam_conserves_every_sample(tmp_path):
 
 
 # ------------------------------------------------------------ I3: backward labels
+#
+# A writer on its own has no pair source, so it never holds: these place at
+# once, as before round 1.  The *_held variants give the writer a pair
+# source that stays silent, then release through an adopted pair.
+
+def _silent(w):
+    """A pair source with no pair to offer (radiod's status not yet read)."""
+    w.set_pair_provider(lambda: None)
+
 
 def test_backward_label_inside_the_chunk_never_overwrites(tmp_path):
     w = _writer(tmp_path)
@@ -175,13 +187,28 @@ def test_backward_label_inside_the_chunk_never_overwrites(tmp_path):
     # The label steps back 400: the first 400 positions already hold data.
     y = _ramp(600, start=10_000)
     w.write_samples(y, base + 200)
-    _pair(w)                                           # releases the held batch
     (_, d, side), = _drain(w)
     assert np.array_equal(d[:600], _ramp(600))         # untouched
     assert np.array_equal(d[600:800], y[400:])         # the new part lands
     assert side["overlap_samples"] == 400
     assert side["samples_covered"] == 800
     assert w.get_stats()["overlap_samples"] == 400
+
+
+def test_backward_label_held_then_released_never_overwrites(tmp_path):
+    w = _writer(tmp_path)
+    _silent(w)
+    base = 30 * SR
+    w.write_samples(_ramp(600), base)
+    y = _ramp(600, start=10_000)
+    w.write_samples(y, base + 200)
+    assert w.get_stats()["held_samples"] == 600
+    _pair(w, near=base + 800)                          # a pair on the held line
+    (_, d, side), = _drain(w)
+    assert np.array_equal(d[:600], _ramp(600))
+    assert np.array_equal(d[600:800], y[400:])
+    assert side["overlap_samples"] == 400
+    assert side["samples_covered"] == 800
 
 
 def test_label_behind_the_chunk_start_is_counted_not_lost_silently(tmp_path):
@@ -191,7 +218,6 @@ def test_label_behind_the_chunk_start_is_counted_not_lost_silently(tmp_path):
     w.write_samples(_ramp(spc), base)                  # chunk N, complete
     w.write_samples(_ramp(300), base + spc)            # chunk N+1 opens
     w.write_samples(_ramp(200, start=50_000), base + spc - 500)   # back into N
-    _pair(w)
     chunks = _drain(w)
     assert len(chunks) == 2
     _, d0, side0 = chunks[0]
@@ -201,21 +227,40 @@ def test_label_behind_the_chunk_start_is_counted_not_lost_silently(tmp_path):
     assert w.get_stats()["dropped_before_start"] == 200
 
 
-def test_rebase_before_the_new_pair_opens_no_chunk_at_a_wrong_boundary(tmp_path):
-    """radiod restarted: batches on the new RTP line arrive while the writer
-    still holds the old pair.  The old pair maps them ~200 days away.  The
-    writer holds them, opens no chunk, and replays them in order once the
-    new pair lands."""
+def test_label_behind_the_chunk_start_held_then_counted(tmp_path):
     w = _writer(tmp_path)
+    _silent(w)
+    spc = w.samples_per_chunk
+    base = 30 * SR
+    w.write_samples(_ramp(spc), base)
+    w.write_samples(_ramp(300), base + spc)
+    w.write_samples(_ramp(200, start=50_000), base + spc - 500)
+    assert w.get_stats()["held_samples"] == 200
+    _pair(w, near=base + spc - 300)
+    chunks = _drain(w)
+    assert len(chunks) == 2
+    assert np.array_equal(chunks[0][1], _ramp(spc))
+    assert chunks[1][2]["dropped_before_start"] == 200
+
+
+def test_rebase_before_the_new_pair_opens_no_chunk_at_a_wrong_boundary(tmp_path):
+    """radiod restarted: batches on the new RTP line arrive while radiod's
+    status still shows the old pair.  The old pair maps them ~200 days
+    away, and it does not lie on the held line, so it releases nothing.
+    The new pair, once adopted, replays the line in order."""
+    w = _writer(tmp_path)
+    old_pair = (_gps_ns(w._gps_time_unix), w._rtp_timesnap)
+    w.set_pair_provider(lambda: old_pair)
     base = 30 * SR
     w.write_samples(_ramp(300), base)
     t_resume = w._rtp_to_unix_time(base + 300)
     boundary = int(t_resume) // 10 * 10
-    new_line = 0x9000_0000                             # the old pair maps it ~200 days back
-    w.write_samples(_ramp(300, start=1000), new_line)
+    new_line = 0x9000_0000
+    w.write_samples(_ramp(300, start=1000), new_line, rebased=True)
     w.write_samples(_ramp(300, start=1300), new_line + 300)
     assert w.current_buffer.write_pos == 300           # nothing placed yet
     assert w.get_stats()["held_samples"] == 600
+    assert w.take_step_request() is None               # the old pair is off the line
     # The new pair: the new line resumes half a second after the old one
     # stopped, so counter new_line + 600 stands at t_resume + 6.5 s.
     w.add_timing_snapshot(_gps_ns(t_resume + 6.5), new_line + 600)
@@ -225,12 +270,38 @@ def test_rebase_before_the_new_pair_opens_no_chunk_at_a_wrong_boundary(tmp_path)
     chunks = _drain(w)
     assert {s["minute_boundary"] for _, _, s in chunks} == {boundary, boundary + 10}
     assert sum(s["samples_covered"] for _, _, s in chunks) == 1200
-    # The replayed line, in order, across the reopened chunk and the next.
     replayed = np.concatenate([d[d != 0] for stem, d, _ in chunks if stem != str(boundary)])
     assert np.array_equal(replayed, _ramp(900, start=1000))
 
 
-# ------------------------------------------------------------ the hold
+def test_a_restored_old_pair_does_not_release_a_held_new_line(tmp_path):
+    """I1: an anchor round trip restores pair A, the old line's, while a
+    re-based line is held.  A's snap lies nowhere near the held line, so
+    the hold stays; replaying under A would land the line in a wrong chunk."""
+    w = _writer(tmp_path)
+    _silent(w)
+    pair_a = (_gps_ns(w._gps_time_unix), w._rtp_timesnap)
+    w.write_samples(_ramp(300), 30 * SR)
+    w.write_samples(_ramp(300), 0x9000_0000, rebased=True)
+    w.restore_timing_mapping(*pair_a)
+    assert w.get_stats()["held_samples"] == 300
+    assert w.get_stats()["samples_written"] == 300
+
+
+def test_the_pair_in_force_releases_a_line_it_lies_on_despite_the_dedupe(tmp_path):
+    w = _writer(tmp_path)
+    _silent(w)
+    _pair(w)                                           # pair in force: snap 100
+    w.write_samples(_ramp(50), 0)
+    w.write_samples(_ramp(50, start=51), 49)           # backward one: a break
+    assert w.get_stats()["held_samples"] == 50
+    gps_ns = (int(w._gps_time_unix) - GPS_MINUS_UNIX_S) * 10**9
+    assert not w.add_timing_snapshot(gps_ns, w._rtp_timesnap)   # deduped ...
+    assert w.get_stats()["held_samples"] == 0                   # ... yet released
+    assert w.get_stats()["overlap_samples"] == 1
+
+
+# ------------------------------------------------------------ the hold, writer side
 
 def _feed(w, rtp, n_batches, size=50, start=1):
     for k in range(n_batches):
@@ -239,77 +310,179 @@ def _feed(w, rtp, n_batches, size=50, start=1):
     return rtp
 
 
-def test_hold_loses_nothing_with_the_host_clock_200_s_off(tmp_path):
-    """A one-sample backward re-sync on the same line, the mapping still
-    right.  The host clock decides nothing: the next pair releases the hold
-    and every sample is written or counted as overlap."""
+def test_small_forward_jump_places_at_once_without_any_pair(tmp_path):
+    """C1: a forward jump the mapping still describes is no break."""
     w = _writer(tmp_path)
-    w._host_time = lambda: time.time() + 200.0
+    _silent(w)
     rtp = _feed(w, 30 * SR, 5)
-    rtp = _feed(w, rtp - 1, 10, start=1000)            # backward by one sample
-    # radiod's next pair, continuous with the mapping in force.
-    _pair(w)
-    _feed(w, rtp, 30, start=5000)
+    _feed(w, rtp + 200, 40, start=1000)
     s = w.get_stats()
-    assert s["unplaced_samples"] == 0
-    assert s["overlap_samples"] == 1
-    assert s["samples_written"] + s["overlap_samples"] == 45 * 50
-
-
-def test_stream_interruption_holds_until_the_next_pair(tmp_path):
-    """ka9q-python >= 3.28.0 flags a re-base with a STREAM_INTERRUPTION
-    event; the recorder passes it on, and the writer holds even when the
-    label happens to continue."""
-    from ka9q import GapSource
-    w = _writer(tmp_path)
-    r = StreamRecorderV2.__new__(StreamRecorderV2)
-    r.state = StreamRecorderState.RECORDING
-    r._lock = threading.Lock()
-    r._tap_lock = threading.Lock()
-    r._tap_callbacks = []
-    r.batches_received = r.samples_received = r.samples_written = 0
-    r.archive_writer = w
-    r.ring_buffer = None
-    r.config = SimpleNamespace(description="testchan")
-    rtp = 30 * SR
-
-    def q(gaps=()):
-        return SimpleNamespace(batch_gaps=list(gaps), has_gaps=bool(gaps),
-                               delivered_rtp_start=rtp, total_gaps_filled=0,
-                               completeness_pct=100.0)
-    r._handle_samples(_ramp(100), q())
-    rtp += 100
-    brk = SimpleNamespace(source=GapSource.STREAM_INTERRUPTION, duration_samples=0)
-    r._handle_samples(_ramp(100, start=101), q([brk]))
-    assert w.get_stats()["samples_written"] == 100     # held
-    _pair(w)
-    assert w.get_stats()["samples_written"] == 200     # replayed
-    (_, d, _), = _drain(w)
-    assert np.array_equal(d[d != 0], _ramp(200))
+    assert s["held_samples"] == 0 and s["unplaced_samples"] == 0
+    assert s["samples_written"] == 45 * 50
 
 
 def test_hold_past_its_bound_drops_only_the_overflow(tmp_path):
     w = _writer(tmp_path)
+    _silent(w)
     bound = int(w.LABEL_HOLD_SECONDS * SR)             # 1000 samples
     rtp = _feed(w, 30 * SR, 2)
-    rtp = _feed(w, rtp + 7, 24, start=1000)            # 1200 held: 200 over
+    rtp = _feed(w, rtp - 7, 24, start=1000)            # backward: 1200 held, 200 over
     s = w.get_stats()
     assert s["held_samples"] == bound
     assert s["unplaced_samples"] == 200
-    _pair(w)
+    _pair(w, near=rtp)
     s = w.get_stats()
-    assert s["samples_written"] == 100 + bound
+    assert s["samples_written"] + s["overlap_samples"] == 100 + bound
     assert s["unplaced_samples"] == 200
 
 
 def test_close_counts_samples_still_held(tmp_path):
     w = _writer(tmp_path)
+    _silent(w)
     rtp = _feed(w, 30 * SR, 2)
-    _feed(w, rtp + 7, 4)
+    _feed(w, rtp - 7, 4)
     with w._lock:
         w._drop_held("test")
     assert w.get_stats()["unplaced_samples"] == 200
     assert w.get_stats()["held_samples"] == 0
+
+
+# ------------------------------------------------------------ the hold, recorder side
+#
+# Driven as StreamRecorderV2 drives the writer in production: batches go
+# through _handle_samples, radiod's pair sits in a ChannelInfo the listener
+# refreshes, and nothing calls add_timing_snapshot by hand after the seed.
+
+class _ChannelInfo:
+    """The listener-refreshed ChannelInfo: one atomic (gps_time, rtp_timesnap)."""
+
+    def __init__(self, pair):
+        self.set(pair)
+
+    def set(self, pair):
+        self._pair = pair
+        self.gps_time, self.rtp_timesnap = pair
+
+    def get_anchor(self):
+        return self._pair
+
+
+def _recorder(tmp_path):
+    from unittest.mock import MagicMock
+    from hf_timestd.core.stream_recorder_v2 import StreamRecorderConfig
+    cfg = StreamRecorderConfig(
+        ssrc=None, frequency_hz=10e6, sample_rate=SR, preset="iq", encoding=4,
+        description="testchan", output_dir=tmp_path, receiver_grid="AA00aa",
+        station_config={}, archive=True, ring_seconds=0, compression="none",
+        archive_dtype="complex64", file_duration_sec=10)
+    r = StreamRecorderV2(config=cfg, control=MagicMock())
+    w = r.archive_writer
+    w._flush_stop.set()
+    w._flush_queue.put(None)
+    w._flush_thread.join(timeout=5)
+    w._check_disk_space = lambda *a, **k: True
+    r.state = StreamRecorderState.RECORDING
+    # The seed, as _create_channel does it: radiod's pair at channel create.
+    t0 = float((int(time.time()) // 10) * 10 - 50)
+    r.channel_info = _ChannelInfo((_gps_ns(t0), 0))
+    w.add_timing_snapshot(*r.channel_info.get_anchor())
+    return r, w
+
+
+def _on_line(w, rtp):
+    """radiod's pair for counter ``rtp`` under the writer's mapping."""
+    return (_gps_ns(w._rtp_to_unix_time(rtp)), rtp)
+
+
+def _stream(r, rtp, n_batches, size=50, start=1, rebased_first=False, ci_follows=None):
+    from ka9q import GapSource
+    for k in range(n_batches):
+        gaps = []
+        if rebased_first and k == 0:
+            gaps = [SimpleNamespace(source=GapSource.STREAM_INTERRUPTION, duration_samples=0)]
+        if ci_follows is not None:
+            ci_follows(rtp)
+        r._handle_samples(_ramp(size, start=start + k * size), SimpleNamespace(
+            batch_gaps=gaps, has_gaps=bool(gaps), delivered_rtp_start=rtp,
+            total_gaps_filled=0, completeness_pct=100.0))
+        rtp += size
+    return rtp
+
+
+def _accounted(s):
+    return (s["samples_written"] + s["overlap_samples"] + s["dropped_before_start"]
+            + s["unplaced_samples"] + s["held_samples"] + s["stale_drops"]
+            + s["timing_drops"])
+
+
+def test_recorder_small_forward_jump_keeps_archiving(tmp_path):
+    """C1, the reviewer's stall probe: one forward jump, then minutes of
+    stream and no pair.  Every sample gets written."""
+    r, w = _recorder(tmp_path)
+    rtp = _stream(r, 30 * SR, 10)
+    _stream(r, rtp + 200, 600, start=10_000)           # 300 s more
+    s = w.get_stats()
+    assert s["samples_written"] == 610 * 50
+    assert s["unplaced_samples"] == 0 and s["held_samples"] == 0
+
+
+def test_recorder_long_forward_jump_on_the_same_line_releases_at_once(tmp_path):
+    """An outage past every fill bound, the counter still on its line:
+    radiod's current pair continues the mapping, so the first held batch
+    releases."""
+    r, w = _recorder(tmp_path)
+    rtp = _stream(r, 30 * SR, 10)
+    resume = rtp + w.FORWARD_BREAK_SAMPLES + 500
+    r.channel_info.set(_on_line(w, resume + 25))
+    _stream(r, resume, 20, start=10_000, rebased_first=True)
+    s = w.get_stats()
+    assert s["samples_written"] == 30 * 50
+    assert s["unplaced_samples"] == 0 and s["held_samples"] == 0
+
+
+def test_recorder_backward_resync_loses_nothing_with_the_host_clock_200_s_off(tmp_path):
+    r, w = _recorder(tmp_path)
+    w._host_time = lambda: time.time() + 200.0
+    rtp = _stream(r, 30 * SR, 5)
+    r.channel_info.set(_on_line(w, rtp + 100))
+    rtp = _stream(r, rtp - 1, 10, start=1000, rebased_first=True)
+    _stream(r, rtp, 30, start=5000)
+    s = w.get_stats()
+    assert s["unplaced_samples"] == 0 and s["held_samples"] == 0
+    assert s["overlap_samples"] == 1
+    assert s["samples_written"] + s["overlap_samples"] == 45 * 50
+
+
+def test_recorder_radiod_restart_adopted_promptly_by_the_poll(tmp_path):
+    """radiod restarts: the stream resumes on a new counter, and for a few
+    batches ChannelInfo still shows the old pair.  Then radiod's new pairs
+    arrive, about one per 0.5 s.  The hold reads them, the recorder's
+    revalidation adopts the step on the second agreeing read (no GPSDO
+    here), and the held line replays under it.  Nothing is lost."""
+    r, w = _recorder(tmp_path)
+    rtp = _stream(r, 30 * SR, 10)                      # 5 s on the old line
+    t_stop = w._rtp_to_unix_time(rtp)
+    new0 = 0x9000_0000
+    t_new0 = t_stop + 2.0                              # radiod back 2 s later
+
+    def radiod_status(line_rtp):
+        # After 3 batches (1.5 s), radiod's new pair shows, refreshed on
+        # every other batch at the newest sample.
+        k = (line_rtp - new0) // 50
+        if k >= 3 and k % 2 == 1:
+            r.channel_info.set((_gps_ns(t_new0 + (line_rtp - new0) / SR), line_rtp))
+    _stream(r, new0, 40, start=100_000, rebased_first=True, ci_follows=radiod_status)
+    s = w.get_stats()
+    assert s["held_samples"] == 0 and s["unplaced_samples"] == 0
+    assert w._rtp_timesnap >= new0                     # the step was adopted
+    assert _accounted(s) == 50 * 50
+    assert s["samples_written"] >= 50 * 50 - 2         # at most a seam sample or two
+    chunks = _drain(w)
+    lo, hi = int(t_stop) - 20, int(t_new0) + 30
+    assert all(lo <= side["minute_boundary"] <= hi for _, _, side in chunks)
+    # The new line sits in order, right where the new pair puts it.
+    new = np.concatenate([d[d.real >= 100_000] for _, d, _ in chunks])
+    assert np.array_equal(new, _ramp(len(new), start=100_000 + 2000 - len(new)))
 
 
 def test_abandoned_buffers_are_counted(tmp_path):

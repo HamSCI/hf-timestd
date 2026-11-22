@@ -239,6 +239,7 @@ class StreamRecorderV2:
         self._t6_reference_provider: Optional[Callable[[], Optional[T6Reference]]] = None
         self._counter_map = None
         self._pair_arbiter = PairStepArbiter(config.sample_rate)
+        self._revalidate_lock = threading.Lock()
         self._prev_mapping: Optional[tuple] = None
         # Field probe (2026-11-13): ticks where the legacy gps_time /
         # rtp_timesnap fields disagreed with the atomic pair, and the
@@ -290,6 +291,7 @@ class StreamRecorderV2:
             )
 
             self.archive_writer = BinaryArchiveWriter(archive_config)
+            self._wire_archive_pair_provider()
         else:
             self.archive_writer = None
             logger.info(f"{config.description}: archive=False, stream-only (no IQ storage)")
@@ -1271,8 +1273,15 @@ class StreamRecorderV2:
           every tick already (P1);
         * never raises (recording must not be disturbed).
         """
+        # The 60 s tick (CoreRecorderV2's thread) and a held archive line
+        # (the sample thread) both revalidate; the arbiter keeps one
+        # pending step, so they take turns.
+        lock = getattr(self, '_revalidate_lock', None)
+        if lock is None:
+            lock = self._revalidate_lock = threading.Lock()
         try:
-            self._revalidate_radiod_pair_inner()
+            with lock:
+                self._revalidate_radiod_pair_inner()
         except Exception as exc:  # noqa: BLE001
             logger.debug(
                 f"{self.config.description}: revalidation tick failed: {exc}"
@@ -1653,6 +1662,26 @@ class StreamRecorderV2:
         with self._tap_lock:
             self._tap_callbacks.append(callback)
 
+    def _wire_archive_pair_provider(self) -> None:
+        """Let the archive writer read radiod's current pair while it holds
+        a broken label line.  No adopted pair reaches the writer in steady
+        state (only seeds, arbitrated steps and restores), so the hold
+        reads the listener-refreshed ChannelInfo itself."""
+        self.archive_writer.set_pair_provider(
+            lambda: read_anchor_pair(getattr(self, 'channel_info', None)))
+
+    def _revalidate_for_hold(self) -> None:
+        """A held label line waits on a pair that steps from the mapping:
+        run the revalidation now rather than at the next 60 s tick.  The
+        PairStepArbiter keeps its veto: without the GPSDO a step needs two
+        reads that agree, so only a pair that differs from the last one
+        sent here counts as a new read."""
+        req = self.archive_writer.take_step_request()
+        if req is None or req == getattr(self, '_hold_revalidated_pair', None):
+            return
+        self._hold_revalidated_pair = req
+        self.revalidate_radiod_pair()
+
     def _handle_samples(self, samples: np.ndarray, quality: StreamQuality):
         """
         Handle incoming samples from RadiodStream.
@@ -1712,6 +1741,8 @@ class StreamRecorderV2:
                     label_source=batch_label_source(quality),
                     rebased=batch_rebased,
                 )
+                if self.archive_writer.hold_active:
+                    self._revalidate_for_hold()
 
             # Publish the batch into the ring buffer AFTER the archive
             # write so any ring-buffer bug during Phase 1 rollout cannot

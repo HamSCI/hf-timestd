@@ -503,6 +503,8 @@ class BinaryArchiveWriter:
         self._last_label_fault_log = 0.0
         self._scratch_seq = 0
         self._host_time = time.time       # for a log line only; never decides
+        self._pair_provider = None
+        self._step_request: Optional[tuple] = None
         self.abandoned_chunks = 0
         self.abandoned_samples = 0
         self.label_discontinuities = 0
@@ -981,8 +983,11 @@ class BinaryArchiveWriter:
         undo, which the recorder already logged at ERROR, not a radiod
         restart, so the counter-space-changed warning and the watchdog's
         mapping-jump capture stay quiet."""
-        # Deduplicate: only store if rtp_timesnap has changed
+        # Deduplicate: only store if rtp_timesnap has changed.  The pair in
+        # force still confirms a held line it lies on.
         if rtp_timesnap == self._last_rtp_timesnap:
+            if self._hold_active and self._pair_on_held_line(rtp_timesnap):
+                self._release_hold("the pair in force lies on the held line")
             return False
         
         self._last_rtp_timesnap = rtp_timesnap
@@ -1099,9 +1104,10 @@ class BinaryArchiveWriter:
         else:
             self._pending_snapshots.append(snapshot)
 
-        # A line held since a label break gets placed under this pair.
-        if self._hold_active:
-            self._release_hold()
+        # A line held since a label break gets placed under this pair, if
+        # the pair describes that line (a restored old pair does not).
+        if self._hold_active and self._pair_on_held_line(rtp_timesnap):
+            self._release_hold("pair adopted on the held line")
         
         return True
     
@@ -2009,43 +2015,120 @@ class BinaryArchiveWriter:
             self.last_rtp_timestamp = (rtp + n) & 0xFFFFFFFF
             expected = self._expected_label
             self._expected_label = (rtp + n) & 0xFFFFFFFF
-            jumped = expected is not None and rtp != expected
-            if jumped:
+            jump = 0
+            if expected is not None and rtp != expected:
+                jump = (rtp - expected) & 0xFFFFFFFF
+                if jump > 0x7FFFFFFF:
+                    jump -= 0x100000000
                 self.label_discontinuities += 1
-            # The fallback label jumps whenever a batch's size changes, and
-            # it places as before; holding it would buy nothing.
-            if ((jumped or rebased) and not self._hold_active
-                    and label_source != "last_packet"):
-                self._begin_hold(rtp, expected, rebased)
+            # A real break: the stream said so, the label went backward, or
+            # it jumped further forward than any ka9q-python zero-fills.  A
+            # smaller forward jump stays on the line the mapping describes
+            # and places at once; its hole shows in hole_*.  The fallback
+            # label jumps whenever a batch's size changes and places as
+            # before, so it never holds.  Nor does a writer with no pair
+            # source: nothing could release the hold.
+            broke = rebased or jump < 0 or jump > self.FORWARD_BREAK_SAMPLES
+            if (broke and not self._hold_active
+                    and label_source != "last_packet"
+                    and self._pair_provider is not None):
+                self._begin_hold(rtp, jump, rebased)
             if self._hold_active:
                 self._hold_batch(samples, rtp, gap_samples, label_source)
-                return 0
+                return self._poll_held_line()
             self._label_source = label_source
             return self._write_samples_inner(samples, rtp_timestamp, gap_samples)
 
-    # A label that breaks its line (a jump, or a STREAM_INTERRUPTION) may
-    # sit on a new RTP counter the pair in force does not describe: after
-    # a radiod restart the old pair maps it up to 24.8 h away.  The writer
-    # holds such batches, in order, until the next GPS_TIME/RTP_TIMESNAP
-    # pair it adopts -- radiod sends one about twice a second -- and then
-    # replays them under that pair.  _adopt_pair_locked has already told a
-    # continuous pair (a re-sync on the old line: place at once) from a
-    # step (a restart: flush, then place under the new pair), on GPS_TIME
-    # against the old mapping, without the host clock.  The hold keeps at
-    # most this much; only the overflow is dropped (unplaced_samples).
+    # A label that breaks its line may sit on a new RTP counter the pair in
+    # force does not describe: after a radiod restart the old pair maps it
+    # up to 24.8 h away.  The writer holds such batches, in order, and on
+    # each held batch reads radiod's current pair through the provider the
+    # recorder wires (the listener-refreshed ChannelInfo; no adopted pair
+    # reaches this writer in steady state).  A pair on the held line that
+    # continues the mapping in force releases the hold under that mapping
+    # (a re-sync or an outage on the old line).  One that steps is handed
+    # back to the recorder (take_step_request), whose revalidation and
+    # PairStepArbiter adopt it; the adoption releases the hold.  No host
+    # clock enters.  The hold keeps at most LABEL_HOLD_SECONDS of samples;
+    # only the overflow is dropped (unplaced_samples).
     LABEL_HOLD_SECONDS = 10.0
 
-    def _begin_hold(self, rtp: int, expected: Optional[int], rebased: bool) -> None:
+    # The smallest gap any supported ka9q-python leaves unfilled: 3.27.0
+    # fills up to 960 000 samples, 3.28.0 up to 120 s (or a 64 MiB budget).
+    # A forward label jump up to this stays on its line.
+    FORWARD_BREAK_SAMPLES = 960_000
+
+    # A pair this close to the mapping in force continues it: the
+    # PairStepArbiter's STEADY limit (radiod's GPS_TIME arrives late by up
+    # to ~0.8 s, so honest pairs scatter by a few hundred ms).
+    HOLD_CONTINUE_LIMIT_S = 0.75
+
+    def set_pair_provider(self, provider) -> None:
+        """``provider()`` returns radiod's current (gps_time_ns,
+        rtp_timesnap) or None.  Without one the writer never holds."""
+        self._pair_provider = provider
+
+    @property
+    def hold_active(self) -> bool:
+        return self._hold_active
+
+    def take_step_request(self) -> Optional[tuple]:
+        """The stepped pair a held line waits on, once; else None.
+
+        The recorder runs its revalidation on it, outside this writer's
+        lock (adoption re-enters through add_timing_snapshot)."""
+        with self._lock:
+            req, self._step_request = self._step_request, None
+            return req
+
+    def _pair_on_held_line(self, rtp_timesnap: int) -> bool:
+        """Does a pair's snap lie on the held line?  radiod samples a fresh
+        pair near the newest sample, so a pair for the held line sits
+        within the hold span plus 2 s; an old-line pair, or a restored pair
+        taken minutes before, does not.  Wrap-aware, RTP only."""
+        if not self._held:
+            return False
+        first = self._held[0][1]
+        d = (int(rtp_timesnap) - first) & 0xFFFFFFFF
+        if d > 0x7FFFFFFF:
+            d -= 0x100000000
+        sr = self.config.sample_rate
+        return (-int(self.LABEL_HOLD_SECONDS * sr) <= d
+                <= self._held_n + 2 * sr)
+
+    def _pair_diff_s(self, gps_time_ns: int, rtp_timesnap: int) -> float:
+        """evaluate_pair's disagreement, for a caller holding the lock."""
+        delta = int((int(rtp_timesnap) - self._rtp_timesnap) & 0xFFFFFFFF)
+        if delta > 0x7FFFFFFF:
+            delta -= 0x100000000
+        implied = self._gps_time_unix + delta / self.config.sample_rate
+        from .leap_second import get_current_gps_leap_seconds
+        fresh = (int(gps_time_ns) / 1e9 + 315964800
+                 - get_current_gps_leap_seconds())
+        return fresh - implied
+
+    def _poll_held_line(self) -> int:
+        """Read radiod's current pair for the held line; release or ask
+        for a step.  Returns the samples a release placed."""
+        try:
+            pair = self._pair_provider()
+        except Exception:  # noqa: BLE001 -- a provider fault only delays release
+            pair = None
+        if pair is None or not self._pair_on_held_line(pair[1]):
+            return 0
+        if abs(self._pair_diff_s(*pair)) <= self.HOLD_CONTINUE_LIMIT_S:
+            return self._release_hold("radiod's pair continues the mapping")
+        self._step_request = (int(pair[0]), int(pair[1]))
+        return 0
+
+    def _begin_hold(self, rtp: int, jump: int, rebased: bool) -> None:
         self._hold_active = True
-        if expected is None:
-            what = "STREAM_INTERRUPTION"
-        else:
-            jump = (rtp - expected) & 0xFFFFFFFF
-            if jump > 0x7FFFFFFF:
-                jump -= 0x100000000
+        if jump:
             what = f"label jumped {jump:+d} samples"
             if rebased:
                 what += " (STREAM_INTERRUPTION)"
+        else:
+            what = "STREAM_INTERRUPTION"
         # The host lag goes in the log line only: it decides nothing.
         try:
             verdict = self._judge_verdict(rtp)
@@ -2056,7 +2139,7 @@ class BinaryArchiveWriter:
             lag_txt = ""
         self._label_fault_log(
             f"{self.config.channel_name}: {what} at rtp={rtp}; holding the "
-            f"line until the next pair{lag_txt}")
+            f"line until a pair places it{lag_txt}")
 
     def _hold_batch(self, samples: np.ndarray, rtp: int, gap_samples: int,
                     label_source: str) -> None:
@@ -2073,18 +2156,21 @@ class BinaryArchiveWriter:
                 f"{self.LABEL_HOLD_SECONDS:.0f}s of held samples; dropped the "
                 f"oldest {len(old)} (unplaced_samples={self.unplaced_samples})")
 
-    def _release_hold(self) -> None:
-        """Replay the held batches, in order, under the pair just adopted."""
+    def _release_hold(self, why: str) -> int:
+        """Replay the held batches, in order, under the mapping now in force."""
         held, self._held = self._held, _deque()
         n, self._held_n = self._held_n, 0
         self._hold_active = False
+        self._step_request = None
         if held:
             logger.info(
-                f"{self.config.channel_name}: pair adopted; replaying "
+                f"{self.config.channel_name}: {why}; replaying "
                 f"{len(held)} held batch(es), {n} samples")
+        placed = 0
         for samples, rtp, gap_samples, label_source in held:
             self._label_source = label_source
-            self._write_samples_inner(samples, rtp, gap_samples)
+            placed += self._write_samples_inner(samples, rtp, gap_samples)
+        return placed
 
     def _drop_held(self, why: str) -> None:
         """Count whatever is still held as unplaced (no pair came)."""
@@ -2095,6 +2181,7 @@ class BinaryArchiveWriter:
         self.unplaced_samples += self._held_n
         self._held, self._held_n = _deque(), 0
         self._hold_active = False
+        self._step_request = None
 
     def _label_fault_log(self, message: str) -> None:
         """Rate-limited WARNING for refused samples; the counters hold the totals."""
