@@ -183,7 +183,6 @@ def test_peak_memory_stays_near_one_file(tmp_path):
     /var/tmp (tmpfs /tmp can be too small).  Set TIMESTD_BIGTMP to move it.
     """
     import os
-    import resource
     import shutil
     import sys
     import tempfile
@@ -205,10 +204,17 @@ def test_peak_memory_stays_near_one_file(tmp_path):
                 {"sample_rate": RATE, "samples_written": n}))
         order = {"event_id": "mem", "start_utc": "2026-11-06T00:00:00Z",
                  "end_utc": "2026-11-06T01:20:00Z"}
+        # The child prints its own VmHWM, which exec starts afresh.  getrusage's ru_maxrss does
+        # not: RUSAGE_CHILDREN reports the largest child the pytest run has waited for, and a
+        # forked child's own ru_maxrss keeps pytest's peak through exec.  Either read 2.1 GB in a
+        # full-suite run.
         code = ("from hf_timestd.events.window_drf import write_window_drf as w; "
-                f"w({str(work / 'raw')!r}, [{ch!r}], {order!r}, {str(work / 'out')!r})")
-        subprocess.run([sys.executable, "-c", code], check=True)
-        peak_mb = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss / 1024
+                f"w({str(work / 'raw')!r}, [{ch!r}], {order!r}, {str(work / 'out')!r}); "
+                "print(next(l.split()[1] for l in open('/proc/self/status') "
+                "if l.startswith('VmHWM:')))")
+        out = subprocess.run([sys.executable, "-c", code], check=True,
+                             capture_output=True, text=True).stdout
+        peak_mb = int(out.split()[-1]) / 1024
     finally:
         shutil.rmtree(work, ignore_errors=True)
     assert peak_mb < 600, f"peak RSS {peak_mb:.0f} MB"
