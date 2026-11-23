@@ -55,7 +55,7 @@ def test_classes_from_tree(tree):
         got[e.name] = si.class_of(e.name)
     assert got["state"] == got["status"] == got["authority_history.db"] == got["authority_history.db-wal"] == "pinned"
     assert got["raw_buffer"] == "raw"
-    assert got["upload"] == "sent"
+    assert got["upload"] == "foreign"
     for n in ("phase2", "products", "timing", "t3_shadow", "wwvb", "archive-status.json", "mystery"):
         assert got[n] == "derived"
 
@@ -68,7 +68,7 @@ def test_sinks_shape(tmp_path):
     assert raw["target"] == str(tmp_path / "raw_buffer")
     assert raw["classes"] == ["raw", "sent"]
     assert raw["final_policy"] == "give-up-oldest:raw" and raw["floor_bytes"] == 2000
-    assert rest["target"] == str(tmp_path) and set(rest["classes"]) == {"derived", "sent", "pinned"}
+    assert rest["target"] == str(tmp_path) and set(rest["classes"]) == {"derived", "pinned"}
 
 
 def test_raw_items_are_day_dirs(tree):
@@ -413,3 +413,51 @@ def test_final_other_policy_uses_kit_and_refusal_has_holdings(tmp_path, monkeypa
     assert not old.exists() and raw.exists() and ans["refused"] is False
     ans = si.apply_final(kit, data, "bogus", 0, 0, NOW)
     assert ans["refused"] is True and ans["bytes_by_class"] == {"raw": 100}
+
+
+# ------------------------------------------------- another client's entries
+
+def test_another_clients_entry_is_never_listed(tree):
+    """upload/ holds hamsci-physics's GRAPE spool, which hamsci-physics registers as
+    its own sink.  hf-timestd listed it as `sent` and its trim deleted packaged
+    days file by file (B4, 2026-11-22/23), which also re-shipped the emptied
+    datasets.  Contract 17.7 design: a client never deletes another's files."""
+    _mk(tree, "upload/20261120/AC0G/GRAPE@AC0G_1_1/OBS2026-11-20T00-00/ch0/rf.h5", 500, 3)
+    _mk(tree, "upload/20261120/.upload_complete", 0, 3)
+    listed = [i.path for i in si.list_items(tree)]
+    assert not [p for p in listed if "/upload/" in p or p.endswith("/upload")]
+    held = sum(i.bytes for i in si.list_items(tree))
+    assert held == sum(i.bytes for i in si.list_items(tree) if "upload" not in i.path)
+
+
+def test_final_raw_leaves_another_clients_entry(tree, monkeypatch):
+    monkeypatch.setattr(archiver, "ARCHIVE_TOML", tree / "no-archive.toml")
+    f = _mk(tree, "upload/20261120/OBS/ch0/rf.h5", 500, 3)
+    si.final_raw(tree, 0, NOW)
+    assert f.exists()
+
+
+def test_every_deletion_reaches_the_journal(tmp_path, monkeypatch):
+    """sigmond captures a trim's stdout and stderr and keeps neither, so the
+    deletions of 2026-11-22/23 left no trace.  Each one now writes a journal line."""
+    monkeypatch.setattr(archiver, "ARCHIVE_TOML", tmp_path / "no-archive.toml")
+    lines = []
+    monkeypatch.setattr(si, "_journal", lines.append)
+    f = _mk(tmp_path, "products/C/old.png", 123, 5)
+    d = _mk(tmp_path, f"raw_buffer/C/{_day(4)}/a.bin.zst", 300, 4).parent
+    for it in si.list_items(tmp_path):
+        if it.path in (str(f), str(d)):
+            assert si.delete_item(it, NOW)
+    assert not f.exists() and not d.exists()
+    assert len(lines) == 2
+    assert any(str(f) in l and "123 B" in l and "derived" in l for l in lines)
+    assert any(str(d) in l and "raw" in l for l in lines)
+
+
+def test_a_held_back_item_writes_nothing(tmp_path, monkeypatch):
+    lines = []
+    monkeypatch.setattr(si, "_journal", lines.append)
+    d = _mk(tmp_path, f"raw_buffer/C/{_day(0)}/a.bin.zst").parent
+    item = [i for i in si.list_items(tmp_path) if i.cls == "raw"][0]
+    assert si.delete_item(item, NOW) is False and d.exists()
+    assert lines == []

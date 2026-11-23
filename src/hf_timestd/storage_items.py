@@ -32,7 +32,15 @@ SINK_CLASSES: Dict[str, str] = {
     "status": "pinned",
     "events-staging": "pinned",
     "raw_buffer": "raw",
-    "upload": "sent",
+}
+
+# Entries of the data root that another client registers as its own sink.
+# hf-timestd neither counts nor trims them: the storage design forbids a client
+# to delete another's files, and only the owner knows what has been sent.
+# upload/ holds hamsci-physics's GRAPE spool (its contract.py sink); listed
+# here as `sent`, it lost packaged days to hf-timestd's trim on B4, 2026-11-22/23.
+FOREIGN_ENTRIES: Dict[str, str] = {
+    "upload": "hamsci-physics",
 }
 
 
@@ -55,7 +63,10 @@ def _is_sqlite(name: str) -> bool:
 
 
 def class_of(name: str) -> str:
-    """Class of one top-level entry; an unknown name counts as derived."""
+    """Class of one top-level entry; an unknown name counts as derived.
+    "foreign" marks an entry another client owns (FOREIGN_ENTRIES)."""
+    if name in FOREIGN_ENTRIES:
+        return "foreign"
     if name in SINK_CLASSES:
         return SINK_CLASSES[name]
     if name.startswith("authority_history.db"):
@@ -195,6 +206,8 @@ def list_items(data_root: Path, now: Optional[float] = None,
         return items
     for e in entries:
         cls = class_of(e.name)
+        if cls == "foreign":
+            continue
         if cls == "raw":
             try:
                 chans = sorted(c for c in e.iterdir() if c.is_dir())
@@ -249,7 +262,7 @@ def sinks(data_root: Path, rate_bytes_per_day: int) -> List[dict]:
          "final_policy": RAW_POLICY, "classes": ["raw", "sent"]},
         {"kind": "file", "target": str(root), "schema_ref": None,
          "retention_days": 0, "mb_per_day": 0,
-         "classes": ["derived", "sent", "pinned"]},
+         "classes": ["derived", "pinned"]},
     ]
 
 
@@ -268,9 +281,25 @@ def _is_raw_day_path(p: Path) -> bool:
     return p.parent.parent.name == RAW_DIR
 
 
+def _journal(line: str) -> None:
+    """One line to the journal.  sigmond keeps neither stdout nor stderr of a
+    trim, so a deletion logged anywhere else leaves no trace."""
+    try:
+        import syslog
+        syslog.openlog("hf-timestd-storage", 0, syslog.LOG_DAEMON)
+        syslog.syslog(syslog.LOG_NOTICE, line)
+    except Exception:
+        pass
+
+
+def _deleted(item) -> bool:
+    _journal(f"storage trim: deleted {item.path} ({item.bytes} B, {item.cls})")
+    return True
+
+
 def delete_item(item, now: float) -> bool:
-    """Delete one item.  False means it stays: pinned, a recent raw day, or
-    a raw day the archive gate holds."""
+    """Delete one item, and say so in the journal.  False means it stays:
+    pinned, a recent raw day, or a raw day the archive gate holds."""
     if item.cls == "pinned":
         return False
     p = Path(item.path)
@@ -293,7 +322,7 @@ def delete_item(item, now: float) -> bool:
         if not archiver.raw_day_may_leave(data_root, day, pct):
             return False
         shutil.rmtree(p)
-        return True
+        return _deleted(item)
     if p.is_dir():
         return False
     try:
@@ -302,7 +331,7 @@ def delete_item(item, now: float) -> bool:
     except OSError:
         return False
     p.unlink()
-    return True
+    return _deleted(item)
 
 
 def resolve_data_root(config: Optional[str] = None) -> Path:
