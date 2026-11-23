@@ -40,6 +40,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple
 
+from .chunk_segments import chunk_stem, parse_chunk_name
+
 logger = logging.getLogger(__name__)
 
 # Constants
@@ -378,17 +380,12 @@ class TieredStorageManager:
                     
                     # Find old .bin files
                     for bin_file in date_dir.glob('*.bin*'):
-                        try:
-                            # Extract minute boundary from filename
-                            stem = bin_file.stem
-                            if stem.endswith('.bin'):
-                                stem = stem[:-4]  # Remove .bin from .bin.zst
-                            minute = int(stem)
-                            
-                            if minute < cutoff:
-                                self._move_to_cold(bin_file, channel_dir.name, date_dir.name)
-                        except ValueError:
-                            continue  # Not a minute file
+                        # A segment (<boundary>.seg<N>) moves with its boundary.
+                        parsed = parse_chunk_name(bin_file.name)
+                        if parsed is None or parsed[2] == '.json':
+                            continue  # Not a chunk file
+                        if parsed[0] < cutoff:
+                            self._move_to_cold(bin_file, channel_dir.name, date_dir.name)
     
     def _move_to_cold(self, hot_file: Path, channel_name: str, date_str: str):
         """Move a file from hot to cold storage."""
@@ -398,7 +395,13 @@ class TieredStorageManager:
         cold_file = cold_dir / hot_file.name
         
         # Also move the JSON sidecar if it exists
-        json_name = hot_file.name.split('.')[0] + '.json'
+        # The sidecar of this file's own segment: splitting at the first dot
+        # would name segment 1's sidecar for a <boundary>.seg<N> file.
+        parsed = parse_chunk_name(hot_file.name)
+        if parsed is None:
+            json_name = hot_file.name.split('.')[0] + '.json'
+        else:
+            json_name = chunk_stem(parsed[0], parsed[1]) + '.json'
         hot_json = hot_file.parent / json_name
         cold_json = cold_dir / json_name
         

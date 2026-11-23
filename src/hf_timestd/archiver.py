@@ -30,6 +30,7 @@ from typing import Dict, Iterator, List, Optional, Tuple
 import numpy as np
 
 from .core import iq_codec
+from .core.chunk_segments import parse_chunk_name
 
 logger = logging.getLogger("hf_timestd.archiver")
 
@@ -632,10 +633,10 @@ def export_f32(src_root: Path, dst: Path, channel: str, start_utc: datetime,
         d = ch_dir / day.strftime("%Y%m%d")
         for b in sorted(d.glob("*.bin.zst")) if d.is_dir() else []:
             stem = b.name[:-len(".bin.zst")]
-            try:
-                start = float(stem)
-            except ValueError:
+            parsed = parse_chunk_name(b.name)     # segments travel with their chunk
+            if parsed is None:
                 continue
+            start = parsed[0]
             if not (t0 <= start < t1):
                 continue
             meta = json.loads(b.with_name(stem + ".json").read_text())

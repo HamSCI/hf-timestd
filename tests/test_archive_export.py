@@ -45,3 +45,20 @@ def test_export_window_bounds(tmp_path):
     assert n == 1
     assert [p.name for p in (tmp_path / "out" / "WWV_10000" / "20251112").glob("*.json")] \
         == ["1762905660.json"]
+
+
+def test_export_carries_a_segment_under_its_own_name(tmp_path):
+    """A chunk reopened at its boundary has a <boundary>.seg<N> file; the
+    export used to parse the stem as a number and drop it."""
+    src = tmp_path / "ssd" / "raw_buffer" / "WWV_10000" / "20251112"
+    root = tmp_path / "drive"
+    drive = root / "raw_buffer" / "WWV_10000" / "20251112"
+    for stem, seed in (("1762905600", 1), ("1762905600.seg2", 2)):
+        b, j = _write_chunk(src, stem, _noise(seed=seed))
+        A.copy_one(b, j, drive, "f16")
+    n = A.export_f32(root, tmp_path / "out", "WWV_10000",
+                     datetime.fromtimestamp(1762905600, timezone.utc),
+                     datetime.fromtimestamp(1762905660, timezone.utc))
+    assert n == 2
+    assert sorted(p.name for p in (tmp_path / "out" / "WWV_10000" / "20251112").glob("*.json")) \
+        == ["1762905600.json", "1762905600.seg2.json"]

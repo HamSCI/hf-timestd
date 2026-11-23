@@ -9,7 +9,9 @@ Layout written:
 
 Each buffer file lands at sample index start_unix * sample_rate.  A file that
 is absent, or short of its expected samples, leaves a gap; nothing fills it.
-A file that cannot be read counts as missing.
+A file that cannot be read counts as missing.  A chunk reopened at its start
+has later segments, ``<start_unix>.seg<N>``; the reader joins them, and the
+metadata record's sidecar lists them under "segments".
 
 Files are cut whole at 600 s, not clipped to the window.  Digital Metadata
 cannot hold nested dicts, so each record stores the sidecar as a JSON string
@@ -46,9 +48,14 @@ def _bin_path(raw_root: Path, channel: str, start: int) -> Path:
 
 
 def _exists(raw_root: Path, channel: str, start: int) -> bool:
-    base = _bin_path(raw_root, channel, start)
-    stem = base.with_name(f"{start}.bin")
-    return any(p.exists() for p in (stem, base, stem.with_name(f"{start}.bin.lz4")))
+    """Any segment of the chunk at ``start`` is on disk (see chunk_segments)."""
+    from ..core.chunk_segments import parse_chunk_name
+
+    for p in _bin_path(raw_root, channel, start).parent.glob(f"{start}*.bin*"):
+        parsed = parse_chunk_name(p.name)
+        if parsed is not None and parsed[0] == start and parsed[2] != '.json':
+            return True
+    return False
 
 
 def window_files(raw_root, channel, start, end):

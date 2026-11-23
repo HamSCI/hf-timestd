@@ -39,6 +39,7 @@ from typing import Optional, Dict, Any, List, Tuple
 from dataclasses import dataclass, field
 
 from . import f16_check
+from .chunk_segments import SegmentJoiner, chunk_stem, join_metadata, parse_chunk_name
 from .iq_codec import (DTYPE_F16, DTYPE_F32, F16_SCALE, F16Overflow, bytes_per_sample,
                        decode_iq, iter_f16_blocks)
 
@@ -1620,8 +1621,8 @@ class BinaryArchiveWriter:
             # replace a chunk already on disk: a chunk reopened at the same
             # boundary (a pair step mid-chunk, a recorder restart, a
             # re-based label) used to overwrite the earlier file.  The later
-            # one becomes a segment, ``<boundary>.seg<N>``; readers that
-            # parse the stem as an integer skip it.
+            # one becomes a segment, ``<boundary>.seg<N>``; the readers join
+            # a boundary's segments (chunk_segments).
             compression = self.config.compression.lower()
             stem, segment = self._free_chunk_stem(minute_dir, buffer.minute_boundary)
             if compression == 'zstd':
@@ -1738,6 +1739,10 @@ class BinaryArchiveWriter:
                 'samples_covered': buffer.samples_covered,
                 'hole_samples': actual_samples - buffer.samples_covered,
                 'hole_count': buffer.hole_count,
+                # The [start, end) runs behind samples_covered.  A reader
+                # joining this chunk's segments (<boundary>.seg<N>) takes
+                # each segment's samples from its own runs.
+                'covered_runs': [list(r) for r in buffer.covered_runs],
                 # Each batch was placed by its FIRST delivered sample
                 # (resequencer delivered_rtp_start), and a batch crossing
                 # the chunk end continued into the next chunk.  A sidecar
@@ -2553,7 +2558,10 @@ class BinaryArchiveReader:
         self._warned_unreadable: set = set()
     
     def get_available_minutes(self, date_str: Optional[str] = None) -> List[int]:
-        """Get list of available minute boundaries."""
+        """Get list of available minute boundaries.
+
+        A boundary counts when any of its segments is on disk (see
+        chunk_segments)."""
         if date_str is None:
             date_str = datetime.now(timezone.utc).strftime('%Y%m%d')
         
@@ -2561,25 +2569,32 @@ class BinaryArchiveReader:
         if not day_dir.exists():
             return []
         
-        minutes = []
+        minutes = set()
         # Match both uncompressed and compressed files
         for bin_file in day_dir.glob('*.bin*'):
-            try:
-                # Handle .bin, .bin.zst, .bin.lz4
-                stem = bin_file.stem
-                if stem.endswith('.bin'):
-                    stem = stem[:-4]  # Remove .bin from .bin.zst
-                minute = int(stem)
-                if minute not in minutes:
-                    minutes.append(minute)
-            except ValueError:
-                pass
+            parsed = parse_chunk_name(bin_file.name)
+            if parsed is not None and parsed[2] != '.json':
+                minutes.add(parsed[0])
         
         return sorted(minutes)
     
     def read_minute(self, minute_boundary: int) -> Optional[np.ndarray]:
         """Samples for one chunk as complex64 (see read_chunk)."""
         return self.read_chunk(minute_boundary)[0]
+
+    def _day_dir(self, minute_boundary: int) -> Path:
+        dt = datetime.fromtimestamp(minute_boundary, tz=timezone.utc)
+        return self.archive_dir / dt.strftime('%Y%m%d')
+
+    def _segments(self, minute_boundary: int) -> List[int]:
+        """The segment numbers on disk at this boundary, a .bin* or a .json, in order."""
+        day_dir = self._day_dir(minute_boundary)
+        found = set()
+        for f in day_dir.glob(f"{minute_boundary}*"):
+            parsed = parse_chunk_name(f.name)
+            if parsed is not None and parsed[0] == minute_boundary:
+                found.add(parsed[1])
+        return sorted(found)
 
     def read_chunk(self, minute_boundary: int) -> Tuple[Optional[np.ndarray], Optional[Dict]]:
         """
@@ -2589,21 +2604,42 @@ class BinaryArchiveReader:
         chunk decodes by its sidecar's "dtype" and "scale" (F16 chunks divide
         the fixed scale back out); .bin and .bin.lz4 are always complex64.
         The sidecar's sample_rate, when present, replaces self.sample_rate.
+
+        A chunk reopened at its boundary has later segments,
+        ``<boundary>.seg<N>``.  They are joined by position, the earlier
+        segment kept where two wrote the same place, and the sidecar comes
+        back with a ``segments`` list (chunk_segments.join_segments).  A
+        segment that cannot be read is left out; with none readable the
+        chunk reads as missing.
         """
-        meta = self.read_metadata(minute_boundary)
+        day_dir = self._day_dir(minute_boundary)
+        joiner = SegmentJoiner()
+        first_meta = None
+        for n, segment in enumerate(self._segments(minute_boundary)):
+            stem = chunk_stem(minute_boundary, segment)
+            meta = self._read_sidecar(day_dir / f"{stem}.json")
+            if n == 0:
+                first_meta = meta
+            samples = self._read_file(day_dir / stem, meta)
+            if samples is not None:
+                joiner.add(segment, samples, meta)
+            del samples          # the joiner holds the joined chunk, nothing more
+        samples, meta = joiner.result()
+        if samples is None:
+            return None, first_meta
         if meta and meta.get('sample_rate'):
             self.sample_rate = int(meta['sample_rate'])
-        dt = datetime.fromtimestamp(minute_boundary, tz=timezone.utc)
-        date_str = dt.strftime('%Y%m%d')
-        base_path = self.archive_dir / date_str / f"{minute_boundary}"
+        return samples, meta
 
+    def _read_file(self, base_path: Path, meta: Optional[Dict]) -> Optional[np.ndarray]:
+        """One chunk file's samples, by its own sidecar, or None."""
         # Try uncompressed first (fastest - memory-mappable)
         bin_path = Path(f"{base_path}.bin")
         if bin_path.exists():
             mm = np.memmap(bin_path, dtype=np.complex64, mode='r')
             arr = np.array(mm)
             del mm
-            return arr, meta
+            return arr
 
         # Try zstd compressed
         zst_path = Path(f"{base_path}.bin.zst")
@@ -2613,20 +2649,20 @@ class BinaryArchiveReader:
             # as missing: guessing complex64 would reinterpret half-floats.
             if meta is None:
                 self._warn_unreadable(zst_path, "has no JSON sidecar")
-                return None, meta
+                return None
             dtype = meta.get('dtype', DTYPE_F32)
             if dtype == DTYPE_F16 and 'scale' not in meta:
                 self._warn_unreadable(zst_path, "has a complex-f16 sidecar without 'scale'")
-                return None, meta
+                return None
             try:
                 import zstandard as zstd
                 with open(zst_path, 'rb') as f:
                     dctx = zstd.ZstdDecompressor()
                     decompressed = dctx.decompress(f.read())
-                return decode_iq(decompressed, dtype, meta.get('scale', 1.0)), meta
+                return decode_iq(decompressed, dtype, meta.get('scale', 1.0))
             except ImportError:
                 logger.warning("zstandard not installed, cannot read .bin.zst files")
-                return None, meta
+                return None
 
         # Try lz4 compressed
         lz4_path = Path(f"{base_path}.bin.lz4")
@@ -2635,12 +2671,12 @@ class BinaryArchiveReader:
                 import lz4.frame
                 with open(lz4_path, 'rb') as f:
                     decompressed = lz4.frame.decompress(f.read())
-                return np.frombuffer(decompressed, dtype=np.complex64), meta
+                return np.frombuffer(decompressed, dtype=np.complex64)
             except ImportError:
                 logger.warning("lz4 not installed, cannot read .bin.lz4 files")
-                return None, meta
+                return None
 
-        return None, meta
+        return None
 
     def _warn_unreadable(self, path: Path, why: str) -> None:
         """Warn once per file that a chunk cannot be decoded."""
@@ -2649,21 +2685,27 @@ class BinaryArchiveReader:
         self._warned_unreadable.add(path)
         logger.warning(f"Skipping {path}: it {why}; treating the chunk as missing")
 
-    def read_metadata(self, minute_boundary: int) -> Optional[Dict]:
-        """Read metadata for a specific minute."""
-        dt = datetime.fromtimestamp(minute_boundary, tz=timezone.utc)
-        date_str = dt.strftime('%Y%m%d')
-        json_path = self.archive_dir / date_str / f"{minute_boundary}.json"
-        
+    @staticmethod
+    def _read_sidecar(json_path: Path) -> Optional[Dict]:
         if not json_path.exists():
             return None
-        
         try:
             with open(json_path) as f:
                 return json.load(f)
         except json.JSONDecodeError as e:
             logger.warning(f"Corrupted metadata file {json_path}: {e}")
             return None
+
+    def read_metadata(self, minute_boundary: int) -> Optional[Dict]:
+        """Read metadata for a specific minute.
+
+        With later segments on disk, the earliest segment's sidecar plus a
+        ``segments`` list (chunk_segments.join_metadata).  read_chunk's
+        sidecar adds what it took from each segment."""
+        day_dir = self._day_dir(minute_boundary)
+        return join_metadata([
+            (segment, self._read_sidecar(day_dir / f"{chunk_stem(minute_boundary, segment)}.json"))
+            for segment in self._segments(minute_boundary)])
     
     def get_latest_complete_minute(self) -> Optional[int]:
         """Get the most recent complete minute boundary."""
