@@ -1325,6 +1325,18 @@ def _install_sighup_log_handler():
     signal.signal(signal.SIGHUP, _reload)
 
 
+def _cmd_data_adopt_netrc(args) -> int:
+    """`data adopt-netrc`: one line, and never the credential."""
+    from .core.earthdata_auth import adopt_netrc
+    try:
+        word = adopt_netrc(Path(args.netrc_from), Path(args.netrc_to))
+    except OSError as exc:
+        print(exc)
+        return 1
+    print(f"earthdata netrc: {word} ({args.netrc_to})")
+    return 0
+
+
 def _cmd_data_sources(args) -> int:
     """`hf-timestd data sources` — report external data-source health.
 
@@ -2106,6 +2118,14 @@ Examples:
     sources_parser.add_argument('--apf107', default='/opt/pharlap_4.7.4/dat/iri2020/apf107.dat',
                                 help='PHaRLAP/IRI apf107.dat path')
 
+    # One-time credential adoption after the IONEX fetcher moved from hamsci-physics
+    adopt_parser = data_subparsers.add_parser(
+        'adopt-netrc', help="Copy hamsci-physics's Earthdata netrc to hf-timestd's path")
+    adopt_parser.add_argument('--from', dest='netrc_from', default='/etc/hamsci-physics/earthdata-netrc',
+                              help='Source netrc')
+    adopt_parser.add_argument('--to', dest='netrc_to', default='/etc/hf-timestd/earthdata-netrc',
+                              help='Destination netrc')
+
     # Clean data
     clean_data_parser = data_subparsers.add_parser('clean-data', help='Delete RTP recordings')
     clean_data_parser.add_argument('--config', '-c', default='/etc/signal-recorder/config.toml',
@@ -2581,6 +2601,8 @@ Per-service overrides in [services] take precedence over the profile.
         sys.exit(_cmd_raytrace(args))
     elif args.command == 'data' and getattr(args, 'data_command', None) == 'sources':
         sys.exit(_cmd_data_sources(args))
+    elif args.command == 'data' and getattr(args, 'data_command', None) == 'adopt-netrc':
+        sys.exit(_cmd_data_adopt_netrc(args))
     elif args.command == 'data':
         # Data management mode
         from .data_management import DataManager

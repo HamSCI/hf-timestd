@@ -178,6 +178,10 @@ units = [
     # timestd-hfps-watchdog.timer` and delete the two files.
     "timestd-hpps-watchdog.timer",
     "timestd-prune.timer",
+    # IONEX download: moved from hamsci-physics, v3.96, decision 10.
+    "timestd-ionex-download.timer",
+    # IRI-indices refresh: moved from hamsci-physics, v3.96, decision 10.
+    "timestd-iri-update.timer",
     # Event-response keeper: listed so every station runs it.  The service
     # skips (ConditionPathExists) on a station with no events.toml, so the
     # timer stays quiet until that station is enrolled with wd30.
@@ -191,6 +195,17 @@ units = [
 templated_units = [
     "timestd-metrology@.service",
 ]
+
+# v3.96: the IONEX and IRI fetchers came back from hamsci-physics.  A move stops the old
+# units, then starts the new timer; `migrate` copies the Earthdata credential once.
+[[systemd.moves]]
+from    = ["hamsci-physics-ionex-download.timer", "hamsci-physics-ionex-download.service"]
+to      = "timestd-ionex-download.timer"
+migrate = ["/opt/git/sigmond/hf-timestd/venv/bin/hf-timestd", "data", "adopt-netrc"]
+
+[[systemd.moves]]
+from = ["hamsci-physics-iri-update.timer", "hamsci-physics-iri-update.service"]
+to   = "timestd-iri-update.timer"
 
 # ---------------------------------------------------------------------------
 # Dependencies sigmond should ensure are present before installing

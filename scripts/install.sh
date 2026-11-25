@@ -739,10 +739,10 @@ if [[ -f "$SYSTEMD_DIR/timestd-metrology.service" ]]; then
 fi
 
 # ── Timer files and optional services ──
-# The GRAPE, IONEX, IRI and space-weather units moved to hamsci-physics in
-# the 2026-08-24 split; `smd install hamsci-physics` ships them now.  The
-# data directories below stay here: /var/lib/timestd is hf-timestd's root
-# and a frozen contract of the split — hamsci-physics writes into grape/,
+# The GRAPE and space-weather units moved to hamsci-physics in the 2026-08-24
+# split; `smd install hamsci-physics` ships them.  The IONEX and IRI units
+# came back here in v3.96.  The data directories below stay here:
+# /var/lib/timestd is hf-timestd's root and a frozen contract of the split — hamsci-physics writes into grape/,
 # upload/ and phase2/ rather than owning a root of its own.
 for tf in \
     timestd-chrony-monitor.service timestd-chrony-monitor.timer \
@@ -750,6 +750,8 @@ for tf in \
     timestd-prune.service timestd-prune.timer \
     timestd-events.service timestd-events.timer \
     timestd-archive.service timestd-archive.timer \
+    timestd-ionex-download.service timestd-ionex-download.timer \
+    timestd-iri-update.service timestd-iri-update.timer \
     timestd-vtec.service \
     timestd-alert@.service
 do

@@ -59,11 +59,31 @@ which is why SpaceWeatherService exists.
 `iono_cache/space_weather.json`. The current F10.7 is injected into the
 parametric ionosphere tier for any caller that doesn't supply one.
 
-### CDDIS IONEX — `ionex_integration.py`
-Downloads IGS Global Ionosphere Maps (Final, then Rapid, walking back up to
-7 days) for GPS VTEC, via NASA Earthdata Login. **Optional enrichment**: if
-`/etc/hf-timestd/earthdata-netrc` is not configured the daily timer skips
-cleanly (see hamsci-physics `docs/NASA_EARTHDATA_SETUP.md`).
+### CDDIS IONEX: `scripts/ionex_integration.py`
+`timestd-ionex-download.timer` (03:00 UTC, 30 min jitter) runs
+`scripts/download_ionex_daily.sh`, which downloads IGS Global Ionosphere Maps
+(Final, then Rapid, walking back up to 7 days) into `/var/lib/timestd/ionex`
+for GPS VTEC, via NASA Earthdata Login. The credential lives in
+`/etc/hf-timestd/earthdata-netrc` (mode 0600, owner `timestd`; the helper is
+`hf_timestd.core.earthdata_auth`). **Optional enrichment**: without that file
+the timer skips cleanly. A station that ran the fetcher under hamsci-physics
+keeps its credential: `hf-timestd data adopt-netrc` copies
+`/etc/hamsci-physics/earthdata-netrc` once, and the v3.96 move runs it.
+
+### IRI solar and geomagnetic indices: `scripts/update-iri-indices.sh`
+`timestd-iri-update.timer` (04:30 UTC, 30 min jitter) refreshes `apf107.dat`
+(daily F10.7 and Ap) and `ig_rz.dat` (monthly IG12 and Rz12) from the eCHAIM
+mirror, with irimodel.org as fallback. It rejects short files, files without a
+digit on the last line, and an `apf107.dat` older than `IRI_MAX_AGE_DAYS`
+(10). The unit runs as root and writes only PHaRLAP's directory,
+`/opt/pharlap_4.7.4/dat/iri2020`, by a rename beside each target.
+
+**The updater never writes the `iri2020` Python package's data directory**
+(`site-packages/iri2020/data/`). That package's Fortran driver segfaults on
+current index files. On 2026-11-13 an updater wrote them there and broke IRI
+fleet-wide: thousands of SIGSEGVs an hour in `timestd-l2-calibration`. The
+package keeps its own copy, which ends 2023-06-29. `tests/test_update_iri_indices.py`
+fails if the script names a package path.
 
 ### GIRO / DIDBase — `core/iono_data_service.py`
 - **Station list**: parsed from the `DIDBFastStationList` HTML page (URSI

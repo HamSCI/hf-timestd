@@ -1,0 +1,15 @@
+[Unit]
+Description=Daily IRI-2020 Indices Update Timer (PHaRLAP's copy)
+Documentation=https://github.com/HamSCI/hf-timestd
+
+[Timer]
+# Daily at 04:30 UTC: the upstream files (chain-new.chain-project.net, the eCHAIM mirror) gain
+# a day's F10.7 and Ap each day.  Refreshes PHaRLAP's copy only; see update-iri-indices.sh.
+OnCalendar=*-*-* 04:30:00
+# Run on boot if missed
+Persistent=true
+# Randomize start by up to 30 minutes to avoid mirror load spikes
+RandomizedDelaySec=1800
+
+[Install]
+WantedBy=timers.target
