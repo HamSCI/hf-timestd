@@ -142,8 +142,9 @@ serial port (§4).
 The same receiver can feed VTEC. The relay that puts its bytes on TCP port 9000
 (`str2str` or `ser2net`), the receiver's message settings, the RTCM orbit
 download and the checks that the stream works belong to `hamsci-physics`, which
-runs the VTEC service. Read them there:
-`hamsci-physics/docs/` and `/etc/hamsci-physics/gnss-vtec.toml`.
+runs the VTEC service. Read them in
+[hamsci-physics `docs/GNSS_VTEC.md`](https://github.com/HamSCI/hamsci-physics/blob/main/docs/GNSS_VTEC.md).
+The service reads `/etc/hamsci-physics/gnss-vtec.toml`.
 
 hf-timestd reads no GNSS stream. A `[gnss_vtec]` section in
 `timestd-config.toml` no longer does anything; `hf-timestd validate` flags it.
