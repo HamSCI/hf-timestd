@@ -42,3 +42,20 @@ def test_installer_and_scripts_forget_vtec():
 def test_template_has_no_gnss_vtec_section():
     t = (ROOT / "config/timestd-config.toml.template").read_text()
     assert "[gnss_vtec]" not in t and "vtec" not in t.split("[services]")[1].split("[timing.t6_pps]")[0]
+
+def test_uninstall_removes_the_chrony_pair_old_install_wrote(tmp_path):
+    """Old install.sh wrote '# GNSS Timeserver (ZED-F9P)' and 'server <host> iburst prefer'."""
+    import subprocess
+    m = re.search(r"^\s*GNSS_CHRONY_SED='(.*)'\s*$", (ROOT / "scripts/uninstall.sh").read_text(), re.M)
+    assert m, "uninstall.sh defines no GNSS_CHRONY_SED"
+    conf = tmp_path / "chrony.conf"
+    conf.write_text("pool 2.debian.pool.ntp.org iburst\n"
+                    "\n# GNSS Timeserver (ZED-F9P)\nserver 192.0.2.80 iburst prefer\n"
+                    "server 192.0.2.99 iburst\n# GNSS Timeserver (other)\nlog tracking\n")
+    subprocess.run(["sed", "-i", m.group(1), str(conf)], check=True)
+    assert conf.read_text() == ("pool 2.debian.pool.ntp.org iburst\n\n"
+                                "server 192.0.2.99 iburst\n# GNSS Timeserver (other)\nlog tracking\n")
+
+def test_config_apply_no_longer_accepts_gnss_vtec():
+    from hf_timestd import configurator as C
+    assert "gnss_vtec" not in C._APPLY_ALLOWED_SECTIONS

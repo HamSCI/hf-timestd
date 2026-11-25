@@ -225,10 +225,13 @@ if [[ -n "$CHRONY_CONF" ]]; then
         log_info "  ℹ️  No timestd SHM configuration found in chrony.conf"
     fi
     
-    # Remove GNSS timeserver if added by install.sh
-    if grep -q "# GNSS Timeserver (ZED-F9P host providing NTP)" "$CHRONY_CONF" 2>/dev/null; then
+    # Remove the GNSS timeserver an older install.sh added.  It wrote two
+    # lines: the comment "# GNSS Timeserver (ZED-F9P)" and
+    # "server <host> iburst prefer".  Delete exactly that pair.
+    GNSS_CHRONY_SED='/^# GNSS Timeserver (ZED-F9P)$/{N;/\nserver [^ ]* iburst prefer$/d}'
+    if grep -qx "# GNSS Timeserver (ZED-F9P)" "$CHRONY_CONF" 2>/dev/null; then
         log_info "  Removing GNSS timeserver from $CHRONY_CONF..."
-        sudo sed -i '/# GNSS Timeserver (ZED-F9P host providing NTP)/,/^server .* iburst prefer$/d' "$CHRONY_CONF"
+        sudo sed -i "$GNSS_CHRONY_SED" "$CHRONY_CONF"
         log_info "  ✅ Removed GNSS timeserver configuration"
         CHRONY_CHANGED=true
     fi

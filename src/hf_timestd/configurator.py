@@ -18,7 +18,7 @@ hf-timestd's config without the operator having to drop to
 
 Section whitelist matches hf-timestd's actual schema (extensive —
 [station], [ka9q], [recorder], [uploader], [logging], [monitoring],
-[web_ui], [timing], [gnss_vtec], [metrology], plus the singleton
+[web_ui], [timing], [metrology], plus the singleton
 ``[instance]`` block, recorder sub-tables, and nested timing
 sub-tables).  Per-key type validation is structural only; sigmond's
 wizard owns input typing on its end.
@@ -71,9 +71,6 @@ _APPLY_ALLOWED_SECTIONS = {
     "monitoring",
     "web_ui",
     "timing",
-    # gnss_vtec retired to hamsci-physics; still accepted so a sigmond payload
-    # that carries it does not abort the whole apply (validate flags it).
-    "gnss_vtec",
     "metrology",
     "storage",
 }
