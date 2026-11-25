@@ -31,7 +31,6 @@ SERVICE_UNIT_MAP: Dict[str, str] = {
     'metrology':         'timestd-metrology.target',
     'l2_calibration':    'timestd-l2-calibration.service',
     'fusion':            'timestd-fusion.service',
-    'vtec':              'timestd-vtec.service',
     # physics / grape_daily / ionex_download / iono_reanalysis moved to
     # hamsci-physics in the 2026-08-24 split.  A profile may only name a
     # unit this repo ships — enabling an absent unit fails the whole
@@ -67,11 +66,6 @@ PROFILES: Dict[str, Set[str]] = {
 
     'fusion': _ALWAYS_ON | {
         'metrology', 'l2_calibration', 'fusion',
-        'vtec',  # gated by [gnss_vtec].enabled — suppressed on hosts
-                 # without a GNSS receiver (see active_services()).
-                 # Fusion reads gnss_vtec data via
-                 # multi_broadcast_fusion._read_gnss_vtec() when present,
-                 # so this is a natural augmentation of timing production.
         'radiod_monitor', 'pipeline_watchdog',
         'hpps_watchdog',  # gated by [timing.t6_pps].enabled
         'chrony_monitor', 'prune',
@@ -79,8 +73,6 @@ PROFILES: Dict[str, Set[str]] = {
 
     'full': _ALWAYS_ON | {
         'metrology', 'l2_calibration', 'fusion',
-        'vtec',  # gated by [gnss_vtec].enabled — suppressed on hosts
-                 # without a GNSS receiver (see active_services())
         'radiod_monitor', 'pipeline_watchdog',
         'hpps_watchdog',  # gated by [timing.t6_pps].enabled
         'chrony_monitor', 'prune',
@@ -96,10 +88,9 @@ PROFILE_DESCRIPTIONS: Dict[str, str] = {
     'archive': 'Core recorder only — raw IQ preservation, minimal resources',
     'rtp':     'Archive + monitoring — standard RTP/GPSDO mode',
     'fusion':  'RTP + metrology + fusion — GPS-denied timing from HF broadcasts',
-    # Since the 2026-08-24 split the physics/ionospheric stages belong to
-    # hamsci-physics; 'full' is now the complete TIMING stack plus the
-    # optional GNSS-VTEC augmentation.
-    'full':    'Fusion + VTEC + monitoring — the complete timing stack',
+    # The physics/ionospheric stages and GNSS-VTEC belong to hamsci-physics;
+    # 'full' is the complete timing stack.
+    'full':    'Fusion + monitoring — the complete timing stack',
 }
 
 
@@ -109,7 +100,6 @@ class ServiceProfile:
 
     profile_name: str
     overrides: Dict[str, bool] = field(default_factory=dict)
-    vtec_available: bool = False  # gnss_vtec.enabled in config
     t6_armed: bool = False        # [timing.t6_pps] enabled in config
 
     @classmethod
@@ -132,8 +122,6 @@ class ServiceProfile:
             if isinstance(val, bool):
                 overrides[key] = val
 
-        vtec_available = config.get('gnss_vtec', {}).get('enabled', False)
-
         # The same reading as scripts/hpps-watchdog.sh: the canonical
         # [timing.t6_pps] or the legacy [timing.l6_pps], armed only by a
         # literal true.
@@ -146,7 +134,6 @@ class ServiceProfile:
         return cls(
             profile_name=profile_name,
             overrides=overrides,
-            vtec_available=vtec_available,
             t6_armed=t6_armed,
         )
 
@@ -163,10 +150,6 @@ class ServiceProfile:
 
         # core_recorder is always on — cannot be overridden off
         base.add('core_recorder')
-
-        # vtec requires gnss_vtec.enabled in addition to profile/override
-        if 'vtec' in base and not self.vtec_available:
-            base.discard('vtec')
 
         # hpps_watchdog guards T6's chrony feed; without T6 it has no purpose
         if not self.t6_armed:
@@ -211,7 +194,6 @@ class ServiceProfile:
         return {
             'profile': self.profile_name,
             'description': PROFILE_DESCRIPTIONS.get(self.profile_name, ''),
-            'vtec_available': self.vtec_available,
             't6_armed': self.t6_armed,
             'services': rows,
         }
@@ -320,8 +302,8 @@ def apply_profile(profile: ServiceProfile, dry_run: bool = False,
     # deploy.toml installs every unit as a symlink into the checkout
     # (kind = "link"), and to systemd a symlink in /etc/systemd/system that
     # points outside the unit path IS a linked unit.  So suppressing a unit
-    # used to uninstall it: AC0G-ND, 2026-10-05 02:17:08, the 'full' profile
-    # suppressed vtec ([gnss_vtec] still off) and timestd-vtec.service was
+    # used to uninstall it: AC0G-ND, 2026-10-05 02:17:08, a profile
+    # suppressed a unit and timestd-vtec.service was
     # gone after the reboot, drop-ins and all orphaned.  Suppressed means
     # "stopped, not started at boot" -- never "removed".  Put the link back.
     relinked = False

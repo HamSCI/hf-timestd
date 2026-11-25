@@ -348,6 +348,10 @@ RETIRED_SECTIONS = {
         'GRAPE to PSWS (its grape-psws pipeline) and uses its own key, '
         '/etc/hs-uploader/keys/id_ed25519_host, so [uploader.sftp] ssh_key '
         'is read by nothing that uploads'),
+    'gnss_vtec': (
+        'moved to hamsci-physics in v3.96 (decision 10): '
+        '/etc/hamsci-physics/gnss-vtec.toml holds it now, and `smd align` '
+        'adopted it there'),
 }
 
 

@@ -966,7 +966,7 @@ wheels = [
 
 [[package]]
 name = "hamsci-dsp"
-version = "0.9.0"
+version = "0.10.0"
 source = { editable = "../hamsci-dsp" }
 dependencies = [
     { name = "geographiclib" },
@@ -986,53 +986,12 @@ requires-dist = [
 provides-extras = ["dev", "iono", "raytrace", "geomag"]
 
 [[package]]
-name = "hamsci-physics"
-version = "0.1.0"
-source = { editable = "../hamsci-physics" }
-dependencies = [
-    { name = "digital-rf" },
-    { name = "h5py" },
-    { name = "hamsci-dsp" },
-    { name = "hs-uploader" },
-    { name = "matplotlib" },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "requests" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "systemd-python" },
-    { name = "toml" },
-    { name = "zstandard" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "boto3", marker = "extra == 'iono'", specifier = ">=1.28.0" },
-    { name = "digital-rf", specifier = ">=2.6.0" },
-    { name = "h5py", specifier = ">=3.8.0,<3.16.0" },
-    { name = "hamsci-dsp", editable = "../hamsci-dsp" },
-    { name = "hs-uploader", editable = "../hs-uploader" },
-    { name = "matplotlib", specifier = ">=3.7.0" },
-    { name = "netcdf4", marker = "extra == 'iono'", specifier = ">=1.6.0" },
-    { name = "numpy", specifier = ">=1.24.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0.0" },
-    { name = "requests", specifier = ">=2.28.0" },
-    { name = "scipy", specifier = ">=1.10.0" },
-    { name = "systemd-python", specifier = ">=235" },
-    { name = "toml", specifier = ">=0.10.0" },
-    { name = "zstandard", specifier = ">=0.22.0" },
-]
-provides-extras = ["dev", "iono"]
-
-[[package]]
 name = "hf-timestd"
 version = "7.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "digital-rf" },
     { name = "hamsci-dsp" },
-    { name = "hamsci-physics" },
     { name = "hs-uploader" },
     { name = "iri2020" },
     { name = "ka9q-python" },
@@ -1065,10 +1024,6 @@ dev = [
     { name = "pytest" },
     { name = "pytest-cov" },
 ]
-gnss = [
-    { name = "pyserial" },
-    { name = "pyubx2" },
-]
 iono = [
     { name = "boto3" },
     { name = "netcdf4", version = "1.7.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' and platform_machine == 'ARM64' and sys_platform == 'win32'" },
@@ -1089,7 +1044,6 @@ requires-dist = [
     { name = "digital-rf", specifier = ">=2.6.0" },
     { name = "flake8", marker = "extra == 'dev'", specifier = ">=6.0.0" },
     { name = "hamsci-dsp", editable = "../hamsci-dsp" },
-    { name = "hamsci-physics", editable = "../hamsci-physics" },
     { name = "hs-uploader", editable = "../hs-uploader" },
     { name = "iri2020", git = "https://github.com/space-physics/iri2020.git?rev=8b6ab9ea3e30fd0c0ed46f556d5d0854c53b20ee" },
     { name = "ka9q-python", editable = "../ka9q-python" },
@@ -1101,10 +1055,8 @@ requires-dist = [
     { name = "pandas", specifier = ">=2.0.0" },
     { name = "paramiko", specifier = ">=3.0.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
-    { name = "pyserial", marker = "extra == 'gnss'", specifier = ">=3.5" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0.0" },
-    { name = "pyubx2", marker = "extra == 'gnss'", specifier = ">=1.2.0" },
     { name = "requests", specifier = ">=2.28.0" },
     { name = "scipy", specifier = ">=1.10.0" },
     { name = "scipy", marker = "extra == 'raytrace'", specifier = ">=1.10.0" },
@@ -1117,7 +1069,7 @@ requires-dist = [
     { name = "zeroconf", specifier = ">=0.132.0" },
     { name = "zstandard", specifier = ">=0.22.0" },
 ]
-provides-extras = ["dev", "lz4", "gnss", "iono", "raytrace"]
+provides-extras = ["dev", "lz4", "iono", "raytrace"]
 
 [[package]]
 name = "hs-uploader"
@@ -2330,42 +2282,12 @@ wheels = [
 ]
 
 [[package]]
-name = "pynmeagps"
-version = "1.1.2"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/a8/08/69ea8fad38b50ddcf9530635a420ae76214ad7b63648bf024b8d94523fc2/pynmeagps-1.1.2.tar.gz", hash = "sha256:e4eb367c3c015d65e5b48ccd6f7eadec883382bcdcecfd65fc0ae7b682761c2d", size = 95826, upload-time = "2026-02-24T15:22:29.763Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/56/50/53b5c3016c4a91f6453436146421768c4d1bfc8d288ae27c1a8778e2649f/pynmeagps-1.1.2-py3-none-any.whl", hash = "sha256:660b6a7d110e74c168fe4d85635dd3ba2a2a7d7c0d519e78df87c8b21923f74f", size = 62611, upload-time = "2026-02-24T15:22:28.09Z" },
-]
-
-[[package]]
 name = "pyparsing"
 version = "3.3.2"
 source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f3/91/9c6ee907786a473bf81c5f53cf703ba0957b23ab84c264080fb5a450416f/pyparsing-3.3.2.tar.gz", hash = "sha256:c777f4d763f140633dcb6d8a3eda953bf7a214dc4eff598413c070bcdc117cbc", size = 6851574, upload-time = "2026-01-21T03:57:59.36Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/10/bd/c038d7cc38edc1aa5bf91ab8068b63d4308c66c4c8bb3cbba7dfbc049f9c/pyparsing-3.3.2-py3-none-any.whl", hash = "sha256:850ba148bd908d7e2411587e247a1e4f0327839c40e2e5e6d05a007ecc69911d", size = 122781, upload-time = "2026-01-21T03:57:55.912Z" },
-]
-
-[[package]]
-name = "pyrtcm"
-version = "1.1.12"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "pynmeagps" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/be/99/9f87002c6c26a8e6d671f99244d87efcb3d3f27b4559ca368e8541bbe9c9/pyrtcm-1.1.12.tar.gz", hash = "sha256:dfc86ae158c901e56d296e02f00b7886c4dbc5b453380c67b8722678ab8eb68e", size = 100598, upload-time = "2026-03-21T16:34:29.039Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/84/e8/02570e158b2467e8c1aa40377ae82dd325129174d378ad468a23da2047c1/pyrtcm-1.1.12-py3-none-any.whl", hash = "sha256:0162ee5f8ef75666165f3261febd741f3ae6d0d295af665fcbf11986f8d9ba8e", size = 42784, upload-time = "2026-03-21T16:34:27.863Z" },
-]
-
-[[package]]
-name = "pyserial"
-version = "3.5"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/1e/7d/ae3f0a63f41e4d2f6cb66a5b57197850f919f59e558159a4dd3a818f5082/pyserial-3.5.tar.gz", hash = "sha256:3c77e014170dfffbd816e6ffc205e9842efb10be9f58ec16d3e8675b4925cddb", size = 159125, upload-time = "2020-11-23T03:59:15.045Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/07/bc/587a445451b253b285629263eb51c2d8e9bcea4fc97826266d186f96f558/pyserial-3.5-py2.py3-none-any.whl", hash = "sha256:c4451db6ba391ca6ca299fb3ec7bae67a5c55dde170964c7a14ceefec02f2cf0", size = 90585, upload-time = "2020-11-23T03:59:13.41Z" },
 ]
 
 [[package]]
@@ -2458,19 +2380,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/56/db/b8721d71d945e6a8ac63c0fc900b2067181dbb50805958d4d4661cf7d277/pytz-2026.1.post1.tar.gz", hash = "sha256:3378dde6a0c3d26719182142c56e60c7f9af7e968076f31aae569d72a0358ee1", size = 321088, upload-time = "2026-03-03T07:47:50.683Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/10/99/781fe0c827be2742bcc775efefccb3b048a3a9c6ce9aec0cbf4a101677e5/pytz-2026.1.post1-py2.py3-none-any.whl", hash = "sha256:f2fd16142fda348286a75e1a524be810bb05d444e5a081f37f7affc635035f7a", size = 510489, upload-time = "2026-03-03T07:47:49.167Z" },
-]
-
-[[package]]
-name = "pyubx2"
-version = "1.2.60"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "pynmeagps" },
-    { name = "pyrtcm" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/f7/19/a1dbd23304790674001cddf5937247608ff22b3550ef39e98aad4a2f3437/pyubx2-1.2.60.tar.gz", hash = "sha256:96b3d437be9690a07d88e14d4029a99b568d5c95485496bf786ecbaf1dd36dff", size = 171973, upload-time = "2026-02-25T19:33:15.46Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/8f/d9/f8b87ba35ee0663af5afee126e840a26907dd40a41cca8796bd402108875/pyubx2-1.2.60-py3-none-any.whl", hash = "sha256:f4f2d88c2b38057fe245144ae884902b2ff7d46594841f1468bc6e1765606710", size = 76652, upload-time = "2026-02-25T19:33:14.114Z" },
 ]
 
 [[package]]

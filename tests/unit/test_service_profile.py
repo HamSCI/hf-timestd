@@ -2,10 +2,9 @@
 Unit tests for hf_timestd.service_profile
 
 Covers:
-- Profile resolution from config (profile name, overrides, vtec gating)
+- Profile resolution from config (profile name, overrides)
 - active_services / inactive_services / systemd_units
 - core_recorder is always-on (cannot be overridden off)
-- vtec requires gnss_vtec.enabled even when the profile/override would enable it
 - summary() shape and source attribution
 - apply_profile() dry-run semantics and subprocess interaction (mocked)
 - get_unit_status() handles missing systemctl
@@ -65,7 +64,6 @@ class TestFromConfig:
         profile = ServiceProfile.from_config({})
         assert profile.profile_name == 'rtp'
         assert profile.overrides == {}
-        assert profile.vtec_available is False
 
     def test_explicit_known_profile(self):
         profile = ServiceProfile.from_config({'services': {'profile': 'fusion'}})
@@ -81,13 +79,13 @@ class TestFromConfig:
         profile = ServiceProfile.from_config({
             'services': {
                 'profile': 'rtp',
-                'vtec': True,            # override-on
+                'fusion': True,          # override-on
                 'radiod_monitor': False,  # override-off
                 'metrology': 'sometimes',  # not bool — ignored
                 'unknown_service': True,   # not in registry — ignored
             }
         })
-        assert profile.overrides == {'vtec': True, 'radiod_monitor': False}
+        assert profile.overrides == {'fusion': True, 'radiod_monitor': False}
 
     @pytest.mark.parametrize('timing,armed', [
         ({}, False),
@@ -102,11 +100,13 @@ class TestFromConfig:
         profile = ServiceProfile.from_config({'timing': timing})
         assert profile.t6_armed is armed
 
-    def test_vtec_flag_picked_up_from_gnss_vtec_section(self):
-        profile = ServiceProfile.from_config({
+    def test_gnss_vtec_section_no_longer_affects_the_profile(self):
+        with_vtec = ServiceProfile.from_config({
+            'services': {'profile': 'full'},
             'gnss_vtec': {'enabled': True},
         })
-        assert profile.vtec_available is True
+        without = ServiceProfile.from_config({'services': {'profile': 'full'}})
+        assert with_vtec.active_services() == without.active_services()
 
 
 # =============================================================================
@@ -140,9 +140,9 @@ class TestActiveServices:
     def test_override_can_disable_profile_service(self):
         profile = ServiceProfile(
             profile_name='full',
-            overrides={'vtec': False},
+            overrides={'fusion': False},
         )
-        assert 'vtec' not in profile.active_services()
+        assert 'fusion' not in profile.active_services()
 
     def test_core_recorder_cannot_be_overridden_off(self):
         profile = ServiceProfile(
@@ -151,23 +151,6 @@ class TestActiveServices:
         )
         # Always-on guarantee
         assert 'core_recorder' in profile.active_services()
-
-    def test_vtec_requires_gnss_vtec_available(self):
-        # Override-on but vtec not available → still inactive
-        profile = ServiceProfile(
-            profile_name='archive',
-            overrides={'vtec': True},
-            vtec_available=False,
-        )
-        assert 'vtec' not in profile.active_services()
-
-    def test_vtec_active_when_available(self):
-        profile = ServiceProfile(
-            profile_name='archive',
-            overrides={'vtec': True},
-            vtec_available=True,
-        )
-        assert 'vtec' in profile.active_services()
 
     def test_hpps_watchdog_off_unless_t6_armed(self):
         # HPPS is T6's chrony feed.  With T6 off there is nothing to guard,
@@ -236,13 +219,12 @@ class TestSummary:
         profile = ServiceProfile(
             profile_name='rtp',
             overrides={'chrony_monitor': True},
-            vtec_available=False,
         )
         summary = profile.summary()
 
         assert summary['profile'] == 'rtp'
         assert summary['description'] == PROFILE_DESCRIPTIONS['rtp']
-        assert summary['vtec_available'] is False
+        assert 'vtec_available' not in summary
         assert summary['t6_armed'] is False
         assert summary['services']['hpps_watchdog']['enabled'] is False
         assert summary['services']['hpps_watchdog']['unit'] == 'timestd-hpps-watchdog.timer'

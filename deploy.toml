@@ -100,11 +100,6 @@ kind = "link"
 src  = "systemd/timestd-radiod-monitor.service"
 dst  = "/etc/systemd/system/timestd-radiod-monitor.service"
 
-[[install.steps]]
-kind = "link"
-src  = "systemd/timestd-vtec.service"
-dst  = "/etc/systemd/system/timestd-vtec.service"
-
 # Archiver (2026-11-13): copies closed raw IQ to the archive drive.  Linked
 # here so `smd update` reaches stations installed before it existed (AB4EJ
 # ran a drive for five days with nothing on it); each run exits quietly
@@ -166,7 +161,6 @@ units = [
     # discovery).  l2-calibration stays here and still produces
     # L2_timing_measurements, so no product is orphaned.
     "timestd-radiod-monitor.service",
-    "timestd-vtec.service",
     # Timers — listed here so `smd start/stop` toggles them too.
     "timestd-chrony-monitor.timer",
     "timestd-pipeline-watchdog.timer",
