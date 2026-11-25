@@ -34,7 +34,18 @@ FALLBACK="https://irimodel.org/indices"
 SOURCES=${IRI_SOURCES:-"$PRIMARY $FALLBACK"}
 
 if [ -n "${IRI_DAT_DIRS:-}" ]; then
-    read -r -a DAT_DIRS <<<"$IRI_DAT_DIRS"
+    # The override is for tests, but root loads it from coordination.env too, so refuse any
+    # entry that resolves into an iri2020 package or anywhere under /opt/git/sigmond.
+    read -r -a REQUESTED_DIRS <<<"$IRI_DAT_DIRS"
+    DAT_DIRS=()
+    for d in "${REQUESTED_DIRS[@]}"; do
+        r=$(readlink -f -- "$d" 2>/dev/null || echo "$d")
+        case "$r" in
+            */site-packages/iri2020|*/site-packages/iri2020/*|*/dist-packages/iri2020|*/dist-packages/iri2020/*|/opt/git/sigmond|/opt/git/sigmond/*)
+                echo "refused $d (resolves to $r: a Python package or sigmond tree, never refreshed)" ;;
+            *) DAT_DIRS+=("$d") ;;
+        esac
+    done
 else
     DAT_DIRS=()
     [ -d /opt/pharlap_4.7.4/dat/iri2020 ] && DAT_DIRS+=(/opt/pharlap_4.7.4/dat/iri2020)
@@ -44,7 +55,7 @@ else
     # to the package's own files at 03:00Z.  Refresh that copy only once its reader is understood.
 fi
 if [ ${#DAT_DIRS[@]} -eq 0 ]; then
-    echo "No IRI data directory found (no PHaRLAP, no iri2020 package); nothing to update."
+    echo "No IRI data directory found (no PHaRLAP); nothing to update."
     exit 0
 fi
 WORK=$(mktemp -d)
@@ -87,11 +98,11 @@ fetch_file() {
             echo "  ok: $size bytes, last line: $last"
             # Install into every directory, each by a rename beside the target, so a
             # reader never sees half a file, mode 0644 so every user reads it.  This
-            # runs as root and the venv trees belong to sigmond, so under
-            # /opt/git/sigmond every write runs as that tree's owner, never root;
-            # root writes only PHaRLAP's exact directory, and only when nobody else
-            # can write to it.  Paths are resolved first; anything else is skipped.
-            # (Overrides in IRI_DAT_DIRS are for tests, run unprivileged.)
+            # runs as root, and root writes only PHaRLAP's exact directory, and only
+            # when nobody else can write to it.  Paths are resolved first; anything
+            # else is skipped.  (Overrides in IRI_DAT_DIRS are for tests, run
+            # unprivileged, and were refused above if they name a package or sigmond
+            # path.)
             chmod 0644 "$tmp"
             local d real as
             for d in "${DAT_DIRS[@]}"; do
@@ -101,16 +112,6 @@ fetch_file() {
                 as=()
                 if [ "$(id -u)" -eq 0 ] && [ -z "${IRI_DAT_DIRS:-}" ]; then
                     case "$real" in
-                        /opt/git/sigmond/?*/*)
-                            # As the data directory's own owner (B2: the repo is sigmond's, its
-                            # venv timestd's, mode 2755), but only a service account.
-                            local ug u g
-                            ug=$(stat -c '%U %G' "$real"); u=${ug% *}; g=${ug#* }
-                            case "$u" in
-                                sigmond|timestd) ;;     # the service accounts that own sigmond venvs
-                                *) echo "  skipped $real (owned by '$u', not a service account)"; continue ;;
-                            esac
-                            as=(setpriv --reuid "$u" --regid "$g" --init-groups --) ;;
                         /opt/pharlap_4.7.4/dat/iri2020)
                             if [ -n "$(find /opt/pharlap_4.7.4 /opt/pharlap_4.7.4/dat "$real" -maxdepth 0 \( ! -user root -o -perm /022 \))" ]; then
                                 echo "  skipped $real (writable by someone other than root)"; continue

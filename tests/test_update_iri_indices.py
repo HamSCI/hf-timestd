@@ -89,8 +89,8 @@ def test_when_every_source_fails_the_old_files_stay(tmp_path):
 def test_no_iri_directory_is_not_an_error(tmp_path):
     r = subprocess.run(["bash", "-c", f"IRI_DAT_DIRS='' bash {SCRIPT}"], capture_output=True,
                        text=True, env=dict(os.environ, IRI_SOURCES="file:///nonexistent"))
-    # On the devbox no /opt/pharlap and no /opt/git/sigmond venvs exist, so discovery finds none.
-    if not Path("/opt/git/sigmond").exists() and not Path("/opt/pharlap_4.7.4").exists():
+    # Discovery looks only for PHaRLAP; where it is absent there is nothing to update.
+    if not Path("/opt/pharlap_4.7.4").exists():
         assert r.returncode == 0, r.stdout + r.stderr
         assert "nothing to update" in r.stdout
 
@@ -99,16 +99,36 @@ def _code_lines():
     return [ln for ln in SCRIPT.read_text().splitlines() if not ln.lstrip().startswith("#")]
 
 
+PHARLAP = "/opt/pharlap_4.7.4/dat/iri2020"
+REFUSAL_PATTERN = ("*/site-packages/iri2020|*/site-packages/iri2020/*|*/dist-packages/iri2020|"
+                   "*/dist-packages/iri2020/*|/opt/git/sigmond|/opt/git/sigmond/*)")
+# DAT_DIRS may be set in exactly these ways: empty, PHaRLAP's directory, or an IRI_DAT_DIRS
+# entry that passed the refusal filter.
+ASSIGNMENTS = {
+    'read -r -a REQUESTED_DIRS <<<"$IRI_DAT_DIRS"',
+    "DAT_DIRS=()",
+    '*) DAT_DIRS+=("$d") ;;',
+    "[ -d %s ] && DAT_DIRS+=(%s)" % (PHARLAP, PHARLAP),
+}
+
+
 def test_the_updater_never_targets_the_iri2020_package_copy():
     # 2026-11-13: an updater wrote current index files into site-packages/iri2020/data; that
     # package's Fortran driver segfaults on them, and IRI broke fleet-wide.  Only PHaRLAP's copy
-    # may be refreshed, so no executable line may name the package, its data directory or
-    # site-packages, and the one directory discovery adds is PHaRLAP's.
-    code = "\n".join(_code_lines())
-    for banned in ("site-packages", "iri2020/data", "iri2020.__file__", "import iri2020", "dist-packages"):
-        assert banned not in code, banned
-    adds = [ln.strip() for ln in _code_lines() if "DAT_DIRS+=" in ln]
-    assert len(adds) == 1 and "/opt/pharlap_4.7.4/dat/iri2020" in adds[0], adds
+    # may be refreshed.  Every executable mention of iri2020 is PHaRLAP's path, except the one
+    # refusal pattern; no executable line names site-packages (again except that pattern);
+    # and DAT_DIRS is assigned only in the known forms.
+    import re
+    code = [ln.strip() for ln in _code_lines()]
+    for ln in code:
+        if ln == REFUSAL_PATTERN:
+            continue
+        rest = ln.replace(PHARLAP, "")
+        assert "iri2020" not in rest, ln
+        assert "site-packages" not in ln and "dist-packages" not in ln, ln
+    assigned = {ln for ln in code if re.search(r"DAT_DIRS\s*(\+?=|\))|-a\s+DAT_DIRS", ln)}
+    assert assigned <= ASSIGNMENTS, assigned - ASSIGNMENTS
+    assert "DAT_DIRS+=(%s)" % PHARLAP in "\n".join(code)
 
 
 def test_a_discovery_run_writes_nowhere_under_an_iri2020_package_path(tmp_path):
@@ -119,3 +139,20 @@ def test_a_discovery_run_writes_nowhere_under_an_iri2020_package_path(tmp_path):
                             if k != "IRI_DAT_DIRS"})
     trace = r.stdout + r.stderr
     assert "site-packages" not in trace and "iri2020/data" not in trace
+
+
+def test_an_override_naming_the_package_copy_is_refused(tmp_path):
+    # IRI_DAT_DIRS comes from coordination.env too; root must not follow it into the package.
+    src = _source(tmp_path / "src", _today() + " fresh")
+    base = tmp_path / "venv" / "lib" / "site-packages" / "iri2020"
+    base.mkdir(parents=True)
+    pkg = _stale(base / "data")
+    link = tmp_path / "innocent"          # a different spelling that resolves into the package
+    link.symlink_to(pkg)
+    ok = _stale(tmp_path / "pharlap")
+    r = _run(tmp_path, [src], [pkg, link, ok])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout.count("refused") == 2
+    assert (pkg / "apf107.dat").read_text() == "23  6 29 stale\n"
+    assert (pkg / "ig_rz.dat").read_text() == "23  6 29 stale\n"
+    assert (ok / "apf107.dat").read_text().splitlines()[-1].endswith(" fresh")

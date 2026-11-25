@@ -234,3 +234,33 @@ def test_cli_adopt_netrc_prints_one_word_and_no_secret(tmp_path, capsys):
     assert out == f"earthdata netrc: copied ({dst})\n" and "hunter2" not in out
     assert _cmd_data_adopt_netrc(ns) == 0
     assert "kept" in capsys.readouterr().out
+
+
+def test_adopt_netrc_refuses_a_symlinked_source_and_writes_nothing(tmp_path):
+    from hf_timestd.core.earthdata_auth import adopt_netrc
+    secret = tmp_path / "root_only"
+    secret.write_text("TOP SECRET\n")
+    src, dst = tmp_path / "a", tmp_path / "sub" / "b"
+    src.symlink_to(secret)
+    assert adopt_netrc(src, dst) == "refused"
+    assert not dst.exists()
+    assert not dst.parent.exists() or not list(dst.parent.iterdir())
+
+
+def test_adopt_netrc_refuses_a_non_regular_source(tmp_path):
+    import os
+    from hf_timestd.core.earthdata_auth import adopt_netrc
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    assert adopt_netrc(fifo, tmp_path / "b") == "refused"
+    assert not (tmp_path / "b").exists()
+
+
+def test_cli_adopt_netrc_exits_1_on_refusal(tmp_path, capsys):
+    import argparse
+    from hf_timestd.cli import _cmd_data_adopt_netrc
+    secret = tmp_path / "s"; secret.write_text("TOP SECRET\n")
+    src = tmp_path / "a"; src.symlink_to(secret)
+    ns = argparse.Namespace(netrc_from=str(src), netrc_to=str(tmp_path / "b"))
+    assert _cmd_data_adopt_netrc(ns) == 1
+    assert "refused" in capsys.readouterr().out and not (tmp_path / "b").exists()

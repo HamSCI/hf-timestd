@@ -14,6 +14,9 @@ def test_iri_unit_runs_as_root_and_writes_only_pharlaps_directory():
     u = _unit("timestd-iri-update.service")
     assert "User=root" in u and "ReadWritePaths=-/opt/pharlap_4.7.4/dat/iri2020" in u
     assert "ExecStart=/opt/git/sigmond/hf-timestd/scripts/update-iri-indices.sh" in u
+    # exactly PHaRLAP's directory: the venvs (and the iri2020 package copy) live under /opt/git/sigmond
+    assert [l for l in u.splitlines() if l.startswith("ReadWritePaths=")] == \
+        ["ReadWritePaths=-/opt/pharlap_4.7.4/dat/iri2020"]
 
 def test_timers_keep_their_schedules():
     assert "OnCalendar=*-*-* 03:00:00" in _unit("timestd-ionex-download.timer")

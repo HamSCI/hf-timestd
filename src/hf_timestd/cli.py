@@ -1334,7 +1334,7 @@ def _cmd_data_adopt_netrc(args) -> int:
         print(exc)
         return 1
     print(f"earthdata netrc: {word} ({args.netrc_to})")
-    return 0
+    return 1 if word == "refused" else 0
 
 
 def _cmd_data_sources(args) -> int:

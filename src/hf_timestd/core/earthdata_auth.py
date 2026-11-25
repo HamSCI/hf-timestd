@@ -19,6 +19,7 @@ The netrc file must contain:
 File permissions must be 0600 (owner read/write only).
 """
 
+import errno
 import logging
 import netrc
 import os
@@ -149,29 +150,44 @@ def check_earthdata_credentials() -> Tuple[bool, str]:
         return False, (
             "NASA Earthdata credentials not found. "
             "IONEX/DCB downloads will fail. "
-            "See docs/NASA_EARTHDATA_SETUP.md for setup instructions."
+            "See docs/external-data-sources.md for setup instructions."
         )
     return validate_netrc(netrc_path)
 
 
 def adopt_netrc(src: Path, dst: Path) -> str:
     """Copy the Earthdata netrc: ``"kept"`` when ``dst`` exists, ``"absent"``
-    when ``src`` does not, else ``"copied"`` (mode 0600, ``src``'s owner and
-    group).  Used once, when the fetchers move over from hamsci-physics."""
+    when ``src`` does not, ``"refused"`` when ``src`` is a symlink or not a
+    regular file, else ``"copied"`` (mode 0600, ``src``'s owner and group).
+
+    This runs as root.  The source opens with O_NOFOLLOW and is checked on
+    its descriptor, and the copy's mode and owner go on the temporary file's
+    descriptor, so a service account that owns the source cannot swap in a
+    symlink to a root-only file and read it back."""
     src, dst = Path(src), Path(dst)
     if dst.exists():
         return "kept"
-    if not src.exists():
+    try:
+        sfd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
         return "absent"
-    st = src.stat()
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return "refused"
+        raise
+    with os.fdopen(sfd, "rb") as sfh:
+        st = os.fstat(sfh.fileno())
+        if not stat.S_ISREG(st.st_mode):
+            return "refused"
+        data = sfh.read()
     dst.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=dst.parent, prefix=f".{dst.name}.")
     tmp = Path(tmp_name)
     try:
+        os.fchmod(fd, 0o600)
+        os.fchown(fd, st.st_uid, st.st_gid)
         with os.fdopen(fd, "wb") as fh:
-            fh.write(src.read_bytes())
-        os.chmod(tmp, 0o600)
-        os.chown(tmp, st.st_uid, st.st_gid)
+            fh.write(data)
         os.replace(tmp, dst)
     except BaseException:
         tmp.unlink(missing_ok=True)
