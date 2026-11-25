@@ -10,7 +10,6 @@
 #   - ka9q-radio status multicast address (e.g. hf-status.local)
 #   - Knowledge of timing source: GPS+PPS on radiod LAN, or NTP only
 #   - (Optional) PSWS station ID and instrument ID for GRAPE uploads
-#   - (Optional) GNSS VTEC receiver host:port (e.g. ZED-F9P via ser2net)
 #
 # Usage:
 #   sudo ./scripts/setup-station.sh                 # interactive
@@ -296,7 +295,6 @@ fi
 [[ -z "${SIGMOND_RADIOD_STATUS:-}" ]] && echo "    - Your ka9q-radio status multicast address"
 echo "    - Timing source (radiod's clock authority)"
 echo "    - Optional: PSWS station/instrument IDs (for GRAPE uploads via hs-uploader)"
-echo "    - Optional: GNSS VTEC receiver address (if you have a ZED-F9P)"
 echo ""
 [[ "${NON_INTERACTIVE:-false}" == "true" ]] || read -rp "  Press Enter to continue..."
 
@@ -489,30 +487,10 @@ if [[ "$L6_PPS_ENABLED" == "true" && -z "$L6_PPS_FREQUENCY" ]]; then
 fi
 
 # =============================================================================
-# Section 4: GNSS VTEC (Optional)
+# Section 4: Compression
 # =============================================================================
 echo ""
-echo -e "${BOLD}${BLUE}━━━ Section 4: GNSS VTEC Monitoring (Optional) ━━━${NC}"
-echo ""
-echo -e "  ${DIM}A dual-frequency GNSS receiver (e.g. ZED-F9P) provides real-time${NC}"
-echo -e "  ${DIM}ionospheric TEC measurements for improved L2 timing corrections.${NC}"
-echo ""
-
-prompt_yn VTEC_ENABLED "Do you have a GNSS VTEC receiver?" "n"
-
-VTEC_HOST=""
-VTEC_PORT="9000"
-
-if [[ "$VTEC_ENABLED" == "true" ]]; then
-    prompt VTEC_HOST "GNSS receiver host" "" "IP address or hostname (e.g. 192.168.0.203)" true
-    prompt VTEC_PORT "GNSS receiver port" "9000" "TCP port for UBX data stream"
-fi
-
-# =============================================================================
-# Section 5: Compression
-# =============================================================================
-echo ""
-echo -e "${BOLD}${BLUE}━━━ Section 5: Storage Options ━━━${NC}"
+echo -e "${BOLD}${BLUE}━━━ Section 4: Storage Options ━━━${NC}"
 echo ""
 
 echo -e "  ${DIM}IQ archiving writes raw data to disk for physics post-processing.${NC}"
@@ -553,13 +531,6 @@ echo ""
 echo -e "  ${BOLD}Timing:${NC}"
 if [[ "$L6_PPS_ENABLED" == "true" ]]; then
 echo "    L6 PPS:       enabled (${L6_PPS_FREQUENCY} Hz)"
-fi
-echo ""
-echo -e "  ${BOLD}GNSS VTEC:${NC}"
-if [[ "$VTEC_ENABLED" == "true" ]]; then
-echo "    Enabled:      yes ($VTEC_HOST:$VTEC_PORT)"
-else
-echo "    Enabled:      no"
 fi
 echo ""
 echo -e "  ${BOLD}PSWS Identity:${NC}"
@@ -610,9 +581,6 @@ export WIZ_INSTRUMENT_ID="$INSTRUMENT_ID"
 export WIZ_KA9Q_STATUS="$KA9Q_STATUS"
 export WIZ_KA9Q_SOURCE="$KA9Q_SOURCE"
 export WIZ_COMPRESSION="$COMPRESSION"
-export WIZ_VTEC_ENABLED="$VTEC_ENABLED"
-export WIZ_VTEC_HOST="$VTEC_HOST"
-export WIZ_VTEC_PORT="$VTEC_PORT"
 export WIZ_L6_PPS_ENABLED="$L6_PPS_ENABLED"
 export WIZ_L6_PPS_FREQUENCY="$L6_PPS_FREQUENCY"
 export WIZ_ARCHIVE_ENABLED="$ARCHIVE_ENABLED"
@@ -631,7 +599,7 @@ output_path   = sys.argv[2]
 
 # Substitutions: (section_prefix, key) -> new_value
 # section_prefix uses dotted form matching the TOML header,
-# e.g. "station", "ka9q", "timing.t6_pps", "gnss_vtec"
+# e.g. "station", "ka9q", "timing.t6_pps"
 # A value of None means "leave template default".
 import os
 env = os.environ
@@ -789,15 +757,6 @@ if l6_enabled == "true":
 archive_enabled = e("WIZ_ARCHIVE_ENABLED", "true")
 if archive_enabled == "false":
     set_bare("recorder.channel_group.timestd", "archive", "false")
-
-# GNSS VTEC
-set_bare("gnss_vtec", "enabled", e("WIZ_VTEC_ENABLED"))
-vtec_host = e("WIZ_VTEC_HOST")
-if vtec_host:
-    set_str("gnss_vtec", "host", vtec_host)
-vtec_port = e("WIZ_VTEC_PORT")
-if vtec_port:
-    set_bare("gnss_vtec", "port", vtec_port)
 
 # --- Process template ---
 KEY_RE = re.compile(r'^(\s*)([\w_]+)(\s*=\s*)(.*)')

@@ -102,7 +102,6 @@ if [[ "$MODE" == "production" ]]; then
     
     # Optional monitoring/supplementary services (warnings only)
     OPTIONAL_SERVICES=(
-        "timestd-vtec.service"
         "timestd-radiod-monitor.service"
     )
     
@@ -654,23 +653,6 @@ if [[ -d "$SCIENCE_DIR" ]]; then
     fi
 else
     check_warn "Science directory not found: $SCIENCE_DIR (physics service may not have run yet)"
-fi
-
-# Check for GNSS VTEC (L3A)
-VTEC_DIR="$DATA_ROOT/data/gnss_vtec"
-if [[ -d "$VTEC_DIR" ]]; then
-    # HDF5
-    VTEC_HDF5=$(find "$VTEC_DIR" -name "*gnss_vtec_*.h5" -mmin -15 2>/dev/null | wc -l)
-    if [[ $VTEC_HDF5 -gt 0 ]]; then
-        check_pass "GNSS VTEC: Found $VTEC_HDF5 recent HDF5 files (last 15 min)"
-    else
-        check_warn "GNSS VTEC output directory exists but no recent HDF5 files"
-    fi
-    
-    # Note: GNSS VTEC CSV no longer primary (HDF5-only)
-else
-    # Optional service
-    check_warn "GNSS VTEC directory not found (service specific)"
 fi
 
 # =============================================================================

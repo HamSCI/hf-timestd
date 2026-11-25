@@ -84,7 +84,6 @@ STARTUP_ORDER=(
     "timestd-metrology.target"
     "timestd-l2-calibration.service"
     "timestd-fusion.service"
-    "timestd-vtec.service"
     "timestd-radiod-monitor.service"
 )
 

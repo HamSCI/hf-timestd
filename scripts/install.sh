@@ -212,12 +212,6 @@ elif getent group chrony &>/dev/null; then
 fi
 [[ -n "$CHRONY_GROUP" ]] && usermod -a -G "$CHRONY_GROUP" "$INSTALL_USER" 2>/dev/null || true
 
-# Add timestd to dialout so timestd-vtec can open a USB GNSS receiver
-# ([gnss_vtec] device = /dev/ttyACM*, root:dialout 0660).  usermod -a is idempotent.
-if getent group dialout &>/dev/null; then
-    usermod -a -G dialout "$INSTALL_USER" 2>/dev/null || true
-fi
-
 # ── Directories ──
 ensure_dir() {
     mkdir -p "$1"
@@ -558,20 +552,18 @@ fi
 # uv sync reads pyproject.toml + uv.lock, resolves [tool.uv.sources]
 # (ka9q-python editable from ../ka9q-python), installs hf-timestd
 # editable + every locked dep into $VENV_DIR.  --no-dev skips dev
-# extras (pytest, black, flake8, mypy); --extra lz4/gnss/iono pulls
-# in deps required by hamsci-physics' reanalysis service +
-# timestd-vtec.service (the lz4 transport, pyserial/pyubx2 for GNSS
-# UBX framing, netCDF4/boto3 for IRI ionosphere reanalysis).
+# extras (pytest, black, flake8, mypy); --extra lz4/iono pulls in the
+# lz4 transport and netCDF4/boto3 for the IONEX and IRI fetch units.
 # --frozen requires uv.lock to be current; regenerate locally with
 # `uv lock` if siblings or deps have shifted.
 #
 # uv.lock supersedes the legacy constraints.txt approach: a committed
 # lockfile is itself a reproducible pinned dependency set, and uv
 # resolves much faster than pip + --constraint did.
-log_info "Syncing hf-timestd + extras (lz4, gnss, iono) into $VENV_DIR..."
+log_info "Syncing hf-timestd + extras (lz4, iono) into $VENV_DIR..."
 UV_PROJECT_ENVIRONMENT="$VENV_DIR" \
     uv sync --project "$PROJECT_DIR" --frozen --no-dev \
-            --extra lz4 --extra gnss --extra iono --quiet
+            --extra lz4 --extra iono --quiet
 
 # Re-assert ownership in case uv touched files as root.
 chown -R "$INSTALL_USER:$INSTALL_USER" "$VENV_DIR"
@@ -752,7 +744,6 @@ for tf in \
     timestd-archive.service timestd-archive.timer \
     timestd-ionex-download.service timestd-ionex-download.timer \
     timestd-iri-update.service timestd-iri-update.timer \
-    timestd-vtec.service \
     timestd-alert@.service
 do
     copy_unit "$PROJECT_DIR/systemd/$tf" && ((UPDATED_COUNT++)) || true
@@ -772,18 +763,6 @@ if [[ -f "$CONFIG_DIR/events.toml" ]]; then
     log_info "Event keeper timer enabled (events.toml present)"
 else
     log_info "Event keeper timer not enabled (no $CONFIG_DIR/events.toml)"
-fi
-
-# ── VTEC service ──
-VTEC_ENABLED=$("$VENV_DIR/bin/python3" -c "
-import tomllib
-try:
-    with open('$MAIN_CONFIG', 'rb') as f: c = tomllib.load(f)
-    print('true' if c.get('gnss_vtec', {}).get('enabled', False) else 'false')
-except Exception: print('false')" 2>/dev/null)
-
-if [[ "$VTEC_ENABLED" == "true" ]]; then
-    copy_unit "$PROJECT_DIR/systemd/timestd-vtec.service" && ((UPDATED_COUNT++)) || true
 fi
 
 # ── Generate metrology channel .env files ──
@@ -947,17 +926,8 @@ if [[ -n "$CHRONY_CONF" ]]; then
         echo "log tracking measurements statistics" >> "$CHRONY_CONF"
     fi
 
-    # GNSS timeserver (VTEC host)
-    if [[ "$VTEC_ENABLED" == "true" ]]; then
-        GNSS_HOST=$("$VENV_DIR/bin/python3" -c "
-import tomllib
-with open('$MAIN_CONFIG', 'rb') as f: c = tomllib.load(f)
-print(c.get('gnss_vtec', {}).get('host', ''))" 2>/dev/null)
-        if [[ -n "$GNSS_HOST" ]] && ! grep -q "server $GNSS_HOST" "$CHRONY_CONF" 2>/dev/null; then
-            echo -e "\n# GNSS Timeserver (ZED-F9P)\nserver $GNSS_HOST iburst prefer" >> "$CHRONY_CONF"
-            log_info "Added GNSS timeserver: $GNSS_HOST"
-        fi
-    fi
+    # chrony gets nothing from fusion or its inputs: install.sh adds no
+    # GNSS box as a preferred server (v3.96, Michael's decision).
 
     log_info "Chrony config: OK"
 fi
@@ -1077,8 +1047,7 @@ if [[ "$DO_RESTART" == "true" ]]; then
             for service in \
                 timestd-l2-calibration \
                 timestd-fusion \
-                timestd-radiod-monitor \
-                timestd-vtec ; do
+                timestd-radiod-monitor ; do
                 if systemctl try-restart "$service" 2>/dev/null; then
                     log_info "  Restarted: $service"
                 fi
@@ -1166,6 +1135,6 @@ echo "  Data:    $DATA_ROOT"
 echo "  Verify:  scripts/verify_pipeline.sh"
 echo ""
 echo "  Optional externals (see docs/EXTERNAL_PREREQUISITES.md):"
-echo "    PHaRLAP raytracing · NASA Earthdata (IONEX) · PSWS uploads · GNSS VTEC"
+echo "    PHaRLAP raytracing · NASA Earthdata (IONEX) · PSWS uploads"
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

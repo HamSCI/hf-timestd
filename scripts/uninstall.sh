@@ -105,7 +105,7 @@ SERVICES=(
     # grape-daily.* is deliberately absent: hamsci-physics owns that
     # name now, and uninstalling hf-timestd must not disable it.
     "timestd-physics.service"
-    "timestd-vtec.service"
+    "timestd-vtec.service"  # retired v3.96; removed from hosts that still have it
     "timestd-radiod-monitor.service"
     "timestd-chrony-monitor.service"
     "timestd-ionex-download.service"

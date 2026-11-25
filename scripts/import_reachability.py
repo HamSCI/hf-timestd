@@ -5,7 +5,7 @@ Run from the repo root:
     python3 scripts/import_reachability.py \
       hf_timestd.cli,hf_timestd.core.core_recorder_v2,hf_timestd.core.metrology_service,\
 hf_timestd.core.multi_broadcast_fusion,hf_timestd.core.l2_calibration_service,hf_timestd.quota_manager \
-      scripts/live_vtec.py,scripts/monitor_radiod_health.py
+      scripts/monitor_radiod_health.py
 
 Writes importgraph.json beside the invocation and prints the unreachable set.
  Every ast Import/ImportFrom node counts,

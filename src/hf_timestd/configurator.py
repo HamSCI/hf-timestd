@@ -71,6 +71,8 @@ _APPLY_ALLOWED_SECTIONS = {
     "monitoring",
     "web_ui",
     "timing",
+    # gnss_vtec retired to hamsci-physics; still accepted so a sigmond payload
+    # that carries it does not abort the whole apply (validate flags it).
     "gnss_vtec",
     "metrology",
     "storage",

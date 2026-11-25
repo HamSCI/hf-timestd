@@ -1089,7 +1089,7 @@ The `hf-timestd` command exposes the following subcommands (see `hf-timestd --he
 - `docs/PHYSICS.md` - Ionospheric physics capabilities
 - `INSTALLATION.md` - Setup guide
 - `docs/DEPLOYMENT_CORRESPONDENCE_CHECKLIST.md` - Production deployment and verification gates
-- `docs/GNSS_TIMESERVER_AND_VTEC.md` - LAN GNSS time server and VTEC (u-blox or RTCM)
+- `docs/GNSS_TIMESERVER.md` - LAN GNSS time server (chrony on PPS)
 
 ### External
 

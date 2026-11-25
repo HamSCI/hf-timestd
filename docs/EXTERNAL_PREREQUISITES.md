@@ -406,7 +406,7 @@ sudo -u timestd /opt/hf-timestd/venv/bin/hf-timestd grape test-upload
 
 ### Setup
 
-See **[GNSS_TIMESERVER_AND_VTEC.md](GNSS_TIMESERVER_AND_VTEC.md)** for the
+See **[GNSS_TIMESERVER.md](GNSS_TIMESERVER.md)** for the
 receiver, the GNSS box (time server and TCP relay) and the station settings.
 
 **Summary:**
@@ -455,4 +455,4 @@ Each adds capability without disrupting running services.
 - [STATION_SETUP_GUIDE.md](STATION_SETUP_GUIDE.md) — Site-specific config (`timestd-config.toml`)
 - [NASA_EARTHDATA_SETUP.md](https://github.com/HamSCI/hamsci-physics/blob/main/docs/NASA_EARTHDATA_SETUP.md) — IONEX/DCB credential setup (hamsci-physics)
 - [PSWS_SETUP_GUIDE.md](https://github.com/HamSCI/hamsci-physics/blob/main/docs/PSWS_SETUP_GUIDE.md) — PSWS registration and SSH key setup (hamsci-physics)
-- [GNSS_TIMESERVER_AND_VTEC.md](GNSS_TIMESERVER_AND_VTEC.md) — GNSS time server and VTEC: receivers, relay, station settings
+- [GNSS_TIMESERVER.md](GNSS_TIMESERVER.md) — GNSS time server: receiver naming, chrony on PPS, station setting

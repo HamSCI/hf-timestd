@@ -19,7 +19,6 @@ HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/BPM time standard bro
 - 🎯 **Sub-millisecond timing** - ±0.5 ms via multi-broadcast fusion to UTC(NIST), with theoretical floor of ±0.036 ms (Cramér-Rao bound).
 - 🌐 **Real-time ionospheric model (v6.7)** - WAM-IPE + GIRO data for frequency-dependent, time-varying group delay predictions with multi-hop support (1F, 2F, 3F).
 - 🗃️ **SQLite-backed measurement store** - Single shared database (`/var/lib/timestd/phase2/timestd.db`) for all inter-service L1/L2/L3 data. WAL mode for concurrent readers + a single writer per product, with millisecond commit cadence. (Replaces the pre-7.0 HDF5/SWMR pipeline; the `h5py` runtime dependency was dropped in the 2026-05-21 migration.)
-- 🌍 **Real-time GNSS VTEC Correction** - Local dual-frequency GPS provides direct ionospheric correction.
 - 🔬 **Hierarchical Estimation** - Per-broadcast Kalman filtering + WLS fusion for deterministic restart behavior.
 - ⏱️ **NTP-Based Bootstrap (v6.4)** - Fast RTP-to-UTC calibration using GPSDO wallclock (~2 min to LOCKED).
 - 🧠 **AI Discrimination** - Probabilistic Logistic Regression + Heuristic Voting for station ID.
@@ -49,9 +48,9 @@ HF Time Standard Analysis (`hf_timestd`) receives WWV/WWVH/BPM time standard bro
 - **Leap second hold** — the fusion Kalman coasts through the month-end boundary when the broadcasts announce a leap second (WWVB's advance notice and WWV's BCD second-3 warning on the dedicated 20/25 MHz channels, both carried on the L1 row as `leap_second_notice`)
 
 **Ionospheric Science:**
-- **Carrier-phase dTEC** — Primary product (~6 mTECU/min sensitivity, ~250K records/day), GNSS VTEC-anchored
+- **Carrier-phase dTEC** — Primary product (~6 mTECU/min sensitivity, ~250K records/day)
 - **Group-delay TEC** — 1/f² dispersion fit (validation product)
-- **Local GNSS VTEC** — ZED-F9P dual-frequency GPS, ~1 Hz, DCB-corrected, ±1 TECU
+- **GNSS VTEC** — moved to hamsci-physics; hf-timestd reads no GNSS stream
 - **Propagation mode identification** — GW, 1E, 1F2, 2F2, 3F2 from delay matching
 - **TID detection** — Cross-path timing residual correlation
 - **Scintillation indices** — S4 (amplitude) and σ_φ (phase) per ITU-R P.531
@@ -250,9 +249,9 @@ The system has an eight-service core pipeline plus a set of housekeeping units (
 3. L2 CALIBRATION (timestd-l2-calibration)
    • Applies geometric + ionospheric corrections -> L2 Timing (SQLite)
      ↓
-4. FUSION (timestd-fusion) <------- 5. VTEC (timestd-vtec)
-   • Reads L2 SQLite (WAL mode)     • GNSS VTEC monitoring
-   • Dual Kalman filtering          • (optional, requires GNSS)
+4. FUSION (timestd-fusion)
+   • Reads L2 SQLite (WAL mode)
+   • Dual Kalman filtering
      (L1 + L2 diagnostic compare)
    • Feeds Chrony SHM unit 1 (FUSE) — one consumer of the
      annotation stream; HPPS (unit 2) is fed by the T6
@@ -269,7 +268,7 @@ The system has an eight-service core pipeline plus a set of housekeeping units (
 
 - **Binary IQ Archive:** Compressed `.bin.zst` files with JSON metadata sidecars for raw 24 kHz IQ recording. Digital RF (MIT Haystack) is used for GRAPE packaging/upload only.
 - **SQLite Measurement Store:** Single shared database (`/var/lib/timestd/phase2/timestd.db`) for all L1/L2/L3 inter-service data exchange. WAL mode for concurrent readers; one writer per data product. Crash recovery is built into SQLite's WAL — no separate sweep utility required. Replaced the pre-7.0 HDF5/SWMR pipeline in the 2026-05-21 migration; `h5py` is no longer a runtime dependency.
-- **Ionospheric Correction:** GNSS VTEC (primary) and IONEX maps (fallback) correct for group delay ($\tau_{iono} \propto TEC/f^2$). Carrier-phase dTEC is the primary ionospheric science product.
+- **Ionospheric Correction:** IONEX maps correct for group delay ($\tau_{iono} \propto TEC/f^2$). Carrier-phase dTEC is the primary ionospheric science product.
 
 ---
 

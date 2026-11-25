@@ -25,7 +25,6 @@ fi
 
 # All services (reverse order of startup)
 SERVICES=(
-    "timestd-vtec"
     "timestd-radiod-monitor"
     "timestd-fusion"
     "timestd-l2-calibration"

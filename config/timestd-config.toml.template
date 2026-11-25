@@ -48,7 +48,7 @@ storage_quota = "80%"
 # guardian PAUSES writes and alerts immediately, but deletes nothing until the
 # pressure PERSISTS past evict_grace_sec — a transient spike costs no data.
 # Then it frees the smallest regenerable unit first (phase2 HDF5, products,
-# vtec, upload/data), oldest first, one at a time, down to evict_low_water_percent;
+# upload/data), oldest first, one at a time, down to evict_low_water_percent;
 # raw IQ is the last resort, a whole day at a time.  A guardian-event.json is
 # written under <data_root>/state for the fleet board to read.
 evict_policy = "auto"              # "auto" (evict after grace) | "alert_only" (never delete)
@@ -467,8 +467,8 @@ radiod_restart_request = false
 #              where radiod's GPSDO provides timing authority.
 #   fusion   — rtp + metrology + l2-calibration + fusion + chrony-monitor.
 #              GPS-denied mode: timing derived from HF broadcasts.
-#   full     — fusion + physics + ionex-download + iono-reanalysis + vtec
-#              (if gnss_vtec.enabled).  Full science + timing.
+#   full     — fusion + physics + ionex-download + iono-reanalysis.
+#              Full science + timing.
 #
 # The active profile sets the default for each service; per-service overrides
 # take precedence.  For example, profile = "rtp" with metrology = true gives
@@ -482,7 +482,6 @@ profile = "rtp"
 # l2_calibration = false      # Force off even if profile includes it
 # fusion = true               # Multi-broadcast fusion → Chrony SHM
 # physics = true              # L2/L3 ionospheric products
-# vtec = false                # GNSS VTEC (also requires gnss_vtec.enabled)
 # radiod_monitor = true       # Hardware health monitor
 # grape_daily = true          # Daily GRAPE decimation + upload timer
 # chrony_monitor = true       # Chrony timing authority watchdog
@@ -661,27 +660,3 @@ write_hdf5 = false      # no-op (HDF5 backend removed at v7.0)
 write_sqlite = true     # no-op (SQLite is always written)
 read_sqlite = true      # no-op (SQLite is always read)
 sqlite_path = "/var/lib/timestd/phase2/timestd.db"
-
-[gnss_vtec]
-enabled = false                         # Set to true if you have a GNSS receiver
-host = "<YOUR_GNSS_HOST>"               # IP of GNSS receiver or ser2net bridge
-port = 9000                             # GNSS data stream port (UBX or RTCM3)
-# device: a receiver plugged into this machine by USB.  When set it replaces
-# host and port.  Use the stable name, e.g.
-# device = "/dev/serial/by-id/usb-u-blox_AG_-_www.u-blox.com_u-blox_GNSS_receiver-if00"
-# configure_receiver: on a serial device, send one UBX-CFG-VALSET (RAM layer
-# only, never flash) that turns on RXM-RAWX, RXM-SFRBX and NAV-SAT each time the port
-# opens.  Set false to leave the receiver alone.  Ignored for host/port.
-# configure_receiver = true
-# protocol: "auto" (default) decides from the first bytes; "ubx" for a u-blox
-# ZED-F9P (RXM-RAWX + NAV-SAT); "rtcm3" for an RTCM 3.3 base stream such as a
-# Quectel LG290P (MSM7 1077 or legacy 1004, plus 1005 antenna position).  An
-# RTCM receiver sends no ephemeris, so elevations come from BKG's multi-GNSS
-# broadcast file, fetched every 15 min into ephemeris_dir (no login needed).
-protocol = "auto"
-ephemeris_dir = "data/brdc"
-# ephemeris_url = "https://igs.bkg.bund.de/root_ftp/IGS/BRDC/{year}/{doy}/BRDC00WRD_S_{year}{doy}0000_01D_MN.rnx.gz"
-save_csv = true
-csv_path = "data/gnss_vtec.csv"
-save_hdf5 = true
-hdf5_path = "data/gnss_vtec"

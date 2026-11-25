@@ -147,7 +147,7 @@ A GNSS box on the LAN can serve the station stratum-1 NTP time and stream raw
 GNSS measurements for VTEC.  Setting up the box, the receiver (u-blox UBX or an
 RTCM 3.3 receiver such as the Quectel LG290P), chrony on PPS, the TCP relay and
 the station's `[gnss_vtec]` settings all live in one guide:
-**[GNSS_TIMESERVER_AND_VTEC.md](GNSS_TIMESERVER_AND_VTEC.md)**.
+**[GNSS_TIMESERVER.md](GNSS_TIMESERVER.md)**.
 
 The station side, in brief:
 
@@ -495,5 +495,5 @@ port = 8000
 
 - [EXTERNAL_PREREQUISITES.md](EXTERNAL_PREREQUISITES.md) — All external dependencies (hardware, accounts, licensed software)
 - [INSTALLATION.md](../INSTALLATION.md) — Full installation guide
-- [GNSS_TIMESERVER_AND_VTEC.md](GNSS_TIMESERVER_AND_VTEC.md) — LAN GNSS time server and VTEC (u-blox or RTCM)
+- [GNSS_TIMESERVER.md](GNSS_TIMESERVER.md) — LAN GNSS time server (chrony on PPS)
 - [NASA_EARTHDATA_SETUP.md](https://github.com/HamSCI/hamsci-physics/blob/main/docs/NASA_EARTHDATA_SETUP.md) — IONEX data access setup (hamsci-physics)

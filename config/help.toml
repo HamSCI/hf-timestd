@@ -196,7 +196,7 @@ hidden = true
 title          = "Service profile"
 help           = """Which services run on this host:
 
-  full      All hf-timestd services (recorder + metrology + GNSS VTEC
+  full      All hf-timestd services (recorder + metrology
             + T6 PPS + web UI).  Default for production.
   minimal   Recorder only.  Use for resource-constrained
             hosts where metrology isn't needed.
@@ -231,71 +231,6 @@ help           = """When ON (default), the metrology service emits
 real-time ionospheric height estimates.  Turn OFF if you only need
 the raw measurements and will run the inversion offline."""
 required       = false
-
-# --- GNSS VTEC (external GNSS data source) -------------------------
-
-[gnss_vtec.enabled]
-title          = "Pull GNSS VTEC from an external server?"
-help           = """When ON, hf-timestd connects to a GNSS-VTEC
-server (e.g. SCINDA, a local rtklib instance) for collateral
-electron-content data.  Turn OFF if you don't have a GNSS source."""
-required       = false
-
-[gnss_vtec.host]
-title          = "GNSS-VTEC server host"
-help           = """IP or hostname of the GNSS-VTEC server.  Typically
-a local rtklib host on your LAN; set to the server's address."""
-example        = "192.168.1.80"
-required       = false
-
-[gnss_vtec.port]
-title          = "GNSS-VTEC server port"
-example        = "9000"
-required       = false
-
-[gnss_vtec.device]
-title          = "USB serial device of the GNSS receiver"
-help           = """Path of a receiver plugged into this machine, such as
-/dev/ttyACM1 or a /dev/serial/by-id/ name.  When set, it replaces host and
-port.  The timestd user needs the dialout group."""
-example        = "/dev/serial/by-id/usb-u-blox_AG_-_www.u-blox.com_u-blox_GNSS_receiver-if00"
-required       = false
-
-[gnss_vtec.configure_receiver]
-title          = "Configure the USB receiver for raw measurements?"
-help           = """On a serial device, send one UBX-CFG-VALSET to RAM each time
-the port opens.  It turns on RXM-RAWX, RXM-SFRBX and NAV-SAT and never touches flash.
-Turn OFF to leave the receiver as it is.  Ignored for host/port sources."""
-required       = false
-
-[gnss_vtec.protocol]
-title          = "What the GNSS receiver speaks"
-help           = """auto (default) decides from the first bytes.  ubx is a
-u-blox receiver such as the ZED-F9P, which sends its own raw measurements and
-satellite positions.  rtcm3 is an RTCM 3.3 base-station stream, such as a
-Quectel LG290P's MSM7; it carries no satellite orbits, so hf-timestd fetches
-the day's broadcast orbits from BKG every 15 minutes (internet needed, no
-login)."""
-example        = "auto"
-required       = false
-
-[gnss_vtec.ephemeris_dir]
-hidden = true
-
-[gnss_vtec.ephemeris_url]
-hidden = true
-
-[gnss_vtec.csv_path]
-hidden = true
-
-[gnss_vtec.hdf5_path]
-hidden = true
-
-[gnss_vtec.save_csv]
-hidden = true
-
-[gnss_vtec.save_hdf5]
-hidden = true
 
 # --- Web UI --------------------------------------------------------
 
