@@ -662,7 +662,7 @@ select which of these run. The core pipeline:
 | Unit | Purpose |
 |------|---------|
 | `timestd-chrony-monitor.timer` | Chrony refclock / discipline monitoring |
-| `timestd-pipeline-watchdog.timer` | End-to-end pipeline liveness watchdog |
+| `timestd-pipeline-watchdog.timer` | End-to-end pipeline liveness watchdog; files a request for the recorder, restarts other stuck services |
 | `timestd-ionex-download.timer` | IGS IONEX VTEC map download |
 | `timestd-iono-reanalysis.timer` | Periodic ionospheric reanalysis |
 | `grape-daily.timer` | Daily GRAPE decimation → package → upload → spectrogram |
@@ -674,6 +674,24 @@ installer):** the SHM/PPS health watchdogs `timestd-clock-monitor`,
 `grape-upload-retry`, and the `timestd-alert@.service` OnFailure handler. These
 keep the SHM feeds, IRI/space-weather data, and GRAPE uploads healthy
 independent of the active service profile.
+
+**Who restarts the recorder.** systemd and `sigmond-recorder-watchdog`
+restart `timestd-core-recorder`; no other agent does. The pipeline
+watchdog, the HPPS watchdog, `sigmond-sdr-recover` and sigmond's
+radiod-consumer hook file requests in `/run/sigmond/recorder-restart`.
+The sigmond watchdog applies a 1320 s grace after a start, one
+30-minute cooldown and 6 restarts a day, and writes every restart to one
+ledger. It records an HPPS request and does not act on it.
+
+**Who deletes.** sigmond's hourly `smd storage expire` asks hf-timestd
+to delete its own rows (`storage_retention.py`): science tables 30 days,
+timing tables 90 days, `authority_history` 30 days and six retired-product
+tables 30 days. `smd storage compact` (`storage_compact.py`) returns free
+pages to the disk on an operator's command. The resource guardian
+(`core/resource_guardian.py`) acts only in an emergency, at 98 % disk
+use under the ledger and 95 % on a standalone install; metrology pauses
+rather than exits. `timestd-prune` is a retired unit (`retired_units` in
+`deploy.toml`).
 
 ### CPU Affinity
 

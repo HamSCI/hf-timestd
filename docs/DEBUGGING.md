@@ -196,6 +196,16 @@ its journal for the alert.
   be < `file_duration_sec` old. The service is `Type=notify` with a
   180 s systemd watchdog — if it can't get samples, systemd restarts
   it.
+- **Who restarts it**: systemd and `sigmond-recorder-watchdog` only.
+  `timestd-pipeline-watchdog` and `timestd-hpps-watchdog` file a request
+  in `/run/sigmond/recorder-restart` and never restart the recorder
+  themselves. The sigmond watchdog waits 1320 s after a recorder start
+  before it judges the recorder, keeps one 30-minute cooldown and a cap
+  of 6 restarts a day, and records every restart in
+  `/var/lib/sigmond/recorder-restarts.jsonl`. It records an HPPS request
+  and does not act on it. A restart that follows a radiod restart, and
+  systemd's own restarts, stand outside the cooldown and the cap. To see
+  why the recorder restarted, read that file.
 - **Common failures**: radiod connection drop, disk full on
   `/var/lib/timestd` or `/dev/shm/timestd`, ring-buffer SHM contention.
 
@@ -308,7 +318,8 @@ The dashboard, its unit and its health endpoints belong to
 
 | Unit | Purpose |
 |---|---|
-| `timestd-pipeline-watchdog.service` + `.timer` | End-to-end freshness check, alerts on stale outputs |
+| `timestd-pipeline-watchdog.service` + `.timer` | End-to-end freshness check. Restarts a stuck metrology or fusion service. Files a request with `sigmond-recorder-watchdog` for the recorder |
+| `timestd-hpps-watchdog.service` + `.timer` | Watches the HPPS feed in chrony. Files an `hpps-stale` request; `sigmond-recorder-watchdog` records it and does not act on it |
 | `timestd-chrony-monitor.service` + `.timer` | Chrony discipline sanity |
 | `timestd-ionex-download.service` + `.timer` | Fetches daily IONEX maps |
 | `timestd-iono-reanalysis.service` + `.timer` | Reprocesses recent days with updated ionospheric inputs |
@@ -367,7 +378,7 @@ sudo systemctl restart timestd-fusion   # ExecStartPre clears stale SHM
 
 ### 5.2 `raw_buffer` growing without bound
 
-**Cause**: the sigmond storage ledger's hourly expire pass did not run, or the ledger holds a stop.
+**Cause**: the sigmond storage ledger's hourly expire pass did not run, or the ledger holds a stop. The ledger asks hf-timestd to delete its own rows and raw chunks; sigmond deletes nothing itself.
 
 **Diagnose**:
 
@@ -377,7 +388,11 @@ journalctl -u sigmond-storage-expire.service -n 50
 du -sh /var/lib/timestd/raw_buffer/*/ | sort -h | tail
 ```
 
-**Fix**: run `smd storage` to see what the ledger holds, clear a stop if one is set, then let the next hourly pass run. The old `timestd-prune.timer` retired in v3.96.
+**Fix**: run `smd storage` to see what the ledger holds, clear a stop if one is set, then let the next hourly pass run. No `timestd-prune` timer exists; sigmond's migration retires it.
+
+**Database size**: `timestd.db` keeps science tables 30 days, timing tables 90 days, `authority_history` 30 days and six retired-product tables 30 days. A deleted row leaves free pages in the file. `smd storage compact hf-timestd timestd` returns that space. It runs as a dry run unless you add `--apply`. With `--apply` it stops the processes that hold the database, swaps in a compact copy and starts them again. An operator runs it; no timer does.
+
+**Emergency net**: the resource guardian inside the recorder deletes only when the disk reaches 98 % under the ledger, or 95 % on a standalone install. At that point it pauses writes and metrology pauses rather than exits.
 
 ### 5.3 HDF5 read errors in metrology
 

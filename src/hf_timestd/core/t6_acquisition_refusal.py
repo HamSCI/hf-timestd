@@ -9,12 +9,12 @@ so restarting the recorder meets the same pair and the same refusal.
 Only radiod redrawing its tie, or a reference that places the edge
 (T5, or a qualified T4), moves it.
 
-hpps-watchdog restarts the recorder whenever HPPS goes quiet.  On
-AC0G-ND (2026-10-27 to 10-31) T6 refused every acquisition, HPPS stayed
-dark, and the watchdog restarted the recorder about 41 times a day,
-curing nothing and opening a data gap each time.  This record lets the
-recorder say, in its status file, that it is refusing and that a
-restart will not help.
+hpps-watchdog files a restart request whenever HPPS goes quiet, and
+sigmond-recorder-watchdog records that request without acting on it.
+A restart cannot cure a refusal: T6 can refuse every acquisition for
+days, HPPS stays dark, and each restart opens a data gap.  This record
+lets the recorder say, in its status file, that it is refusing and that
+a restart will not help.
 
 Criterion 7 refreshes the record once per fold block (30 s at K = 30)
 while it persists, so a record that stopped being refreshed has stopped

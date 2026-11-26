@@ -4324,8 +4324,8 @@ class CoreRecorderV2:
     #
     # chrony adjudicates, so the feed's obligation is to stay available
     # and carry a truthful sigma -- not to go dark, which is us doing
-    # chrony's job badly and which forces hpps-watchdog to restart the
-    # recorder, destroying the very anchor the coast rests on.  The one
+    # chrony's job badly and which makes hpps-watchdog report a stale feed
+    # and tempts a restart of the recorder, destroying the very anchor the coast rests on.  The one
     # thing we must never do is publish a claim we cannot express: the
     # SHM precision field saturates at PRECISION_CEILING, so beyond
     # 2**PRECISION_CEILING seconds the pushed precision would UNDERSTATE
@@ -4417,8 +4417,8 @@ class CoreRecorderV2:
         # recapture as an RTP re-base: on B4 overnight 2026-08-17 all 9
         # withdrawals said "the ruler was re-based" when nothing had
         # been, the coast refused, HPPS went dark, and hpps-watchdog
-        # restarted the recorder 7 times -- each restart recapturing the
-        # anchor and invalidating the reference again.
+        # asked for 7 recorder restarts -- each restart would recapture the
+        # anchor and invalidate the reference again.
         anchor = getattr(self, '_t6_native_anchor', None)
         anchor_id = None if anchor is None else (
             getattr(anchor, 'anchor_rtp', None),
@@ -4535,17 +4535,17 @@ class CoreRecorderV2:
     def _t6_hpps_publish_status(self) -> dict:
         """What we BELIEVE about the HPPS feed, for external watchers.
 
-        ``hpps-watchdog`` restarts the recorder when chrony stops
-        sampling HPPS.  That is the correct cure for the failure it was
-        built for — the push gate stops firing while the calibrator
-        still reports ``acquired=1``, so everything looks fine in the
-        journal while chrony sees reach=0 — and the WRONG cure for an
-        honest withdrawal, because a restart destroys the anchor a coast
-        rests on and forces a fresh acquisition.
+        ``hpps-watchdog`` files a restart request when chrony stops
+        sampling HPPS; sigmond-recorder-watchdog records it and does not
+        act on it.  A restart would cure a wedge — the push gate stops
+        firing while the calibrator still reports ``acquired=1``, so
+        everything looks fine in the journal while chrony sees reach=0 —
+        and would harm an honest withdrawal, because a restart destroys
+        the anchor a coast rests on and forces a fresh acquisition.
 
         Only the recorder can tell those apart, so it says so here:
 
-        * ``publishing`` true + chrony dark  ⇒ WEDGE, restart is right
+        * ``publishing`` true + chrony dark  ⇒ WEDGE, restart would help
         * ``publishing`` false               ⇒ we know we are not
           feeding, and why; restarting fixes nothing and costs the anchor
 
@@ -5460,7 +5460,7 @@ class CoreRecorderV2:
                 "RTP->UTC pair, which outlives the recorder (T4: %s).  "
                 "radiod redrawing its tie, a live T5, or a qualified T4 "
                 "clears it.  Published as t6_pps.acquisition_refusal_* "
-                "so hpps-watchdog stops restarting the recorder for it.  "
+                "so hpps-watchdog stops requesting a recorder restart for it.  "
                 "Logged once; the exit is logged too.",
                 reference or "the pair", (effective_ns or 0) / 1e6,
                 _T6_PLACEMENT_MAX_NS / 1e6, t4_why or "not consulted")
