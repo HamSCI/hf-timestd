@@ -11,12 +11,17 @@ It does not import ``multi_broadcast_fusion`` (preflight ruling D3): a
 fault at fusion's import time must not stop the authority.  The config
 loader both services use lives in ``authority_config``.
 
-The systemd watchdog proves this loop iterates, not that the manager's
-ticks succeed (ruling D6).  A tick that fails, or goes stale, shows in
-the unit's STATUS and in the log as a fault; the pet continues, so the
-unit stays up and loud rather than restarting and resetting the T3
-admission window.  A hung loop stops the pets, and a dead manager thread
-ends the service with a non-zero status; systemd restarts either.
+The systemd watchdog proves the manager's loop iterates, not that its
+ticks succeed (ruling D6).  The pet follows the runner's loop stamp,
+which advances after every tick, failed or not.  A tick that fails, or
+goes stale, shows in the unit's STATUS and in the log as a fault; the
+pet continues, so the unit stays up and loud rather than restarting and
+resetting the T3 admission window.  A tick that never returns stops the
+loop stamp: after ``LOOP_HUNG_INTERVALS`` intervals (90 s at the default
+30 s) the pets stop, and systemd restarts the unit once ``WatchdogSec``
+(120 s in Task 3's unit) passes without one, so at most about 210 s
+after the loop's last tick.  A dead manager thread ends the service with
+a non-zero status at once.
 
 Run:  python -m hf_timestd.core.authority_service --config <path> --log-level INFO
 """
@@ -40,8 +45,14 @@ from hf_timestd.core.authority_runner import build_authority_runner_from_config
 log = logging.getLogger(__name__)
 
 #: A tick counts as stale after this many manager intervals without a
-#: successful one.
+#: successful one.  STATUS and the log only.
 STALE_INTERVALS = 3
+
+#: The loop counts as hung after this many manager intervals without a
+#: tick finishing, success or failure.  The loop sleeps one interval
+#: between ticks, so this leaves two intervals for a slow tick.  The
+#: watchdog pet stops while the loop is hung.
+LOOP_HUNG_INTERVALS = 3
 
 
 def _publish_chains(cfg: dict) -> None:
@@ -103,6 +114,7 @@ def run_authority_service(
     )
 
     limit_s = STALE_INTERVALS * runner.interval_sec
+    hung_s = LOOP_HUNG_INTERVALS * runner.interval_sec
     started = monotonic_fn()
     state: Optional[str] = None
     while True:
@@ -110,12 +122,21 @@ def run_authority_service(
             msg = "authority manager thread died; exiting for a restart"
             log.error(msg)
             notify(f"STATUS={msg}")
-            runner.stop(timeout=5.0)
+            _stop_runner(runner)
             return 1
-        notify("WATCHDOG=1")
 
         now = monotonic_fn()
-        if runner.tick_fresh(limit_s):
+        if runner.loop_fresh(hung_s):
+            notify("WATCHDOG=1")
+            looping = True
+        else:
+            looping = False
+
+        if not looping:
+            new_state, text = "hung", (
+                f"authority manager loop HUNG: no tick finished in "
+                f"{hung_s:.0f} s; watchdog withheld for a restart")
+        elif runner.tick_fresh(limit_s):
             new_state, text = "ok", (
                 f"authority ticking (interval {runner.interval_sec:.0f} s)")
         elif now - started < limit_s:
@@ -124,9 +145,11 @@ def run_authority_service(
             new_state, text = "stale", _stale_status(runner, limit_s, now)
         if new_state != state:
             notify(f"STATUS={text}")
-            if new_state == "stale":
+            if new_state == "hung":
+                log.error(text)
+            elif new_state == "stale":
                 log.warning(text)
-            elif state == "stale":
+            elif state in ("stale", "hung"):
                 log.info("authority tick recovered: %s", text)
             state = new_state
 
@@ -134,8 +157,17 @@ def run_authority_service(
             break
 
     log.info("Authority service stopping")
-    runner.stop(timeout=5.0)
+    notify("STOPPING=1")
+    _stop_runner(runner)
     return 0
+
+
+def _stop_runner(runner) -> None:
+    """Stop the runner as fusion did: a failure logs, it does not raise."""
+    try:
+        runner.stop(timeout=5.0)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Authority manager stop failed: %s", exc)
 
 
 def _systemd_notify() -> Callable[[str], None]:

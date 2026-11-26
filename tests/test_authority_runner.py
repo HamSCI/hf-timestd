@@ -80,6 +80,29 @@ class TestAuthorityRunner(unittest.TestCase):
         r._safe_tick()
         self.assertIsNone(r.last_tick_ok_monotonic)
 
+    def test_loop_stamp_advances_on_failed_tick_too(self) -> None:
+        clock = [1000.0]
+        r = AuthorityRunner(manager=_RaisingManager(), interval_sec=30.0,
+                            monotonic_fn=lambda: clock[0])
+        self.assertIsNone(r.last_loop_monotonic)
+        self.assertFalse(r.loop_fresh(90.0))
+        r._safe_tick()
+        self.assertEqual(r.last_loop_monotonic, 1000.0)
+        clock[0] = 1050.0
+        r._safe_tick()
+        self.assertEqual(r.last_loop_monotonic, 1050.0)
+        self.assertTrue(r.loop_fresh(90.0, now_monotonic=1140.0))
+        self.assertFalse(r.loop_fresh(90.0, now_monotonic=1141.0))
+
+    def test_loop_stamp_set_at_start(self) -> None:
+        r = AuthorityRunner(manager=_FakeManager(), interval_sec=3600.0,
+                            monotonic_fn=lambda: 1000.0)
+        r.start()
+        try:
+            self.assertEqual(r.last_loop_monotonic, 1000.0)
+        finally:
+            r.stop(timeout=2.0)
+
     def test_eager_first_tick_publishes_promptly(self) -> None:
         probe = _CountingProbe()
         runner = AuthorityRunner(self._mgr(probe), interval_sec=10.0)

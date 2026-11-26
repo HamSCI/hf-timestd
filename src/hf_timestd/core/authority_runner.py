@@ -68,6 +68,11 @@ class AuthorityRunner:
         # Monotonic time of the last tick that returned without raising;
         # None until one does.
         self.last_tick_ok_monotonic: Optional[float] = None
+        # Monotonic time the loop last finished a tick, success or
+        # failure; set at start() too, so a loop that never finishes its
+        # first tick ages from there.  None before start().  The service
+        # watchdog reads it: a stuck tick stops it advancing.
+        self.last_loop_monotonic: Optional[float] = None
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -75,6 +80,7 @@ class AuthorityRunner:
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
+        self.last_loop_monotonic = self._monotonic()
         self._thread = threading.Thread(
             target=self._loop, name="AuthorityManager", daemon=True,
         )
@@ -116,12 +122,24 @@ class AuthorityRunner:
         now = self._monotonic() if now_monotonic is None else now_monotonic
         return (now - last) <= max_age_s
 
+    def loop_fresh(self, max_age_s: float,
+                   now_monotonic: Optional[float] = None) -> bool:
+        """True when the loop finished a tick, or started, within the last
+        max_age_s seconds, whether or not the tick succeeded."""
+        last = self.last_loop_monotonic
+        if last is None:
+            return False
+        now = self._monotonic() if now_monotonic is None else now_monotonic
+        return (now - last) <= max_age_s
+
     def _safe_tick(self) -> None:
         try:
             self.manager.tick()
             self.last_tick_ok_monotonic = self._monotonic()
         except Exception as e:
             log.exception("Authority manager tick failed: %s", e)
+        finally:
+            self.last_loop_monotonic = self._monotonic()
 
 
 def build_authority_runner_from_config(

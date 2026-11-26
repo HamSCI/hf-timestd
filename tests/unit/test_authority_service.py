@@ -17,9 +17,11 @@ from hf_timestd.core.authority_service import run_authority_service
 
 
 class FakeRunner:
-    def __init__(self, alive=True, fresh=True, interval_sec=30.0):
+    def __init__(self, alive=True, fresh=True, interval_sec=30.0, looping=True):
         self.alive = alive
         self.fresh = fresh
+        self.looping = looping
+        self.loop_asked_with = None
         self.interval_sec = interval_sec
         self.last_tick_ok_monotonic = None
         self.started = False
@@ -33,6 +35,8 @@ class FakeRunner:
     def stop(self, timeout=5.0):
         self.stopped = True
         self.stop_timeout = timeout
+        if getattr(self, "stop_raises", False):
+            raise RuntimeError("join failed")
 
     def is_alive(self):
         return self.alive
@@ -40,6 +44,10 @@ class FakeRunner:
     def tick_fresh(self, max_age_s, now_monotonic=None):
         self.fresh_asked_with = max_age_s
         return self.fresh
+
+    def loop_fresh(self, max_age_s, now_monotonic=None):
+        self.loop_asked_with = max_age_s
+        return self.looping
 
 
 def _stop_after(stop, sent, n_pets):
@@ -68,6 +76,7 @@ def test_ready_then_pets_while_fresh(tmp_path):
     assert sent.count("WATCHDOG=1") == 2
     assert runner.started and runner.stopped
     assert runner.stop_timeout == 5.0
+    assert sent[-1] == "STOPPING=1"
 
 
 def test_stale_tick_still_pets_and_reports_loudly(tmp_path, caplog):
@@ -119,14 +128,59 @@ def test_dead_runner_thread_exits_nonzero(tmp_path):
     systemd restarts it, rather than petting an empty shell."""
     sent, stop = [], threading.Event()
     runner = FakeRunner(alive=False, fresh=False)
-    threading.Timer(2.0, stop.set).start()
+    backstop = threading.Timer(2.0, stop.set)
+    backstop.daemon = True
+    backstop.start()
     rc = run_authority_service(tmp_path / "cfg.toml", notify=sent.append,
                                stop_event=stop, pet_interval_s=0.01,
                                build_runner=lambda c: runner,
                                publish=lambda cfg: None)
-    stop.set()
+    backstop.cancel()
     assert rc != 0
     assert "WATCHDOG=1" not in sent
+    assert runner.stopped
+
+
+def test_hung_loop_withholds_the_pet(tmp_path, caplog):
+    """D6: a tick that never returns stops the loop stamp while the thread
+    stays alive.  The pets stop, so systemd's watchdog restarts the unit."""
+    sent, stop = [], threading.Event()
+    runner = FakeRunner(alive=True, fresh=False, interval_sec=30.0, looping=False)
+    t = threading.Timer(0.2, stop.set)
+    t.daemon = True
+    t.start()
+    with caplog.at_level(logging.ERROR, logger="hf_timestd.core.authority_service"):
+        rc = run_authority_service(tmp_path / "cfg.toml", notify=sent.append,
+                                   stop_event=stop, pet_interval_s=0.01,
+                                   build_runner=lambda c: runner,
+                                   publish=lambda cfg: None)
+    t.cancel()
+    assert rc == 0
+    assert "WATCHDOG=1" not in sent
+    assert runner.loop_asked_with == 90.0
+    hung = [m for m in sent if m.startswith("STATUS=") and "HUNG" in m]
+    assert len(hung) == 1, sent
+    assert any("HUNG" in r.getMessage() for r in caplog.records)
+
+
+def test_failing_ticks_that_still_iterate_keep_petting(tmp_path):
+    sent, stop = [], threading.Event()
+    runner = FakeRunner(alive=True, fresh=False, interval_sec=0.001, looping=True)
+    run_authority_service(tmp_path / "cfg.toml", notify=_stop_after(stop, sent, 3),
+                          stop_event=stop, pet_interval_s=0.01,
+                          build_runner=lambda c: runner, publish=lambda cfg: None)
+    assert sent.count("WATCHDOG=1") == 3
+
+
+def test_stop_failure_still_exits_cleanly(tmp_path):
+    stop = threading.Event()
+    stop.set()
+    runner = FakeRunner()
+    runner.stop_raises = True
+    rc = run_authority_service(tmp_path / "cfg.toml", notify=lambda m: None,
+                               stop_event=stop, build_runner=lambda c: runner,
+                               publish=lambda cfg: None)
+    assert rc == 0
     assert runner.stopped
 
 
