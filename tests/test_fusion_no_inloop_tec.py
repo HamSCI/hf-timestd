@@ -3,8 +3,8 @@
 The 08-10 split plan (and the hamsci-physics separation plan) remove
 TECEstimator from multi_broadcast_fusion: HF-derived TEC is a science
 product (hamsci-physics), not a timing correction.  Fusion keeps the
-GNSS-VTEC DB read and the HFPropagationModel.predict seam — both
-consume hamsci-dsp — and nothing else from the TEC solver family.
+HFPropagationModel.predict seam and reads no science product (the
+GNSS-VTEC read left in v3.96).
 
 Source-scan style (like hamsci-dsp's import lint) so even lazy,
 function-level wiring is caught.
@@ -35,8 +35,8 @@ def test_fusion_does_not_use_the_tec_estimator():
         "found: " + "; ".join(offenders[:6]))
 
 
-def test_fusion_keeps_the_sanctioned_seams():
-    text = SRC.read_text()
-    # The two seams that STAY: GNSS-VTEC read and the propagation model.
-    assert "_read_gnss_vtec" in text
-    assert "HFPropagationModel" in text
+def test_fusion_reads_no_science_product():
+    """Decision 10: GNSS VTEC belongs to hamsci-physics; the timing core reads none of its output."""
+    code = "\n".join(line for _, line in _code_lines())
+    assert "gnss_vtec" not in code and "last_vtec_tecu" not in code
+    assert "HFPropagationModel" in code      # the propagation seam stays

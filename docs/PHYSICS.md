@@ -147,12 +147,7 @@ By fitting measured arrival times across multiple frequencies to a 1/f² model, 
 
 #### 3.1.3 GNSS VTEC for Ionospheric Correction
 
-When local GNSS VTEC is available, the system applies a direct correction to D_clock measurements in the metrology pathway:
-
-```
-D_clock_corrected = D_clock + Δiono
-Δiono = 1.344 × (TEC_model - TEC_gnss) × n_hops × obliquity / f²
-```
+Fusion reads no GNSS VTEC and applies no ionospheric correction to D_clock. GNSS VTEC belongs to hamsci-physics, which writes the `L3_gnss_vtec` table for science use.
 
 **TEC source hierarchy for propagation modeling:**
 
@@ -162,8 +157,6 @@ D_clock_corrected = D_clock + Δiono
 | 2 | IONEX maps | ±2-5 TECU | 2 hours |
 | 3 | IRI-2020 | ±5-10 TECU | Climatology |
 | 4 | Parametric | ±10-20 TECU | Climatology |
-
-**Implementation:** `src/hf_timestd/core/multi_broadcast_fusion.py` (GNSS VTEC correction block)
 
 **Outputs:**
 - `dtec_mean_tecu`: Anchored differential TEC (primary science product)

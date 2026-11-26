@@ -683,8 +683,8 @@ class MultiBroadcastFusion:
         
         # Split Phase 2 (2026-08-24): the in-loop HF TEC solver is gone.
         # HF-derived TEC is a hamsci-physics science product, not a timing
-        # correction; the ionospheric inputs that remain are the GNSS-VTEC
-        # DB read and the guarded HFPropagationModel prediction.
+        # correction; the one ionospheric input that remains is the guarded
+        # HFPropagationModel prediction.
         
         # ====================================================================
         # PER-BROADCAST KALMAN FILTERS (v6.0 Hierarchical Architecture)
@@ -706,7 +706,7 @@ class MultiBroadcastFusion:
             (self.broadcast_kalman_state_dir / _feed).mkdir(parents=True, exist_ok=True)
         self._load_broadcast_kalman_states()
         
-        # Initialize HF Propagation Model (for GNSS VTEC integration + mode scoring)
+        # Initialize HF Propagation Model (for mode scoring)
         if _HFPropModel:
             try:
                 self.physics_model = _HFPropModel(
@@ -716,10 +716,10 @@ class MultiBroadcastFusion:
                 )
             except Exception as e:
                 self.physics_model = None
-                logger.warning(f"HFPropagationModel init failed: {e} - GNSS VTEC integration disabled")
+                logger.warning(f"HFPropagationModel init failed: {e} - mode scoring prediction disabled")
         else:
             self.physics_model = None
-            logger.warning("HFPropagationModel not available - GNSS VTEC integration disabled")
+            logger.warning("HFPropagationModel not available - mode scoring prediction disabled")
         
         # Calibration state
         self.calibration_file = calibration_file or (
@@ -3040,12 +3040,8 @@ class MultiBroadcastFusion:
         is_nighttime = current_hour < 6 or current_hour > 18
         time_factor = 1.5 if is_nighttime else 1.0
         
-        # Ionospheric conditions factor (if available)
-        # High/low TEC indicates disturbed conditions
+        # No ionospheric-conditions input reaches fusion (decision 10).
         iono_factor = 1.0
-        if hasattr(self, 'last_vtec_tecu') and self.last_vtec_tecu is not None:
-            if self.last_vtec_tecu > 40 or self.last_vtec_tecu < 10:
-                iono_factor = 2.0  # Disturbed conditions
         
         CROSS_STATION_THRESHOLD_MS = base_threshold * time_factor * iono_factor
         
@@ -3417,99 +3413,12 @@ class MultiBroadcastFusion:
         weights = self._calculate_weights(measurements)
         
         # ====================================================================
-        # GNSS VTEC INTEGRATION (Real-Time Physics Correction)
-        # ====================================================================
-        # If available, use local GNSS VTEC to refine ionospheric delays.
-        # This replaces the empirical/model delay with one derived from live data.
-        
-        logger.debug(">>> VTEC INTEGRATION: Starting VTEC check <<<")
-        
-        gnss_vtec_data = self._read_gnss_vtec()
-        
-        logger.debug(f"VTEC check: data={gnss_vtec_data is not None}, physics_model={self.physics_model is not None}")
-        
-        if gnss_vtec_data and self.physics_model:
-            vtec_tecu, vtec_ts = gnss_vtec_data
-            
-            # Only use if fresh (< 5 minutes old)
-            age_seconds = time.time() - vtec_ts
-            logger.debug(f"VTEC data: {vtec_tecu:.2f} TECU, age={age_seconds:.1f}s")
-            
-            if age_seconds < 300:
-                logger.debug(f"GNSS VTEC available: {vtec_tecu:.2f} TECU (age: {age_seconds:.1f}s)")
-                
-                # ================================================================
-                # GNSS VTEC CROSS-CHECK (v6.1 - 2026-01-24; check-only since
-                # the FUSION-authority branch retired 2026-09-04)
-                # ================================================================
-                # The propagation model computed D_clock from a MODELED TEC.
-                # GNSS VTEC measures the actual TEC.  Their difference, through
-                #   τ_iono = 40.3 × TEC × n_hops / (c × f²),
-                # says how far the model sat from the sky it described.  The
-                # loop below logs that and tags the measurement GNSS_VALIDATED;
-                # it never moves D_clock (see the comment at the tag).
-                # ================================================================
-                
-                for m in measurements:
-                    if m.station == 'GLOBAL_DIFF' or m.station == 'UNKNOWN':
-                        continue
-                        
-                    # Compute baseline prediction (what the model predicts)
-                    prediction = self.physics_model.predict(
-                        station=m.station,
-                        frequency_mhz=m.frequency_mhz,
-                        utc_time=datetime.fromtimestamp(m.timestamp, tz=timezone.utc)
-                    )
-                    primary = prediction.get_primary_arrival()
-                    
-                    if primary and primary.mode.n_hops > 0:
-                        # Extract model TEC (what was used to compute D_clock)
-                        model_tec = primary.slant_tec_tecu if primary.slant_tec_tecu else 20.0
-                        n_hops = primary.mode.n_hops
-                        
-                        # Calculate TEC difference
-                        tec_diff = model_tec - vtec_tecu  # Positive if model overestimated
-                        
-                        # Compute ionospheric delay correction
-                        # Using same formula as IonosphericDelayCalculator:
-                        # τ_ms = IONO_DELAY_CONSTANT_MS × TEC / f²
-                        # where IONO_DELAY_CONSTANT_MS ≈ 0.1345 ms·MHz²/TECU
-                        # and f is in MHz, TEC in TECU
-                        #
-                        # For slant TEC: STEC ≈ VTEC × obliquity_factor
-                        # Typical obliquity for HF paths: 1.5-2.0
-                        IONO_DELAY_CONSTANT_MS = 40.3 / 299792.458 * 1e16 / 1e12  # ≈ 0.1345
-                        obliquity_factor = 1.5  # Typical mapping function for HF paths
-                        f_sq = m.frequency_mhz ** 2
-                        delta_iono_ms = IONO_DELAY_CONSTANT_MS * tec_diff * n_hops * obliquity_factor / f_sq
-                        
-                        # GNSS VTEC is a cross-check only, never a D_clock
-                        # correction.  The registration comes from radiod's
-                        # pair plus the judge's offset (MEASUREMENT_MODEL.md);
-                        # a model-derived TEC correction would inject
-                        # ionospheric model noise into a reference tighter
-                        # than the model.  M-H14 pins this
-                        # (tests/test_fusion_gnss_vtec_rtp_gate.py).  The
-                        # FUSION-authority branch that once applied the
-                        # correction retired 2026-09-04 with the
-                        # `[timing] authority` key (RESIDUE_AUDIT §3.4).
-                        m.propagation_mode = f"{prediction.primary_mode}+GNSS_VALIDATED"
-                        m.confidence = min(1.0, m.confidence * 1.1)
-                        logger.debug(
-                            f"  {m.station} {m.frequency_mhz}MHz: GNSS TEC "
-                            f"cross-check only (ΔTEC={tec_diff:+.1f} TECU, "
-                            f"Δiono={delta_iono_ms:+.3f}ms NOT applied to D_clock)"
-                        )
-            else:
-                logger.debug(f"GNSS VTEC stale (age: {time.time()-vtec_ts:.1f}s), skipping")
-
-        # ====================================================================
         # TEC ESTIMATION — REMOVED (split Phase 2, 2026-08-24)
         # ====================================================================
         # The HF multi-frequency TEC solver no longer runs inside fusion.
         # It mixed a science estimate into the timing path; it now lives in
-        # hamsci-dsp (engine) / hamsci-physics (product).  GNSS VTEC above
-        # remains the only ionospheric delay correction applied here.
+        # hamsci-dsp (engine) / hamsci-physics (product).  Fusion applies
+        # no ionospheric delay correction and reads no science product.
 
         # CRITICAL: Filter out any measurements with NaN values or unlocked GPSDO before fusion
         # This is a safety net to prevent NaN from propagating and to exclude unlocked measurements
@@ -3733,13 +3642,8 @@ class MultiBroadcastFusion:
             '3F': 3.0,    # Three-hop (highly variable)
         }
         
-        # Scale by ionospheric conditions (if VTEC available)
-        # TEC variability increases uncertainty
+        # No ionospheric-conditions input reaches fusion (decision 10).
         iono_scale_factor = 1.0
-        if hasattr(self, 'last_vtec_tecu') and self.last_vtec_tecu is not None:
-            # High TEC (>40 TECU) or low TEC (<10 TECU) indicates disturbed conditions
-            if self.last_vtec_tecu > 40 or self.last_vtec_tecu < 10:
-                iono_scale_factor = 1.5
         
         mode_uncertainties = {k: v * iono_scale_factor for k, v in mode_uncertainties_base.items()}
         
@@ -4288,95 +4192,6 @@ class MultiBroadcastFusion:
             logger.error(f"Failed to write fusion result: {e}", exc_info=True)
 
     
-    def _read_gnss_vtec(self) -> Optional[Tuple[float, float]]:
-        """
-        Read the latest GNSS VTEC from L3_gnss_vtec (Phase-4 SQLite cutover).
-        Returns (vtec_tecu, unix_timestamp) or None.
-
-        The original HDF5 implementation read a fixed tail of N rows from
-        a ~560 MB/day daily file every 8 s fusion cycle to avoid a full
-        scan; with SQLite the indexed (channel, timestamp_utc) range
-        query over the ±5 min window is cheap and uniform, so no tail
-        trick is needed.
-        """
-        from datetime import datetime, timedelta, timezone
-
-        MAX_AGE_SECONDS = 300  # 5 minutes
-        current_time = time.time()
-
-        # Pick a vtec dir for API parity with the reader's `data_dir`
-        # argument; the actual data lives in the SQLite DB, so this
-        # path is only used to satisfy the constructor.
-        vtec_dir = self.data_root / 'data' / 'gnss_vtec'
-        if not vtec_dir.exists():
-            vtec_dir = self.data_root / 'gnss_vtec'
-
-        target_dt = datetime.fromtimestamp(current_time, tz=timezone.utc)
-        start_iso = (target_dt - timedelta(seconds=MAX_AGE_SECONDS)).isoformat().replace('+00:00', 'Z')
-        end_iso = (target_dt + timedelta(seconds=5)).isoformat().replace('+00:00', 'Z')
-
-        try:
-            reader = make_data_product_reader(
-                data_dir=vtec_dir,
-                product_level='L3',
-                product_name='gnss_vtec',
-                channel='GNSS',
-                storage_config=self._storage_config,
-            )
-        except Exception as e:
-            logger.error(f"GNSS VTEC reader init failed: {e}")
-            return None
-
-        try:
-            try:
-                rows = reader.read_time_range(
-                    start=start_iso,
-                    end=end_iso,
-                    quality_flags=['GOOD', 'MARGINAL'],
-                )
-            except Exception as e:
-                logger.error(f"L3_gnss_vtec read failed: {e}")
-                return None
-        finally:
-            close_fn = getattr(reader, 'close', None)
-            if close_fn is not None:
-                try:
-                    close_fn()
-                except Exception:
-                    pass
-
-        if not rows:
-            logger.debug(f"No fresh VTEC in last {MAX_AGE_SECONDS}s")
-            return None
-
-        # rows are timestamp-ordered; the latest within the window is
-        # the most-recent GOOD/MARGINAL measurement.  Walk backwards and
-        # return the first one that has both unix_timestamp + vtec_tecu
-        # populated and is within MAX_AGE_SECONDS.
-        for row in reversed(rows):
-            ts = row.get('unix_timestamp')
-            vtec = row.get('vtec_tecu')
-            if ts is None or vtec is None:
-                continue
-            try:
-                ts = float(ts)
-                vtec = float(vtec)
-            except (TypeError, ValueError):
-                continue
-            age = current_time - ts
-            if age > MAX_AGE_SECONDS:
-                break
-            sats = row.get('n_satellites') or 0
-            qflag = row.get('quality_flag', '')
-            logger.debug(
-                f"Read VTEC from SQLite: {vtec:.2f} TECU, "
-                f"{sats} sats, quality={qflag} (age: {age:.1f}s)"
-            )
-            return vtec, ts
-
-        logger.debug(f"No GOOD/MARGINAL VTEC in last {MAX_AGE_SECONDS}s")
-        return None
-
     def get_current_calibration(self) -> Dict[str, float]:
         """Get current calibration offsets."""
         return {

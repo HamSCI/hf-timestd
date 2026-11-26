@@ -77,7 +77,6 @@ class SlidingWindowRun:
         fu.arrival_matrix = None
         fu._run_global_differential_solve = lambda lookback_minutes=30: (None, 0)
         fu._read_tick_timing_observations = lambda lb: {}
-        fu._read_gnss_vtec = lambda: None
         fu._read_latest_measurements = self.read
         self.fusion = fu
         self.cycles = 0

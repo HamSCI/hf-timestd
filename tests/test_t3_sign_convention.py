@@ -138,7 +138,6 @@ def _run_fusion(auto_calibrate, bias_ms=None):
             fu._run_global_differential_solve = \
                 lambda lookback_minutes=30: (None, 0)
             fu._read_tick_timing_observations = lambda lb: {}
-            fu._read_gnss_vtec = lambda: None
             fu._check_upstream_freshness = lambda: (True, 0.0)
             fu._read_l2_physics = lambda lb: {}
 
