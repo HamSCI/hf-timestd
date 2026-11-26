@@ -7,7 +7,8 @@ sigmond orchestrates; this module does the database work, in four verbs:
               max(rowid) in `<db>.compact.json`
   --holders   which pids (and systemd units) hold the database open
   --swap      every holder stopped: catch up the rows written since prepare,
-              check the copy, and move it over the live file
+              check the copy, list the holders again (refuse if any came
+              back), and move it over the live file
 
 Every verb that opens the database as root first drops to the file's owner, so
 no root-owned -wal or -shm file appears and locks the writers out.  `holders`
@@ -341,14 +342,26 @@ def swap(db: Path, *, max_age_s: int = 86400, proc_root: Path = Path("/proc"),
             con.close()  # the last close checkpoints and removes the copy's -wal
         for p in (Path(f"{copy}-wal"), Path(f"{copy}-shm"), Path(f"{copy}-journal")):
             _unlink(p)
+        _fsync_path(copy)  # VACUUM INTO does not sync its output
         lv = sqlite3.connect(str(db), timeout=30)
         try:
             lv.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
         finally:
             lv.close()
+        # The checks above take minutes on a large file.  A writer that came
+        # back meanwhile (a watchdog, an operator) would write into the file
+        # this replaces, and its rows would vanish.  Look again, last thing.
+        # The process now runs as the file's owner, so it sees the owner's
+        # processes: the writers.
+        late = holders(db, proc_root)
+        if late:
+            _unlink(copy)       # the copy holds the catch-up: prepare again
+            _unlink(side)
+            return refuse("database opened again during the swap by " + ", ".join(
+                f"{pid} ({unit or 'no unit'})" for pid, unit in late)
+                + "; nothing replaced; run prepare again")
         _unlink(f"{db}-wal")
         _unlink(f"{db}-shm")
-        _fsync_path(copy)  # VACUUM INTO does not sync its output
         os.replace(copy, db)
         _fsync_path(db.parent)
         os.chmod(db, stat.S_IMODE(old.st_mode))

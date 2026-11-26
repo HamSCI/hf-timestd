@@ -310,3 +310,24 @@ def test_swap_refuses_when_an_index_was_added_since_prepare(tmp_path):
     con.commit()
     con.close()
     _swap_refused_and_untouched(db, tmp_path, "added to an existing table")
+
+
+def test_swap_refuses_a_holder_that_appears_during_the_swap(tmp_path, monkeypatch):
+    # final review C1: a watchdog restarts a writer while the swap checks the copy.
+    # Mutation check: drop the second holders() call before os.replace.
+    db = _big_db(tmp_path)
+    storage_compact.prepare(db, margin_bytes=0)
+    proc = _empty_proc(tmp_path)
+    real_checkpoint_connect = sqlite3.connect
+    def connect(path, *a, **kw):
+        con = real_checkpoint_connect(path, *a, **kw)
+        if str(path) == str(db) and not (proc / "4243").exists():
+            _fake_proc(tmp_path, 4243, f"{db}-wal",
+                       "0::/system.slice/timestd-metrology@a.service\n")
+        return con
+    monkeypatch.setattr(storage_compact.sqlite3, "connect", connect)
+    before = db.read_bytes()
+    a = storage_compact.swap(db, proc_root=proc)
+    assert a["refused"] is True and "4243" in a["reason"] and "prepare again" in a["reason"]
+    assert db.read_bytes() == before
+    assert not Path(f"{db}.compact").exists() and not Path(f"{db}.compact.json").exists()

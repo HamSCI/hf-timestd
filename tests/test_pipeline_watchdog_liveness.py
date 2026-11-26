@@ -41,7 +41,8 @@ SYSTEMCTL_SHIM = r'''#!/bin/bash
 cmd=""; unit=""
 for a in "$@"; do case "$a" in --*) ;; *) if [[ -z "$cmd" ]]; then cmd="$a"; else unit="$a"; fi;; esac; done
 case "$cmd" in
-  is-enabled|is-active) for u in $ENABLED_UNITS; do [[ "$u" == "$unit" ]] && exit 0; done; exit 1 ;;
+  is-enabled) for u in $ENABLED_UNITS; do [[ "$u" == "$unit" ]] && exit 0; done; exit 1 ;;
+  is-active) for u in ${ACTIVE_UNITS-$ENABLED_UNITS}; do [[ "$u" == "$unit" ]] && exit 0; done; exit 1 ;;
   is-failed) exit 1 ;;
   show) for a in "$@"; do [[ "$a" == "ActiveEnterTimestampMonotonic" ]] && echo "$RECORDER_ENTER_US"; done; exit 0 ;;
   *) exit 0 ;;
@@ -98,16 +99,21 @@ def env(tmp_path):
         "systemctl_log": tmp_path / "systemctl.log",
         "uptime": tmp_path / "uptime",
         "hot_buffer": tmp_path / "hot_raw_buffer",
+        "compact_marker": tmp_path / "compact-in-progress.json",
     }
 
 
-def _run(env, enabled_units, recorder_enter_s=None, newest_chunk_age=None, dry=True):
+def _run(env, enabled_units, recorder_enter_s=None, newest_chunk_age=None, dry=True,
+         active_units=None):
     """recorder_enter_s: seconds after boot the recorder became active.
     newest_chunk_age: age of the newest chunk under raw_buffer.
     dry=False runs for real against the shims and the temp request_dir."""
     e = dict(os.environ)
     e["PATH"] = f"{env['shim']}:{e['PATH']}"
     e["ENABLED_UNITS"] = " ".join(enabled_units)
+    if active_units is not None:
+        e["ACTIVE_UNITS"] = " ".join(active_units)
+    e["COMPACT_MARKER"] = str(env["compact_marker"])
     e["DATA_ROOT"] = str(env["data_root"])
     e["RUN_DIR"] = str(env["run_dir"])
     e["SQLITE_DB"] = str(env["db"])
@@ -135,6 +141,7 @@ MET = f"timestd-metrology@{CHANNEL}.service"
 FUS = "timestd-fusion.service"
 CAL = "timestd-l2-calibration.service"
 PHY = "hamsci-physics-fusion.service"
+REC = "timestd-core-recorder.service"
 
 
 def test_sparse_detections_with_fresh_attempts_is_alive(env):
@@ -142,7 +149,7 @@ def test_sparse_detections_with_fresh_attempts_is_alive(env):
     now = int(time.time())
     _make_db(env["db"], now, {"L1_metrology_measurements": 3600,
                               "L2_detection_attempts": 70, "L1_all_arrivals": 70}, None)
-    out = _run(env, [MET])
+    out = _run(env, [REC, MET])
     assert "Would restart" not in out, out
 
 
@@ -150,7 +157,7 @@ def test_no_processed_minute_anywhere_restarts_metrology(env):
     now = int(time.time())
     _make_db(env["db"], now, {"L1_metrology_measurements": 3600,
                               "L2_detection_attempts": 900, "L1_all_arrivals": 900}, None)
-    out = _run(env, [MET])
+    out = _run(env, [REC, MET])
     assert f"Would restart {MET}" in out, out
 
 
@@ -158,7 +165,7 @@ def test_fusion_alive_by_status_file_despite_stale_l3(env):
     now = int(time.time())
     _make_db(env["db"], now, {}, fusion_l3_age=3600)
     _touch(env["run_dir"] / "fusion_status.json", 10)
-    out = _run(env, [FUS])
+    out = _run(env, [REC, FUS])
     assert "Would restart" not in out, out
 
 
@@ -166,7 +173,7 @@ def test_fusion_stale_status_file_restarts(env):
     now = int(time.time())
     _make_db(env["db"], now, {}, fusion_l3_age=30)
     _touch(env["run_dir"] / "fusion_status.json", 700)
-    out = _run(env, [FUS])
+    out = _run(env, [REC, FUS])
     assert f"Would restart {FUS}" in out, out
 
 
@@ -184,7 +191,7 @@ def test_future_dated_row_is_not_liveness(env):
     now = int(time.time())
     _make_db(env["db"], now, {"L1_metrology_measurements": 3600,
                               "L2_detection_attempts": -3600, "L1_all_arrivals": 900}, None)
-    out = _run(env, [MET])
+    out = _run(env, [REC, MET])
     assert f"Would restart {MET}" in out, out
 
 
@@ -216,7 +223,7 @@ def test_guardian_pause_suppresses_the_metrology_restart(env):
     grace and the emergency eviction never runs."""
     _stale_metrology(env)
     _guardian_event(env, "paused", 60)
-    out = _run(env, [MET])
+    out = _run(env, [REC, MET])
     assert "Would restart" not in out, out
     assert "resource guardian paused" in out
 
@@ -224,22 +231,20 @@ def test_guardian_pause_suppresses_the_metrology_restart(env):
 def test_guardian_evict_skipped_locked_also_suppresses(env):
     _stale_metrology(env)
     _guardian_event(env, "evict-skipped-locked", 60)
-    assert "Would restart" not in _run(env, [MET])
+    assert "Would restart" not in _run(env, [REC, MET])
 
 
 def test_an_old_guardian_pause_does_not_suppress(env):
     _stale_metrology(env)
     _guardian_event(env, "paused", 601 + 60)
-    assert f"Would restart {MET}" in _run(env, [MET])
+    assert f"Would restart {MET}" in _run(env, [REC, MET])
 
 
 def test_other_guardian_actions_do_not_suppress(env):
     _stale_metrology(env)
     _guardian_event(env, "evicted", 30)
-    assert f"Would restart {MET}" in _run(env, [MET])
+    assert f"Would restart {MET}" in _run(env, [REC, MET])
 
-
-REC = "timestd-core-recorder.service"
 
 
 def _uptime(env, s):
@@ -317,11 +322,9 @@ def test_inactive_recorder_is_reported_only(env):
 
 
 def test_enabled_but_inactive_recorder_is_reported_only(env, tmp_path):
-    shim = env["shim"] / "systemctl"
-    shim.write_text(shim.read_text().replace(
-        "is-enabled|is-active) for", "is-enabled) exit 0 ;;\n  is-active) for"))
     _uptime(env, 10_000)
-    out = _run(env, [], recorder_enter_s=1_000, newest_chunk_age=1300, dry=False)
+    out = _run(env, [REC], recorder_enter_s=1_000, newest_chunk_age=1300, dry=False,
+               active_units=[])
     assert "not active (reported only)" in out
     assert not (env["request_dir"] / "pipeline-watchdog.json").exists()
     log = _log(env)
@@ -382,3 +385,34 @@ def test_scratch_tmp_and_drain_files_are_not_output(env):
         _touch(buf / f"1.CH.0.{ext}", 5)
     out = _run(env, [REC], recorder_enter_s=1_000)
     assert "[DRY-RUN] Would request" in out, out
+
+
+# --- final review C1 and I2 ---------------------------------------------------
+
+def test_a_compaction_marker_holds_every_restart(env):
+    # Mutation check: drop the marker check before the checks run.
+    _stale_metrology(env)
+    _touch(env["run_dir"] / "fusion_status.json", 700)
+    env["compact_marker"].write_text("{}")
+    out = _run(env, [REC, MET, FUS, CAL], dry=False,
+               active_units=[CAL])        # metrology and fusion down, as compaction left them
+    assert "compaction in progress" in out, out
+    assert "restart" not in _log(env)
+
+
+def test_metrology_and_fusion_are_not_revived_while_the_recorder_is_down(env):
+    # An operator stopped the recorder; metrology's Requires= would pull it back.
+    # Mutation check: drop the recorder_up gate in check_metrology / check_fusion.
+    _stale_metrology(env)
+    _touch(env["run_dir"] / "fusion_status.json", 10)
+    out = _run(env, [REC, MET, FUS], dry=False, active_units=[])
+    assert "restart" not in _log(env), _log(env)
+    assert f"{REC} not active" in out
+
+
+def test_metrology_and_fusion_are_revived_while_the_recorder_runs(env):
+    _stale_metrology(env)
+    _touch(env["run_dir"] / "fusion_status.json", 10)
+    _run(env, [REC, MET, FUS], dry=False, active_units=[REC])
+    log = _log(env)
+    assert f"restart {MET}" in log and f"restart {FUS}" in log

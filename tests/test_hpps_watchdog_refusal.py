@@ -2,14 +2,16 @@
 
 AC0G-ND, 2026-10-27 to 10-31.  T6 refused every acquisition because the
 edge's raw chain delay read radiod's RTP counter, drawn 0.3-0.5 s off UTC.
-HPPS stayed dark, and timestd-hpps-watchdog restarted the recorder about
-41 times a day -- ~180 restarts, each opening a data gap and none curing
-anything, because the counter belongs to radiod and outlives the recorder.
+HPPS stayed dark.  The recorder restarts that followed opened data gaps and
+cured nothing, because the counter belongs to radiod and outlives the
+recorder.
 
-The recorder now publishes the refusal (t6_acquisition_refusal.py) and the
-watchdog skips the restart while it stays current, saying so once on
-entry and once on exit.  The tests run the real script against stub
-chronyc / systemctl / logger binaries and a status file built by the
+The recorder publishes the refusal (t6_acquisition_refusal.py).  The
+watchdog never restarts the recorder: it files a request with
+sigmond-recorder-watchdog.  While a refusal stays current, it files none,
+and says so once on entry and once on exit.  While sigmond's compaction
+marker stands, it checks nothing.  The tests run the real script against
+stub chronyc / systemctl / logger binaries and a status file built by the
 recorder's own key builder, so the producer and the grep agree by
 construction.
 """
@@ -154,6 +156,7 @@ esac
                    HPPS_LASTRX_THRESHOLD_S="600",
                    HPPS_RESTART_COOLDOWN_S="1800",
                    HPPS_REQUEST_DIR=str(self.request_dir),
+                   HPPS_COMPACT_MARKER=str(self.root / "compact-in-progress.json"),
                    # Tests do not run as root.
                    REQUEST_DIR_OWNER_UID=str(os.getuid()),
                    REQUEST_DIR_INSTALL_OWNER="")
@@ -211,6 +214,15 @@ class TestTheWatchdogScript(unittest.TestCase):
         self.assertIsInstance(req["requested_utc"], float)
         self.assertIs(req["stopped_recorder"], False)
         self.assertIn("LastRx=9999s", req["evidence"])
+
+    def test_a_compaction_in_progress_files_no_request(self):
+        # Mutation check: drop the marker check in main().
+        self.st.publish(None)
+        (self.st.root / "compact-in-progress.json").write_text("{}")
+        out = self.st.run()
+        self.assertEqual(self.st.requests, 0)
+        self.assertEqual(self.st.restarts, 0)
+        self.assertTrue(any("compaction in progress" in l for l in out), out)
 
     def test_the_request_cooldown_limits_requests(self):
         self.st.publish(None)

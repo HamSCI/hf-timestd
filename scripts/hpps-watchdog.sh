@@ -41,6 +41,9 @@
 #   HPPS_RECORDER_STATUS_MAX_AGE_S - older than this, the status file no
 #                               longer speaks for a live recorder, and its
 #                               refusal record holds off nothing (default 120)
+#   HPPS_COMPACT_MARKER       - sigmond's compaction marker; while it
+#                               exists this script files no request
+#                               (default /run/sigmond/compact-in-progress.json)
 #
 # Exit codes:
 #   0 - HPPS healthy, OR request filed, OR cooldown active
@@ -60,6 +63,7 @@ WITHDRAWN_FILE="$STATE_DIR/hpps-watchdog-withdrawn-since"
 RECORDER_STATUS_FILE="${HPPS_RECORDER_STATUS_FILE:-/var/lib/timestd/status/core-recorder-status.json}"
 RECORDER_STATUS_MAX_AGE_S="${HPPS_RECORDER_STATUS_MAX_AGE_S:-120}"
 REFUSAL_FILE="$STATE_DIR/hpps-watchdog-refusal-since"
+COMPACT_MARKER="${HPPS_COMPACT_MARKER:-/run/sigmond/compact-in-progress.json}"
 LOG_TAG="hpps-watchdog"
 
 log() { logger -t "$LOG_TAG" -- "$@"; echo "[$LOG_TAG] $*"; }
@@ -211,6 +215,12 @@ record_request() {
 
 main() {
     local lastrx
+    # `smd storage compact --apply` stops the recorder on purpose; a dark
+    # HPPS then says nothing about the recorder's health.
+    if [ -e "$COMPACT_MARKER" ]; then
+        log "sigmond compaction in progress ($COMPACT_MARKER); no check this run"
+        return 0
+    fi
     lastrx="$(lastrx_seconds)" || {
         log "chronyc query failed; exiting cleanly so timer retries"
         return 1

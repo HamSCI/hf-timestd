@@ -20,7 +20,13 @@
 #          a hung loop, and the state file this once read belongs to fusion
 #
 # If a service is running but has stopped processing beyond the threshold,
-# the watchdog restarts it. This catches "zombie" services that appear
+# the watchdog restarts it.  Two guards hold every restart back:
+#   - while sigmond's compaction marker ($COMPACT_MARKER) stands, the pass
+#     does nothing: compaction stopped these units on purpose;
+#   - while timestd-core-recorder is not active, metrology and fusion are
+#     reported, not revived: metrology Requires= the recorder, so its start
+#     would pull back a recorder an operator, sigmond-recorder-watchdog or
+#     sigmond-sdr-recover chose to keep down. This catches "zombie" services that appear
 # healthy to systemd but have stopped doing work.  A service that processes
 # every minute and detects nothing is healthy; the ionosphere is not a fault.
 #
@@ -39,6 +45,11 @@ LOG_TAG="timestd-watchdog"
 DRY_RUN=false
 
 [[ "${1:-}" == "--dry-run" ]] && DRY_RUN=true
+
+# sigmond writes this marker while `smd storage compact --apply` has the
+# database's holders stopped; a restart then would write into the file the swap
+# replaces.
+COMPACT_MARKER="${COMPACT_MARKER:-/run/sigmond/compact-in-progress.json}"
 
 # ── Helpers ──
 log_info()  { logger -t "$LOG_TAG" -p user.info  "$*"; }
@@ -331,12 +342,24 @@ check_recorder() {
     fi
 }
 
+# True while timestd-core-recorder runs.  Metrology Requires= the recorder, so
+# starting metrology while the recorder is down starts the recorder too; only
+# sigmond-recorder-watchdog and systemd may do that.
+RECORDER_UNIT="timestd-core-recorder.service"
+recorder_up() {
+    if is_active "$RECORDER_UNIT"; then return 0; fi
+    log_warn "NOT reviving $1: $RECORDER_UNIT is not active (reported only)"
+    echo "[SKIP] $1: $RECORDER_UNIT not active"
+    return 1
+}
+
 # ==========================================================================
 # Check 2: Metrology Workers
 # ==========================================================================
 check_metrology() {
     local phase2="$DATA_ROOT/phase2"
     if [[ ! -d "$phase2" ]]; then return; fi
+    recorder_up "metrology" || return
 
     # Clear stale target failed state
     if systemctl is-failed --quiet timestd-metrology.target 2>/dev/null; then
@@ -408,6 +431,7 @@ check_metrology() {
 check_fusion() {
     local unit="timestd-fusion.service"
     if ! is_enabled "$unit"; then return; fi
+    recorder_up "$unit" || return
 
     if ! is_active "$unit"; then
         do_restart "$unit" "not running but enabled"
@@ -491,6 +515,12 @@ check_calibration() {
 # ==========================================================================
 # Run all checks
 # ==========================================================================
+if [[ -e "$COMPACT_MARKER" ]]; then
+    log_info "sigmond compaction in progress ($COMPACT_MARKER): no checks, no restarts this pass"
+    echo "[SKIP] compaction in progress: no checks this pass"
+    exit 0
+fi
+
 check_recorder
 check_metrology
 check_fusion
