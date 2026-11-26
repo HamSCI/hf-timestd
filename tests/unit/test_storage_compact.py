@@ -250,3 +250,63 @@ def test_estimate_opens_read_only_in_a_directory_it_cannot_write(tmp_path):
     finally:
         os.chmod(db.parent, 0o755)
     assert e["live_bytes"] > 0 and "reason" in e
+
+
+def test_swap_fsyncs_the_copy_then_replaces_then_syncs_the_directory(tmp_path, monkeypatch):
+    db = _big_db(tmp_path)
+    storage_compact.prepare(db, margin_bytes=0)
+    calls = []
+    real_fsync, real_replace = os.fsync, os.replace
+    monkeypatch.setattr(storage_compact.os, "fsync", lambda fd: (
+        calls.append("fsync-dir" if stat_isdir(fd) else "fsync-file"), real_fsync(fd))[1])
+    monkeypatch.setattr(storage_compact.os, "replace", lambda a, b: (
+        calls.append("replace"), real_replace(a, b))[1])
+    assert storage_compact.swap(db, proc_root=_empty_proc(tmp_path))["refused"] is False
+    assert calls == ["fsync-file", "replace", "fsync-dir"]
+
+
+def stat_isdir(fd):
+    import stat as _s
+    return _s.S_ISDIR(os.fstat(fd).st_mode)
+
+
+def _swap_refused_and_untouched(db, tmp_path, why):
+    before = db.read_bytes()
+    a = storage_compact.swap(db, proc_root=_empty_proc(tmp_path))
+    assert a["refused"] is True and why in a["reason"], a
+    assert db.read_bytes() == before
+    assert Path(f"{db}.compact").exists() and Path(f"{db}.compact.json").exists()
+
+
+def test_swap_refuses_when_a_column_was_added_since_prepare(tmp_path):
+    db = _big_db(tmp_path)
+    storage_compact.prepare(db, margin_bytes=0)
+    con = sqlite3.connect(db)
+    con.execute("ALTER TABLE L2_tick_phase ADD COLUMN extra TEXT")
+    con.commit()
+    con.close()
+    _swap_refused_and_untouched(db, tmp_path, "changed since prepare")
+
+
+def test_swap_refuses_when_a_table_was_rebuilt_since_prepare(tmp_path):
+    db = _big_db(tmp_path)
+    storage_compact.prepare(db, margin_bytes=0)
+    con = sqlite3.connect(db)
+    con.executescript("""
+        CREATE TABLE new_t (id INTEGER PRIMARY KEY, v TEXT NOT NULL);
+        INSERT INTO new_t (v) SELECT v FROM L2_tick_phase;
+        DROP TABLE L2_tick_phase;
+        ALTER TABLE new_t RENAME TO L2_tick_phase;""")
+    con.commit()
+    con.close()
+    _swap_refused_and_untouched(db, tmp_path, "changed since prepare")
+
+
+def test_swap_refuses_when_an_index_was_added_since_prepare(tmp_path):
+    db = _big_db(tmp_path)
+    storage_compact.prepare(db, margin_bytes=0)
+    con = sqlite3.connect(db)
+    con.execute("CREATE INDEX ix_v ON L2_tick_phase (v)")
+    con.commit()
+    con.close()
+    _swap_refused_and_untouched(db, tmp_path, "added to an existing table")

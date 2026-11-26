@@ -233,6 +233,39 @@ def _columns(con: sqlite3.Connection, schema: str, table: str) -> Tuple[List[str
     return cols, alias
 
 
+def _schema_difference(con: sqlite3.Connection) -> str:
+    """Why the copy's schema no longer matches the live file's, or ''.
+
+    The catch-up keys on rowid and copies shared columns, so any change since
+    prepare (an added column, a table rebuild that renumbers rowids) would lose
+    rows silently.  A table or index only in the live file is allowed when its
+    table is new (the catch-up creates it).
+    """
+    def schema(name):
+        return {(r[0], r[1]): (r[2], r[3]) for r in con.execute(
+            f"SELECT type, name, tbl_name, sql FROM {name}.sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' AND sql IS NOT NULL").fetchall()}
+    mine, live = schema("main"), schema("live")
+    copy_tables = {k[1] for k in mine if k[0] == "table"}
+    for key in sorted(set(mine) | set(live)):
+        if key in mine and key in live:
+            if mine[key][1] != live[key][1]:
+                return f"schema of {key[0]} {key[1]} changed since prepare"
+        elif key in mine:
+            return f"{key[0]} {key[1]} was dropped since prepare"
+        elif live[key][0] in copy_tables:
+            return f"{key[0]} {key[1]} was added to an existing table since prepare"
+    return ""
+
+
+def _fsync_path(path, flags=os.O_RDONLY) -> None:
+    fd = os.open(path, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def _catch_up(con: sqlite3.Connection, marks: Dict[str, int]) -> Dict[str, int]:
     caught: Dict[str, int] = {}
     have = set(_tables(con, "main"))
@@ -292,6 +325,9 @@ def swap(db: Path, *, max_age_s: int = 86400, proc_root: Path = Path("/proc"),
         try:
             con.execute("ATTACH DATABASE ? AS live", (str(db),))
             was = con.execute("PRAGMA live.journal_mode").fetchall()[0][0]
+            why = _schema_difference(con)
+            if why:
+                return refuse(why)
             con.execute("BEGIN IMMEDIATE")
             caught = _catch_up(con, marks)
             con.execute("COMMIT")
@@ -312,7 +348,9 @@ def swap(db: Path, *, max_age_s: int = 86400, proc_root: Path = Path("/proc"),
             lv.close()
         _unlink(f"{db}-wal")
         _unlink(f"{db}-shm")
+        _fsync_path(copy)  # VACUUM INTO does not sync its output
         os.replace(copy, db)
+        _fsync_path(db.parent)
         os.chmod(db, stat.S_IMODE(old.st_mode))
         st = db.stat()
         if (st.st_uid, st.st_gid) != (old.st_uid, old.st_gid):
