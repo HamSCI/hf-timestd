@@ -39,7 +39,8 @@ from typing import Optional, Dict, Any, List, Tuple
 from dataclasses import dataclass, field
 
 from . import f16_check
-from .chunk_segments import SegmentJoiner, chunk_stem, join_metadata, parse_chunk_name
+from .chunk_segments import (SegmentJoiner, chunk_stem, join_metadata, parse_chunk_name,
+                             runs_from_mask)
 from .iq_codec import (DTYPE_F16, DTYPE_F32, F16_SCALE, F16Overflow, bytes_per_sample,
                        decode_iq, iter_f16_blocks)
 
@@ -219,6 +220,24 @@ class MinuteBuffer:
     # "first_sample" (the resequencer's delivered_rtp_start), "last_packet"
     # (the pre-3.21 ka9q-python fallback), or "mixed".
     batch_label: Optional[str] = None
+
+    # Positions holding ka9q-python's zero gap fill, as [start, end) runs in
+    # chunk sample positions.  Every fill position is also in covered_runs.
+    fill_runs: List[List[int]] = field(default_factory=list)
+
+    def note_fill(self, start: int, mask: np.ndarray) -> int:
+        """Record the True runs of ``mask``, placed at ``start``, as fill.
+
+        A run that continues the last one merges into it.  Returns the
+        number of positions added."""
+        added = 0
+        for a, b in runs_from_mask(mask, start):
+            if self.fill_runs and self.fill_runs[-1][1] == a:
+                self.fill_runs[-1][1] = b
+            else:
+                self.fill_runs.append([a, b])
+            added += b - a
+        return added
 
     def free_spans(self, start: int, end: int) -> List[tuple]:
         """The parts of [start, end) not yet written, in order."""
@@ -430,6 +449,7 @@ class BinaryArchiveWriter:
         self.samples_written = 0
         self.total_gaps = 0
         self.write_errors = 0
+        self.fill_samples = 0  # Zero gap-fill positions stored (sidecar fill_runs)
         self.stale_drops = 0  # Samples dropped by the split detector (BACKLOG verdicts)
         self.timing_drops = 0  # Samples dropped waiting for GPS_TIME
         self.anchor_fault_events = 0  # Split-detector ANCHOR FAULT classifications (data kept)
@@ -1637,12 +1657,18 @@ class BinaryArchiveWriter:
                 'completeness_pct': 100.0 * actual_samples / self.samples_per_chunk,
                 'gap_count': buffer.gap_count,
                 'gap_samples': buffer.gap_samples,
+                # The archive stores ka9q-python's gap fill as the zeros it
+                # received; fill_runs names where they lie.
+                'gap_fill': 'zeros',
+                'fill_runs': [list(r) for r in buffer.fill_runs],
                 # Coverage.  samples_written above is the highest position
                 # written (the bin's length), and completeness_pct follows
                 # it; these count what inside it the writer actually wrote.
-                # samples_covered includes gap fills (gap_samples: zeros, or
-                # interpolation for runs up to 1000 samples), so received
-                # samples = samples_covered - gap_samples.  hole_* covers
+                # samples_covered includes the fill, and fill_runs names
+                # where it lies, so received samples = samples_covered
+                # minus the fill count (the sum of fill_runs).  gap_samples
+                # stays what ka9q-python reported, so the two can differ.
+                # hole_* covers
                 # [0, samples_written) only: a short tail already shows as
                 # samples_written < samples_expected.
                 'samples_covered': buffer.samples_covered,
@@ -1792,84 +1818,6 @@ class BinaryArchiveWriter:
             rtp_delta -= 0x100000000
         
         return self._gps_time_unix + rtp_delta / self.config.sample_rate
-    
-    def _interpolate_gaps(self, samples: np.ndarray) -> np.ndarray:
-        """
-        Replace zero-filled gaps with phase-continuous interpolation.
-        
-        ka9q-python fills gaps with zeros which breaks phase continuity.
-        This method detects zero runs and replaces them with samples that
-        maintain phase continuity from the surrounding valid samples.
-        
-        Args:
-            samples: Complex64 samples potentially containing zero-filled gaps
-            
-        Returns:
-            Samples with gaps interpolated to preserve phase continuity
-        """
-        # Find zero samples (gap fills from ka9q-python)
-        # ka9q-python fills gaps with exact numpy zeros, so exact comparison is safe and much faster than np.abs()
-        zero_mask = samples == 0
-        
-        if not np.any(zero_mask):
-            return samples  # No gaps to interpolate
-        
-        # Make a copy to modify
-        result = samples.copy()
-        
-        # Find runs of zeros
-        # Pad with False to detect edges at boundaries
-        padded = np.concatenate([[False], zero_mask, [False]])
-        diff = np.diff(padded.astype(int))
-        starts = np.where(diff == 1)[0]
-        ends = np.where(diff == -1)[0]
-        
-        for start, end in zip(starts, ends):
-            gap_len = end - start
-            
-            # Do not interpolate massive gaps (e.g. dropped network connection).
-            # Interpolating > 1000 samples (~40ms) is mathematically meaningless
-            # for a 24kHz RF signal and causes huge CPU spikes.
-            if gap_len > 1000:
-                continue
-                
-            # Get samples before and after gap
-            before_idx = start - 1 if start > 0 else None
-            after_idx = end if end < len(samples) else None
-            
-            if before_idx is not None and after_idx is not None:
-                before_sample = samples[before_idx]
-                after_sample = samples[after_idx]
-
-                if np.abs(before_sample) > 1e-10 and np.abs(after_sample) > 1e-10:
-                    before_phase = np.angle(before_sample)
-                    after_phase = np.angle(after_sample)
-                    before_amp = np.abs(before_sample)
-                    after_amp = np.abs(after_sample)
-
-                    phase_diff = after_phase - before_phase
-                    if phase_diff > np.pi:
-                        phase_diff -= 2 * np.pi
-                    elif phase_diff < -np.pi:
-                        phase_diff += 2 * np.pi
-
-                    # Vectorized: compute all interpolated samples at once
-                    t = np.linspace(1, gap_len, gap_len, dtype=np.float32) / (gap_len + 1)
-                    interp_phase = before_phase + t * phase_diff
-                    interp_amp = before_amp + t * (after_amp - before_amp)
-                    result[start:end] = interp_amp * np.exp(1j * interp_phase)
-
-            elif before_idx is not None:
-                before_sample = samples[before_idx]
-                if np.abs(before_sample) > 1e-10:
-                    result[start:end] = before_sample
-
-            elif after_idx is not None:
-                after_sample = samples[after_idx]
-                if np.abs(after_sample) > 1e-10:
-                    result[start:end] = after_sample
-        
-        return result
     
     def write_samples(
         self,
@@ -2229,21 +2177,19 @@ class BinaryArchiveWriter:
 
         ``fill_mask`` marks the zero-filled positions of ``samples`` and
         is passed only when this call writes the remainder of a batch
-        split at a chunk end: the batch was interpolated already, and the
-        mask tells this chunk which share of the gap fill it holds.
+        split at a chunk end: the mask tells this chunk which share of the
+        gap fill it holds.
         """
         # Ensure complex64
         if samples.dtype != np.complex64:
             samples = samples.astype(np.complex64)
         
-        # Phase-preserving gap interpolation
-        # ka9q-python fills gaps with exact zeros which breaks phase continuity.
-        # Only scan for gaps if the stream told us it inserted some.  The
+        # ka9q-python fills gaps with exact zeros; the archive keeps them and
+        # marks where they lie (fill_runs).  Only scan for gaps if the stream told us it inserted some.  The
         # zero mask, taken first, says where the fill lies, so a batch split
         # across two chunks gives each chunk its own share of the gap.
         if fill_mask is None and gap_samples > 0:
             fill_mask = samples == 0
-            samples = self._interpolate_gaps(samples)
         
         # Determine which chunk this belongs to FROM RTP TIMESTAMP (GPSDO-disciplined)
         # This avoids wall clock jitter from NTP/chrony adjustments.
@@ -2329,6 +2275,9 @@ class BinaryArchiveWriter:
             for a, b in buffer.free_spans(sample_position, end):
                 buffer.samples[a:b] = samples[a - sample_position:b - sample_position]
                 buffer.note_written(a, b)
+                if fill_mask is not None:
+                    self.fill_samples += buffer.note_fill(
+                        a, fill_mask[a - sample_position:b - sample_position])
                 overlap -= b - a
                 self.samples_written += b - a
             if overlap:
@@ -2441,6 +2390,7 @@ class BinaryArchiveWriter:
             'label_discontinuities': self.label_discontinuities,
             'unplaced_samples': self.unplaced_samples,
             'overlap_samples': self.overlap_samples,
+            'fill_samples': self.fill_samples,
             'dropped_before_start': self.dropped_before_start,
             'held_samples': self._held_n,
             'abandoned_chunks': self.abandoned_chunks,

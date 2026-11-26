@@ -103,9 +103,11 @@ def test_split_batch_leaves_its_tail_fill_to_the_next_chunk(tmp_path):
     assert side0["gap_samples"] == 0 and side0["gap_count"] == 0
     assert side1["gap_samples"] == 1200 and side1["gap_count"] == 1
     assert np.count_nonzero(d1 == 0) == 1200
+    assert side0["fill_runs"] == []
+    assert side1["fill_runs"] == [[100, 1300]]
 
 
-def test_split_batch_with_fill_on_both_sides_divides_it(tmp_path):
+def test_fill_runs_split_across_chunk_end(tmp_path):
     w = _writer(tmp_path, dur=30)
     spc = w.samples_per_chunk
     base = 300 * SR
@@ -117,6 +119,69 @@ def test_split_batch_with_fill_on_both_sides_divides_it(tmp_path):
     (_, _, side0), (_, _, side1) = _drain(w)
     assert (side0["gap_samples"], side0["gap_count"]) == (1200, 1)
     assert (side1["gap_samples"], side1["gap_count"]) == (1200, 1)
+    assert side0["fill_runs"] == [[spc - 1900, spc - 700]]
+    assert side1["fill_runs"] == [[500, 1700]]
+
+
+def test_gap_fill_stays_zero_in_the_archive(tmp_path):
+    w = _writer(tmp_path, dur=30)
+    base = 300 * SR
+    x = _ramp(1000); x[400:600] = 0
+    w.write_samples(x, base, gap_samples=200)        # a short run the writer used to bridge
+    ((_, d, side),) = _drain(w)
+    assert np.all(d[400:600] == 0)
+    assert side["gap_fill"] == "zeros"
+    assert side["fill_runs"] == [[400, 600]]
+    assert w.get_stats()["fill_samples"] == 200
+
+
+def test_zero_without_a_reported_gap_is_not_fill(tmp_path):
+    w = _writer(tmp_path, dur=30)
+    base = 300 * SR
+    x = _ramp(1000); x[5] = 0
+    w.write_samples(x, base, gap_samples=0)
+    ((_, d, side),) = _drain(w)
+    assert side["fill_runs"] == []
+    assert w.get_stats()["fill_samples"] == 0
+
+
+def test_fill_at_positions_already_written_is_not_marked(tmp_path):
+    w = _writer(tmp_path, dur=30)
+    base = 300 * SR
+    w.write_samples(_ramp(1000), base)
+    x = _ramp(200, start=5000); x[50:150] = 0        # labelled over [500, 700)
+    w.write_samples(x, base + 500, gap_samples=100)
+    ((_, d, side),) = _drain(w)
+    assert side["fill_runs"] == []
+    assert side["overlap_samples"] == 200
+    assert w.get_stats()["fill_samples"] == 0
+
+
+def test_fill_marks_only_the_positions_this_batch_wrote(tmp_path):
+    w = _writer(tmp_path, dur=30)
+    base = 300 * SR
+    w.write_samples(_ramp(1000), base)
+    x = _ramp(200, start=5000); x[50:150] = 0        # labelled over [900, 1100), zeros at [950, 1050)
+    w.write_samples(x, base + 900, gap_samples=100)
+    ((_, d, side),) = _drain(w)
+    assert side["fill_runs"] == [[1000, 1050]]
+    assert w.get_stats()["fill_samples"] == 50
+
+
+def test_fill_positions_are_covered_and_survive_a_join(tmp_path):
+    from hf_timestd.core.chunk_segments import join_metadata, fill_mask
+    w = _writer(tmp_path, dur=30)
+    base = 300 * SR
+    x = _ramp(1000); x[400:600] = 0
+    w.write_samples(x, base, gap_samples=200)
+    ((_, d, side),) = _drain(w)
+    assert any(a <= 400 and b >= 600 for a, b in side["covered_runs"])
+    later = {"sample_rate": side["sample_rate"], "gap_samples": 0,
+             "covered_runs": [[1000, 1200]], "fill_runs": []}
+    joined = join_metadata([(1, side), (2, later)])
+    assert joined["fill_runs"] == [[400, 600]]
+    m = fill_mask(len(d), joined)
+    assert m.sum() == 200 and m[400:600].all()
 
 
 # ------------------------------------------------------------ I2: pair age
