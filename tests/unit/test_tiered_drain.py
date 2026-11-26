@@ -154,3 +154,22 @@ def test_failed_drain_logs_error_naming_root_and_count(monkeypatch, tmp_path, ca
     assert errs
     msg = errs[0].getMessage()
     assert str(hot / "raw_buffer") in msg and "2 finished chunk stem" in msg
+
+
+def test_drain_sweeps_stale_staging_files_it_created(tmp_path):
+    """Minor B: a drain that ran out of disk mid-copy strands <name>.drain.
+    The next start removes it, and only names the drain itself creates."""
+    hot, cold = tmp_path / "hot", tmp_path / "cold"
+    cold_day = cold / "chan" / "20261111"
+    cold_day.mkdir(parents=True)
+    stale = [cold_day / "100.bin.zst.drain", cold_day / "100.json.drain",
+             cold_day / "200.seg2.bin.zst.drain"]
+    keep = [cold_day / "notes.drain", cold_day / "300.bin.zst", cold_day / "400.scratch"]
+    for f in stale + keep:
+        f.write_bytes(b"x")
+    _chunk(hot / "chan" / "20261111", "500")
+    r = drain_hot_buffer(hot, cold)
+    assert (r.moved, r.refused) == (1, 0)
+    assert not any(f.exists() for f in stale)
+    assert all(f.exists() for f in keep)
+    assert (cold_day / "500.bin.zst").exists()

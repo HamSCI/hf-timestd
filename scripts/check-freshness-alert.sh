@@ -9,7 +9,6 @@ set -e
 
 # Configuration
 DATA_ROOT="/var/lib/timestd"
-HOT_BUFFER="/dev/shm/timestd/raw_buffer"
 MAX_RAW_STALE_SECONDS=600      # raw buffer freshness (core-recorder)
 MAX_FUSION_STALE_SECONDS=300   # fusion writes every ~8s to 60s cadence
 MAX_PHYSICS_STALE_SECONDS=900  # physics products update roughly every minute
@@ -108,12 +107,9 @@ clear_alert() {
     fi
 }
 
-# Determine which buffer to check
-if [ -d "$HOT_BUFFER" ]; then
-    SEARCH_PATH="$HOT_BUFFER"
-else
-    SEARCH_PATH="$DATA_ROOT/raw_buffer"
-fi
+# Since v3.96 every finished chunk lands in the on-disk raw_buffer.  /dev/shm
+# holds only the open chunk's .scratch file, so never look there.
+SEARCH_PATH="$DATA_ROOT/raw_buffer"
 
 if [ ! -d "$SEARCH_PATH" ]; then
     log "ERROR: Buffer directory not found: $SEARCH_PATH"
@@ -124,12 +120,12 @@ fi
 TODAY=$(date -u +%Y%m%d)
 YESTERDAY=$(date -u -d "yesterday" +%Y%m%d 2>/dev/null || date -u -v-1d +%Y%m%d)
 
-LATEST_FILE=$(find "$SEARCH_PATH" \( -path "*/$TODAY/*.bin*" -o -path "*/$YESTERDAY/*.bin*" \) \
+LATEST_FILE=$(find "$SEARCH_PATH" \( -path "*/$TODAY/*.bin.zst" -o -path "*/$YESTERDAY/*.bin.zst" \) \
     -type f -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
 
 if [ -z "$LATEST_FILE" ]; then
     send_alert "No raw buffer files found" \
-        "No .bin files found in $SEARCH_PATH for $TODAY or $YESTERDAY. Pipeline may be completely down."
+        "No finished chunk files found in $SEARCH_PATH for $TODAY or $YESTERDAY. Pipeline may be completely down."
     exit 1
 fi
 

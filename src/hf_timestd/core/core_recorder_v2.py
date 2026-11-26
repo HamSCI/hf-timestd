@@ -1211,7 +1211,8 @@ class CoreRecorderV2:
             return
         if result.refused:
             logger.warning(
-                "Hot buffer drain: moved %d chunk stem(s), refused %d (left in RAM)",
+                "Hot buffer drain: moved %d chunk stem(s), refused %d "
+                "(the RAM files of a refused stem stay; its sidecar may already be on disk)",
                 result.moved, result.refused)
         else:
             logger.info("Hot buffer drain: moved %d chunk stem(s), refused 0", result.moved)

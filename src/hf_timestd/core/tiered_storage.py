@@ -66,10 +66,31 @@ def pending_stems(hot_root: Path) -> int:
     return n
 
 
+def sweep_stale_staging(cold_root: Path) -> int:
+    """Remove ``<chunk name>.drain`` files an earlier drain left on disk.
+
+    A drain that hit a full disk mid-copy, or died between its copy and its
+    link, strands its staging file.  Nothing else reads that name.  The sweep
+    removes only names the drain itself creates: a parsed chunk name plus
+    ``.drain``.  The RAM source stays intact in every such case."""
+    removed = 0
+    for f in Path(cold_root).glob('*/*/*.drain'):
+        if parse_chunk_name(f.name[:-len('.drain')]) is None or not f.is_file():
+            continue
+        try:
+            f.unlink()
+            removed += 1
+            logger.warning("drain: removed stale staging file %s", f)
+        except OSError as e:
+            logger.warning("drain: could not remove stale staging file %s: %s", f, e)
+    return removed
+
+
 def drain_hot_buffer(hot_root: Path, cold_root: Path) -> DrainResult:
     """Move every chunk file under hot_root to the same path under cold_root."""
     moved = refused = 0
     hot_root, cold_root = Path(hot_root), Path(cold_root)
+    sweep_stale_staging(cold_root)
     if not hot_root.is_dir():
         return DrainResult(0, 0)
     for channel_dir in sorted(p for p in hot_root.iterdir() if p.is_dir()):

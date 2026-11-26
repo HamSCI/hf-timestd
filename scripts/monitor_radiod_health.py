@@ -204,6 +204,12 @@ def check_radiod_connectivity():
         return None
 
 
+# Since v3.96 the recorder writes every finished chunk straight to
+# <data_root>/raw_buffer on disk.  /dev/shm holds only the open chunk's
+# .scratch file, so this check never looks there.
+RAW_BUFFER_DIR = Path('/var/lib/timestd/raw_buffer')
+
+
 def check_data_flow(state_file: Path) -> dict:
     """Check if data is flowing by verifying raw buffer files are being written.
     
@@ -214,15 +220,11 @@ def check_data_flow(state_file: Path) -> dict:
         dict with 'flowing', 'latest_file_age', 'error'
     """
     try:
-        # Check hot buffer for recent files
-        hot_buffer = Path('/dev/shm/timestd/raw_buffer')
-        cold_buffer = Path('/var/lib/timestd/raw_buffer')
-        
-        search_path = hot_buffer if hot_buffer.exists() else cold_buffer
+        search_path = RAW_BUFFER_DIR
         if not search_path.exists():
             return {'flowing': None, 'error': 'No raw buffer directory'}
         
-        # Find most recent .bin file
+        # Find most recent finished chunk (*.bin.zst)
         from datetime import timedelta
         now = datetime.now(timezone.utc)
         dates_to_check = [
@@ -240,7 +242,7 @@ def check_data_flow(state_file: Path) -> dict:
                 day_dir = channel_dir / date_str
                 if not day_dir.exists():
                     continue
-                for f in day_dir.glob('*.bin*'):
+                for f in day_dir.glob('*.bin.zst'):
                     try:
                         mtime = f.stat().st_mtime
                         if mtime > latest_mtime:

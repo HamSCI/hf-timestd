@@ -1436,6 +1436,8 @@ class BinaryArchiveWriter:
     def _cleanup_partial_write(self, *paths: Path) -> None:
         """Clean up partial files after a failed write."""
         for path in paths:
+            if path is None:
+                continue
             try:
                 if path.exists():
                     path.unlink()
@@ -1542,6 +1544,7 @@ class BinaryArchiveWriter:
         bin_path = None
         json_path = None
         temp_json = None
+        bin_path_tmp = None
         
         try:
             minute_dir = self._get_minute_dir(buffer.minute_boundary)
@@ -1658,7 +1661,10 @@ class BinaryArchiveWriter:
                 'gap_count': buffer.gap_count,
                 'gap_samples': buffer.gap_samples,
                 # The archive stores ka9q-python's gap fill as the zeros it
-                # received; fill_runs names where they lie.
+                # received; fill_runs names where they lie.  Known limit
+                # (Ruling F1): inside a batch that reports a gap, a sample
+                # the radio really received as exact zero also lands in
+                # fill_runs.  GRAPE counts those positions as lost.
                 'gap_fill': 'zeros',
                 'fill_runs': [list(r) for r in buffer.fill_runs],
                 # Coverage.  samples_written above is the highest position
@@ -1788,13 +1794,15 @@ class BinaryArchiveWriter:
             else:
                 logger.error(f"OS error writing minute {buffer.minute_boundary}: {e}")
             # Clean up any partial files
-            self._cleanup_partial_write(bin_path, json_path, temp_json)
+            # The compressed temp file holds SSD space on a full disk too.
+            self._cleanup_partial_write(bin_path, json_path, temp_json, bin_path_tmp)
             self.write_errors += 1
             return False
         except Exception as e:
             logger.error(f"Failed to write minute {buffer.minute_boundary}: {e}", exc_info=True)
             # Clean up any partial files
-            self._cleanup_partial_write(bin_path, json_path, temp_json)
+            # The compressed temp file holds SSD space on a full disk too.
+            self._cleanup_partial_write(bin_path, json_path, temp_json, bin_path_tmp)
             self.write_errors += 1
             return False
     
@@ -2188,6 +2196,8 @@ class BinaryArchiveWriter:
         # marks where they lie (fill_runs).  Only scan for gaps if the stream told us it inserted some.  The
         # zero mask, taken first, says where the fill lies, so a batch split
         # across two chunks gives each chunk its own share of the gap.
+        # Ruling F1: a received sample that is exactly zero, inside a batch
+        # with a reported gap, counts as fill too.  GRAPE counts it as lost.
         if fill_mask is None and gap_samples > 0:
             fill_mask = samples == 0
         

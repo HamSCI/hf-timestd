@@ -874,3 +874,21 @@ def test_status_reports_samples_shed_by_the_split_detector(tmp_path):
     assert a["lost_by_cause"]["stale_drops"] == 80
     assert a["samples_lost"] == 80
     assert a["samples_placed"] == 0
+
+
+def test_failed_flush_leaves_no_compressed_temp_file_on_disk(tmp_path, monkeypatch):
+    """Minor A: a flush that fails after the compressed temp file exists
+    (disk full while the sidecar is written) must remove that temp file."""
+    import errno
+    from hf_timestd.core import binary_archive_writer as baw
+    w = _writer(tmp_path)
+    w.config.compression = "zstd"
+    w.write_samples(_ramp(300), 30 * SR)
+    buf = w.current_buffer
+
+    def full(*a, **k):
+        raise OSError(errno.ENOSPC, "No space left on device")
+    monkeypatch.setattr(baw.json, "dump", full)
+    assert w._flush_minute(buf) is False
+    left = [p.name for p in (tmp_path / "raw_buffer").rglob("*") if p.is_file()]
+    assert not [n for n in left if n.endswith(".tmp") or ".bin" in n], left

@@ -343,12 +343,6 @@ if [[ -d "$RAW_BUFFER_DIR" ]]; then
     check_pass "Binary archive directory exists: $RAW_BUFFER_DIR"
     
     SEARCH_PATHS="$RAW_BUFFER_DIR"
-    # TODO(ring-buffer Phase 3): delete this hot-tier block once TieredStorageManager
-    # is retired and BinaryArchiveWriter.run_from_ring() writes only to the cold path.
-    if [[ -d "/dev/shm/timestd/raw_buffer" ]]; then
-        SEARCH_PATHS="$SEARCH_PATHS /dev/shm/timestd/raw_buffer"
-        check_pass "Hot buffer (tiered storage) exists: /dev/shm/timestd/raw_buffer"
-    fi
     
     # Cold archive writes 10-minute chunks aligned to wall clock; widen window
     # so a recent core-recorder restart doesn't trigger a false negative.
@@ -368,9 +362,9 @@ if [[ -d "$RAW_BUFFER_DIR" ]]; then
         
         # CRITICAL: Buffer alignment check (v5.3.12 fix)
         # start_system_time MUST equal minute_boundary exactly for correct timing
-        if command -v jq &>/dev/null && [[ -d "/dev/shm/timestd/raw_buffer" ]]; then
+        if command -v jq &>/dev/null && [[ -d "$RAW_BUFFER_DIR" ]]; then
             # Find a recent JSON file to check alignment
-            SAMPLE_JSON=$(find /dev/shm/timestd/raw_buffer -name "*.json" -mmin -2 2>/dev/null | head -1)
+            SAMPLE_JSON=$(find "$RAW_BUFFER_DIR" -name "*.json" -mmin -15 2>/dev/null | head -1)
             if [[ -n "$SAMPLE_JSON" ]]; then
                 MINUTE_BOUNDARY=$(jq -r '.minute_boundary' "$SAMPLE_JSON" 2>/dev/null)
                 START_SYSTEM_TIME=$(jq -r '.start_system_time' "$SAMPLE_JSON" 2>/dev/null)

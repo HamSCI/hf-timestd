@@ -226,7 +226,7 @@ def analyze_tick_correlation(iq, sample_rate=20000, freq_hz=1000.0,
 
 def main():
     # Find the most recent raw buffer
-    base = Path("/dev/shm/timestd/raw_buffer/SHARED_10000")
+    base = Path("/var/lib/timestd/raw_buffer/SHARED_10000")  # finished chunks live on disk since v3.96
     dates = sorted(base.iterdir(), reverse=True)
     
     for date_dir in dates:
