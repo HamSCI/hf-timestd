@@ -675,22 +675,30 @@ installer):** the SHM/PPS health watchdogs `timestd-clock-monitor`,
 keep the SHM feeds, IRI/space-weather data, and GRAPE uploads healthy
 independent of the active service profile.
 
-**Who restarts the recorder.** systemd and `sigmond-recorder-watchdog`
-restart `timestd-core-recorder`; no other agent does. The pipeline
+**Who restarts the recorder.** On a fault, systemd and
+`sigmond-recorder-watchdog` restart `timestd-core-recorder`; no other
+agent does. Deploy and config paths (`smd align`, `sigmond-site-timing`,
+`install.sh --restart-all`, `deploy.sh`) restart it through their own
+code, outside the watchdog's ledger. The pipeline
 watchdog, the HPPS watchdog, `sigmond-sdr-recover` and sigmond's
 radiod-consumer hook file requests in `/run/sigmond/recorder-restart`.
 The sigmond watchdog applies a 1320 s grace after a start, one
 30-minute cooldown and 6 restarts a day, and writes every restart to one
-ledger. It records an HPPS request and does not act on it.
+ledger. It records an HPPS request and does not act on it. The pipeline
+watchdog revives metrology and fusion only while the recorder runs,
+because metrology `Requires=` the recorder.
 
 **Who deletes.** sigmond's hourly `smd storage expire` asks hf-timestd
 to delete its own rows (`storage_retention.py`): science tables 30 days,
 timing tables 90 days, `authority_history` 30 days and six retired-product
 tables 30 days. `smd storage compact` (`storage_compact.py`) returns free
-pages to the disk on an operator's command. The resource guardian
-(`core/resource_guardian.py`) acts only in an emergency, at 98 % disk
-use under the ledger and 95 % on a standalone install; metrology pauses
-rather than exits. `timestd-prune` is a retired unit (`retired_units` in
+pages to the disk on an operator's command; while sigmond's compaction
+marker stands, the pipeline and HPPS watchdogs check nothing. The
+resource guardian (`core/resource_guardian.py`) acts only in an
+emergency, at 98 % disk use under the ledger and 95 % on a standalone
+install. It pauses writes at once, and metrology pauses rather than
+exits. It deletes files only after the disk stays that full for a 600 s
+grace. `timestd-prune` is a retired unit (`retired_units` in
 `deploy.toml`).
 
 ### CPU Affinity

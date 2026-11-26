@@ -196,16 +196,24 @@ its journal for the alert.
   be < `file_duration_sec` old. The service is `Type=notify` with a
   180 s systemd watchdog — if it can't get samples, systemd restarts
   it.
-- **Who restarts it**: systemd and `sigmond-recorder-watchdog` only.
+- **Who restarts it**: on a fault, systemd and `sigmond-recorder-watchdog`
+  only.  Deploy and config paths restart it through their own code,
+  outside the watchdog's ledger: `smd align`, `sigmond-site-timing` when
+  it arms the timing tiers or T6, and this repo's
+  `install.sh --restart-all` and `deploy.sh`.
   `timestd-pipeline-watchdog` and `timestd-hpps-watchdog` file a request
   in `/run/sigmond/recorder-restart` and never restart the recorder
-  themselves. The sigmond watchdog waits 1320 s after a recorder start
+  themselves.  The pipeline watchdog revives metrology and fusion only
+  while the recorder runs: metrology `Requires=` the recorder, so its
+  start would bring back a recorder someone stopped. The sigmond watchdog waits 1320 s after a recorder start
   before it judges the recorder, keeps one 30-minute cooldown and a cap
   of 6 restarts a day, and records every restart in
   `/var/lib/sigmond/recorder-restarts.jsonl`. It records an HPPS request
   and does not act on it. A restart that follows a radiod restart, and
-  systemd's own restarts, stand outside the cooldown and the cap. To see
-  why the recorder restarted, read that file.
+  systemd's own restarts, stand outside the cooldown and the cap. A
+  revival of a recorder systemd gave up on does not wait out the
+  cooldown, but counts against the cap and starts a new cooldown. To see
+  why the watchdog or systemd restarted the recorder, read that file.
 - **Common failures**: radiod connection drop, disk full on
   `/var/lib/timestd` or `/dev/shm/timestd`, ring-buffer SHM contention.
 
@@ -378,7 +386,7 @@ sudo systemctl restart timestd-fusion   # ExecStartPre clears stale SHM
 
 ### 5.2 `raw_buffer` growing without bound
 
-**Cause**: the sigmond storage ledger's hourly expire pass did not run, or the ledger holds a stop. The ledger asks hf-timestd to delete its own rows and raw chunks; sigmond deletes nothing itself.
+**Cause**: the sigmond storage ledger's hourly expire pass did not run, or the ledger holds a stop. The ledger asks hf-timestd to delete its own rows and raw chunks; sigmond deletes no client rows or files itself.
 
 **Diagnose**:
 
@@ -390,9 +398,9 @@ du -sh /var/lib/timestd/raw_buffer/*/ | sort -h | tail
 
 **Fix**: run `smd storage` to see what the ledger holds, clear a stop if one is set, then let the next hourly pass run. No `timestd-prune` timer exists; sigmond's migration retires it.
 
-**Database size**: `timestd.db` keeps science tables 30 days, timing tables 90 days, `authority_history` 30 days and six retired-product tables 30 days. A deleted row leaves free pages in the file. `smd storage compact hf-timestd timestd` returns that space. It runs as a dry run unless you add `--apply`. With `--apply` it stops the processes that hold the database, swaps in a compact copy and starts them again. An operator runs it; no timer does.
+**Database size**: `timestd.db` keeps science tables 30 days, timing tables 90 days, `authority_history` 30 days and six retired-product tables 30 days. A deleted row leaves free pages in the file. `smd storage compact hf-timestd timestd` returns that space. It runs as a dry run unless you add `--apply`. With `--apply` it stops hf-timestd's active timers and the processes that hold the database, swaps in a compact copy, and starts them all again. While it works, sigmond keeps the marker `/run/sigmond/compact-in-progress.json`, and the pipeline and HPPS watchdogs check nothing. Just before the swap replaces the file, it lists the holders again and refuses if any came back. An operator runs it; no timer does.
 
-**Emergency net**: the resource guardian inside the recorder deletes only when the disk reaches 98 % under the ledger, or 95 % on a standalone install. At that point it pauses writes and metrology pauses rather than exits.
+**Emergency net**: the resource guardian, which runs inside each metrology service, acts only when the disk reaches 98 % under the ledger, or 95 % on a standalone install. At that point it pauses writes at once, and metrology pauses rather than exits. It deletes files only if the disk stays that full for a 600 s grace.
 
 ### 5.3 HDF5 read errors in metrology
 
