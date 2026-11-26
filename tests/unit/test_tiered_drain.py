@@ -22,7 +22,7 @@ def test_drain_moves_every_chunk_regardless_of_age(tmp_path):
     for stem in (str(now), f"{now}.seg2"):
         _chunk(day, stem)
     r = drain_hot_buffer(hot, cold)
-    assert (r.moved, r.refused) == (4, 0)
+    assert (r.moved, r.refused) == (2, 0)
     for stem in (str(now), f"{now}.seg2"):
         assert (cold / "WWV_10000" / "20261125" / f"{stem}.bin.zst").exists()
         assert (cold / "WWV_10000" / "20261125" / f"{stem}.json").exists()
@@ -120,3 +120,37 @@ def test_run_does_not_drain_when_tiering_is_off(monkeypatch, tmp_path):
     monkeypatch.setattr(cr, "_initialize_channels", lambda: False)
     cr.run()
     assert calls == []
+
+
+def test_drain_keeps_the_sidecar_when_the_disk_holds_only_the_bin(tmp_path):
+    hot, cold = tmp_path / "hot", tmp_path / "cold"
+    hot_day, cold_day = hot / "chan" / "20261111", cold / "chan" / "20261111"
+    _chunk(hot_day, "100")
+    cold_day.mkdir(parents=True)
+    (cold_day / "100.bin.zst").write_bytes(b"disk")
+    r = drain_hot_buffer(hot, cold)
+    assert (r.moved, r.refused) == (0, 1)
+    assert (hot_day / "100.json").exists()
+    assert (hot_day / "100.bin.zst").read_bytes() == b"x"
+    assert not (cold_day / "100.json").exists()
+    assert (cold_day / "100.bin.zst").read_bytes() == b"disk"
+
+
+def test_failed_drain_logs_error_naming_root_and_count(monkeypatch, tmp_path, caplog):
+    import logging
+    hot = tmp_path / "shm"
+    _chunk(hot / "raw_buffer" / "chan" / "20261111", "100")
+    _chunk(hot / "raw_buffer" / "chan" / "20261111", "700")
+    cr = CoreRecorderV2.__new__(CoreRecorderV2)
+    cr.recorder_config = {"tiered_storage": True, "hot_buffer_root": str(hot)}
+    cr.output_dir = tmp_path / "disk"
+
+    def boom(h, c):
+        raise OSError("disk gone")
+    monkeypatch.setattr(tiered_storage, "drain_hot_buffer", boom)
+    with caplog.at_level(logging.ERROR):
+        cr._drain_hot_buffer()
+    errs = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert errs
+    msg = errs[0].getMessage()
+    assert str(hot / "raw_buffer") in msg and "2 finished chunk stem" in msg

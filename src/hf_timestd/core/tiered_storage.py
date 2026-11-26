@@ -32,8 +32,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class DrainResult:
-    moved: int    # chunk files moved to disk
-    refused: int  # chunk stems left in RAM because the disk already held a name
+    moved: int    # chunk stems moved to disk (a chunk = its bin and its sidecar)
+    refused: int  # chunk stems left in RAM
 
 
 def _move_without_replacing(src: Path, dest: Path) -> bool:
@@ -54,6 +54,16 @@ def _move_without_replacing(src: Path, dest: Path) -> bool:
         raise
     os.unlink(staging)
     return True
+
+
+def pending_stems(hot_root: Path) -> int:
+    """How many chunk stems still sit under hot_root."""
+    n = 0
+    for day_dir in Path(hot_root).glob('*/*'):
+        if day_dir.is_dir():
+            n += len({chunk_stem(p[0], p[1]) for p in
+                      (parse_chunk_name(f.name) for f in day_dir.iterdir()) if p})
+    return n
 
 
 def drain_hot_buffer(hot_root: Path, cold_root: Path) -> DrainResult:
@@ -85,14 +95,14 @@ def drain_hot_buffer(hot_root: Path, cold_root: Path) -> DrainResult:
                 try:
                     cold_dir.mkdir(parents=True, exist_ok=True)
                     for f in files:
-                        if _move_without_replacing(f, cold_dir / f.name):
-                            moved += 1
-                        else:
+                        if not _move_without_replacing(f, cold_dir / f.name):
                             logger.error(
                                 "drain refused: %s appeared on disk; RAM copy %s stays",
                                 cold_dir / f.name, f)
                             refused += 1
                             break
+                    else:
+                        moved += 1
                 except Exception as e:
                     logger.error("drain failed for %s: %s", day_dir / stem, e)
                     refused += 1

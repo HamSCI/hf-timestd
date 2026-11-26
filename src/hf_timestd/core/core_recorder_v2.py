@@ -1186,14 +1186,20 @@ class CoreRecorderV2:
             result = tiered_storage.drain_hot_buffer(
                 hot_root / 'raw_buffer', Path(self.output_dir) / 'raw_buffer')
         except Exception:
-            logger.exception("Hot buffer drain failed; continuing")
+            try:
+                left = tiered_storage.pending_stems(hot_root / 'raw_buffer')
+            except Exception:
+                left = 'an unknown number of'
+            logger.exception(
+                "Hot buffer drain FAILED: %s finished chunk stem(s) may remain in RAM "
+                "under %s; continuing", left, hot_root / 'raw_buffer')
             return
         if result.refused:
             logger.warning(
-                "Hot buffer drain: moved %d, refused %d (the disk already holds those names)",
+                "Hot buffer drain: moved %d chunk stem(s), refused %d (left in RAM)",
                 result.moved, result.refused)
         else:
-            logger.info("Hot buffer drain: moved %d, refused 0", result.moved)
+            logger.info("Hot buffer drain: moved %d chunk stem(s), refused 0", result.moved)
 
     def run(self):
         """Main run loop."""
