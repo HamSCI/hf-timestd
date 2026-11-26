@@ -665,7 +665,6 @@ select which of these run. The core pipeline:
 | `timestd-pipeline-watchdog.timer` | End-to-end pipeline liveness watchdog |
 | `timestd-ionex-download.timer` | IGS IONEX VTEC map download |
 | `timestd-iono-reanalysis.timer` | Periodic ionospheric reanalysis |
-| `timestd-prune.timer` | Storage retention / pruning of `timestd.db` and raw buffer |
 | `grape-daily.timer` | Daily GRAPE decimation → package → upload → spectrogram |
 
 **Housekeeping units (not profile-selected; enabled directly by the
@@ -694,7 +693,7 @@ All timestd Python services are pinned to CPUs 0-7 (`CPUAffinity=0-7` in systemd
 ### Disk Usage
 
 - **Raw Buffer:** ~2-3 GB/day/channel
-- **SQLite store (`timestd.db`):** ~50-100 MB/day (richer than CSV; pruned by `timestd-prune.timer`)
+- **SQLite store (`timestd.db`):** ~50-100 MB/day (richer than CSV; trimmed by the sigmond storage ledger)
 
 ### Failure Recovery
 

@@ -42,7 +42,6 @@ SERVICE_UNIT_MAP: Dict[str, str] = {
     # [timing.t6_pps] enabled (see active_services()): with T6 off it has
     # nothing to guard, and sigmond reads this map to decide what to enable.
     'hpps_watchdog':     'timestd-hpps-watchdog.timer',
-    'prune':             'timestd-prune.timer',
 }
 
 # All known service keys (sorted for stable output)
@@ -56,26 +55,25 @@ ALL_SERVICES = sorted(SERVICE_UNIT_MAP.keys())
 _ALWAYS_ON = {'core_recorder'}
 
 PROFILES: Dict[str, Set[str]] = {
-    'archive': _ALWAYS_ON | {'prune'},
+    'archive': _ALWAYS_ON,
 
     'rtp': _ALWAYS_ON | {
         'radiod_monitor', 'pipeline_watchdog',
         'hpps_watchdog',  # gated by [timing.t6_pps].enabled
-        'prune',
     },
 
     'fusion': _ALWAYS_ON | {
         'metrology', 'l2_calibration', 'fusion',
         'radiod_monitor', 'pipeline_watchdog',
         'hpps_watchdog',  # gated by [timing.t6_pps].enabled
-        'chrony_monitor', 'prune',
+        'chrony_monitor',
     },
 
     'full': _ALWAYS_ON | {
         'metrology', 'l2_calibration', 'fusion',
         'radiod_monitor', 'pipeline_watchdog',
         'hpps_watchdog',  # gated by [timing.t6_pps].enabled
-        'chrony_monitor', 'prune',
+        'chrony_monitor',
     },
 }
 

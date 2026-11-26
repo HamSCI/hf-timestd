@@ -97,7 +97,6 @@ Profile: full
   l2_calibration              on  active(running) timestd-l2-calibration.service
   metrology                   on  active(active) timestd-metrology.target
   pipeline_watchdog           on  active(waiting) timestd-pipeline-watchdog.timer
-  prune                       on  active(waiting) timestd-prune.timer
   radiod_monitor              on  active(running) timestd-radiod-monitor.service
   vtec                        on  active(running) timestd-vtec.service
 ```

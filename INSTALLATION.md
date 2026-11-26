@@ -48,44 +48,7 @@ The system generates substantial data. **The minimum practical installation requ
 
 #### Storage retention configuration
 
-The nightly prune timer (`timestd-prune.timer`, runs at 03:00 UTC) manages retention automatically. The default retention policy keeps derived products for the same number of days as the raw buffer, since **all L1/L2 derived products can be reconstructed from the raw IQ data**. Only L3 science outputs (dtec, tec) are kept longer as the final irreducible product.
-
-Default retention (sufficient for disks that comfortably hold 3+ days of data per channel):
-```
-RAW_BUFFER_DAYS=3        # and all derived products
-SCIENCE_DTEC_TS_DAYS=7
-SCIENCE_DTEC_DAYS=30
-SCIENCE_TEC_DAYS=90
-```
-
-For smaller disks, create `/etc/hf-timestd/prune.conf` with tighter values. Example for a 120 GB disk with 9 channels (`RAW_BUFFER_DAYS=1` is the minimum safe value):
-```bash
-# /etc/hf-timestd/prune.conf — tight retention for small disk
-RAW_BUFFER_DAYS=1
-ALL_ARRIVALS_DAYS=1
-TICK_PHASE_DAYS=1
-L1_DAYS=1
-L2_DAYS=1
-SCIENCE_DTEC_TS_DAYS=3
-SCIENCE_DTEC_DAYS=15
-SCIENCE_TEC_DAYS=30
-DISK_WARN_PCT=80
-DISK_CRIT_PCT=88
-```
-
-On constrained disks also change the prune timer to run hourly rather than daily, since the disk can fill within a single day:
-```bash
-sudo mkdir -p /etc/systemd/system/timestd-prune.timer.d
-sudo tee /etc/systemd/system/timestd-prune.timer.d/override.conf <<EOF
-[Timer]
-OnCalendar=
-OnCalendar=hourly
-RandomizedDelaySec=120
-EOF
-sudo systemctl daemon-reload && sudo systemctl restart timestd-prune.timer
-```
-
-When disk usage exceeds `DISK_CRIT_PCT`, the prune script automatically flushes all `all_arrivals` and `tick_phase` files regardless of age, since these are reconstructible and are the largest products after raw IQ data.
+Since v3.96 the sigmond storage ledger owns retention. Its hourly `smd storage expire` pass asks hf-timestd to trim its own files and database tables, and it evicts raw days under disk pressure. The recorder deletes nothing. Science tables in `timestd.db` keep 30 days. Inspect the ledger with `smd storage` (see sigmond's storage design).
 
 ### Software
 
@@ -304,7 +267,6 @@ it just refreshes the editable install and restarts the units already enabled.
 | **`timestd-pipeline-watchdog.timer`** | Pipeline health watchdog |
 | **`timestd-ionex-download.timer`** | Daily IONEX map download from NASA CDDIS |
 | **`timestd-iono-reanalysis.timer`** | Ionospheric reanalysis |
-| **`timestd-prune.timer`** | Nightly data retention enforcement |
 
 ---
 

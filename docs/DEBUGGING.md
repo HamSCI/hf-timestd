@@ -308,7 +308,6 @@ The dashboard, its unit and its health endpoints belong to
 
 | Unit | Purpose |
 |---|---|
-| `timestd-prune.service` + `.timer` | Deletes old raw buffers + HDF5 per QuotaManager (v6.10 circular-buffer policy) |
 | `timestd-pipeline-watchdog.service` + `.timer` | End-to-end freshness check, alerts on stale outputs |
 | `timestd-chrony-monitor.service` + `.timer` | Chrony discipline sanity |
 | `timestd-ionex-download.service` + `.timer` | Fetches daily IONEX maps |
@@ -368,22 +367,17 @@ sudo systemctl restart timestd-fusion   # ExecStartPre clears stale SHM
 
 ### 5.2 `raw_buffer` growing without bound
 
-**Cause**: `timestd-prune.timer` disabled or QuotaManager misbehaving.
+**Cause**: the sigmond storage ledger's hourly expire pass did not run, or the ledger holds a stop.
 
 **Diagnose**:
 
 ```bash
-systemctl list-timers 'timestd-prune*'
-journalctl -u timestd-prune.service -n 50
+systemctl list-timers 'sigmond-storage-expire*'
+journalctl -u sigmond-storage-expire.service -n 50
 du -sh /var/lib/timestd/raw_buffer/*/ | sort -h | tail
 ```
 
-**Fix**:
-
-```bash
-sudo systemctl enable --now timestd-prune.timer
-sudo systemctl start timestd-prune.service    # immediate sweep
-```
+**Fix**: run `smd storage` to see what the ledger holds, clear a stop if one is set, then let the next hourly pass run. The old `timestd-prune.timer` retired in v3.96.
 
 ### 5.3 HDF5 read errors in metrology
 

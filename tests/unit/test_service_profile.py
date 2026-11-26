@@ -117,7 +117,7 @@ class TestFromConfig:
 class TestActiveServices:
     def test_archive_baseline(self):
         profile = ServiceProfile(profile_name='archive')
-        assert profile.active_services() == {'core_recorder', 'prune'}
+        assert profile.active_services() == {'core_recorder'}
 
     def test_full_baseline(self):
         profile = ServiceProfile(profile_name='full')
@@ -197,9 +197,9 @@ class TestSystemdUnits:
         profile = ServiceProfile(profile_name='archive')
         units = profile.systemd_units(active=True)
         assert units == sorted(units)
-        # archive baseline is core_recorder + prune
+        # archive baseline is core_recorder
         assert 'timestd-core-recorder.service' in units
-        assert 'timestd-prune.timer' in units
+        assert 'timestd-prune.timer' not in units
 
     def test_inactive_units_complement_active(self):
         profile = ServiceProfile(profile_name='archive')

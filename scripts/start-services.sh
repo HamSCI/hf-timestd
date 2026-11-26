@@ -101,7 +101,6 @@ OPTIONAL_SERVICES=()
 ALL_TIMERS=(
     "timestd-pipeline-watchdog.timer"
     "timestd-chrony-monitor.timer"
-    "timestd-prune.timer"
 )
 TIMERS=()
 for timer in "${ALL_TIMERS[@]}"; do
@@ -274,7 +273,7 @@ fi
 # Start timers
 log_step "Starting periodic timers..."
 for timer in "${TIMERS[@]}"; do
-    # Enable timer if not already enabled (e.g. timestd-prune on fresh install)
+    # Enable timer if not already enabled (e.g. on a fresh install)
     if ! systemctl is-enabled --quiet "$timer" 2>/dev/null; then
         systemctl enable "$timer" 2>/dev/null || true
         log_info "  Enabled: $timer"

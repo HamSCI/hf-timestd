@@ -42,7 +42,6 @@ recording_interval = 60
 continuous = true
 blocktime_ms = 20
 max_gap_seconds = 60
-storage_quota = "80%"
 
 # Resource guardian eviction policy (hf-timestd#31).  At >=95% disk the
 # guardian PAUSES writes and alerts immediately, but deletes nothing until the

@@ -19,6 +19,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'src'))
 from hf_timestd.cli import RETIRED_KEYS, retired_key_issues, provides_timing_calibration
 
 
+class RetiredStorageQuotaTests(unittest.TestCase):
+
+    def test_storage_quota_is_a_retired_key(self):
+        issues = retired_key_issues({'recorder': {'storage_quota': '80%'}})
+        self.assertEqual(len(issues), 1)
+        self.assertIn('storage ledger', issues[0]['message'])
+
+    def test_archive_root_and_derived_max_days_stay_live_until_task_11(self):
+        # `data clean` still reads both, with defaults.
+        self.assertEqual(retired_key_issues({'recorder': {'archive_root': '/x'}}), [])
+        self.assertEqual(retired_key_issues({'recorder': {'derived_max_days': 7}}), [])
+
+
 class RetiredKeyIssueTests(unittest.TestCase):
 
     def test_clean_config_raises_no_issue(self):

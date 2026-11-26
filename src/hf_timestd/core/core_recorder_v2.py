@@ -52,7 +52,6 @@ except ImportError:
 
 from ka9q import discover_channels, RadiodControl, ChannelInfo, StreamQuality, Encoding
 
-from ..quota_manager import QuotaManager
 from .stream_recorder_v2 import StreamRecorderV2, StreamRecorderConfig
 from .batch_rtp import resolve_batch_rtp  # noqa: F401  (re-exported; tests import it here)
 from .binary_archive_writer import DEFAULT_ARCHIVE_DTYPE
@@ -1320,32 +1319,6 @@ class CoreRecorderV2:
         # Write initial status
         self._write_status()
         
-        # Initialize quota manager
-        try:
-            quota_str = str(self.recorder_config.get('storage_quota', '75%'))
-            quota_percent = float(quota_str.rstrip('%'))
-            logger.info(f"Initializing QuotaManager with threshold {quota_percent}%")
-        except ValueError:
-            logger.warning("Invalid storage_quota format, using default 75%")
-            quota_percent = 75.0
-
-        archive_root = self.recorder_config.get('archive_root')
-        if archive_root:
-            archive_root = Path(archive_root)
-            logger.info(f"QuotaManager archive root: {archive_root}")
-
-        derived_max_days = int(self.recorder_config.get('derived_max_days', 7))
-        logger.info(f"QuotaManager derived_max_days: {derived_max_days}")
-
-        self.quota_manager = QuotaManager(
-            data_root=self.output_dir,
-            threshold_percent=quota_percent,
-            min_days_to_keep=7,
-            dry_run=False,
-            archive_root=archive_root,
-            derived_max_days=derived_max_days,
-        )
-        
         # Quality snapshot writer — surfaces per-recorder StreamQuality
         # to /run/hf-timestd/quality.json for sigmond's `hf-timestd
         # quality --json` CLI to read.  Intentionally driven from the
@@ -1356,7 +1329,6 @@ class CoreRecorderV2:
         # Main loop
         last_status_time = 0
         last_health_check = 0
-        last_quota_check = 0
         last_quality_tick = 0
         # P2 radiod-pair revalidation: first tick 60 s in (channels are
         # freshly seeded at startup, nothing to revalidate earlier).
@@ -1393,11 +1365,6 @@ class CoreRecorderV2:
                     self._monitor_health()
                     last_health_check = now
                 
-                # Quota enforcement (every 5 minutes)
-                if now - last_quota_check >= 300:
-                    self._enforce_quota()
-                    last_quota_check = now
-
                 # Quality snapshot for sigmond (every 5 seconds)
                 if now - last_quality_tick >= 5:
                     quality_writer.tick()
@@ -7730,18 +7697,6 @@ class CoreRecorderV2:
 
         except Exception as e:
             logger.debug(f"Data freshness check error: {e}")
-    
-    def _enforce_quota(self):
-        """Enforce disk quota."""
-        try:
-            result = self.quota_manager.enforce_quota()
-            if result.get('files_deleted', 0) > 0:
-                logger.info(
-                    f"Quota: deleted {result['files_deleted']} files, "
-                    f"freed {result['bytes_freed'] / 1024**3:.2f} GB"
-                )
-        except Exception as e:
-            logger.error(f"Quota enforcement error: {e}")
     
     def _shutdown(self):
         """Graceful shutdown.

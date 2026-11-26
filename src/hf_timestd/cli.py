@@ -297,6 +297,8 @@ for _section in ('timing.t6_pps', 'timing.l6_pps'):
             'feed and the persisted chain-delay store are gone; the matched '
             'filter and the anchor inversion carry T6')
 del _section, _key
+RETIRED_KEYS[('recorder', 'storage_quota')] = (
+    'retired in v3.96: the sigmond storage ledger owns retention')
 
 
 def retired_key_issues(cfg):
@@ -2471,7 +2473,6 @@ Per-service overrides in [services] take precedence over the profile.
             'station': config.get('station', {}),
             'channels': _expand_channel_groups(recorder_section),
             'status_address': resolve_ka9q_status(config, default='239.192.152.141'),
-            'storage_quota': recorder_section.get('storage_quota', '75%'),
             'archive_root': archive_root,
             'derived_max_days': derived_max_days,
         }

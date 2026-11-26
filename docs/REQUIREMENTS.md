@@ -158,8 +158,8 @@ sources (IONEX/Earthdata, IRI-2020, space-weather).
   overwritten each cycle; consumers read it whole or not at all.
 - `HFT-Q-005` `[CODE]` ✅ The SQLite store SHALL use WAL with a single writer per
   product for concurrent reads at ms commit cadence.
-- `HFT-Q-006` `[DOC]` ✅ SHALL enforce a disk quota (default 80%) with
-  day-granularity eviction (`prune` timer).
+- `HFT-Q-006` `[DOC]` ✅ SHALL leave disk-quota enforcement to the sigmond storage ledger (v3.96);
+  the recorder deletes nothing.
 - `HFT-Q-007` `[CODE]` ✅ Optional dependencies (PHaRLAP, GNSS, Earthdata, PSWS
   creds) SHALL degrade gracefully to documented fallbacks, never hard-fail the
   core.

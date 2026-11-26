@@ -52,8 +52,8 @@ _RESERVED_IDS = ("state.json", "state.json.tmp", "orders.json", "_conditions")
 _RECEIPT = re.compile(r"[0-9a-f]{64}  verified \S+\n?\Z")
 _REQUIRED = ("station_id", "remote", "ssh_key", "staging", "raw_root")
 BYTES_PER_FILE_CHANNEL = 115_200_000      # 600 s x 24 kHz x complex64
-DEFAULT_MAX_DISK_PCT = 78                  # must stay below timestd-prune's 80 % trigger
-PRUNE_TRIGGER_PCT = 80
+DEFAULT_MAX_DISK_PCT = 78                  # kept below the ledger's 80 % pressure line, where eviction starts
+LEDGER_PRESSURE_PCT = 80
 _TS = "%Y-%m-%dT%H:%M:%SZ"
 PULL_TIMEOUT = 600
 PUSH_TIMEOUT = 6 * 3600
@@ -84,9 +84,9 @@ def validate_config(cfg: dict) -> dict:
         raise ConfigError("events.toml: channels must be a list of names")
     if "max_disk_used_pct" in cfg:
         v = cfg["max_disk_used_pct"]
-        if isinstance(v, bool) or not isinstance(v, (int, float)) or not (0 < v < PRUNE_TRIGGER_PCT):
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not (0 < v < LEDGER_PRESSURE_PCT):
             raise ConfigError("events.toml: max_disk_used_pct must be above 0 and below %d "
-                              "(timestd-prune's trigger)" % PRUNE_TRIGGER_PCT)
+                              "(the storage ledger's pressure line)" % LEDGER_PRESSURE_PCT)
     for k in ("settle_minutes", "bwlimit_kib_s"):
         if k in cfg and (isinstance(cfg[k], bool) or not isinstance(cfg[k], (int, float))
                          or cfg[k] < 0):

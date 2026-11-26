@@ -739,7 +739,6 @@ fi
 for tf in \
     timestd-chrony-monitor.service timestd-chrony-monitor.timer \
     timestd-pipeline-watchdog.service timestd-pipeline-watchdog.timer \
-    timestd-prune.service timestd-prune.timer \
     timestd-events.service timestd-events.timer \
     timestd-archive.service timestd-archive.timer \
     timestd-ionex-download.service timestd-ionex-download.timer \

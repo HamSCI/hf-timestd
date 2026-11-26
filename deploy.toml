@@ -171,7 +171,6 @@ units = [
     # hand-linked unit files should remove them: `systemctl disable --now
     # timestd-hfps-watchdog.timer` and delete the two files.
     "timestd-hpps-watchdog.timer",
-    "timestd-prune.timer",
     # IONEX download: moved from hamsci-physics, v3.96, decision 10.
     "timestd-ionex-download.timer",
     # IRI-indices refresh: moved from hamsci-physics, v3.96, decision 10.
@@ -189,6 +188,10 @@ units = [
 templated_units = [
     "timestd-metrology@.service",
 ]
+
+# v3.96: the sigmond storage ledger owns retention; the prune timer retires.
+# Keep the key above the first [[systemd.moves]] so TOML files it under [systemd].
+retired_units = ["timestd-prune.timer", "timestd-prune.service"]
 
 # v3.96: the IONEX and IRI fetchers came back from hamsci-physics.  A move stops the old
 # units, then starts the new timer; `migrate` copies the Earthdata credential once.

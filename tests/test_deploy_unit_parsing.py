@@ -76,6 +76,15 @@ def test_units_parse_under_every_awk(awk):
 
 
 @pytest.mark.parametrize("awk", AWKS)
+def test_retired_units_are_never_listed_for_restart(awk):
+    """v3.96: timestd-prune retired; sigmond stops it, deploy.sh must not restart it."""
+    units = list_units(awk).stdout.split()
+
+    assert not any("timestd-prune" in u for u in units)
+    assert "timestd-core-recorder.service" in units
+
+
+@pytest.mark.parametrize("awk", AWKS)
 def test_every_awk_agrees_on_the_unit_list(awk):
     """A parser that works but disagrees per-host is no better."""
     reference = list_units(AWKS[0]).stdout.split()
