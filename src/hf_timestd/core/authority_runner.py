@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from pathlib import Path
 from typing import Callable, List, Optional
 
@@ -59,9 +60,14 @@ def _opt_float(value: object) -> Optional[float]:
 class AuthorityRunner:
     """Thread wrapper around AuthorityManager.tick()."""
 
-    def __init__(self, manager: AuthorityManager, interval_sec: float = 30.0):
+    def __init__(self, manager: AuthorityManager, interval_sec: float = 30.0,
+                 monotonic_fn: Callable[[], float] = time.monotonic):
         self.manager = manager
         self.interval_sec = float(interval_sec)
+        self._monotonic = monotonic_fn
+        # Monotonic time of the last tick that returned without raising;
+        # None until one does.
+        self.last_tick_ok_monotonic: Optional[float] = None
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -101,9 +107,19 @@ class AuthorityRunner:
         while not self._stop.wait(self.interval_sec):
             self._safe_tick()
 
+    def tick_fresh(self, max_age_s: float,
+                   now_monotonic: Optional[float] = None) -> bool:
+        """True when a tick succeeded within the last max_age_s seconds."""
+        last = self.last_tick_ok_monotonic
+        if last is None:
+            return False
+        now = self._monotonic() if now_monotonic is None else now_monotonic
+        return (now - last) <= max_age_s
+
     def _safe_tick(self) -> None:
         try:
             self.manager.tick()
+            self.last_tick_ok_monotonic = self._monotonic()
         except Exception as e:
             log.exception("Authority manager tick failed: %s", e)
 

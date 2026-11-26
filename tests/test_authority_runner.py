@@ -32,6 +32,16 @@ class _CountingProbe:
         return ProbeResult(self.t_level, available=True, offset_ms=0.5, sigma_ms=0.3)
 
 
+class _FakeManager:
+    def tick(self):
+        return None
+
+
+class _RaisingManager:
+    def tick(self):
+        raise RuntimeError("tick failed")
+
+
 class TestAuthorityRunner(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp())
@@ -47,6 +57,28 @@ class TestAuthorityRunner(unittest.TestCase):
             a_level_provider=lambda: "A1",
             upgrade_hysteresis=1,
         )
+
+    def test_tick_fresh_false_before_first_tick(self) -> None:
+        r = AuthorityRunner(manager=_FakeManager(), interval_sec=30.0,
+                            monotonic_fn=lambda: 1000.0)
+        self.assertIsNone(r.last_tick_ok_monotonic)
+        self.assertFalse(r.tick_fresh(90.0))
+
+    def test_tick_fresh_after_good_tick_then_stale(self) -> None:
+        clock = [1000.0]
+        r = AuthorityRunner(manager=_FakeManager(), interval_sec=30.0,
+                            monotonic_fn=lambda: clock[0])
+        r._safe_tick()
+        self.assertEqual(r.last_tick_ok_monotonic, 1000.0)
+        self.assertTrue(r.tick_fresh(90.0, now_monotonic=1089.0))
+        self.assertFalse(r.tick_fresh(90.0, now_monotonic=1091.0))
+
+    def test_failed_tick_does_not_refresh(self) -> None:
+        clock = [1000.0]
+        r = AuthorityRunner(manager=_RaisingManager(), interval_sec=30.0,
+                            monotonic_fn=lambda: clock[0])
+        r._safe_tick()
+        self.assertIsNone(r.last_tick_ok_monotonic)
 
     def test_eager_first_tick_publishes_promptly(self) -> None:
         probe = _CountingProbe()
