@@ -1834,6 +1834,10 @@ class StreamRecorderV2:
                 # Archive stats
                 'phase1_samples': archive_stats.get('samples_written', 0),
                 'minutes_written': archive_stats.get('minutes_written', 0),
+                # What the archive writer placed and lost, by cause; None
+                # when this channel archives nothing.
+                'archive': (self.archive_writer.loss_report()
+                            if self.archive_writer else None),
             }
             
             # Add quality metrics if available

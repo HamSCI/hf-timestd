@@ -768,3 +768,83 @@ def test_stream_recorder_archives_under_raw_buffer(tmp_path, monkeypatch, tiered
     w._flush_thread.join(timeout=5)
     assert w.archive_dir == tmp_path / "raw_buffer" / "testchan"
     assert w.scratch_dir == (tmp_path / "shm" / "raw_buffer" / "testchan" if tiered else None)
+
+
+# ------------------------------------------------------------ A18: the status reports the loss
+#
+# Each test drives a real loss and reads it from get_status()["archive"],
+# the block the recorder status file carries per channel.
+
+def test_status_reports_samples_dropped_before_the_chunk_start(tmp_path):
+    """Driven through the recorder: the backward batch is HELD (the recorder
+    has a pair provider and no pair on that line), then counted as
+    dropped_before_start once released."""
+    r, w = _recorder(tmp_path)
+    spc = w.samples_per_chunk
+    base = 30 * SR
+    w.write_samples(_ramp(spc), base)                  # chunk N, complete
+    w.write_samples(_ramp(300), base + spc)            # chunk N+1 opens
+    w.write_samples(_ramp(200, start=50_000), base + spc - 500)   # back into N
+    a = r.get_status()["archive"]
+    # Path: held first, not dropped yet.
+    assert a["held_samples"] == 200
+    assert a["lost_by_cause"]["dropped_before_start"] == 0
+    _pair(w, near=base + spc - 300)                    # pair on the held line releases it
+    a = r.get_status()["archive"]
+    assert a["held_samples"] == 0
+    assert a["lost_by_cause"]["dropped_before_start"] == 200
+    assert a["samples_lost"] == 200
+    assert a["samples_placed"] == spc + 300
+
+
+def test_status_reports_a_backward_label_inside_the_chunk_as_overlap(tmp_path):
+    r, w = _recorder(tmp_path)
+    base = 30 * SR
+    w.write_samples(_ramp(600), base)
+    w.write_samples(_ramp(600, start=10_000), base + 200)   # 400 already written
+    a = r.get_status()["archive"]
+    # Path: held first (the recorder has no pair on that line), counted on release.
+    assert a["held_samples"] == 600
+    assert a["lost_by_cause"]["overlap_samples"] == 0
+    _pair(w, near=base + 800)
+    a = r.get_status()["archive"]
+    assert a["lost_by_cause"]["overlap_samples"] == 400
+    assert a["samples_lost"] == 400
+    assert a["samples_placed"] == 800                  # 600 + the 200 new ones
+
+
+def test_status_reports_the_overflow_of_the_hold_as_unplaced(tmp_path):
+    r, w = _recorder(tmp_path)
+    w.set_pair_provider(lambda: None)
+    bound = int(w.LABEL_HOLD_SECONDS * SR)
+    rtp = _feed(w, 30 * SR, 2)
+    _feed(w, rtp - 7, bound // 50 + 4, start=1000)     # 200 over the bound
+    a = r.get_status()["archive"]
+    assert a["held_samples"] == bound
+    assert a["lost_by_cause"]["unplaced_samples"] == 200
+    assert a["samples_lost"] == 200
+    assert a["samples_placed"] == 100
+
+
+def test_status_reports_an_abandoned_chunk_in_both_counts(tmp_path):
+    r, w = _recorder(tmp_path)
+    spc = w.samples_per_chunk
+    n = w._flush_queue.maxsize + 1
+    for k in range(n):
+        w.write_samples(_ramp(spc), 30 * SR + k * spc)
+    a = r.get_status()["archive"]
+    assert a["abandoned_chunks"] == 1
+    assert a["lost_by_cause"]["abandoned_samples"] == spc
+    assert a["samples_lost"] == spc
+    assert a["samples_placed"] >= spc * n - spc        # abandoned samples stay in placed
+
+
+def test_status_reports_gap_fill_without_calling_it_a_loss(tmp_path):
+    r, w = _recorder(tmp_path)
+    base = 30 * SR
+    w.write_samples(_ramp(100), base)
+    x = np.zeros(40, np.complex64)
+    w.write_samples(x, base + 100, gap_samples=40)
+    a = r.get_status()["archive"]
+    assert a["fill_samples"] == 40
+    assert a["samples_lost"] == 0

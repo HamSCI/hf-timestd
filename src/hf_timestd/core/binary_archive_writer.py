@@ -2399,6 +2399,37 @@ class BinaryArchiveWriter:
             'flush_queue_depth': self._flush_queue.qsize(),
         }
 
+    def loss_report(self) -> Dict[str, Any]:
+        """What this writer placed and what it lost, by cause (A18).
+
+        ``samples_placed`` counts samples the writer put into a chunk
+        buffer.  Samples of an abandoned chunk count in both
+        ``samples_placed`` and ``abandoned_samples``: the buffer took them,
+        and the flush queue then lost the whole chunk.  ``fill_samples``
+        counts zeros stored for reported gaps; they sit inside
+        ``samples_placed`` and are not a loss.  ``held_samples`` waits for
+        a timing pair and is not yet a loss.  ``samples_lost`` sums
+        ``lost_by_cause``.
+        """
+        lost = {
+            'timing_drops': self.timing_drops,
+            'stale_drops': self.stale_drops,
+            'unplaced_samples': self.unplaced_samples,
+            'overlap_samples': self.overlap_samples,
+            'dropped_before_start': self.dropped_before_start,
+            'abandoned_samples': self.abandoned_samples,
+        }
+        return {
+            'samples_placed': self.samples_written,
+            'fill_samples': self.fill_samples,
+            'samples_lost': sum(lost.values()),
+            'lost_by_cause': lost,
+            'abandoned_chunks': self.abandoned_chunks,
+            'write_errors': self.write_errors,
+            'held_samples': self._held_n,
+            'flush_queue_depth': self._flush_queue.qsize(),
+        }
+
 
 class BinaryArchiveReader:
     """

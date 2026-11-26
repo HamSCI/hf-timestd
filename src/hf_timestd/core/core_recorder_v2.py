@@ -152,6 +152,21 @@ def format_native_anchor_log(anchor, tier) -> str:
             f"sr={anchor.sample_rate_hz}, tier={tier}")
 
 
+def archive_totals(channels: Dict[str, dict]) -> Dict[str, int]:
+    """Sum the archive writers' placed and lost samples over the channels.
+
+    A channel whose ``archive`` is not a dict archives nothing and adds
+    nothing."""
+    placed = lost = 0
+    for ch in channels.values():
+        a = ch.get('archive')
+        if isinstance(a, dict):
+            placed += a.get('samples_placed', 0)
+            lost += a.get('samples_lost', 0)
+    return {'total_archive_samples_placed': placed,
+            'total_archive_samples_lost': lost}
+
+
 def newest_sample_rtp(quality) -> Optional[int]:
     """RTP label of the sample just past the newest DELIVERED one.
 
@@ -7286,6 +7301,7 @@ class CoreRecorderV2:
                     status['overall']['channels_active'] += 1
                 status['overall']['total_samples_received'] += ch_stats.get('samples_received', 0)
                 status['overall']['total_samples_written'] += ch_stats.get('samples_written', 0)
+            status['overall'].update(archive_totals(status['channels']))
 
             # Ring-health alarm — surface any channel whose hot ring failed
             # (e.g. a foreign-owned stale SysV segment we cannot reclaim).  A
