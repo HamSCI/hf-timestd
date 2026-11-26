@@ -101,6 +101,7 @@ SERVICES=(
     "timestd-metrology.target"
     "timestd-l2-calibration.service"
     "timestd-fusion.service"
+    "timestd-authority-manager.service"
     # Retired hf-timestd unit names (pre-2026-08-24-split installs).
     # grape-daily.* is deliberately absent: hamsci-physics owns that
     # name now, and uninstalling hf-timestd must not disable it.
@@ -161,6 +162,7 @@ SERVICE_FILES=(
     "/etc/systemd/system/timestd-metrology@.service"
     "/etc/systemd/system/timestd-l2-calibration.service"
     "/etc/systemd/system/timestd-fusion.service"
+    "/etc/systemd/system/timestd-authority-manager.service"
     "/etc/systemd/system/timestd-physics.service"
     "/etc/systemd/system/timestd-vtec.service"
     "/etc/systemd/system/timestd-radiod-monitor.service"

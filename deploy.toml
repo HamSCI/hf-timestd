@@ -92,6 +92,11 @@ dst  = "/etc/systemd/system/timestd-fusion.service"
 
 [[install.steps]]
 kind = "link"
+src  = "systemd/timestd-authority-manager.service"
+dst  = "/etc/systemd/system/timestd-authority-manager.service"
+
+[[install.steps]]
+kind = "link"
 src  = "systemd/timestd-l2-calibration.service"
 dst  = "/etc/systemd/system/timestd-l2-calibration.service"
 
@@ -154,6 +159,14 @@ units = [
     "timestd-core-recorder.service",
     "timestd-metrology.target",
     "timestd-fusion.service",
+    # v3.96: the authority manager left fusion for a unit of its own.  It
+    # stays AFTER fusion: deploy.sh and sigmond restart in this order, so
+    # the new fusion (which no longer hosts the authority) restarts first,
+    # and two writers never share authority.json.  A plain unit, not a
+    # systemd.moves entry: a move would retire fusion.  (No square brackets
+    # in comments inside this array: deploy.sh's awk reader ends the list
+    # at the first one.)
+    "timestd-authority-manager.service",
     "timestd-l2-calibration.service",
     # The physics stage (timestd-physics.service) MOVED to hamsci-physics in
     # the 2026-08-24 split, where it ships as hamsci-physics-fusion.service —

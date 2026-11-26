@@ -1,0 +1,57 @@
+[Unit]
+Description=HF-Timestd Authority Manager (authority.json)
+Documentation=https://github.com/HamSCI/hf-timestd
+# Ordering only.  This unit binds to no other: the authority must keep
+# running, and publish "T6 unavailable", while the recorder stands down.
+# Until v3.96 the manager ran inside timestd-fusion, so a fusion crash or a
+# failing l2-calibration took authority.json down with it (audit C1).
+After=timestd-core-recorder.service chrony.service
+# A crash loop (RestartSec=5) reaches 5 starts in well under 300 s and
+# leaves the unit failed, which fires OnFailure.  A hung manager loop
+# restarts about every 210 s (watchdog), so it never trips this limit.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+OnFailure=timestd-alert@%N.service
+
+[Service]
+Type=notify
+User=timestd
+Group=timestd
+
+# The same run directory and identity as timestd-fusion and the recorder,
+# so authority.json keeps its path (/run/hf-timestd/authority.json) and its
+# owner.  RuntimeDirectoryPreserve=yes keeps the directory alive when any
+# one of the three stops.
+RuntimeDirectory=hf-timestd
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+
+# The service pets WATCHDOG=1 while its manager loop iterates, failed
+# ticks included (they show in STATUS and the log).  A loop stuck inside a
+# tick stops the pets after 3 intervals (90 s at the default 30 s), and
+# systemd restarts the unit 120 s later.
+WatchdogSec=120
+TimeoutStartSec=120
+
+# Operator identity (callsign, grid) from sigmond — CLIENT-CONTRACT §14.2
+EnvironmentFile=-/etc/sigmond/coordination.env
+
+ExecStart=/opt/git/sigmond/hf-timestd/venv/bin/python -m hf_timestd.core.authority_service \
+    --config /etc/hf-timestd/timestd-config.toml \
+    --log-level INFO
+
+# A dead manager thread exits 1; restart it.
+Restart=always
+RestartSec=5
+
+MemoryMax=300M
+MemoryHigh=200M
+MemorySwapMax=0
+
+# Unified journal sink — see docs/DEBUGGING.md §2 for access patterns.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=timestd-authority-manager
+
+[Install]
+WantedBy=multi-user.target

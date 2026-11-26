@@ -456,3 +456,18 @@ class TestProfilesOnlyReferenceShippedUnits:
         unknown = {name: sorted(keys - set(SERVICE_UNITS))
                    for name, keys in PROFILES.items() if keys - set(SERVICE_UNITS)}
         assert not unknown, unknown
+
+
+# =============================================================================
+# v3.96: the authority manager, a unit of its own
+# =============================================================================
+
+
+@pytest.mark.parametrize("profile", ["rtp", "fusion", "full"])
+def test_authority_manager_runs_in_timing_profiles(profile):
+    assert "authority_manager" in PROFILES[profile]
+    assert SERVICE_UNIT_MAP["authority_manager"] == "timestd-authority-manager.service"
+
+
+def test_archive_profile_has_no_authority():
+    assert "authority_manager" not in PROFILES["archive"]

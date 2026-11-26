@@ -61,6 +61,7 @@ except Exception as e:
     for u in [
         'timestd-core-recorder.service', 'timestd-metrology.target',
         'timestd-l2-calibration.service', 'timestd-fusion.service',
+        'timestd-authority-manager.service',
         'timestd-radiod-monitor.service', 'timestd-pipeline-watchdog.timer',
     ]:
         print(u)
@@ -84,6 +85,7 @@ STARTUP_ORDER=(
     "timestd-metrology.target"
     "timestd-l2-calibration.service"
     "timestd-fusion.service"
+    "timestd-authority-manager.service"
     "timestd-radiod-monitor.service"
 )
 
@@ -248,6 +250,8 @@ log_step "Phase 3: Starting fusion and physics..."
 # SHM segments.
 
 start_service "timestd-fusion" "Fusion → Chrony SHM"
+# After fusion, as in deploy.toml: authority.json never has two writers.
+start_service "timestd-authority-manager" "Authority → authority.json"
 # TEC estimation moved to hamsci-physics (2026-08-24 split): `smd start hamsci-physics`.
 
 # Restart chronyd to pick up SHM (fusion creates SHM segments with correct permissions)

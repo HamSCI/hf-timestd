@@ -12,13 +12,14 @@ Type=notify
 User=timestd
 Group=timestd
 
-# Volatile state directory for the authority manager's contract file
-# /run/hf-timestd/fusion_status.json — see METROLOGY.md §4.5.
-# systemd creates /run/hf-timestd/ owned by timestd:timestd on start.
-# RuntimeDirectoryPreserve=yes keeps it alive across fusion restarts so
-# co-located services (timestd-core-recorder, which shares the same
-# RuntimeDirectory under ProtectSystem=strict) don't have their bind
-# mount of /run/hf-timestd orphaned when fusion stops.
+# Volatile state directory.  Fusion writes /run/hf-timestd/fusion_status.json
+# there, which timestd-authority-manager.service reads as its T3 input
+# (METROLOGY.md §4.5); since v3.96 that unit, not fusion, writes
+# authority.json beside it.  systemd creates /run/hf-timestd/ owned by
+# timestd:timestd on start.  RuntimeDirectoryPreserve=yes keeps it alive
+# across fusion restarts so the services that share it (the recorder, under
+# ProtectSystem=strict, and the authority manager) don't have their view of
+# /run/hf-timestd orphaned when fusion stops.
 RuntimeDirectory=hf-timestd
 RuntimeDirectoryMode=0755
 RuntimeDirectoryPreserve=yes

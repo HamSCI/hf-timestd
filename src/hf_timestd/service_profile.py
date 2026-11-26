@@ -31,6 +31,10 @@ SERVICE_UNIT_MAP: Dict[str, str] = {
     'metrology':         'timestd-metrology.target',
     'l2_calibration':    'timestd-l2-calibration.service',
     'fusion':            'timestd-fusion.service',
+    # v3.96: the authority manager runs in its own unit, so authority.json
+    # outlives a fusion or l2-calibration fault (audit C1).  On in every
+    # profile that publishes timing; archive publishes none.
+    'authority_manager': 'timestd-authority-manager.service',
     # physics / grape_daily / ionex_download / iono_reanalysis moved to
     # hamsci-physics in the 2026-08-24 split.  A profile may only name a
     # unit this repo ships — enabling an absent unit fails the whole
@@ -58,19 +62,20 @@ PROFILES: Dict[str, Set[str]] = {
     'archive': _ALWAYS_ON,
 
     'rtp': _ALWAYS_ON | {
+        'authority_manager',
         'radiod_monitor', 'pipeline_watchdog',
         'hpps_watchdog',  # gated by [timing.t6_pps].enabled
     },
 
     'fusion': _ALWAYS_ON | {
-        'metrology', 'l2_calibration', 'fusion',
+        'metrology', 'l2_calibration', 'fusion', 'authority_manager',
         'radiod_monitor', 'pipeline_watchdog',
         'hpps_watchdog',  # gated by [timing.t6_pps].enabled
         'chrony_monitor',
     },
 
     'full': _ALWAYS_ON | {
-        'metrology', 'l2_calibration', 'fusion',
+        'metrology', 'l2_calibration', 'fusion', 'authority_manager',
         'radiod_monitor', 'pipeline_watchdog',
         'hpps_watchdog',  # gated by [timing.t6_pps].enabled
         'chrony_monitor',

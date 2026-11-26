@@ -26,6 +26,7 @@ fi
 # All services (reverse order of startup)
 SERVICES=(
     "timestd-radiod-monitor"
+    "timestd-authority-manager"
     "timestd-fusion"
     "timestd-l2-calibration"
     "timestd-metrology.target"

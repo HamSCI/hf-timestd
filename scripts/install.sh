@@ -710,7 +710,7 @@ copy_unit() {
 }
 
 # ── Core service files ──
-CORE_UNITS=("timestd-core-recorder" "timestd-l2-calibration" "timestd-fusion" "timestd-radiod-monitor")
+CORE_UNITS=("timestd-core-recorder" "timestd-l2-calibration" "timestd-fusion" "timestd-authority-manager" "timestd-radiod-monitor")
 
 UPDATED_COUNT=0
 for svc in "${CORE_UNITS[@]}"; do
@@ -1031,6 +1031,7 @@ if [[ "$DO_RESTART" == "true" ]]; then
             for service in \
                 timestd-l2-calibration \
                 timestd-fusion \
+                timestd-authority-manager \
                 timestd-radiod-monitor ; do
                 if systemctl try-restart "$service" 2>/dev/null; then
                     log_info "  Restarted: $service"
@@ -1088,7 +1089,7 @@ fi
 if [[ "$DO_RESTART" == "true" ]]; then
     sleep 2
     FAILED_SVCS=()
-    for svc in timestd-core-recorder timestd-metrology.target timestd-l2-calibration timestd-fusion; do
+    for svc in timestd-core-recorder timestd-metrology.target timestd-l2-calibration timestd-fusion timestd-authority-manager; do
         if systemctl is-enabled --quiet "$svc" 2>/dev/null && ! systemctl is-active --quiet "$svc" 2>/dev/null; then
             FAILED_SVCS+=("$svc")
         fi

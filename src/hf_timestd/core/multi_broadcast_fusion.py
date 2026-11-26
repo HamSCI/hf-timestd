@@ -4534,61 +4534,33 @@ def run_fusion_service(
     except Exception as e:
         logger.warning(f"Fusion status writer not available: {e}")
 
-    # Authority manager — METROLOGY.md §4.5 / §4.6. Publishes
-    # /run/hf-timestd/authority.json on a 30s cadence from its own thread.
-    # Per the single-writer / coupling rule, this runs INSIDE the fusion
-    # service so a fusion hang decays authority.json, chrony SHM reach,
-    # and mDNS advertisement together.
-    authority_runner = None
+    # The authority manager (METROLOGY.md §4.5 / §4.6) runs in its own
+    # unit, timestd-authority-manager.service, since v3.96: fusion writes
+    # neither authority.json nor timing_chain.json, nor any chrony SHM or
+    # mDNS record.  Fusion still reads the station config here, for its
+    # loop metrics and for the anchor-closure regime below.
+    _auth_config: dict = load_fusion_config(config_path)
     # Task 17a: is the T3 registration anchor closure in force?  Resolved
-    # once, below, from the same config the authority manager reads, so
-    # this process and the recorder cannot disagree about the regime.
-    # False until then, and False if the config cannot be read at all --
-    # a station whose regime is unknown does not hand chrony the anchor.
+    # once, from the same config the authority manager reads, so this
+    # process and the recorder cannot disagree about the regime.  False if
+    # it cannot be resolved -- a station whose regime is unknown does not
+    # hand chrony the anchor.
     _anchor_closure = False
     try:
-        from hf_timestd.core.authority_runner import build_authority_runner_from_config
-        # Re-read config for the authority block (config was loaded earlier
-        # for station coords and timing_authority; the authority.* subtree
-        # may only be present in fresh configs, so handle absence gracefully).
-        _auth_config: dict = load_fusion_config(config_path)
-        try:
-            from hf_timestd.core.anchor_closure import anchor_closure_enabled
-            _anchor_closure = anchor_closure_enabled(_auth_config)
-        except Exception as _ac_exc:  # noqa: BLE001 — unknown regime is off
-            logger.warning(
-                f"anchor closure regime unresolved ({_ac_exc}) — treated "
-                f"as off"
-            )
-        if _anchor_closure:
-            logger.warning(
-                "registration anchor closure is ON, but the FUSE refclock "
-                "is retired (2026-10-22): the closure no longer reaches "
-                "chrony.  It still places UTC on the ring, §18 and the "
-                "sidecar."
-            )
-        authority_runner = build_authority_runner_from_config(config=_auth_config)
-        # TIMING_PROVENANCE_MODEL §3.2: the station's chain records, for the
-        # GRAPE packager.  Best-effort; the timing chain outranks its provenance.
-        try:
-            from hf_timestd.core.timing_chain_publisher import chains_from_config, publish_chains
-            from hf_timestd.core.t3_admission import t3_admission_mode
-            # Task A7: the mode, not a decision.  This record goes out once
-            # at start, so it claims T3 only in mode ON; the per-minute
-            # decision reaches readers through authority.json.
-            publish_chains(chains_from_config(_auth_config),
-                           t3_admission_mode=t3_admission_mode(_auth_config))
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("timing chain not published: %s", exc)
-        authority_runner.start()
-        probe_levels = [p.t_level for p in authority_runner.manager.probes]
-        logger.info(
-            "Authority manager started: probes=%s interval=%.1fs hysteresis=%d",
-            probe_levels, authority_runner.interval_sec,
-            authority_runner.manager.upgrade_hysteresis,
+        from hf_timestd.core.anchor_closure import anchor_closure_enabled
+        _anchor_closure = anchor_closure_enabled(_auth_config)
+    except Exception as _ac_exc:  # noqa: BLE001 — unknown regime is off
+        logger.warning(
+            f"anchor closure regime unresolved ({_ac_exc}) — treated "
+            f"as off"
         )
-    except Exception as e:
-        logger.warning(f"Authority manager not available: {e}")
+    if _anchor_closure:
+        logger.warning(
+            "registration anchor closure is ON, but the FUSE refclock "
+            "is retired (2026-10-22): the closure no longer reaches "
+            "chrony.  It still places UTC on the ring, §18 and the "
+            "sidecar."
+        )
 
     # Fusion loop metrics (fusion audit measurement phase). Enabled by
     # default; gate via [timing.fusion_metrics] enabled=false if we ever
@@ -4971,14 +4943,6 @@ def run_fusion_service(
     # Remove calibration file on shutdown so stale data is not consumed
     if calib_writer:
         calib_writer.remove()
-
-    # Stop authority manager thread cleanly (publishes its final state
-    # before exiting if it is in the middle of a tick).
-    if authority_runner is not None:
-        try:
-            authority_runner.stop(timeout=5.0)
-        except Exception as e:
-            logger.warning(f"Authority manager stop failed: {e}")
 
     logger.info("Fusion service shutdown complete")
 

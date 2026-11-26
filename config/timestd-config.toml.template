@@ -473,6 +473,7 @@ profile = "rtp"
 # metrology = true            # Force metrology on (e.g., for study in RTP mode)
 # l2_calibration = false      # Force off even if profile includes it
 # fusion = true               # Multi-broadcast fusion → Chrony SHM
+# authority_manager = true    # Authority manager → authority.json (own unit since v3.96)
 # physics = true              # L2/L3 ionospheric products
 # radiod_monitor = true       # Hardware health monitor
 # grape_daily = true          # Daily GRAPE decimation + upload timer

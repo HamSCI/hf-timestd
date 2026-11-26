@@ -3,10 +3,12 @@ AuthorityRunner — runs AuthorityManager.tick() on a fixed cadence from
 its own thread, and exposes a factory that wires up probes from a
 timestd-config.toml dict.
 
-The runner is designed to be embedded in timestd-fusion's
-run_fusion_service() so that the heartbeat-coupling rule from §4.5.2
-holds (authority.json, chrony SHM, and mDNS all go silent together if
-the fusion process hangs).
+Since v3.96 the runner lives in its own unit,
+timestd-authority-manager.service (``core/authority_service.py``); it
+no longer rides inside timestd-fusion.  The heartbeat-coupling rule from
+METROLOGY.md §4.5 still holds: the manager's loop stays the single gate
+for authority.json and the mDNS advertisement, so both go silent
+together if that loop hangs.
 """
 from __future__ import annotations
 
