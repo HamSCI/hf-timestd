@@ -40,7 +40,7 @@ def test_scratch_and_temp_files_do_not_count(tmp_path, monkeypatch):
     mod = _load()
     monkeypatch.setattr(mod, "RAW_BUFFER_DIR", tmp_path / "raw_buffer")
     _put(tmp_path / "raw_buffer", "1700000000.bin.zst", 1300)
-    for n in ("1700000600.WWV.0.scratch", "1700000600.bin.zst.tmp", "1700000600.bin.zst.drain"):
+    for n in ("1700000600.WWV.0.scratch", "1700000600.bin.zst.tmp", "1700000600.bin.zst.drain", "1700000600.json"):
         _put(tmp_path / "raw_buffer", n, 1)
     r = mod.check_data_flow(tmp_path / "state.json")
     assert r["flowing"] is False
@@ -74,3 +74,10 @@ def test_1300s_old_chunk_is_stopped(tmp_path, monkeypatch, caplog):
     r, msgs = _flow(tmp_path, monkeypatch, 1300, caplog)
     assert r["flowing"] is False
     assert any("DATA FLOW STOPPED" in m for m in msgs)
+
+
+def test_freshness_alert_limit_is_two_chunks():
+    import re
+    sh = Path(__file__).resolve().parents[2] / "scripts" / "check-freshness-alert.sh"
+    m = re.search(r"^MAX_RAW_STALE_SECONDS=(\d+)", sh.read_text(), re.M)
+    assert m and int(m.group(1)) >= 1200
