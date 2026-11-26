@@ -1,15 +1,40 @@
 """Where the authority manager's settings live in the station config.
 
-The fusion service's runner (``build_authority_runner_from_config``) reads
-them, and so does every process that follows the manager's output and
-needs to know how often it writes (the T3 admission gate).  One reader
-keeps the two from disagreeing.  This module imports nothing heavy, so a
-recorder or metrology process can use it.
+The authority runner (``build_authority_runner_from_config``) reads them,
+and so does every process that follows the manager's output and needs to
+know how often it writes (the T3 admission gate).  One reader keeps the
+two from disagreeing.  ``load_station_config`` reads the TOML itself, for
+both the fusion service and the authority service.  This module imports
+nothing heavy, so a recorder, metrology or authority process can use it
+without loading fusion.
 """
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
 from typing import Any, Optional
+
+log = logging.getLogger(__name__)
+
+#: Where the station config lives in production.
+DEFAULT_CONFIG_PATH = Path('/etc/hf-timestd/timestd-config.toml')
+
+
+def load_station_config(path) -> dict:
+    """The TOML at ``path``, or {} when it is missing or unreadable.
+
+    {} fails closed: no anchor closure, and T3 not admitted."""
+    try:
+        path = Path(path)
+        if not path.exists():
+            return {}
+        import toml
+        return toml.load(str(path)) or {}
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"Could not read config {path}: {e}")
+        return {}
+
 
 #: The manager's tick, when ``[timing.authority_manager] interval_sec``
 #: does not say.

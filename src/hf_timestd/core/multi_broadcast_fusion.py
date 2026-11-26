@@ -4409,22 +4409,13 @@ def anchor_sign_line(
 
 
 
-DEFAULT_CONFIG_PATH = Path('/etc/hf-timestd/timestd-config.toml')
-
-
-def load_fusion_config(path) -> dict:
-    """The TOML at ``path``, or {} when it is missing or unreadable.
-
-    {} fails closed: no anchor closure, and T3 not admitted."""
-    try:
-        path = Path(path)
-        if not path.exists():
-            return {}
-        import toml
-        return toml.load(str(path)) or {}
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"Could not read config {path}: {e}")
-        return {}
+# The loader lives in authority_config so the authority service can read
+# the same file without importing this module (Plan D ruling D3).  Fusion
+# calls it through this module-level name, which tests patch.
+from hf_timestd.core.authority_config import (  # noqa: E402
+    DEFAULT_CONFIG_PATH,
+    load_station_config as load_fusion_config,
+)
 
 def run_fusion_service(
     data_root: Path,
