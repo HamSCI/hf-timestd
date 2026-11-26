@@ -11,7 +11,8 @@ User=root
 Group=root
 
 # Runs to completion in <2s on the happy path; only does work on
-# the rare LastRx-exceeded path (which fires a systemctl restart).
+# the rare LastRx-exceeded path, which files a restart request with
+# sigmond-recorder-watchdog.  This unit restarts nothing itself.
 #
 # Threshold tuning (2026-05-21): each restart causes the BPSK
 # calibrator to re-disambiguate against T4 (LAN GPS), and the
@@ -22,7 +23,7 @@ Group=root
 #
 # Current values:
 #   HPPS_LASTRX_THRESHOLD_S=600  (10 min — only react to genuine outages)
-#   HPPS_RESTART_COOLDOWN_S=1800 (30 min — prevent thrash even when fired)
+#   HPPS_RESTART_COOLDOWN_S=1800 (30 min — at most one request per 30 min)
 #
 # Today (2026-05-23) the chain_delay IS persisted across restarts AND
 # disambig uses T5 (LB-1421 USB NMEA, GPS-truth-direct), so the
@@ -31,6 +32,7 @@ Group=root
 # resilient, this can revert to 120/300.
 Environment=HPPS_LASTRX_THRESHOLD_S=600
 Environment=HPPS_RESTART_COOLDOWN_S=1800
+Environment=HPPS_REQUEST_DIR=/run/sigmond/recorder-restart
 ExecStart=/opt/git/sigmond/hf-timestd/scripts/hpps-watchdog.sh
 
 StandardOutput=journal

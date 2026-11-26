@@ -1,15 +1,18 @@
 #!/bin/bash
 # /opt/git/sigmond/hf-timestd/scripts/hpps-watchdog.sh
 #
-# Restart timestd-core-recorder if HPPS (T6 BPSK SHM refclock) goes
-# dark.  Targets the specific failure mode where the matched-filter
+# Report a dark HPPS (T6 BPSK SHM refclock) to sigmond-recorder-watchdog,
+# which alone restarts timestd-core-recorder.  This script files a
+# request (cause hpps-stale) and never restarts the recorder itself.
+# sigmond records the request and does not act on it: a stale HPPS is a
+# downstream symptom, and a restart once cost four data gaps in a night.  Targets the specific failure mode where the matched-filter
 # / calibrator keeps reporting `acquired=1, pps_consec>0` in the log,
 # but the SHM push gate stops firing — chrony silently sees reach=0
 # while everything LOOKS fine in the journal.
 #
 # Observed first on bee1 2026-05-12 ~07:01 UTC after ~5 hours of
 # runtime; a `systemctl restart timestd-core-recorder` brought HPPS
-# back within seconds.  This script automates that.
+# back within seconds.  This script used to automate that restart.
 #
 # Detection: LastRx > LASTRX_THRESHOLD_S means chrony hasn't sampled
 # HPPS within the threshold — that's the symptom that confirmed the
@@ -18,18 +21,20 @@
 # the last good sample.
 #
 # Throttling: a state file under STATE_DIR records the timestamp of
-# the last restart so we don't thrash if there's a deeper problem
-# (e.g., radiod completely missing).  Default cooldown is 5 minutes.
+# the last request so we don't repeat ourselves while a deeper problem
+# lasts (e.g., radiod completely missing).  Default cooldown is 5 minutes.
 #
 # Environment variables (also accepts legacy TSL3_* names for
 # in-flight rename compatibility — drop the legacy names after one
 # stable week of operation):
 #   HPPS_LASTRX_THRESHOLD_S   - dark-source restart threshold (default 120)
-#   HPPS_RESTART_COOLDOWN_S   - minimum gap between auto-restarts (default 300)
+#   HPPS_RESTART_COOLDOWN_S   - minimum gap between restart requests (default 300)
+#   HPPS_REQUEST_DIR          - where the request file goes
+#                               (default /run/sigmond/recorder-restart)
 #   HPPS_STATE_DIR            - cooldown state file directory
 #   HPPS_STATUS_FILE          - producer status surface (authority.json)
 #   HPPS_WITHDRAWN_GRACE_S    - how long to tolerate an HONEST withdrawal
-#                               before restarting anyway (default 3600)
+#                               before requesting a restart anyway (default 3600)
 #   HPPS_RECORDER_STATUS_FILE - the recorder's own status file, read for
 #                               a T6 acquisition refusal a restart cannot
 #                               cure (core-recorder-status.json)
@@ -38,8 +43,9 @@
 #                               refusal record holds off nothing (default 120)
 #
 # Exit codes:
-#   0 - HPPS healthy, OR restart attempted, OR cooldown active
-#   1 - chronyc query failed (transient — let systemd retry next tick)
+#   0 - HPPS healthy, OR request filed, OR cooldown active
+#   1 - chronyc query failed, or the request could not be written
+#       (transient or unsafe request dir — let systemd retry next tick)
 #   2 - state file write failed (operator should investigate)
 
 set -euo pipefail
@@ -55,9 +61,15 @@ RECORDER_STATUS_FILE="${HPPS_RECORDER_STATUS_FILE:-/var/lib/timestd/status/core-
 RECORDER_STATUS_MAX_AGE_S="${HPPS_RECORDER_STATUS_MAX_AGE_S:-120}"
 REFUSAL_FILE="$STATE_DIR/hpps-watchdog-refusal-since"
 LOG_TAG="hpps-watchdog"
-TARGET_UNIT="timestd-core-recorder.service"
 
 log() { logger -t "$LOG_TAG" -- "$@"; echo "[$LOG_TAG] $*"; }
+log_warn()  { log "$@"; }
+log_error() { log "ERROR: $*"; }
+
+# The shared request writer (same guarantees as pipeline-watchdog.sh).
+REQUEST_DIR="${HPPS_REQUEST_DIR:-/run/sigmond/recorder-restart}"
+# shellcheck source=recorder-request-lib.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/recorder-request-lib.sh"
 
 # Config gate: if the T6 BPSK PPS chain is disabled in config, HPPS can
 # never feed and LastRx is infinite BY DESIGN - restarting the recorder
@@ -181,6 +193,7 @@ refusal_exit() {
     rm -f "$REFUSAL_FILE" 2>/dev/null || true
 }
 
+# The cooldown limits how often this script files a request.
 cooldown_active() {
     [ -f "$STATE_FILE" ] || return 1
     local last_restart now elapsed
@@ -190,7 +203,7 @@ cooldown_active() {
     [ "$elapsed" -lt "$COOLDOWN_S" ]
 }
 
-record_restart() {
+record_request() {
     mkdir -p "$STATE_DIR" 2>/dev/null || return 2
     date -u +%s > "$STATE_FILE" 2>/dev/null || return 2
     chmod 0644 "$STATE_FILE" 2>/dev/null || true
@@ -245,26 +258,25 @@ main() {
             log "HPPS withdrawn BY THE PRODUCER for ${elapsed}s (not a wedged push gate; see the recorder journal for the reason) — a restart would destroy the anchor, holding off until ${WITHDRAWN_GRACE_S}s"
             return 0
         fi
-        log "HPPS withdrawn for ${elapsed}s exceeds grace ${WITHDRAWN_GRACE_S}s — restarting as a last resort"
+        log "HPPS withdrawn for ${elapsed}s exceeds grace ${WITHDRAWN_GRACE_S}s — requesting a restart as a last resort"
     else
         rm -f "$WITHDRAWN_FILE" 2>/dev/null || true
     fi
 
     if cooldown_active; then
-        log "restart cooldown active (last restart < ${COOLDOWN_S}s ago); skipping"
+        log "request cooldown active (last request < ${COOLDOWN_S}s ago); skipping"
         return 0
     fi
 
-    log "restarting $TARGET_UNIT to recover T6 SHM"
-    if systemctl restart "$TARGET_UNIT"; then
-        if record_restart; then
-            log "restart issued; state file updated"
-        else
-            log "WARNING: restart issued but state file write failed — cooldown disabled"
+    if request_recorder_restart hpps-watchdog hpps-stale \
+            "HPPS LastRx=${lastrx}s exceeds threshold ${LASTRX_THRESHOLD_S}s"; then
+        log "requested a recorder restart from sigmond-recorder-watchdog"
+        if ! record_request; then
+            log "WARNING: request filed but state file write failed — cooldown disabled"
             return 2
         fi
     else
-        log "ERROR: systemctl restart $TARGET_UNIT failed"
+        log "ERROR: could not file the restart request"
         return 1
     fi
 }

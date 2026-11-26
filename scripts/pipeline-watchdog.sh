@@ -255,49 +255,10 @@ unit_active_age() {
     awk -v u="$up" -v e="$enter_us" 'BEGIN { a = u - e / 1000000; if (a < 0) a = 0; printf "%d\n", a }'
 }
 
-# File a restart request with sigmond-recorder-watchdog, then kick it.
-# Format: sigmond lib/sigmond/recorder_watchdog.py, file_request.  The
-# requested_utc must be a JSON number; the watchdog drops a string.
-request_recorder_restart() {
-    local cause="$1" evidence="$2"
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_warn "[DRY-RUN] Would request recorder restart ($cause): $evidence"
-        echo "[DRY-RUN] Would request recorder restart ($cause): $evidence"
-        return 0
-    fi
-    local esc="${evidence//\\/\\\\}"
-    esc="${esc//\"/\\\"}"
-    local path="$REQUEST_DIR/pipeline-watchdog.json" tmp
-    # This script runs as root.  Write only into a directory that root owns
-    # and nobody else can write: a planted symlink or a writable directory
-    # would turn the write below into a root-privileged one.
-    if [[ -e "$REQUEST_DIR" || -L "$REQUEST_DIR" ]]; then
-        local owner perms
-        owner=$(stat -c %u "$REQUEST_DIR" 2>/dev/null)
-        perms=$(stat -c %a "$REQUEST_DIR" 2>/dev/null)
-        if [[ -L "$REQUEST_DIR" || ! -d "$REQUEST_DIR" \
-              || "$owner" != "$REQUEST_DIR_OWNER_UID" \
-              || -z "$perms" || $(( 8#$perms & 8#022 )) -ne 0 ]]; then
-            log_error "refusing to write a request: $REQUEST_DIR is a symlink, not a directory, not owned by uid $REQUEST_DIR_OWNER_UID, or group/world-writable"
-            echo "refusing to write a request: $REQUEST_DIR is unsafe"
-            return 1
-        fi
-    else
-        mkdir -p "$(dirname "$REQUEST_DIR")" 2>/dev/null
-        install -d -m 0755 ${REQUEST_DIR_INSTALL_OWNER--o root -g root} "$REQUEST_DIR" \
-            || { log_error "cannot create $REQUEST_DIR"; return 1; }
-    fi
-    tmp=$(mktemp "$REQUEST_DIR/.pipeline-watchdog.XXXXXX") \
-        || { log_error "cannot create a temp file in $REQUEST_DIR"; return 1; }
-    if ! { printf '{"schema": 1, "reporter": "pipeline-watchdog", "cause": "%s", "requested_utc": %s, "evidence": "%s", "stopped_recorder": false}\n' \
-            "$cause" "$(date +%s.%N)" "$esc" > "$tmp" && mv -f "$tmp" "$path"; }; then
-        rm -f "$tmp"
-        log_error "cannot write $path"
-        return 1
-    fi
-    log_warn "Requested recorder restart ($cause): $evidence"
-    systemctl start --no-block sigmond-recorder-watchdog.service 2>/dev/null || true
-}
+# request_recorder_restart REPORTER CAUSE EVIDENCE comes from the shared
+# writer, which sigmond-recorder-watchdog's request format shapes.
+# shellcheck source=recorder-request-lib.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/recorder-request-lib.sh"
 
 # ── Thresholds (seconds) ──
 # Recorder flushes a chunk every file_duration_sec (default 600 = 10 min).
@@ -315,8 +276,6 @@ RECORDER_GRACE=1320
 # files a request with it (cause no-output) and kicks it; it never restarts
 # the recorder itself.
 REQUEST_DIR="${REQUEST_DIR:-/run/sigmond/recorder-restart}"
-# Required owner of REQUEST_DIR (tests override; root in production).
-REQUEST_DIR_OWNER_UID="${REQUEST_DIR_OWNER_UID:-0}"
 UPTIME_FILE="${UPTIME_FILE:-/proc/uptime}"
 RAW_BUFFER_HOT="${RAW_BUFFER_HOT:-/dev/shm/timestd/raw_buffer}"
 # Phase 2: metrology reads from the ring buffer and produces HDF5 data
@@ -368,7 +327,7 @@ check_recorder() {
     done
 
     if [[ $age -gt $RECORDER_STALE ]]; then
-        request_recorder_restart no-output "running but no output for ${age}s (threshold: ${RECORDER_STALE}s)"
+        request_recorder_restart pipeline-watchdog no-output "running but no output for ${age}s (threshold: ${RECORDER_STALE}s)"
     fi
 }
 

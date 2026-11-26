@@ -116,6 +116,7 @@ class _Station:
         self.status = root / "core-recorder-status.json"
         self.config = root / "timestd-config.toml"
         self.config.write_text("[timing.t6_pps]\nenabled = true\n")
+        self.request_dir = root / "recorder-restart"
         self.set_lastrx(9999)
         self._stub("chronyc", f"""#!/bin/bash
 case "$*" in
@@ -151,7 +152,11 @@ esac
                    HPPS_STATUS_FILE=str(self.root / "authority.json"),
                    HPPS_RECORDER_STATUS_FILE=str(self.status),
                    HPPS_LASTRX_THRESHOLD_S="600",
-                   HPPS_RESTART_COOLDOWN_S="1800")
+                   HPPS_RESTART_COOLDOWN_S="1800",
+                   HPPS_REQUEST_DIR=str(self.request_dir),
+                   # Tests do not run as root.
+                   REQUEST_DIR_OWNER_UID=str(os.getuid()),
+                   REQUEST_DIR_INSTALL_OWNER="")
         out = subprocess.run(["bash", str(SCRIPT)], env=env,
                              capture_output=True, text=True)
         assert out.returncode == 0, out.stdout + out.stderr
@@ -162,6 +167,16 @@ esac
         if not self.calls.exists():
             return 0
         return self.calls.read_text().count("restart")
+
+    @property
+    def requests(self):
+        if not self.request_dir.exists():
+            return 0
+        return len(list(self.request_dir.glob("*.json")))
+
+    def request(self):
+        return json.loads(
+            (self.request_dir / "hpps-watchdog.json").read_text())
 
 
 def _nd_refusal():
@@ -181,16 +196,70 @@ class TestTheWatchdogScript(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def test_a_dark_hpps_with_no_refusal_still_restarts(self):
-        """The wedge the watchdog was built for keeps its cure."""
+    def test_a_dark_hpps_with_no_refusal_files_a_request(self):
+        """The recorder is restarted by sigmond alone; this script reports."""
+        self.st.publish(None)
+        out = self.st.run()
+        self.assertEqual(self.st.restarts, 0)
+        self.assertEqual(self.st.requests, 1)
+        self.assertTrue(any("requested a recorder restart from "
+                            "sigmond-recorder-watchdog" in l for l in out), out)
+        req = self.st.request()
+        self.assertEqual(req["cause"], "hpps-stale")
+        self.assertEqual(req["reporter"], "hpps-watchdog")
+        self.assertEqual(req["schema"], 1)
+        self.assertIsInstance(req["requested_utc"], float)
+        self.assertIs(req["stopped_recorder"], False)
+        self.assertIn("LastRx=9999s", req["evidence"])
+
+    def test_the_request_cooldown_limits_requests(self):
         self.st.publish(None)
         self.st.run()
-        self.assertEqual(self.st.restarts, 1)
+        (self.st.request_dir / "hpps-watchdog.json").unlink()
+        self.st.run()
+        self.assertEqual(self.st.requests, 0)
 
-    def test_an_incurable_refusal_holds_the_restart(self):
+    def test_an_unsafe_request_dir_is_refused(self):
+        self.st.request_dir.mkdir(mode=0o755)
+        self.st.request_dir.chmod(0o777)
+        self.st.publish(None)
+        env = dict(os.environ, PATH=f"{self.st.bin}:{os.environ['PATH']}",
+                   HPPS_CONFIG_FILE=str(self.st.config),
+                   HPPS_STATE_DIR=str(self.st.state),
+                   HPPS_STATUS_FILE=str(self.st.root / "authority.json"),
+                   HPPS_RECORDER_STATUS_FILE=str(self.st.status),
+                   HPPS_LASTRX_THRESHOLD_S="600",
+                   HPPS_REQUEST_DIR=str(self.st.request_dir),
+                   REQUEST_DIR_OWNER_UID=str(os.getuid()))
+        r = subprocess.run(["bash", str(SCRIPT)], env=env,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual(self.st.requests, 0)
+        self.assertEqual(self.st.restarts, 0)
+
+    def test_a_symlinked_request_dir_is_refused(self):
+        target = self.st.root / "elsewhere"
+        target.mkdir(mode=0o755)
+        self.st.request_dir.symlink_to(target)
+        self.st.publish(None)
+        env = dict(os.environ, PATH=f"{self.st.bin}:{os.environ['PATH']}",
+                   HPPS_CONFIG_FILE=str(self.st.config),
+                   HPPS_STATE_DIR=str(self.st.state),
+                   HPPS_STATUS_FILE=str(self.st.root / "authority.json"),
+                   HPPS_RECORDER_STATUS_FILE=str(self.st.status),
+                   HPPS_LASTRX_THRESHOLD_S="600",
+                   HPPS_REQUEST_DIR=str(self.st.request_dir),
+                   REQUEST_DIR_OWNER_UID=str(os.getuid()))
+        r = subprocess.run(["bash", str(SCRIPT)], env=env,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual(list(target.iterdir()), [])
+
+    def test_an_incurable_refusal_holds_the_request(self):
         self.st.publish(_nd_refusal())
         self.st.run()
         self.assertEqual(self.st.restarts, 0)
+        self.assertEqual(self.st.requests, 0)
 
     def test_the_hold_is_logged_once_and_then_nothing(self):
         self.st.publish(_nd_refusal())
@@ -207,13 +276,15 @@ class TestTheWatchdogScript(unittest.TestCase):
         last refusal it wrote must not shield it from a restart."""
         self.st.publish(_nd_refusal(), age_s=600)
         self.st.run()
-        self.assertEqual(self.st.restarts, 1)
+        self.assertEqual(self.st.restarts, 0)
+        self.assertEqual(self.st.requests, 1)
 
     def test_a_refusal_a_restart_can_cure_does_not_hold(self):
         rec = dict(_nd_refusal(), restart_cures=True)
         self.st.publish(rec)
         self.st.run()
-        self.assertEqual(self.st.restarts, 1)
+        self.assertEqual(self.st.restarts, 0)
+        self.assertEqual(self.st.requests, 1)
 
     def test_when_the_refusal_ends_the_exit_is_logged_and_policy_resumes(self):
         self.st.publish(_nd_refusal())
@@ -222,7 +293,8 @@ class TestTheWatchdogScript(unittest.TestCase):
         out = self.st.run()
         self.assertTrue(any("no longer reports" in line for line in out),
                         out)
-        self.assertEqual(self.st.restarts, 1)
+        self.assertEqual(self.st.restarts, 0)
+        self.assertEqual(self.st.requests, 1)
         again = self.st.run()
         self.assertFalse(any("no longer reports" in line for line in again))
 
