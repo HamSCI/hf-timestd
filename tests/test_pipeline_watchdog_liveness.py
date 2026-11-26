@@ -44,7 +44,10 @@ case "$cmd" in
   is-enabled) for u in $ENABLED_UNITS; do [[ "$u" == "$unit" ]] && exit 0; done; exit 1 ;;
   is-active) for u in ${ACTIVE_UNITS-$ENABLED_UNITS}; do [[ "$u" == "$unit" ]] && exit 0; done; exit 1 ;;
   is-failed) exit 1 ;;
-  show) for a in "$@"; do [[ "$a" == "ActiveEnterTimestampMonotonic" ]] && echo "$RECORDER_ENTER_US"; done; exit 0 ;;
+  show) for a in "$@"; do
+          [[ "$a" == "ActiveEnterTimestampMonotonic" ]] && echo "$RECORDER_ENTER_US"
+          [[ "$a" == "ExecMainStatus" ]] && echo "${EXEC_MAIN_STATUS:-0}"
+        done; exit 0 ;;
   *) exit 0 ;;
 esac
 '''
@@ -453,3 +456,19 @@ def test_a_compaction_marker_holds_the_authority_restart(env):
     env["compact_marker"].write_text("{}")
     _run(env, [REC, AUTH], dry=False, active_units=[REC])
     assert f"restart {AUTH}" not in _log(env)
+
+
+def test_authority_exit_78_is_not_restarted(env, monkeypatch):
+    # Mutation check: drop the exit-78 test from check_authority_manager.
+    monkeypatch.setenv("EXEC_MAIN_STATUS", "78")
+    out = _run(env, [REC, AUTH], dry=False, active_units=[REC])
+    log = _log(env)
+    assert f"restart {AUTH}" not in log, log
+    assert f"reset-failed {AUTH}" not in log, log
+    assert "refused for configuration (exit 78)" in out
+
+
+def test_authority_other_failure_is_restarted(env, monkeypatch):
+    monkeypatch.setenv("EXEC_MAIN_STATUS", "1")
+    _run(env, [REC, AUTH], dry=False, active_units=[REC])
+    assert f"restart {AUTH}" in _log(env)

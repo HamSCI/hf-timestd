@@ -483,6 +483,16 @@ check_authority_manager() {
     local unit="timestd-authority-manager.service"
     if ! is_enabled "$unit"; then return; fi
     if ! is_active "$unit"; then
+        # Exit 78 (EX_CONFIG) means the authority cannot build its manager
+        # from config; the unit sets RestartPreventExitStatus=78 on purpose.
+        # Reviving it would undo that every pass, so leave it failed.
+        local main_status
+        main_status=$(systemctl show -p ExecMainStatus --value "$unit" 2>/dev/null)
+        if [[ "$main_status" == "78" ]]; then
+            log_warn "timestd-authority-manager refused for configuration (exit 78); not restarting — fix the config, then restart it"
+            echo "timestd-authority-manager refused for configuration (exit 78); not restarting — fix the config, then restart it"
+            return
+        fi
         do_restart "$unit" "not running but enabled"
         RESTARTS=$((RESTARTS + 1))
     fi
