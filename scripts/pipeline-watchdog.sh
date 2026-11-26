@@ -56,6 +56,23 @@ if ! command -v sqlite3 >/dev/null 2>&1; then
 data-driven restarts are DISABLED this pass (install the sqlite3 package)"
 fi
 
+# True while the resource guardian reports a pause (action=paused or
+# evict-skipped-locked) with a ts newer than 2 x this timer's 300 s interval.
+# A paused metrology writes no rows; restarting it every tick resets nothing
+# useful and (before the guardian persisted its grace start) kept the
+# emergency eviction from ever running.  Parsed with grep/date: no jq here.
+GUARDIAN_PAUSE_FRESH_SEC=600
+guardian_paused() {
+    local ev="$DATA_ROOT/state/guardian-event.json" action ts epoch
+    [[ -r "$ev" ]] || return 1
+    action=$(grep -o '"action": *"[^"]*"' "$ev" 2>/dev/null | head -1 | sed 's/.*: *"\(.*\)"/\1/')
+    case "$action" in paused|evict-skipped-locked) ;; *) return 1 ;; esac
+    ts=$(grep -o '"ts": *"[^"]*"' "$ev" 2>/dev/null | head -1 | sed 's/.*: *"\(.*\)"/\1/')
+    epoch=$(date -u -d "$ts" +%s 2>/dev/null) || return 1
+    (( $(date -u +%s) - epoch <= GUARDIAN_PAUSE_FRESH_SEC )) || return 1
+    return 0
+}
+
 # Seconds since a file/dir was last modified. Returns 999999 if not found.
 file_age() {
     local path="$1"
@@ -330,6 +347,9 @@ check_metrology() {
         age=$(min_known_age "$age_meas" "$age_att" "$age_arr")
         if age_unknown "$age"; then
             log_error "cannot assess metrology liveness for $channel (every SQLite query failed) - NOT restarting $unit"
+        elif [[ $age -gt $METROLOGY_STALE ]] && guardian_paused; then
+            log_warn "NOT restarting $unit: the resource guardian has writes paused (disk at its hard stop); a restart would reset its grace window"
+            echo "[SKIP] $unit: resource guardian paused"
         elif [[ $age -gt $METROLOGY_STALE ]]; then
             do_restart "$unit" "running but no processed minute for $channel in ${age}s (attempts=${age_att}s arrivals=${age_arr}s measurements=${age_meas}s; threshold: ${METROLOGY_STALE}s)"
             RESTARTS=$((RESTARTS + 1))

@@ -162,6 +162,7 @@ class ResourceGuardian:
         evict_grace_sec: float = EVICT_GRACE_SEC,
         evict_low_water_percent: float = EVICT_LOW_WATER_PERCENT,
         clock=time.monotonic,
+        wall=time.time,
         archive_dtype: str = DEFAULT_ARCHIVE_DTYPE,
     ):
         self.data_root = Path(data_root)
@@ -202,6 +203,7 @@ class ResourceGuardian:
         self.evict_grace_sec = float(evict_grace_sec)
         self.evict_low_water_percent = float(evict_low_water_percent)
         self._clock = clock
+        self._wall = wall      # epoch seconds: the persisted grace start only
 
         self._last_watchdog_time = float('-inf')   # first check runs at once
         self._evict_skipped = False
@@ -414,7 +416,7 @@ class ResourceGuardian:
         # --- Safety net: hard stop (hf-timestd#31: hysteresis) ---
         if disk_used_pct >= hard_stop:
             if self._over_since is None:
-                self._over_since = now
+                self._over_since = self._adopt_or_start_over_since(now, hard_stop)
             over_for = now - self._over_since
             grace_left = self.evict_grace_sec - over_for
             # ALWAYS pause + alert on a crossing; DELETE only after the
@@ -463,6 +465,7 @@ class ResourceGuardian:
                 else:
                     state = ResourceState.STOP
                     self._over_since = None
+                    self._clear_over_since()
                     message = (
                         f"Disk was ≥{hard_stop}%%, evicted "
                         f"{bytes_cleaned / GB:.1f} GB (regenerable first, oldest "
@@ -476,6 +479,7 @@ class ResourceGuardian:
         else:
             self._over_since = None
             self._lock_contended_since = None
+            self._clear_over_since()
 
         # Below the hard stop nothing else happens here: the sigmond ledger
         # owns routine retention, and the guardian walks no data tree.
@@ -623,6 +627,51 @@ class ResourceGuardian:
                     continue
                 seen.add(date_str)
                 yield ('raw_day', date_str)
+
+    # -- the grace survives a restart ----------------------------------
+    # pipeline-watchdog restarts a paused metrology (no rows), and each new
+    # guardian would start its 600 s grace again, so no eviction ever ran.
+    # The start of the over-threshold spell is kept as a wall-clock epoch
+    # beside guardian-event.json; the six metrology processes share it.
+
+    @property
+    def _over_since_path(self) -> Path:
+        return self.data_root / 'state' / 'guardian-over-since.json'
+
+    def _adopt_or_start_over_since(self, now: float, hard_stop: float) -> float:
+        """Monotonic start of this spell: adopt a persisted one for the same
+        threshold, else start now and persist.  A missing, corrupt or
+        future-dated file starts fresh."""
+        import json
+        try:
+            doc = json.loads(self._over_since_path.read_text())
+            epoch = float(doc['over_since'])
+            thr = float(doc['threshold'])
+            age = self._wall() - epoch
+            if thr == hard_stop and 0.0 <= age < 30 * 86400:
+                logger.info("Guardian: adopting the over-threshold spell "
+                            "begun %.0f s ago (survives a restart)", age)
+                return now - age
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        try:
+            state_dir = self.data_root / 'state'
+            state_dir.mkdir(parents=True, exist_ok=True)
+            tmp = state_dir / f'guardian-over-since.json.{os.getpid()}.tmp'
+            tmp.write_text(json.dumps({'over_since': self._wall(),
+                                       'threshold': hard_stop}))
+            tmp.replace(self._over_since_path)       # atomic
+        except OSError as exc:
+            logger.warning("Could not persist the guardian grace start: %s", exc)
+        return now
+
+    def _clear_over_since(self) -> None:
+        try:
+            self._over_since_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            logger.warning("Could not clear the guardian grace start: %s", exc)
 
     def _usage_percent(self) -> float:
         try:

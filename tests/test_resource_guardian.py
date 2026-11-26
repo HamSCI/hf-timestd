@@ -718,3 +718,94 @@ class TestEvictLock:
                 assert g.watchdog_check(force=True).bytes_cleaned > 0      # bound passed
         finally:
             os.close(held)
+
+
+class TestGraceSurvivesRestart:
+    """pipeline-watchdog restarts a paused metrology; the 600 s grace must
+    not start over with each new guardian."""
+
+    def _new(self, root, clk, wall, **kw):
+        return ResourceGuardian(data_root=str(root), n_channels=1, clock=clk,
+                                wall=wall, evict_grace_sec=600,
+                                evict_low_water_percent=90.0, **kw)
+
+    def test_a_restarted_guardian_evicts_after_the_remaining_grace(self, tmp_data_root):
+        _day(tmp_data_root, '20260101', raw_bytes=10000, phase2_bytes=5000)
+        wall = [5_000_000.0]
+        clk1 = _Clock()
+        g1 = self._new(tmp_data_root, clk1, lambda: wall[0])
+        fake = _live_du(tmp_data_root, fill_bytes=24000, total_bytes=40000)
+        with patch('shutil.disk_usage', side_effect=fake):
+            assert g1.watchdog_check(force=True).state == ResourceState.STOP
+        # the process dies; a new one starts 590 s later, on a fresh clock
+        wall[0] += 590
+        clk2 = _Clock()
+        g2 = self._new(tmp_data_root, clk2, lambda: wall[0])
+        with patch('shutil.disk_usage', side_effect=fake):
+            s = g2.watchdog_check(force=True)
+            assert s.state == ResourceState.STOP and s.bytes_cleaned == 0   # 590 < 600
+            clk2.advance(11)
+            wall[0] += 11
+            s = g2.watchdog_check(force=True)                               # 601 s in all
+        assert s.bytes_cleaned > 0
+
+    def test_without_persistence_each_restart_would_wait_the_full_grace(self, tmp_data_root):
+        """Pins the restart: a new guardian 100 s later has 500 s left, not 0."""
+        wall = [5_000_000.0]
+        g1 = self._new(tmp_data_root, _Clock(), lambda: wall[0])
+        with patch('shutil.disk_usage', return_value=_du(500 * GB, 480 * GB)):
+            g1.watchdog_check(force=True)
+            wall[0] += 100
+            g2 = self._new(tmp_data_root, _Clock(), lambda: wall[0])
+            g2.watchdog_check(force=True)
+        assert 99 <= g2._clock() - g2._over_since <= 101
+
+    def test_a_corrupt_file_starts_fresh(self, tmp_data_root):
+        (tmp_data_root / 'state' / 'guardian-over-since.json').write_text('{not json')
+        clk = _Clock()
+        g = self._new(tmp_data_root, clk, lambda: 5_000_000.0)
+        with patch('shutil.disk_usage', return_value=_du(500 * GB, 480 * GB)):
+            g.watchdog_check(force=True)
+        assert g._over_since == clk()
+        import json
+        assert json.loads((tmp_data_root / 'state' / 'guardian-over-since.json'
+                           ).read_text())['over_since'] == 5_000_000.0
+
+    def test_a_future_dated_file_starts_fresh(self, tmp_data_root):
+        import json
+        (tmp_data_root / 'state' / 'guardian-over-since.json').write_text(
+            json.dumps({'over_since': 9_000_000.0, 'threshold': 95.0}))
+        clk = _Clock()
+        g = self._new(tmp_data_root, clk, lambda: 5_000_000.0)
+        with patch('shutil.disk_usage', return_value=_du(500 * GB, 480 * GB)):
+            g.watchdog_check(force=True)
+        assert g._over_since == clk()
+
+    def test_a_file_for_another_threshold_starts_fresh(self, tmp_data_root):
+        import json
+        (tmp_data_root / 'state' / 'guardian-over-since.json').write_text(
+            json.dumps({'over_since': 4_999_000.0, 'threshold': 98.0}))
+        clk = _Clock()
+        g = self._new(tmp_data_root, clk, lambda: 5_000_000.0)
+        with patch('shutil.disk_usage', return_value=_du(500 * GB, 480 * GB)):
+            g.watchdog_check(force=True)               # unmanaged: 95 %
+        assert g._over_since == clk()
+
+    def test_below_threshold_clears_the_file(self, tmp_data_root):
+        f = tmp_data_root / 'state' / 'guardian-over-since.json'
+        g = self._new(tmp_data_root, _Clock(), lambda: 5_000_000.0)
+        with patch('shutil.disk_usage', return_value=_du(500 * GB, 480 * GB)):
+            g.watchdog_check(force=True)
+        assert f.exists()
+        with patch('shutil.disk_usage', return_value=_du(500 * GB, 300 * GB)):
+            g.watchdog_check(force=True)
+        assert not f.exists()
+
+    def test_a_fresh_guardian_below_threshold_clears_a_stale_file(self, tmp_data_root):
+        import json
+        f = tmp_data_root / 'state' / 'guardian-over-since.json'
+        f.write_text(json.dumps({'over_since': 4_999_000.0, 'threshold': 95.0}))
+        g = self._new(tmp_data_root, _Clock(), lambda: 5_000_000.0)
+        with patch('shutil.disk_usage', return_value=_du(500 * GB, 300 * GB)):
+            g.watchdog_check(force=True)
+        assert not f.exists()

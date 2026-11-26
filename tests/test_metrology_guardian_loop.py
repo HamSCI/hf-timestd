@@ -123,3 +123,18 @@ def test_a_preflight_at_the_hard_stop_starts_a_paused_service(tmp_path, monkeypa
         assert g.preflight_check() is True
         svc._run_ringbuffer_mode()
     assert svc._guardian_paused is True and reader.cursor_reads == 0
+
+
+def test_resume_logs_the_unmeasured_minutes_at_warning(tmp_path, monkeypatch, caplog):
+    import logging
+    clk = Clock()
+    _data(tmp_path)
+    g = ResourceGuardian(data_root=str(tmp_path), n_channels=1, clock=clk,
+                         evict_grace_sec=600, evict_low_water_percent=90.0)
+    svc, reader, sleeps = _service(monkeypatch, g, clk, max_sleeps=900)
+    monkeypatch.setattr(ms.time, 'time', lambda: 1_700_000_000.0 + clk.t - 100000.0)
+    with patch('shutil.disk_usage', side_effect=_disk(tmp_path, 24000, 40000)), \
+            caplog.at_level(logging.WARNING):
+        svc._run_ringbuffer_mode()
+    msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any('UNMEASURED' in m and '[T]' in m and '2023-11-14' in m for m in msgs), msgs

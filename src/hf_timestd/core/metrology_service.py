@@ -531,11 +531,25 @@ class MetrologyService:
                 logger.critical(
                     f"[{self.channel_name}] resource guardian: "
                     f"{rs.message} — writes PAUSED")
+                # Operational log only; no timing path reads this.
+                self._paused_at = time.time()
             self._guardian_paused = True
         elif self._guardian_paused:
             logger.warning(
                 f"[{self.channel_name}] resource guardian: disk recovered "
                 f"({rs.disk_used_percent:.1f}%) — writes RESUMED")
+            paused_at = getattr(self, '_paused_at', None)
+            if paused_at is not None:
+                import datetime as _dt
+                fmt = '%Y-%m-%d %H:%MZ'
+                m0 = _dt.datetime.fromtimestamp(
+                    paused_at // 60 * 60, _dt.timezone.utc)
+                m1 = _dt.datetime.fromtimestamp(
+                    time.time() // 60 * 60, _dt.timezone.utc)
+                logger.warning(
+                    f"[{self.channel_name}] UNMEASURED while paused: minutes "
+                    f"{m0.strftime(fmt)} through {m1.strftime(fmt)} "
+                    f"(any still in the ring are processed on resume)")
             self._guardian_paused = False
         return False
 

@@ -170,3 +170,46 @@ def test_physics_not_judged_by_tec_output(env):
     _make_db(env["db"], now, {}, None)
     out = _run(env, [PHY])
     assert "Would restart" not in out, out
+
+
+def _guardian_event(env, action, age):
+    import json
+    ts = datetime.fromtimestamp(time.time() - age, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    d = env["data_root"] / "state"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "guardian-event.json").write_text(json.dumps(
+        {"ts": ts, "action": action, "state": "stop", "message": "x"}))
+
+
+def _stale_metrology(env):
+    now = int(time.time())
+    _make_db(env["db"], now, {"L1_metrology_measurements": 3600,
+                              "L2_detection_attempts": 900, "L1_all_arrivals": 900}, None)
+
+
+def test_guardian_pause_suppresses_the_metrology_restart(env):
+    """A paused metrology writes no rows; restarting it resets the guardian
+    grace and the emergency eviction never runs."""
+    _stale_metrology(env)
+    _guardian_event(env, "paused", 60)
+    out = _run(env, [MET])
+    assert "Would restart" not in out, out
+    assert "resource guardian paused" in out
+
+
+def test_guardian_evict_skipped_locked_also_suppresses(env):
+    _stale_metrology(env)
+    _guardian_event(env, "evict-skipped-locked", 60)
+    assert "Would restart" not in _run(env, [MET])
+
+
+def test_an_old_guardian_pause_does_not_suppress(env):
+    _stale_metrology(env)
+    _guardian_event(env, "paused", 601 + 60)
+    assert f"Would restart {MET}" in _run(env, [MET])
+
+
+def test_other_guardian_actions_do_not_suppress(env):
+    _stale_metrology(env)
+    _guardian_event(env, "evicted", 30)
+    assert f"Would restart {MET}" in _run(env, [MET])
