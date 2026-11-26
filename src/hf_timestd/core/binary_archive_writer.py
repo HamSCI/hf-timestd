@@ -124,7 +124,6 @@ class BinaryArchiveConfig:
     compress_completed: bool = False  # Async compression of old minutes
     compression: str = 'none'  # 'none', 'zstd', or 'lz4' - reduces disk I/O by ~2-3x
     compression_level: int = 3  # zstd: 1-22 (3 = good balance), lz4: 1-12
-    storage_quota_percent: float = 80.0  # Max disk usage percentage (from config storage_quota)
     use_tiered_storage: bool = False  # Use /dev/shm hot buffer with disk cold storage
     radiod_snr_db: Optional[float] = None  # SNR from radiod (updated periodically)
     # |old-mapping vs new-snapshot| beyond this (s) ⇒ radiod stepped its
@@ -1272,128 +1271,26 @@ class BinaryArchiveWriter:
         return buffer
     
     def _check_disk_space(self, path: Path, required_bytes: int) -> bool:
-        """Check if sufficient disk space is available based on storage quota.
-        
-        Uses the configured storage_quota_percent to determine if we're over quota.
-        If over quota, automatically removes oldest files to make room.
-        Also checks for absolute minimum free space (100MB headroom).
+        """Refuse a flush when free space runs short.  Never delete a file.
+
+        True when at least required_bytes + 100 MiB is free.  Otherwise this
+        logs an ERROR and returns False.  Retention belongs to sigmond's
+        ledger and the prune timer, not to the writer.
         """
         try:
             stat = shutil.disk_usage(path)
-            
-            # Check storage quota percentage
-            current_usage_percent = (stat.used / stat.total) * 100
-            if current_usage_percent >= self.config.storage_quota_percent:
-                # Auto-remove oldest files to make room
-                freed = self._remove_oldest_files(path, required_bytes)
-                if freed > 0:
-                    logger.info(
-                        f"Storage quota reached ({current_usage_percent:.1f}%), "
-                        f"removed oldest files to free {freed / 1024 / 1024:.1f}MB"
-                    )
-                    # Re-check after cleanup
-                    stat = shutil.disk_usage(path)
-                    current_usage_percent = (stat.used / stat.total) * 100
-                    if current_usage_percent >= self.config.storage_quota_percent:
-                        logger.warning(
-                            f"Still over quota after cleanup: {current_usage_percent:.1f}%"
-                        )
-                        # Continue anyway - we tried our best
-            
-            # Also check absolute minimum free space (100MB headroom)
             min_free = required_bytes + 100 * 1024 * 1024
             if stat.free < min_free:
-                # Try to free more space
-                freed = self._remove_oldest_files(path, min_free - stat.free)
-                if freed > 0:
-                    logger.info(f"Freed {freed / 1024 / 1024:.1f}MB for minimum headroom")
-                else:
-                    logger.error(
-                        f"Insufficient disk space: {stat.free / 1024 / 1024:.1f}MB free, "
-                        f"need {min_free / 1024 / 1024:.1f}MB"
-                    )
-                    return False
-            
+                logger.error(
+                    f"Insufficient disk space: {stat.free / 1024 / 1024:.1f}MB free, "
+                    f"need {min_free / 1024 / 1024:.1f}MB"
+                )
+                return False
             return True
         except OSError as e:
             logger.warning(f"Could not check disk space: {e}")
             return True  # Proceed anyway, let write fail if needed
-    
-    def _remove_oldest_files(self, path: Path, bytes_needed: int) -> int:
-        """Remove oldest files from the archive to free space.
-        
-        Args:
-            path: Base path to search for files
-            bytes_needed: Minimum bytes to free
-            
-        Returns:
-            Total bytes freed
-        """
-        try:
-            # Find all .bin and .bin.zst/.bin.lz4 files in the archive
-            archive_root = path.parent if path.name.isdigit() else path
-            
-            # Collect all minute files with their timestamps
-            files_with_time = []
-            for pattern in ['**/*.bin', '**/*.bin.zst', '**/*.bin.lz4']:
-                for f in archive_root.glob(pattern):
-                    try:
-                        # Use file modification time for sorting
-                        mtime = f.stat().st_mtime
-                        size = f.stat().st_size
-                        files_with_time.append((mtime, size, f))
-                    except OSError:
-                        continue
-            
-            if not files_with_time:
-                return 0
-            
-            # Sort by modification time (oldest first)
-            files_with_time.sort(key=lambda x: x[0])
-            
-            # Protect files less than 2 days old from cleanup.
-            # The GRAPE daily pipeline runs at 01:01 UTC for yesterday's data,
-            # so we need at least 1 day + margin of retention.
-            retention_cutoff = time.time() - (2 * 86400)
-            
-            # Remove oldest files until we've freed enough space
-            bytes_freed = 0
-            files_removed = 0
-            for mtime, size, filepath in files_with_time:
-                if bytes_freed >= bytes_needed:
-                    break
-                if mtime > retention_cutoff:
-                    # Skip files newer than retention cutoff
-                    continue
-                
-                try:
-                    # Also remove the corresponding .json sidecar
-                    json_path = filepath.with_suffix('.json') if filepath.suffix == '.bin' else \
-                                filepath.with_name(filepath.name.replace('.bin.zst', '.json').replace('.bin.lz4', '.json'))
-                    
-                    filepath.unlink()
-                    bytes_freed += size
-                    files_removed += 1
-                    
-                    if json_path.exists():
-                        json_size = json_path.stat().st_size
-                        json_path.unlink()
-                        bytes_freed += json_size
-                    
-                    logger.debug(f"Removed old file: {filepath.name}")
-                except OSError as e:
-                    logger.debug(f"Could not remove {filepath}: {e}")
-                    continue
-            
-            if files_removed > 0:
-                logger.info(f"Quota cleanup: removed {files_removed} oldest files")
-            
-            return bytes_freed
-            
-        except Exception as e:
-            logger.warning(f"Error during quota cleanup: {e}")
-            return 0
-    
+
     def _try_flush(self, buffer: MinuteBuffer) -> bool:
         """Hand the buffer off to the async flush worker.
 
