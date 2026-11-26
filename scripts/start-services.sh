@@ -249,12 +249,14 @@ log_step "Phase 3: Starting fusion and physics..."
 # timestd-fusion.service:69 states the policy outright: never ipcrm the shared
 # SHM segments.
 
-start_service "timestd-fusion" "Fusion → Chrony SHM"
+start_service "timestd-fusion" "Fusion → L3 timing (witness)"
 # After fusion, as in deploy.toml: authority.json never has two writers.
 start_service "timestd-authority-manager" "Authority → authority.json"
 # TEC estimation moved to hamsci-physics (2026-08-24 split): `smd start hamsci-physics`.
 
-# Restart chronyd to pick up SHM (fusion creates SHM segments with correct permissions)
+# Restart chronyd so it re-attaches the refclock SHM segments.  Fusion writes
+# none since the FUSE refclock retired (2026-10-22); sigmond-shm-precreate
+# creates them and the recorder writes HPPS.  Behaviour kept as it was.
 if systemctl is-active --quiet chronyd; then
     log_info "  Restarting chronyd to pick up SHM segments..."
     systemctl restart chronyd

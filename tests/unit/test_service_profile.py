@@ -471,3 +471,48 @@ def test_authority_manager_runs_in_timing_profiles(profile):
 
 def test_archive_profile_has_no_authority():
     assert "authority_manager" not in PROFILES["archive"]
+
+
+class TestFusionRestartsBeforeTheAuthorityStarts:
+    """Fusion hosted the authority runner until v3.96.  `smd align` runs
+    install.sh, whose `profile set` starts the new authority unit with
+    `enable --now`, which never restarts the running (old) fusion: two
+    writers of authority.json.  apply_profile restarts fusion first."""
+
+    AUTH = 'timestd-authority-manager.service'
+    FUSION = 'timestd-fusion.service'
+
+    def _run(self, active_units):
+        calls = []
+
+        def fake_run(cmd, *args, **kwargs):
+            calls.append(list(cmd))
+            if cmd[:2] == ['systemctl', 'is-active']:
+                return MagicMock(returncode=0 if cmd[-1] in active_units else 3,
+                                 stderr='')
+            return MagicMock(returncode=0, stderr='')
+
+        with patch('hf_timestd.service_profile.subprocess.run',
+                   side_effect=fake_run):
+            actions = apply_profile(ServiceProfile(profile_name='full'),
+                                    dry_run=False)
+        return calls, actions
+
+    def _index(self, calls, cmd):
+        return calls.index(cmd)
+
+    def test_running_fusion_restarts_before_the_authority_starts(self):
+        calls, actions = self._run({self.FUSION})
+        restart = self._index(calls, ['systemctl', 'try-restart', self.FUSION])
+        start = self._index(
+            calls, ['systemctl', 'enable', '--no-reload', '--now', self.AUTH])
+        assert restart < start
+        assert actions[self.FUSION + ' (pre-authority)'] == 'restarted'
+
+    def test_no_restart_when_the_authority_already_runs(self):
+        calls, _ = self._run({self.FUSION, self.AUTH})
+        assert ['systemctl', 'try-restart', self.FUSION] not in calls
+
+    def test_no_restart_when_fusion_is_not_running(self):
+        calls, _ = self._run(set())
+        assert ['systemctl', 'try-restart', self.FUSION] not in calls

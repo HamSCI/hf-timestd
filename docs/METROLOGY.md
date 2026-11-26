@@ -460,7 +460,7 @@ Transitions are logged and stamped in sidecars:
 }
 ```
 
-The authority history store (`/var/lib/timestd/authority_history.db`) mirrors the verdict as four flat columns, `host_clock_verdict`, `host_clock_since_utc`, `host_clock_t2_ms`, `host_clock_lb1421_s`, so a station's day can be read back without parsing JSON (hamsci-dsp `authority_snapshot_store`, 2026-09-04; older DBs gain the columns on reopen). The authority service (`timestd-authority-manager.service`) also publishes the station's `chain` records, once at start,, its measurand plane and uncertainty budget, at `/run/hf-timestd/timing_chain.json`, from the defaults plus the overrides in `[timing.provenance]` (`docs/design/TIMING_PROVENANCE_MODEL.md` §3.2; `core/timing_chain_publisher.py`).
+The authority history store (`/var/lib/timestd/authority_history.db`) mirrors the verdict as four flat columns, `host_clock_verdict`, `host_clock_since_utc`, `host_clock_t2_ms`, `host_clock_lb1421_s`, so a station's day can be read back without parsing JSON (hamsci-dsp `authority_snapshot_store`, 2026-09-04; older DBs gain the columns on reopen). The authority service (`timestd-authority-manager.service`) also publishes, once at start, the station's `chain` records (its measurand plane and uncertainty budget) at `/run/hf-timestd/timing_chain.json`, from the defaults plus the overrides in `[timing.provenance]` (`docs/design/TIMING_PROVENANCE_MODEL.md` §3.2; `core/timing_chain_publisher.py`).
 
 #### Published Authority State (schema v1)
 

@@ -238,6 +238,50 @@ def get_unit_status(unit: str) -> Dict[str, str]:
 # Where link-installed units live (deploy.toml kind = "link").
 SYSTEMD_UNIT_DIR = '/etc/systemd/system'
 
+AUTHORITY_UNIT = SERVICE_UNIT_MAP['authority_manager']
+FUSION_UNIT = SERVICE_UNIT_MAP['fusion']
+
+
+def _unit_is_active(unit: str) -> bool:
+    try:
+        return subprocess.run(
+            ['systemctl', 'is-active', '--quiet', unit],
+            capture_output=True, text=True, timeout=10,
+        ).returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+
+
+def _restart_fusion_before_authority(actions: Dict[str, str]) -> None:
+    """Before v3.96 fusion hosted the authority runner in-process.  When the
+    authority unit is about to start for the first time, a fusion that is
+    already running may still be that old code, and the two would both
+    write authority.json.  `systemctl enable --now` never restarts a running
+    unit, so restart fusion first: the process that comes back runs the
+    current code, which hosts no runner.  `smd align` reaches this through
+    install.sh's `profile set`, before its own ordered restart.
+
+    Skipped when the authority already runs: fusion was restarted then, and
+    an ordinary `profile set` must not bounce it."""
+    if _unit_is_active(AUTHORITY_UNIT) or not _unit_is_active(FUSION_UNIT):
+        return
+    try:
+        subprocess.run(
+            ['systemctl', 'try-restart', FUSION_UNIT],
+            capture_output=True, text=True, timeout=120, check=True,
+        )
+        actions[FUSION_UNIT + ' (pre-authority)'] = 'restarted'
+        logger.info(f"{FUSION_UNIT}: restarted before {AUTHORITY_UNIT} "
+                    f"starts, so it no longer hosts the authority")
+    except subprocess.CalledProcessError as e:
+        actions[FUSION_UNIT + ' (pre-authority)'] = f'error: {e.stderr.strip()}'
+        logger.error(f"{FUSION_UNIT}: restart before {AUTHORITY_UNIT} "
+                     f"failed: {e.stderr.strip()}")
+    except subprocess.TimeoutExpired as e:
+        actions[FUSION_UNIT + ' (pre-authority)'] = f'error: {e}'
+        logger.error(f"{FUSION_UNIT}: restart before {AUTHORITY_UNIT} "
+                     f"timed out: {e}")
+
 
 def apply_profile(profile: ServiceProfile, dry_run: bool = False,
                   unit_dir: str = SYSTEMD_UNIT_DIR) -> Dict[str, str]:
@@ -288,6 +332,8 @@ def apply_profile(profile: ServiceProfile, dry_run: bool = False,
         if dry_run:
             actions[unit] = 'would enable'
         else:
+            if unit == AUTHORITY_UNIT:
+                _restart_fusion_before_authority(actions)
             try:
                 subprocess.run(
                     ['systemctl', 'enable', '--no-reload', '--now', unit],
