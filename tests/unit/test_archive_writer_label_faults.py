@@ -689,11 +689,7 @@ def test_writer_close_joins_the_watchdog_capture(tmp_path, monkeypatch):
 @pytest.mark.parametrize("tiered", [True, False])
 def test_stream_recorder_archives_under_raw_buffer(tmp_path, monkeypatch, tiered):
     from unittest.mock import MagicMock
-    from hf_timestd.core import tiered_storage as ts
     from hf_timestd.core.stream_recorder_v2 import StreamRecorderConfig
-    # F8: the global manager must never touch /dev/shm or /var/lib here.
-    monkeypatch.setattr(ts, "_manager", ts.TieredStorageManager(ts.TieredStorageConfig(
-        hot_buffer_root=tmp_path / "mgr_hot", cold_buffer_root=tmp_path / "mgr_cold")))
     cfg = StreamRecorderConfig(
         ssrc=None, frequency_hz=10e6, sample_rate=SR, preset="iq", encoding=4,
         description="testchan", output_dir=tmp_path, receiver_grid="AA00aa",

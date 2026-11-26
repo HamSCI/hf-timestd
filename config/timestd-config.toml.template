@@ -80,19 +80,12 @@ file_duration_sec = 600
 # Digital RF HDF5 output (uses significant storage ~1.5GB/day/channel)
 save_digital_rf = false
 
-# Tiered Storage: Use /dev/shm (RAM) for hot buffer, disk for cold storage
-#
-# Two independent RAM budgets ADD UP — keep their sum well under the
-# systemd MemoryMax (defaults to 6 G in our unit file).  Cgroup memory
-# accounting also double-counts tmpfs-backed scratch, so the effective
-# ceiling is (tiered_ram_percent + ring_ram_percent) × available_RAM
-# + ~1 G tmpfs double-count + ~0.5 G Python heap.  10 % + 10 % is a
-# safe default on hosts with 14 G+ available; raise both together if
-# you also raise MemoryMax.
+# Tiered Storage: with tiered_storage on, the chunk still filling lives in
+# hot_buffer_root (RAM, about 115 MB per channel at chunk end).  A finished
+# chunk goes to raw_buffer on disk at once.  At start the recorder moves any
+# finished chunks an older recorder left in RAM to disk.
 tiered_storage = true
 hot_buffer_root = "/dev/shm/timestd"
-tiered_ram_percent = 10
-ring_ram_percent = 10
 
 # Channel defaults (applied to all channel groups unless overridden per-group)
 [recorder.channel_defaults]

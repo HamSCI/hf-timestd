@@ -1176,6 +1176,25 @@ class CoreRecorderV2:
         threading.Thread(
             target=_loop, daemon=True, name="timestd-deferred-start").start()
 
+    def _drain_hot_buffer(self) -> None:
+        """Move finished chunks a pre-v3.96 recorder left in RAM to disk."""
+        if not self.recorder_config.get('tiered_storage', False):
+            return
+        from . import tiered_storage
+        hot_root = Path(self.recorder_config.get('hot_buffer_root', '/dev/shm/timestd'))
+        try:
+            result = tiered_storage.drain_hot_buffer(
+                hot_root / 'raw_buffer', Path(self.output_dir) / 'raw_buffer')
+        except Exception:
+            logger.exception("Hot buffer drain failed; continuing")
+            return
+        if result.refused:
+            logger.warning(
+                "Hot buffer drain: moved %d, refused %d (the disk already holds those names)",
+                result.moved, result.refused)
+        else:
+            logger.info("Hot buffer drain: moved %d, refused 0", result.moved)
+
     def run(self):
         """Main run loop."""
         self.running = True
@@ -1186,6 +1205,10 @@ class CoreRecorderV2:
         # Recorder always archives immediately. MetrologyEngine handles timing lock.
         logger.info("Archiving mode: IMMEDIATE (MetrologyEngine handles timing lock)")
         
+        # Clear finished chunks an older recorder left in RAM, before any
+        # channel opens a chunk on disk.
+        self._drain_hot_buffer()
+
         # Ensure channels exist and get ChannelInfo
         if not self._initialize_channels():
             logger.error("Failed to initialize channels - exiting")
@@ -1193,62 +1216,6 @@ class CoreRecorderV2:
         
         logger.info(f"Channels initialized: {len(self.channel_specs)} specs, {len(self.recorders)} recorders")
         self.running = True
-        
-        # Initialize tiered storage if enabled
-        tiered_enabled = self.recorder_config.get('tiered_storage', False)
-        
-        logger.info(f"Tiered storage: {'enabled' if tiered_enabled else 'disabled'}")
-        
-        if tiered_enabled:
-            try:
-                from .tiered_storage import TieredStorageConfig, TieredStorageManager
-                
-                num_channels = len(self.channel_specs)
-                hot_buffer_root = self.recorder_config.get('hot_buffer_root', '/dev/shm/timestd')
-                tiered_hot_minutes = self.recorder_config.get('tiered_hot_minutes')
-                tiered_ram_percent = self.recorder_config.get('tiered_ram_percent')
-                if tiered_ram_percent is None:
-                    tiered_ram_percent = self.recorder_config.get('ram_percent')
-                
-                logger.info(f"Initializing tiered storage: {num_channels} channels, "
-                           f"hot_buffer={hot_buffer_root}")
-                
-                tiered_config = TieredStorageConfig(
-                    hot_buffer_root=Path(hot_buffer_root),
-                    cold_buffer_root=Path(self.output_dir),
-                    auto_configure=(tiered_hot_minutes is None),
-                    hot_minutes=int(tiered_hot_minutes) if tiered_hot_minutes is not None else 5,
-                    ram_percent=float(tiered_ram_percent) if tiered_ram_percent is not None else TieredStorageConfig.ram_percent,
-                    num_channels=num_channels,
-                    # Must be threaded through: the hot buffer's floor is
-                    # "one whole chunk plus margin" (see calculate_hot_minutes),
-                    # so leaving this at the 600 s dataclass default pinned the
-                    # ring at 11 minutes -- 725 MB for six channels -- no matter
-                    # what the operator set. On B4 that was the difference
-                    # between 725 MB and ~400 MB on a box that was OOM-killing
-                    # this very process hourly.
-                    file_duration_sec=int(self.recorder_config.get(
-                        'file_duration_sec', TieredStorageConfig.file_duration_sec)),
-                )
-                
-                from . import tiered_storage
-                tiered_manager = TieredStorageManager(tiered_config)
-                tiered_storage._manager = tiered_manager
-                tiered_manager.start()
-                
-                logger.info(f"✓ Tiered storage ACTIVE: hot_minutes={tiered_manager.hot_minutes}")
-            except Exception as e:
-                logger.critical(
-                    f"Failed to initialize tiered storage: {e}. "
-                    f"Cannot continue — without cold migration, the hot buffer "
-                    f"({hot_buffer_root}) will fill tmpfs and cause silent data loss. "
-                    f"Fix the tiered storage config or set tiered_storage=false to "
-                    f"write directly to disk.",
-                    exc_info=True
-                )
-                return  # Fatal — let systemd restart (and alert via OnFailure)
-        else:
-            logger.info("Tiered storage: disabled (files written directly to disk)")
         
         # Start all recorders.  In shared-MultiStream mode, channels
         # were already provisioned in _initialize_channels() via

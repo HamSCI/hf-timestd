@@ -124,7 +124,8 @@ class StreamRecorderConfig:
     null_targets: Optional[list] = None
     combining_method: Optional[str] = None
     
-    # Tiered storage: hot buffer in /dev/shm, cold storage on disk
+    # Tiered storage: the chunk still filling lives in hot_buffer_root (RAM);
+    # a finished chunk goes to raw_buffer on disk at once.
     tiered_storage: bool = False
     hot_buffer_root: Path = None  # e.g., /dev/shm/timestd
     

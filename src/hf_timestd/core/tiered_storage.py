@@ -1,501 +1,99 @@
 #!/usr/bin/env python3
 """
-Tiered Storage Manager - RAM-aware hot/cold buffer management
+Drain of the RAM buffer, run once when the recorder starts.
 
-Automatically configures hot buffer (RAM) and cold buffer (disk) based on
-available system memory. Provides zero-disk-I/O for real-time pipeline while
-ensuring data is archived to persistent storage.
+Before v3.96 the archive writer left finished chunks in /dev/shm and a
+background thread moved them to disk once they aged out.  Since v3.96 the
+writer puts each finished chunk on disk at once and keeps only the chunk still
+filling in RAM.  A recorder of the older kind may have left finished chunks in
+/dev/shm; ``drain_hot_buffer`` moves them to the disk tree at start, whatever
+their age, and nothing moves chunks afterwards.
 
-Architecture:
-    /dev/shm/timestd/raw_buffer/{CHANNEL}/    <- Hot buffer (RAM)
-    /var/lib/timestd/raw_buffer/{CHANNEL}/    <- Cold buffer (disk)
+Layout (both roots are ``raw_buffer`` directories):
+    <hot_root>/<channel>/<day>/<boundary>[.seg<N>].{json,bin*}
+    <cold_root>/<channel>/<day>/...
 
-The hot buffer holds recent minutes in RAM for:
-- Zero-latency reads by Phase 2 Analytics
-- Web-UI access to current data
-- Avoiding disk write/read round-trips
-
-A background thread moves old minutes from hot to cold storage.
-
-RAM Budget Calculation:
-    Per channel per minute: ~10 MB (9.6 MB IQ + metadata)
-    
-    Available RAM    Channels    Hot Minutes    RAM Used
-    ─────────────    ────────    ───────────    ────────
-    1 GB             9           2              180 MB (18%)
-    2 GB             9           5              450 MB (22%)
-    4 GB             9           10             900 MB (22%)
-    8 GB             9           20             1.8 GB (22%)
-    16 GB            9           30             2.7 GB (17%)
-
-Default: Use 20% of available RAM for hot buffer, minimum 2 minutes.
+The drain never replaces a file on disk.  The new writer may already have
+reopened a boundary chunk on disk; if the destination holds the name, the RAM
+file stays where it is, and the drain logs an error and counts it as refused.
 """
 
 import logging
 import os
 import shutil
-import threading
-import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Dict, List, Tuple
+from typing import Dict, List
 
 from .chunk_segments import chunk_stem, parse_chunk_name
 
 logger = logging.getLogger(__name__)
 
-# Constants
-MB = 1024 * 1024
-GB = 1024 * MB
-BYTES_PER_SECOND_PER_CHANNEL = 192_000  # ~192 KB/s (24 kHz × 8 bytes/sample)
-BYTES_PER_MINUTE = 10 * MB  # ~10 MB per channel per minute (legacy, kept for docs)
-MIN_HOT_MINUTES = 4  # Always keep at least 4 minutes in RAM
-# Raised from 2 to 4 for the ring-buffer refactor: metrology workers
-# need breathing room past the longest file-chunk duration so a slow
-# worker never trips overrun on a 1-minute extract.
-MAX_HOT_MINUTES = 60  # Never keep more than 1 hour in RAM
-DEFAULT_RAM_PERCENT = 20  # Use 20% of available RAM for hot buffer
-DEFAULT_FILE_DURATION_SEC = 600  # 10-minute chunks (matches BinaryArchiveConfig default)
-
 
 @dataclass
-class TieredStorageConfig:
-    """Configuration for tiered storage."""
-    # Required path - must be provided from config (default to /var/lib/timestd for backwards compatibility)
-    cold_buffer_root: Path = Path('/var/lib/timestd')
-
-    # Optional paths
-    hot_buffer_root: Path = Path('/dev/shm/timestd')
-
-    # Auto-configuration
-    auto_configure: bool = True  # Auto-detect RAM and set hot_minutes
-    ram_percent: float = DEFAULT_RAM_PERCENT  # Percent of available RAM to use
-
-    # Manual override (used if auto_configure=False)
-    hot_minutes: int = 5  # Minutes to keep in hot buffer
-
-    # Behavior
-    archive_to_cold: bool = True  # Move old minutes to cold storage
-    delete_after_archive: bool = True  # Delete from hot after archiving
-    archive_interval_seconds: float = 30.0  # How often to run archiver
-
-    # Channel info (set at runtime)
-    # NOTE: this default is a footgun. A TieredStorageConfig() built without
-    # arguments sizes the hot buffer for NINE channels at 20% of RAM. B4 logs
-    # exactly one such defaulted call at every recorder start. Kept for
-    # compatibility with existing constructors; always pass num_channels.
-    num_channels: int = 9
-
-    # File duration — must match BinaryArchiveConfig.file_duration_sec so that
-    # eviction cutoff accounts for the full chunk span.
-    file_duration_sec: int = DEFAULT_FILE_DURATION_SEC
+class DrainResult:
+    moved: int    # chunk files moved to disk
+    refused: int  # chunk stems left in RAM because the disk already held a name
 
 
-def get_available_ram_bytes() -> int:
-    """Get available RAM in bytes using /proc/meminfo or fallback."""
+def _move_without_replacing(src: Path, dest: Path) -> bool:
+    """Move src to dest unless dest exists.  True when it moved.
+
+    The copy lands under a name no reader parses, then os.link publishes it
+    under the final name.  link fails when dest exists, so a writer that
+    creates dest in the meantime keeps its file."""
+    staging = dest.with_name(dest.name + ".drain")
+    shutil.move(str(src), str(staging))
     try:
-        with open('/proc/meminfo', 'r') as f:
-            for line in f:
-                if line.startswith('MemAvailable:'):
-                    # Format: "MemAvailable:    1234567 kB"
-                    parts = line.split()
-                    kb = int(parts[1])
-                    return kb * 1024
-    except (FileNotFoundError, ValueError, IndexError):
-        pass
-    
-    # Fallback: use shutil.disk_usage on /dev/shm
-    try:
-        usage = shutil.disk_usage('/dev/shm')
-        return usage.free
-    except (FileNotFoundError, OSError):
-        pass
-    
-    # Last resort: assume 1 GB available
-    logger.warning("Could not detect available RAM, assuming 1 GB")
-    return 1 * GB
+        os.link(staging, dest)
+    except FileExistsError:
+        shutil.move(str(staging), str(src))
+        return False
+    except BaseException:
+        shutil.move(str(staging), str(src))
+        raise
+    os.unlink(staging)
+    return True
 
 
-def get_shm_size_bytes() -> int:
-    """Get size of /dev/shm (tmpfs) in bytes."""
-    try:
-        usage = shutil.disk_usage('/dev/shm')
-        return usage.total
-    except (FileNotFoundError, OSError):
-        # /dev/shm doesn't exist (non-Linux?)
-        return 0
-
-
-def calculate_hot_minutes(
-    num_channels: int,
-    ram_percent: float = DEFAULT_RAM_PERCENT,
-    available_ram: Optional[int] = None,
-    file_duration_sec: int = DEFAULT_FILE_DURATION_SEC
-) -> int:
-    """
-    Calculate optimal number of hot buffer minutes based on available RAM.
-
-    The hot buffer must hold at least one complete chunk file per channel
-    (file_duration_sec worth of data) so that the writer can finish writing
-    before the archiver evicts the file.
-
-    Args:
-        num_channels: Number of channels being recorded
-        ram_percent: Percentage of available RAM to use (0-100)
-        available_ram: Override available RAM detection (for testing)
-        file_duration_sec: Duration of each raw IQ file in seconds
-
-    Returns:
-        Number of minutes to keep in hot buffer
-    """
-    if available_ram is None:
-        available_ram = get_available_ram_bytes()
-
-    # Also check /dev/shm size - can't use more than that
-    shm_size = get_shm_size_bytes()
-    if shm_size > 0:
-        available_ram = min(available_ram, shm_size)
-
-    # Calculate RAM budget
-    ram_budget = int(available_ram * (ram_percent / 100.0))
-
-    # Calculate minutes that fit in budget using per-second byte rate
-    bytes_per_minute_all_channels = BYTES_PER_SECOND_PER_CHANNEL * 60 * num_channels
-    hot_minutes = ram_budget // bytes_per_minute_all_channels
-
-    # Must hold at least one complete chunk file (file_duration_sec / 60 minutes)
-    min_for_chunk = max(MIN_HOT_MINUTES, (file_duration_sec + 59) // 60 + 1)
-    hot_minutes = max(min_for_chunk, min(MAX_HOT_MINUTES, hot_minutes))
-
-    logger.info(
-        f"TieredStorage: Available RAM={available_ram/GB:.1f}GB, "
-        f"budget={ram_budget/MB:.0f}MB ({ram_percent}%), "
-        f"channels={num_channels}, file_duration={file_duration_sec}s, "
-        f"hot_minutes={hot_minutes}"
-    )
-
-    return hot_minutes
-
-
-class TieredStorageManager:
-    """
-    Manages hot (RAM) and cold (disk) storage tiers.
-    
-    Usage:
-        manager = TieredStorageManager(config)
-        manager.start()  # Start background archiver
-        
-        # Writers use hot buffer path
-        hot_path = manager.get_hot_buffer_path(channel_name)
-        
-        # Readers check hot first, then cold
-        data_path = manager.find_minute_file(channel_name, minute_boundary)
-        
-        manager.stop()
-    """
-    
-    def __init__(self, config: Optional[TieredStorageConfig] = None):
-        self.config = config or TieredStorageConfig()
-        
-        self.file_duration_sec = self.config.file_duration_sec
-
-        # Auto-configure hot_minutes based on RAM
-        if self.config.auto_configure:
-            self.hot_minutes = calculate_hot_minutes(
-                num_channels=self.config.num_channels,
-                ram_percent=self.config.ram_percent,
-                file_duration_sec=self.file_duration_sec
-            )
-        else:
-            self.hot_minutes = self.config.hot_minutes
-        
-        # Ensure directories exist
-        self.hot_root = self.config.hot_buffer_root / 'raw_buffer'
-        self.cold_root = self.config.cold_buffer_root / 'raw_buffer'
-        
-        self.hot_root.mkdir(parents=True, exist_ok=True)
-        self.cold_root.mkdir(parents=True, exist_ok=True)
-        
-        # Background archiver
-        self._running = False
-        self._archiver_thread: Optional[threading.Thread] = None
-        self._archive_lock = threading.Lock()
-        
-        logger.info(
-            f"TieredStorageManager initialized: "
-            f"hot={self.hot_root}, cold={self.cold_root}, "
-            f"hot_minutes={self.hot_minutes}"
-        )
-    
-    def get_hot_buffer_path(self, channel_name: str) -> Path:
-        """Get hot buffer directory for a channel (for writers)."""
-        from ..paths import channel_name_to_dir
-        safe_name = channel_name_to_dir(channel_name)
-        path = self.hot_root / safe_name
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-    
-    def get_cold_buffer_path(self, channel_name: str) -> Path:
-        """Get cold buffer directory for a channel."""
-        from ..paths import channel_name_to_dir
-        safe_name = channel_name_to_dir(channel_name)
-        path = self.cold_root / safe_name
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-    
-    def find_minute_file_hot_only(
-        self,
-        channel_name: str,
-        minute_boundary: int,
-        date_str: Optional[str] = None
-    ) -> Optional[Path]:
-        """
-        Find a minute file in the hot buffer ONLY (/dev/shm).
-
-        Use this for real-time metrology — if the data isn't in RAM,
-        it's already too old to matter for UTC reconstruction.
-
-        Args:
-            channel_name: Channel name
-            minute_boundary: Unix timestamp of minute
-            date_str: Optional YYYYMMDD string (computed if not provided)
-
-        Returns:
-            Path to .bin file, or None if not in hot buffer
-        """
-        if date_str is None:
-            from datetime import datetime, timezone
-            dt = datetime.fromtimestamp(minute_boundary, tz=timezone.utc)
-            date_str = dt.strftime('%Y%m%d')
-
-        hot_path = self.get_hot_buffer_path(channel_name) / date_str
-        for ext in ['.bin', '.bin.zst', '.bin.lz4']:
-            candidate = hot_path / f"{minute_boundary}{ext}"
-            if candidate.exists():
-                return candidate
-
-        return None
-
-    def find_minute_file(
-        self,
-        channel_name: str,
-        minute_boundary: int,
-        date_str: Optional[str] = None
-    ) -> Optional[Path]:
-        """
-        Find a minute file, checking hot buffer first, then cold.
-
-        Use this for science/physics/web-api reads that can tolerate
-        disk latency.  Real-time metrology should use
-        find_minute_file_hot_only() instead.
-        
-        Args:
-            channel_name: Channel name
-            minute_boundary: Unix timestamp of minute
-            date_str: Optional YYYYMMDD string (computed if not provided)
-            
-        Returns:
-            Path to .bin file (may be .bin.zst), or None if not found
-        """
-        if date_str is None:
-            from datetime import datetime, timezone
-            dt = datetime.fromtimestamp(minute_boundary, tz=timezone.utc)
-            date_str = dt.strftime('%Y%m%d')
-        
-        # Check hot buffer first
-        hot_path = self.get_hot_buffer_path(channel_name) / date_str
-        for ext in ['.bin', '.bin.zst', '.bin.lz4']:
-            candidate = hot_path / f"{minute_boundary}{ext}"
-            if candidate.exists():
-                return candidate
-        
-        # Check cold buffer
-        cold_path = self.get_cold_buffer_path(channel_name) / date_str
-        for ext in ['.bin', '.bin.zst', '.bin.lz4']:
-            candidate = cold_path / f"{minute_boundary}{ext}"
-            if candidate.exists():
-                return candidate
-        
-        return None
-    
-    def start(self):
-        """Start background archiver thread."""
-        if self._running:
-            return
-        
-        self._running = True
-        self._archiver_thread = threading.Thread(
-            target=self._archiver_loop,
-            name="TieredStorageArchiver",
-            daemon=True
-        )
-        self._archiver_thread.start()
-        logger.info("TieredStorageManager archiver started")
-    
-    def stop(self):
-        """Stop background archiver thread."""
-        self._running = False
-        if self._archiver_thread:
-            self._archiver_thread.join(timeout=5.0)
-            self._archiver_thread = None
-        logger.info("TieredStorageManager archiver stopped")
-    
-    def _archiver_loop(self):
-        """Background loop that moves old minutes from hot to cold."""
-        while self._running:
-            try:
-                self._archive_old_minutes()
-            except Exception as e:
-                logger.error(f"Archiver error: {e}", exc_info=True)
-            
-            # Sleep in small increments to allow quick shutdown
-            for _ in range(int(self.config.archive_interval_seconds)):
-                if not self._running:
-                    break
-                time.sleep(1.0)
-    
-    def _archive_old_minutes(self):
-        """Move chunk files older than hot_minutes from hot to cold storage.
-
-        A chunk file spans file_duration_sec seconds.  We must not evict it
-        until the *end* of the chunk is older than hot_minutes, so the cutoff
-        is shifted back by file_duration_sec.
-        """
-        if not self.config.archive_to_cold:
-            return
-
-        now = int(time.time())
-        cutoff = now - (self.hot_minutes * 60) - self.file_duration_sec
-        
-        with self._archive_lock:
-            # Iterate through all channel directories in hot buffer
-            for channel_dir in self.hot_root.iterdir():
-                if not channel_dir.is_dir():
+def drain_hot_buffer(hot_root: Path, cold_root: Path) -> DrainResult:
+    """Move every chunk file under hot_root to the same path under cold_root."""
+    moved = refused = 0
+    hot_root, cold_root = Path(hot_root), Path(cold_root)
+    if not hot_root.is_dir():
+        return DrainResult(0, 0)
+    for channel_dir in sorted(p for p in hot_root.iterdir() if p.is_dir()):
+        for day_dir in sorted(p for p in channel_dir.iterdir() if p.is_dir()):
+            stems: Dict[str, List[Path]] = {}
+            for f in day_dir.iterdir():
+                parsed = parse_chunk_name(f.name)
+                if parsed is None or not f.is_file():
+                    continue  # *.scratch, *.tmp and strangers stay put
+                stems.setdefault(chunk_stem(parsed[0], parsed[1]), []).append(f)
+            cold_dir = cold_root / channel_dir.name / day_dir.name
+            for stem in sorted(stems):
+                # The sidecar goes first: a crash between the two moves must
+                # never leave a disk bin without the sidecar naming its dtype.
+                files = sorted(stems[stem], key=lambda p: not p.name.endswith('.json'))
+                taken = [cold_dir / f.name for f in files if (cold_dir / f.name).exists()]
+                if taken:
+                    logger.error(
+                        "drain refused: %s exists on disk; RAM copy %s stays",
+                        taken[0], files[0].parent / stem)
+                    refused += 1
                     continue
-                
-                # Iterate through date directories
-                for date_dir in channel_dir.iterdir():
-                    if not date_dir.is_dir():
-                        continue
-                    
-                    # Find old .bin files
-                    for bin_file in date_dir.glob('*.bin*'):
-                        # A segment (<boundary>.seg<N>) moves with its boundary.
-                        parsed = parse_chunk_name(bin_file.name)
-                        if parsed is None or parsed[2] == '.json':
-                            continue  # Not a chunk file
-                        if parsed[0] < cutoff:
-                            self._move_to_cold(bin_file, channel_dir.name, date_dir.name)
-    
-    def _move_to_cold(self, hot_file: Path, channel_name: str, date_str: str):
-        """Move a file from hot to cold storage."""
-        cold_dir = self.cold_root / channel_name / date_str
-        cold_dir.mkdir(parents=True, exist_ok=True)
-        
-        cold_file = cold_dir / hot_file.name
-        
-        # Also move the JSON sidecar if it exists
-        # The sidecar of this file's own segment: splitting at the first dot
-        # would name segment 1's sidecar for a <boundary>.seg<N> file.
-        parsed = parse_chunk_name(hot_file.name)
-        if parsed is None:
-            json_name = hot_file.name.split('.')[0] + '.json'
-        else:
-            json_name = chunk_stem(parsed[0], parsed[1]) + '.json'
-        hot_json = hot_file.parent / json_name
-        cold_json = cold_dir / json_name
-        
-        try:
-            # Move the JSON sidecar first, then the bin: a crash between the
-            # two must never leave a cold bin without the sidecar that names
-            # its dtype.  A hot bin left behind keeps no sidecar either, and
-            # readers treat it as missing until the next sweep moves it.
-            if hot_json.exists():
-                shutil.move(str(hot_json), str(cold_json))
-
-            shutil.move(str(hot_file), str(cold_file))
-            
-            logger.debug(f"Archived {hot_file.name} to cold storage")
-            
-        except Exception as e:
-            logger.error(f"Failed to archive {hot_file}: {e}")
-    
-    def get_stats(self) -> Dict:
-        """Get storage statistics."""
-        hot_files = 0
-        hot_bytes = 0
-        cold_files = 0
-        cold_bytes = 0
-        
-        for f in self.hot_root.rglob('*.bin*'):
-            hot_files += 1
-            hot_bytes += f.stat().st_size
-        
-        for f in self.cold_root.rglob('*.bin*'):
-            cold_files += 1
-            cold_bytes += f.stat().st_size
-        
-        return {
-            'hot_minutes': self.hot_minutes,
-            'hot_files': hot_files,
-            'hot_bytes': hot_bytes,
-            'hot_mb': hot_bytes / MB,
-            'cold_files': cold_files,
-            'cold_bytes': cold_bytes,
-            'cold_mb': cold_bytes / MB,
-        }
-
-
-# Module-level singleton for easy access
-_manager: Optional[TieredStorageManager] = None
-
-
-def get_tiered_storage_manager(
-    config: Optional[TieredStorageConfig] = None
-) -> TieredStorageManager:
-    """Get or create the global TieredStorageManager singleton."""
-    global _manager
-    if _manager is None:
-        _manager = TieredStorageManager(config)
-    return _manager
-
-
-def init_tiered_storage(
-    cold_buffer_root: str,  # Required - must be provided from config
-    num_channels: int = 9,
-    hot_buffer_root: str = '/dev/shm/timestd',
-    ram_percent: float = DEFAULT_RAM_PERCENT,
-    auto_start: bool = True,
-    file_duration_sec: int = DEFAULT_FILE_DURATION_SEC
-) -> TieredStorageManager:
-    """
-    Initialize tiered storage with auto-configuration.
-
-    Args:
-        cold_buffer_root: Path for disk-based cold buffer
-        num_channels: Number of channels being recorded
-        hot_buffer_root: Path for RAM-based hot buffer
-        ram_percent: Percentage of available RAM to use for hot buffer
-        auto_start: Start background archiver immediately
-        file_duration_sec: Duration of each raw IQ file in seconds
-
-    Returns:
-        Configured TieredStorageManager
-    """
-    global _manager
-
-    config = TieredStorageConfig(
-        hot_buffer_root=Path(hot_buffer_root),
-        cold_buffer_root=Path(cold_buffer_root),
-        auto_configure=True,
-        ram_percent=ram_percent,
-        num_channels=num_channels,
-        file_duration_sec=file_duration_sec,
-    )
-    
-    _manager = TieredStorageManager(config)
-    
-    if auto_start:
-        _manager.start()
-    
-    return _manager
+                try:
+                    cold_dir.mkdir(parents=True, exist_ok=True)
+                    for f in files:
+                        if _move_without_replacing(f, cold_dir / f.name):
+                            moved += 1
+                        else:
+                            logger.error(
+                                "drain refused: %s appeared on disk; RAM copy %s stays",
+                                cold_dir / f.name, f)
+                            refused += 1
+                            break
+                except Exception as e:
+                    logger.error("drain failed for %s: %s", day_dir / stem, e)
+                    refused += 1
+    return DrainResult(moved, refused)

@@ -17,7 +17,6 @@ from hf_timestd.core.binary_archive_writer import (
     BinaryArchiveConfig, BinaryArchiveReader, BinaryArchiveWriter)
 from hf_timestd.core.chunk_segments import chunk_stem, join_segments, parse_chunk_name
 from hf_timestd.core.leap_second import get_current_gps_leap_seconds
-from hf_timestd.core.tiered_storage import TieredStorageConfig, TieredStorageManager
 from hf_timestd.events.window_drf import window_files
 
 SR = 100
@@ -205,27 +204,6 @@ def test_window_counts_a_boundary_with_only_a_segment(tmp_path):
     t = datetime.fromtimestamp(b600, timezone.utc)
     found, missing = window_files(tmp_path / "raw_buffer", "testchan", t, t + timedelta(seconds=1))
     assert found == [b600] and missing == []
-
-
-# ------------------------------------------------------------ tiered storage
-
-def test_tiering_moves_a_segment_with_its_own_sidecar(tmp_path):
-    hot, cold = tmp_path / "hot", tmp_path / "cold"
-    day = hot / "raw_buffer" / "testchan" / "20261123"
-    day.mkdir(parents=True)
-    old = int(time.time()) - 3 * 3600
-    for stem in (str(old), f"{old}.seg2"):
-        (day / f"{stem}.bin.zst").write_bytes(b"x")
-        (day / f"{stem}.json").write_text(json.dumps({"stem": stem}))
-    m = TieredStorageManager(TieredStorageConfig(
-        hot_buffer_root=hot, cold_buffer_root=cold, auto_configure=False,
-        hot_minutes=10, archive_to_cold=True, file_duration_sec=600))
-    m._archive_old_minutes()
-    cold_day = cold / "raw_buffer" / "testchan" / "20261123"
-    assert sorted(p.name for p in day.iterdir()) == []
-    for stem in (str(old), f"{old}.seg2"):
-        assert (cold_day / f"{stem}.bin.zst").exists()
-        assert json.loads((cold_day / f"{stem}.json").read_text()) == {"stem": stem}
 
 
 def test_the_joined_chunk_reuses_the_first_segments_array():

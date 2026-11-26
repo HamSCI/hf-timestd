@@ -141,26 +141,6 @@ def test_sidecar_lands_before_the_bin(tmp_path, monkeypatch):
     assert seen == [True]
 
 
-def test_tiered_move_sidecar_before_bin(tmp_path, monkeypatch):
-    import shutil
-    from hf_timestd.core.tiered_storage import TieredStorageConfig, TieredStorageManager
-    m = TieredStorageManager(TieredStorageConfig(
-        cold_buffer_root=tmp_path / "cold", hot_buffer_root=tmp_path / "hot",
-        auto_configure=False, num_channels=1))
-    day = m.hot_root / "chan" / "20261111"
-    day.mkdir(parents=True)
-    (day / "100.bin.zst").write_bytes(b"x")
-    (day / "100.json").write_text("{}")
-    order = []
-    real_move = shutil.move
-    monkeypatch.setattr(shutil, "move",
-                        lambda s, d: (order.append(os.path.basename(s)), real_move(s, d))[1])
-    import os
-    m._move_to_cold(day / "100.bin.zst", "chan", "20261111")
-    assert order == ["100.json", "100.bin.zst"]
-    assert (m.cold_root / "chan" / "20261111" / "100.bin.zst").exists()
-
-
 def _recorder(tmp_path, monkeypatch, recorder):
     """A CoreRecorderV2 with its radiod-facing parts stubbed out."""
     import ka9q.utils
