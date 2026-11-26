@@ -121,6 +121,9 @@ def _run(env, enabled_units, recorder_enter_s=None, newest_chunk_age=None, dry=T
         e["RECORDER_ENTER_US"] = str(int(recorder_enter_s * 1_000_000))
     if newest_chunk_age is not None:
         _touch(env["data_root"] / "raw_buffer" / "chunk.bin", newest_chunk_age)
+    # Tests do not run as root: expect our own uid, and skip install's chown.
+    e["REQUEST_DIR_OWNER_UID"] = str(os.getuid())
+    e["REQUEST_DIR_INSTALL_OWNER"] = ""
     args = ["bash", str(WATCHDOG)] + (["--dry-run"] if dry else [])
     r = subprocess.run(args, env=e,
                        capture_output=True, text=True, timeout=60)
@@ -323,3 +326,59 @@ def test_enabled_but_inactive_recorder_is_reported_only(env, tmp_path):
     assert not (env["request_dir"] / "pipeline-watchdog.json").exists()
     log = _log(env)
     assert "restart timestd-core-recorder" not in log and "sigmond-recorder-watchdog" not in log
+
+
+def _stale_recorder_run(env):
+    _uptime(env, 10_000)
+    return _run(env, [REC], recorder_enter_s=1_000, newest_chunk_age=1300, dry=False)
+
+
+def test_symlinked_request_dir_is_refused(env, tmp_path):
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    env["request_dir"].symlink_to(target)
+    _stale_recorder_run(env)
+    assert not list(target.iterdir())
+    assert "start --no-block sigmond-recorder-watchdog" not in _log(env)
+
+
+def test_group_writable_request_dir_is_refused(env):
+    env["request_dir"].mkdir()
+    env["request_dir"].chmod(0o775)
+    _stale_recorder_run(env)
+    assert not list(env["request_dir"].iterdir())
+    assert "start --no-block sigmond-recorder-watchdog" not in _log(env)
+
+
+def test_wrongly_owned_request_dir_is_refused(env):
+    env["request_dir"].mkdir(mode=0o755)
+    e_uid = os.getuid() + 1  # the script expects this uid, the dir has ours
+    import subprocess as sp
+    # run by hand with a different required uid
+    _uptime(env, 10_000)
+    e = dict(os.environ, PATH=f"{env['shim']}:{os.environ['PATH']}",
+             ENABLED_UNITS=REC, DATA_ROOT=str(env["data_root"]), RUN_DIR=str(env["run_dir"]),
+             SQLITE_DB=str(env["db"]), REQUEST_DIR=str(env["request_dir"]),
+             UPTIME_FILE=str(env["uptime"]), RAW_BUFFER_HOT=str(env["hot_buffer"]),
+             SYSTEMCTL_LOG=str(env["systemctl_log"]), REQUEST_DIR_OWNER_UID=str(e_uid),
+             RECORDER_ENTER_US="1000000000")
+    _touch(env["data_root"] / "raw_buffer" / "chunk.bin", 1300)
+    sp.run(["bash", str(WATCHDOG)], env=e, capture_output=True, text=True, timeout=60)
+    assert not list(env["request_dir"].iterdir())
+
+
+def test_request_is_written_to_a_safe_dir_with_no_tmp_left(env):
+    env["request_dir"].mkdir(mode=0o755)
+    _stale_recorder_run(env)
+    assert [p.name for p in env["request_dir"].iterdir()] == ["pipeline-watchdog.json"]
+
+
+def test_scratch_tmp_and_drain_files_are_not_output(env):
+    """A fresh .scratch/.tmp/.drain beside a stale .bin.zst must read stale."""
+    _uptime(env, 10_000)
+    buf = env["data_root"] / "raw_buffer"
+    _touch(buf / "1.CH.0.bin.zst", 1300)
+    for ext in ("scratch", "tmp", "drain"):
+        _touch(buf / f"1.CH.0.{ext}", 5)
+    out = _run(env, [REC], recorder_enter_s=1_000)
+    assert "[DRY-RUN] Would request" in out, out
