@@ -2,6 +2,7 @@
 import json
 from datetime import datetime, timezone
 
+import numpy as np
 import zstandard as zstd
 
 from hf_timestd import archiver as A
@@ -35,6 +36,24 @@ def test_export_roundtrip(tmp_path):
         raw = zstd.ZstdDecompressor().decompress(
             (out / "WWV_10000" / "20251112" / f"{s}.bin.zst").read_bytes())
         assert A.f16_within_rounding(x, iq_codec.decode_iq(raw, "complex64"))
+
+
+def test_export_keeps_fill_runs(tmp_path):
+    src = tmp_path / "ssd" / "raw_buffer" / "WWV_10000" / "20251112"
+    root = tmp_path / "drive"
+    drive = root / "raw_buffer" / "WWV_10000" / "20251112"
+    x = _noise(); x[100:200] = 0
+    b, j = _write_chunk(src, 1762905600, x,
+                        extra={"fill_runs": [[100, 200]], "gap_fill": "zeros"})
+    A.copy_one(b, j, drive, "f16")
+    A.export_f32(root, tmp_path / "out", "WWV_10000",
+                 datetime.fromtimestamp(1762905600, timezone.utc),
+                 datetime.fromtimestamp(1762905660, timezone.utc))
+    out = tmp_path / "out" / "WWV_10000" / "20251112"
+    meta = json.loads((out / "1762905600.json").read_text())
+    assert meta["fill_runs"] == [[100, 200]] and meta["dtype"] == "complex64"
+    raw = zstd.ZstdDecompressor().decompress((out / "1762905600.bin.zst").read_bytes())
+    assert np.all(iq_codec.decode_iq(raw, "complex64")[100:200] == 0)
 
 
 def test_export_window_bounds(tmp_path):

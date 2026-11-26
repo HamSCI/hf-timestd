@@ -241,6 +241,51 @@ def test_reader_joins_the_segments_of_a_chunk(tmp_path):
     assert [s["segment"] for s in r.read_metadata(boundary)["segments"]] == [1, 2]
 
 
+def _hand_segment(tmp_path, boundary, seg, x, meta):
+    """One chunk file and its sidecar, written by hand; no station block."""
+    day = (tmp_path / "raw_buffer" / "testchan"
+           / datetime.fromtimestamp(boundary, timezone.utc).strftime("%Y%m%d"))
+    day.mkdir(parents=True, exist_ok=True)
+    stem = chunk_stem(boundary, seg)
+    (day / f"{stem}.bin").write_bytes(np.asarray(x, np.complex64).tobytes())
+    (day / f"{stem}.json").write_text(json.dumps(
+        dict(meta, minute_boundary=boundary, sample_rate=SR, start_rtp_timestamp=1000)))
+
+
+def _masked_pair(tmp_path, boundary, second_masked=True):
+    a = np.ones(10, np.complex64); a[2:4] = 0
+    b = np.full(10, 2, np.complex64); b[7:9] = 0
+    _hand_segment(tmp_path, boundary, 1, a, {
+        "samples_written": 10, "covered_runs": [[0, 6]],
+        "fill_runs": [[2, 4]], "gap_fill": "zeros"})
+    meta2 = {"samples_written": 10, "covered_runs": [[4, 10]]}
+    if second_masked:
+        meta2.update(fill_runs=[[7, 9]], gap_fill="zeros")
+    _hand_segment(tmp_path, boundary, 2, b, meta2)
+
+
+def test_reader_returns_the_joined_fill_runs(tmp_path):
+    boundary = 1795417200
+    _masked_pair(tmp_path, boundary)
+    x, meta = BinaryArchiveReader(tmp_path / "raw_buffer", "testchan").read_chunk(boundary)
+    assert meta["fill_runs"] == [[2, 4], [7, 9]]
+    assert "station" not in meta
+
+
+def test_read_metadata_of_a_segmented_chunk_returns_the_merged_mask(tmp_path):
+    """Ruling F2: not segment 1's mask; both masked merge, one legacy claims none."""
+    boundary = 1795417200
+    r = BinaryArchiveReader(tmp_path / "raw_buffer", "testchan")
+    _masked_pair(tmp_path, boundary)
+    meta = r.read_metadata(boundary)
+    assert meta["fill_runs"] == [[2, 4], [7, 9]] and meta["gap_fill"] == "zeros"
+    _masked_pair(tmp_path, boundary, second_masked=False)
+    meta = r.read_metadata(boundary)
+    assert "fill_runs" not in meta and "gap_fill" not in meta
+    _, joined = r.read_chunk(boundary)
+    assert "fill_runs" not in joined
+
+
 def test_reader_reads_a_lone_segment(tmp_path):
     """The first file can be gone (evicted, or still in the other tier)."""
     w, boundary = _two_segments(tmp_path)

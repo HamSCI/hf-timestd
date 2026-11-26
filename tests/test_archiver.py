@@ -47,6 +47,18 @@ def _decode(path: Path, meta: dict) -> np.ndarray:
     return iq_codec.decode_iq(raw, meta.get("dtype", "complex64"), float(meta.get("scale", 1.0)))
 
 
+def test_copy_keeps_fill_runs_and_exact_zeros(tmp_path):
+    src = tmp_path / "ssd" / "WWV_10000" / "20261110"
+    drive = tmp_path / "drive" / "WWV_10000" / "20261110"
+    x = _noise(); x[100:200] = 0
+    b, j = _write_chunk(src, 1762732800, x,
+                        extra={"fill_runs": [[100, 200]], "gap_fill": "zeros"})
+    assert A.copy_one(b, j, drive, "f16") == "converted"
+    meta = json.loads((drive / j.name).read_text())
+    assert meta["fill_runs"] == [[100, 200]]
+    assert np.all(_decode(drive / b.name, meta)[100:200] == 0)
+
+
 def test_f32_source_converted(tmp_path):
     src = tmp_path / "ssd" / "WWV_10000" / "20261110"
     x = _noise()

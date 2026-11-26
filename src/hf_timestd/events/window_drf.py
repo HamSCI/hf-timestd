@@ -84,14 +84,15 @@ def _write_channel(raw_root, channel, order, found, missing, out_dir):
     md_dir = chan_dir / "metadata"
     writer = None
     first_idx = rate = 0
-    written = []          # (start, first sample index) per file; no arrays, no sidecars
+    written = []          # (start, first sample index) per file; no arrays
+    sides = {}            # start -> the joined sidecar (run lists only, small)
     nbytes = 0
     try:
         # One ten-minute file at a time: decode, write, release.
         for s in found:
             try:
-                samples = reader.read_minute(s)
-                side = reader.read_metadata(s) or {}
+                samples, side = reader.read_chunk(s)
+                side = side or {}
             except Exception as e:
                 log.warning("%s %s: unreadable, counted missing: %s", channel, s, e)
                 samples, side = None, {}
@@ -115,6 +116,7 @@ def _write_channel(raw_root, channel, order, found, missing, out_dir):
                             next_sample=idx - first_idx)  # relative to start_global_index
             nbytes += n * 8
             written.append((s, idx))
+            sides[s] = side
             del samples
     finally:
         if writer is not None:
@@ -123,13 +125,13 @@ def _write_channel(raw_root, channel, order, found, missing, out_dir):
     if not written:
         return 0, 0, missing
     # Every metadata record names the full missing list, so these wait until
-    # the data pass has found out which files were unreadable.  Each sidecar
-    # is read again here, one at a time.
+    # the data pass has found out which files were unreadable.  Each record
+    # carries the sidecar read_chunk joined, so a segmented chunk names every
+    # segment's fill_runs.
     md_writer = drf.DigitalMetadataWriter(
         str(md_dir), 3600, 3600, rate, 1, "metadata")
     order_json = json.dumps(order, sort_keys=True)
     missing_json = json.dumps(missing)
-    sides = {s: reader.read_metadata(s) or {} for s, _ in written}
     stored_dtype = _uniform([sd.get("dtype", "complex64") for sd in sides.values()])
     stored_scale = _uniform([float(sd.get("scale", 1.0)) for sd in sides.values()])
     for s, idx in written:

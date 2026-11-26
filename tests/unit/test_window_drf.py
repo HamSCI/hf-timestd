@@ -24,17 +24,21 @@ def ts(*a):
     return int(utc(*a).timestamp())
 
 
-def make_file(root, channel, start, seed, written=NSAMP):
+def make_file(root, channel, start, seed, written=NSAMP, station=True, seg=1, extra=None):
     rng = np.random.default_rng(seed)
     x = (rng.standard_normal(written) + 1j * rng.standard_normal(written)).astype(np.complex64)
     day = root / channel / datetime.fromtimestamp(start, timezone.utc).strftime("%Y%m%d")
     day.mkdir(parents=True, exist_ok=True)
-    (day / f"{start}.bin.zst").write_bytes(zstandard.ZstdCompressor().compress(x.tobytes()))
+    stem = f"{start}" if seg == 1 else f"{start}.seg{seg}"
+    (day / f"{stem}.bin.zst").write_bytes(zstandard.ZstdCompressor().compress(x.tobytes()))
     side = {"minute_boundary": start, "channel_name": channel, "frequency_hz": 20000000,
             "sample_rate": RATE, "samples_written": written, "samples_expected": NSAMP,
-            "gap_count": 0, "station": {"callsign": "AC0G", "latitude": 38.9},
+            "gap_count": 0,
             "timing": {"chain": "sysclock@1", "engineering": {"judge_tier": "T6"}}}
-    (day / f"{start}.json").write_text(json.dumps(side))
+    if station:
+        side["station"] = {"callsign": "AC0G", "latitude": 38.9}
+    side.update(extra or {})
+    (day / f"{stem}.json").write_text(json.dumps(side))
     return x, side
 
 
@@ -172,6 +176,29 @@ def test_samples_written_truncates(tmp_path):
     r = DigitalRFReader(str(out))
     assert r.get_bounds(CH) == (s * RATE, s * RATE + 19)
     assert np.array_equal(r.read_vector(s * RATE, 20, CH), x[:20])
+
+
+def test_segmented_chunk_metadata_carries_joined_fill_runs(tmp_path):
+    """A chunk reopened at its boundary has a .seg2; the DRF record names both fills."""
+    from digital_rf import DigitalMetadataReader
+    s = ts(2026, 11, 6, 0, 10)
+    half = NSAMP // 2
+    make_file(tmp_path, CH, s, 1, station=False, extra={
+        "start_rtp_timestamp": 1000, "gap_fill": "zeros",
+        "fill_runs": [[2, 4]], "covered_runs": [[0, half]]})
+    make_file(tmp_path, CH, s, 2, station=False, seg=2, extra={
+        "start_rtp_timestamp": 1000, "gap_fill": "zeros",
+        "fill_runs": [[30, 32]], "covered_runs": [[half, NSAMP]]})
+    order = dict(ORDER, start_utc="2026-11-06T00:10:00Z", end_utc="2026-11-06T00:11:00Z")
+    out = tmp_path / "out"
+    write_window_drf(tmp_path, [CH], order, out)
+    md = DigitalMetadataReader(str(out / CH / "metadata"))
+    rec = md.read(s * RATE, s * RATE + 1)[s * RATE]
+    side = json.loads(str(rec["sidecar_json"]))
+    assert side["fill_runs"] == [[2, 4], [30, 32]]
+    # what only read_chunk's joined sidecar carries (read_metadata joins sidecars alone)
+    assert [g["samples_taken"] for g in side["segments"]] == [half, half]
+    assert "station" not in side
 
 
 def test_peak_memory_stays_near_one_file(tmp_path):
