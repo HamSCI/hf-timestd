@@ -1151,6 +1151,8 @@ Claude-Session: https://claude.ai/code/session_01BUMH4psju42aywNgiJv98Z"
 
 ### Task 12: measure B4 before and after; check the two ledger items
 
+> **Added 2026-11-26 (Task 8 review):** removing the VTEC cross-check changes fusion's published sigma on the VTEC stations (ND, B4, SIGMA, N8UR): the old `+GNSS_VALIDATED` tag made the uncertainty lookup fall to a flat 1.0 ms; now each mode gets its table value, about −0.55 to +1.89 ms change (×5 single-station).  It reaches the Offset Judge's T3 bench and the AuthorityManager's T3 sigma, not chrony and not D_clock.  Add to this task's before/after counters on B4: fusion_status.json `uncertainty_ms` and `propagation_uncertainty_ms`, `quality_grade`, and authority.json's T3 `sigma_ns` and adopted tier.
+
 **Files:** none in the repos.  The operator stages the reads in `~/hf-measure-v396e.sh` on the devbox and runs it; every remote command reads only.
 
 **Before anything on B4:** read the claude-bus and `/etc/sigmond/CLAUDE-COORDINATION.md` on B4, and post on the bus that the v3.96 canary will move `timestd-vtec` and the two fetch timers and add three CPU-affinity entries.  Record the affinity entries in the coordination doc when the canary lands.  Open a ledger item (`v396-timing-core-alone`) the same hour, and set `nd-vtec-zero-division` and `vtec-local-usb-source` to point at it.
