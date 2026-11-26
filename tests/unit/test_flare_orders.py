@@ -8,7 +8,7 @@ import pytest
 
 from hf_timestd.events import flare_orders as fo
 
-B4 = {"id": "AC0G-B4", "lat": 38.9187367, "lon": -92.1277335,
+B4 = {"id": "AC0G-B4", "lat": 38.9375, "lon": -92.125,
       "paths": [list(fo.WWV), list(fo.WWVH)]}
 NOW = datetime(2026, 11, 6, 20, 0, tzinfo=timezone.utc)
 DATA = os.path.join(os.path.dirname(__file__), "data", "goes_xray_flares_7day.json")
@@ -41,7 +41,7 @@ def test_solar_elevation_matches_hamsci_dsp():
 def test_midpoint_wwv_b4():
     lat, lon = fo.path_midpoint(B4["lat"], B4["lon"], *fo.WWV)
     assert 38.9 < lat < 40.7
-    assert -105.0407 < lon < -92.1277
+    assert -105.0407 < lon < -92.125
 
 
 def test_night_flare_makes_no_order():

@@ -6,6 +6,11 @@ Read-only.  Never connects to a station.
     scripts/replay_admission.py /path/to/copy-of-timestd.db \
         --channel SHARED_10000 --floor-snr-db 10.0
 
+The receiver position defaults to the centre of the station's 6-character
+grid square (EM38ww for AC0G-B4).  A replay that needs the precise position
+passes --lat and --lon, read from the station's own config.  The repo never
+holds that position.
+
 ⚠ The thresholds below are PROVISIONAL.  Their values are what this harness
 exists to determine; do not treat the defaults as settled policy.
 """
@@ -17,8 +22,8 @@ from hf_timestd.replay.report import summarise
 from hf_timestd.replay.runner import replay
 from hf_timestd.replay.window_source import WindowSource
 
-# AC0G / B4, Columbia MO.
-DEFAULT_LAT, DEFAULT_LON = 38.9187497, -92.1277207
+# AC0G / B4, Columbia MO: centre of grid square EM38ww.
+DEFAULT_LAT, DEFAULT_LON = 38.9375, -92.125
 
 
 def main(argv=None) -> int:
@@ -32,8 +37,10 @@ def main(argv=None) -> int:
     p.add_argument("--lookback", type=int, default=10)
     p.add_argument("--reacquire-after", type=int, default=3)
     p.add_argument("--reference-sigma-ms", type=float, default=0.7)
-    p.add_argument("--lat", type=float, default=DEFAULT_LAT)
-    p.add_argument("--lon", type=float, default=DEFAULT_LON)
+    p.add_argument("--lat", type=float, default=DEFAULT_LAT,
+                   help="receiver latitude; default is the grid-square centre")
+    p.add_argument("--lon", type=float, default=DEFAULT_LON,
+                   help="receiver longitude; default is the grid-square centre")
     args = p.parse_args(argv)
 
     source = WindowSource(receiver_lat=args.lat, receiver_lon=args.lon,

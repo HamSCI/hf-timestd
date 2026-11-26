@@ -43,7 +43,9 @@ Then on wd30:
 to `wsprdaemon` too, or the verifier cannot write `.verify-state.json` there.
 
 `stations.json` lists B4 only. Edit it to add stations, and give each a
-`incoming/<id>` directory and its own key line.
+`incoming/<id>` directory and its own key line. The file in the repo holds
+the grid-square centre (EM38ww for B4); the deployed copy may hold the precise
+position, and stays out of the repo.
 
 After the code is pushed, a clone works too:
 `git clone https://github.com/HamSCI/hf-timestd.git`, then copy the same three

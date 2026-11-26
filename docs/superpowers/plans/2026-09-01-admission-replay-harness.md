@@ -699,7 +699,7 @@ import pytest
 from hf_timestd.replay.window_source import WindowSource
 
 # AC0G / B4, Columbia MO — the station the archive came from.
-LAT, LON = 38.9187497, -92.1277207
+LAT, LON = 38.9375, -92.125
 MINUTE_1719Z = 1788196740  # 2026-08-31T17:19Z
 
 
@@ -1105,7 +1105,7 @@ from hf_timestd.replay.runner import replay
 from hf_timestd.replay.window_source import WindowSource
 
 # AC0G / B4, Columbia MO.
-DEFAULT_LAT, DEFAULT_LON = 38.9187497, -92.1277207
+DEFAULT_LAT, DEFAULT_LON = 38.9375, -92.125
 
 
 def main(argv=None) -> int:

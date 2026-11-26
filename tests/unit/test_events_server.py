@@ -355,7 +355,7 @@ def test_orders_cli_writes_file(tmp_path):
 def test_stations_json_is_b4_only():
     st = json.loads((REPO / "scripts/events/stations.json").read_text())
     assert [s["id"] for s in st] == ["AC0G-B4"]
-    assert (st[0]["lat"], st[0]["lon"]) == (38.9187367, -92.1277335)
+    assert (st[0]["lat"], st[0]["lon"]) == (38.9375, -92.125)
     assert st[0]["paths"] == [[40.6807, -105.0407], [21.9872, -159.7636]]
 
 

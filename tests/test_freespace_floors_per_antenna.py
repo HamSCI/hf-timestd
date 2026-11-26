@@ -19,7 +19,7 @@ from hamsci_dsp.stations import BUILTIN_CATALOG
 from hf_timestd.core.metrology_engine import freespace_floors_ms
 
 # AC0G / B4, Columbia MO.
-LAT, LON = 38.9187497, -92.1277207
+LAT, LON = 38.9375, -92.125
 
 
 def test_floors_are_returned_for_the_live_stations():
