@@ -62,8 +62,10 @@ def test_classes_from_tree(tree):
 
 def test_sinks_shape(tmp_path):
     s = si.sinks(tmp_path, 1000)
-    assert len(s) == 3 and all(x["kind"] == "file" and x["classes"] for x in s)
-    pinned, raw, rest = s
+    files = [x for x in s if x["kind"] == "file"]
+    assert len(files) == 3 and all(x["classes"] for x in files)
+    assert all(x["kind"] == "service" and x["expires"] for x in s if x not in files)
+    pinned, raw, rest = files
     assert pinned["classes"] == ["pinned"] and "final_policy" not in pinned
     assert raw["target"] == str(tmp_path / "raw_buffer")
     assert raw["classes"] == ["raw", "sent"]
@@ -124,16 +126,28 @@ def test_cli_holdings_and_unsupported(tree, tmp_path):
     assert j["bytes_by_class"]["raw"] == 310
 
 
-def test_sqlite_files_never_listed(tmp_path):
+def test_sqlite_files_listed_pinned_never_evicted(tmp_path):
     for n in ("timestd.db", "timestd.db-wal", "timestd.db-shm", "x.db-journal", "y.sqlite3"):
-        _mk(tmp_path, f"phase2/{n}")
-    _mk(tmp_path, "phase2/keep.csv")
+        _mk(tmp_path, f"phase2/{n}", age_days=1)
+    _mk(tmp_path, "phase2/keep.csv", age_days=1)
     _mk(tmp_path, "upload/z.db")
-    got = sorted(Path(i.path).name for i in si.list_items(tmp_path))
-    assert got == ["keep.csv"]
+    got = {Path(i.path).name: i.cls for i in si.list_items(tmp_path)}
+    assert got == {"timestd.db": "pinned", "timestd.db-wal": "pinned",
+                   "timestd.db-shm": "pinned", "x.db-journal": "pinned",
+                   "y.sqlite3": "pinned", "keep.csv": "derived"}
+    for i in si.list_items(tmp_path):
+        if i.cls == "pinned":
+            assert si.delete_item(i, NOW) is False
     gone = si.Item(str(tmp_path / "phase2/timestd.db"), 1, "derived", 0.0)
     assert si.delete_item(gone, NOW) is False
     assert (tmp_path / "phase2/timestd.db").exists()
+
+
+def test_list_items_shows_timestd_db_as_pinned(tmp_path):
+    (tmp_path / "phase2").mkdir()
+    _mk(tmp_path, "phase2/timestd.db", 10, age_days=1)
+    items = si.list_items(tmp_path)
+    assert any(i.path.endswith("phase2/timestd.db") and i.cls == "pinned" for i in items)
 
 
 def test_non_date_dir_not_a_raw_day(tmp_path, monkeypatch):
@@ -147,7 +161,7 @@ def test_non_date_dir_not_a_raw_day(tmp_path, monkeypatch):
 def test_list_items_without_kit(tree, monkeypatch):
     monkeypatch.setattr(si, "load_kit", lambda: None)
     assert si.list_items(tree)
-    assert len(si.sinks_for(tree)) == 3
+    assert len([s for s in si.sinks_for(tree) if s["kind"] == "file"]) == 3
 
 
 def test_unrelated_command_does_not_walk_tree(monkeypatch, capsys):

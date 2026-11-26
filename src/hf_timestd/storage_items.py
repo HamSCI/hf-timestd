@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from . import storage_retention
+
 DAY = 86400.0
 # A derived file written within this window may still be open: never a trim item.
 LIVE_WINDOW = 2 * 3600.0
@@ -188,8 +190,9 @@ def list_items(data_root: Path, now: Optional[float] = None,
 
     raw: one item per raw_buffer/<channel>/<YYYYMMDD> directory.
     pinned: one item per entry (listed so holdings count it; never deleted).
-    sent, derived: one item per file.  SQLite files (live databases with
-    their -wal/-shm/-journal) are never listed: trim must not take one apart.
+    sent, derived: one item per file.  Each SQLite file (a live database with
+    its -wal/-shm/-journal) is one pinned item: holdings count it, trim never
+    offers it.  Rows leave through `storage expire`.
     A raw day directory must be named YYYYMMDD.  A raw day older than
     yesterday (UTC) that the archiver's status file reports copied is class
     `sent`: it goes first.  Files under any `state` directory, and derived
@@ -233,16 +236,14 @@ def list_items(data_root: Path, now: Optional[float] = None,
                 for dirpath, _dn, files in os.walk(e):
                     in_state = "state" in Path(dirpath).relative_to(e).parts
                     for f in files:
-                        if _is_sqlite(f):
-                            continue
                         p = Path(dirpath) / f
                         try:
                             st = p.lstat()
                         except OSError:
                             continue
                         kind = cls
-                        if cls == "derived" and (
-                                in_state or t - st.st_mtime < LIVE_WINDOW):
+                        if _is_sqlite(f) or (cls == "derived" and (
+                                in_state or t - st.st_mtime < LIVE_WINDOW)):
                             kind = "pinned"
                         items.append(Item(str(p), st.st_size, kind, st.st_mtime))
             else:
@@ -263,7 +264,7 @@ def sinks(data_root: Path, rate_bytes_per_day: int) -> List[dict]:
         {"kind": "file", "target": str(root), "schema_ref": None,
          "retention_days": 0, "mb_per_day": 0,
          "classes": ["derived", "pinned"]},
-    ]
+    ] + storage_retention.retention_sinks()
 
 
 def sinks_for(data_root: Path, now: Optional[float] = None) -> List[dict]:
@@ -354,7 +355,7 @@ def add_verbs(subparsers, data_root: Path) -> bool:
     kit = load_kit()
     if kit is None:
         return False
-    rate = sinks_for(data_root)[1]
+    rate = sinks_for(data_root)[1]  # the raw_buffer sink
     kit.add_storage_verbs(
         subparsers,
         list_items=lambda: list_items(data_root),
@@ -363,6 +364,8 @@ def add_verbs(subparsers, data_root: Path) -> bool:
         final_policy=RAW_POLICY,
         apply_policy=lambda policy, fit: apply_final(kit, data_root, policy, fit,
                                                      rate["floor_bytes"]),
+        expire=lambda target, days, max_seconds: storage_retention.expire_target(
+            data_root, target, days, max_seconds),
     )
     _file_level_holdings(subparsers, kit, data_root)
     return True
