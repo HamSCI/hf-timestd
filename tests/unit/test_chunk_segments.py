@@ -15,7 +15,9 @@ import numpy as np
 
 from hf_timestd.core.binary_archive_writer import (
     BinaryArchiveConfig, BinaryArchiveReader, BinaryArchiveWriter)
-from hf_timestd.core.chunk_segments import chunk_stem, join_segments, parse_chunk_name
+from hf_timestd.core.chunk_segments import (
+    chunk_stem, fill_mask, join_metadata, join_segments, parse_chunk_name,
+    runs_from_mask)
 from hf_timestd.core.leap_second import get_current_gps_leap_seconds
 from hf_timestd.events.window_drf import window_files
 
@@ -163,6 +165,66 @@ def test_one_segment_comes_back_untouched():
     side = _side([[0, 4]])
     x, meta = join_segments([(1, a, side)])
     assert x is a and meta is side
+
+
+# ------------------------------------------------------------ the fill mask
+
+def _masked(runs, fill, **kw):
+    return _side(runs, fill_runs=fill, gap_fill="zeros", **kw)
+
+
+def test_runs_from_mask_merges_and_offsets():
+    m = np.array([False, True, True, False, True])
+    assert runs_from_mask(m, offset=10) == [[11, 13], [14, 15]]
+    assert runs_from_mask(np.zeros(4, bool)) == []
+
+
+def test_fill_mask_none_for_a_sidecar_without_fill_runs():
+    assert fill_mask(10, {"covered_runs": [[0, 10]]}) is None
+    np.testing.assert_array_equal(fill_mask(5, {"fill_runs": [[1, 3]]}),
+                                  [False, True, True, False, False])
+    assert fill_mask(2, {"fill_runs": [[1, 9]]}).tolist() == [False, True]
+
+
+def test_join_carries_each_segments_fill_into_the_joined_chunk():
+    a = np.ones(10, np.complex64); a[2:4] = 0
+    b = np.full(10, 2, np.complex64); b[7:9] = 0
+    x, meta = join_segments([
+        (1, a, _masked([[0, 6]], [[2, 4]], gap_samples=1)),
+        (2, b, _masked([[4, 10]], [[7, 9]], gap_samples=2))])
+    assert meta["fill_runs"] == [[2, 4], [7, 9]]
+    assert meta["covered_runs"] == [[0, 10]]
+    assert meta["gap_fill"] == "zeros"
+    assert meta["gap_samples"] == 3      # the sum of what each segment reported
+
+
+def test_fill_at_a_refused_position_does_not_join():
+    a = np.ones(6, np.complex64); a[2:4] = 0
+    b = np.full(8, 2, np.complex64); b[5:6] = 0
+    _, meta = join_segments([(1, a, _masked([[0, 6]], [[2, 4]])),
+                             (2, b, _masked([[4, 8]], [[5, 6]]))])
+    assert meta["fill_runs"] == [[2, 4]]
+
+
+def test_join_with_a_legacy_segment_claims_no_mask():
+    a = np.ones(6, np.complex64)
+    b = np.full(10, 2, np.complex64); b[7:9] = 0
+    for parts in ([(1, a, _side([[0, 6]])), (2, b, _masked([[4, 10]], [[7, 9]]))],
+                  [(1, a, _masked([[0, 6]], [[2, 4]])), (2, b, _side([[4, 10]]))]):
+        _, meta = join_segments(parts)
+        assert "fill_runs" not in meta and "gap_fill" not in meta
+
+
+def test_join_metadata_merges_the_mask_without_the_samples():
+    """read_metadata joins sidecars alone; it must agree with the joined chunk."""
+    sides = [(1, _masked([[0, 6]], [[2, 4]], gap_samples=1)),
+             (2, _masked([[4, 10]], [[5, 6], [7, 9]], gap_samples=2))]
+    meta = join_metadata(sides)
+    assert meta["fill_runs"] == [[2, 4], [7, 9]]
+    assert meta["covered_runs"] == [[0, 10]]
+    assert (meta["gap_fill"], meta["gap_samples"]) == ("zeros", 3)
+    legacy = join_metadata([sides[0], (2, _side([[4, 10]]))])
+    assert "fill_runs" not in legacy and "gap_fill" not in legacy
 
 
 # ------------------------------------------------------------ BinaryArchiveReader

@@ -48,6 +48,27 @@ def covered_mask(samples: np.ndarray, sidecar: Optional[Dict]) -> np.ndarray:
     return mask
 
 
+def runs_from_mask(mask: np.ndarray, offset: int = 0) -> List[List[int]]:
+    """The sorted, merged ``[start, end)`` runs of True positions, shifted by ``offset``."""
+    m = np.concatenate([[False], np.asarray(mask, dtype=bool), [False]])
+    edges = np.flatnonzero(m[1:] != m[:-1])
+    return [[int(a) + offset, int(b) + offset] for a, b in zip(edges[::2], edges[1::2])]
+
+
+def fill_mask(n: int, sidecar: Optional[Dict]) -> Optional[np.ndarray]:
+    """The positions the writer filled with zeros, clipped to ``n``.
+
+    None when the sidecar has no ``fill_runs``: a chunk written before v3.96,
+    whose fill the writer interpolated and never marked."""
+    runs = (sidecar or {}).get('fill_runs')
+    if runs is None:
+        return None
+    mask = np.zeros(n, dtype=bool)
+    for a, b in runs:
+        mask[max(0, int(a)):min(n, int(b))] = True
+    return mask
+
+
 def _rtp_offset(rtp: Optional[int], first: Optional[int]) -> Optional[int]:
     if rtp is None or first is None:
         return None
@@ -79,7 +100,53 @@ def join_metadata(sidecars: Sequence[Tuple[int, Optional[Dict]]]) -> Optional[Di
     meta = dict(first or {})
     first_rtp = meta.get('start_rtp_timestamp')
     meta['segments'] = [segment_summary(n, s, first_rtp) for n, s in sidecars]
+    _join_sidecar_masks(meta, [s for _, s in sidecars])
     return meta
+
+
+def _join_sidecar_masks(meta: Dict, sides: Sequence[Optional[Dict]]) -> None:
+    """Set the joined sidecar's ``gap_samples``, ``covered_runs``, ``fill_runs``
+    and ``gap_fill`` from the segments' sidecars alone (no samples).
+
+    Positions are boundary-relative in every segment, so runs join as they
+    stand, not offset by the segments before.  A later segment's fill counts
+    only where it wrote a position no earlier segment wrote.  The joined
+    chunk claims a mask (``gap_fill`` "zeros" and ``fill_runs``) only when
+    every joined segment carries one; a legacy segment leaves no claim.
+    A segment at another sample rate from the first is skipped, as in the joiner.
+    ``gap_samples`` sums what ka9q-python reported for each segment; the fill
+    count lives only in ``fill_runs``."""
+    rate = meta.get('sample_rate')
+    sides = [s or {} for s in sides
+             if rate is None or (s or {}).get('sample_rate') is None
+             or int(s['sample_rate']) == int(rate)]
+    gaps = [s['gap_samples'] for s in sides if s.get('gap_samples') is not None]
+    if gaps:
+        meta['gap_samples'] = int(sum(gaps))
+    ends = [int(b) for s in sides for key in ('covered_runs', 'fill_runs')
+            for _, b in s.get(key) or []]
+    n = max(ends, default=0)
+    if all(s.get('covered_runs') is not None for s in sides):
+        written = np.zeros(n, dtype=bool)
+        fill = np.zeros(n, dtype=bool)
+        for s in sides:
+            wrote = covered_mask(np.zeros(n), s)
+            take = wrote & ~written
+            seg_fill = fill_mask(n, s)
+            if seg_fill is not None:
+                fill |= take & seg_fill
+            written |= take
+        meta['covered_runs'] = runs_from_mask(written)
+        masked = all(s.get('fill_runs') is not None for s in sides)
+    else:
+        meta.pop('covered_runs', None)
+        masked = False
+    if masked:
+        meta['fill_runs'] = runs_from_mask(fill)
+        meta['gap_fill'] = 'zeros'
+    else:
+        meta.pop('fill_runs', None)
+        meta.pop('gap_fill', None)
 
 
 class SegmentJoiner:
@@ -99,6 +166,10 @@ class SegmentJoiner:
         self._first: Optional[Tuple[int, np.ndarray, Optional[Dict]]] = None
         self._out: Optional[np.ndarray] = None
         self._filled: Optional[np.ndarray] = None
+        self._fill: Optional[np.ndarray] = None
+        self._masked = True      # every merged segment carries fill_runs
+        self._gap = 0
+        self._gap_seen = False
         self._meta: Optional[Dict] = None
         self._first_len = 0
 
@@ -114,6 +185,7 @@ class SegmentJoiner:
             self._first_len = len(fx)
             self._out = fx if fx.flags.writeable else fx.copy()
             self._filled = np.zeros(len(fx), dtype=bool)
+            self._fill = np.zeros(len(fx), dtype=bool)
             self._merge(fseg, fx, fside)
             del fx
         self._merge(segment, samples, sidecar)
@@ -131,11 +203,19 @@ class SegmentJoiner:
             grow = len(x) - len(self._out)
             self._out = np.concatenate([self._out, np.zeros(grow, dtype=np.complex64)])
             self._filled = np.concatenate([self._filled, np.zeros(grow, dtype=bool)])
+            self._fill = np.concatenate([self._fill, np.zeros(grow, dtype=bool)])
         wrote = covered_mask(x, side)
         take = wrote & ~self._filled[:len(x)]
         if x is not self._out:
             self._out[:len(x)][take] = x[take]
         self._filled[:len(x)] |= take
+        seg_fill = fill_mask(len(x), side)
+        if seg_fill is None:
+            self._masked = False
+        else:
+            self._fill[:len(x)][take & seg_fill] = True
+        self._gap += int((side or {}).get('gap_samples') or 0)
+        self._gap_seen = self._gap_seen or (side or {}).get('gap_samples') is not None
         summary['samples_taken'] = int(take.sum())
         summary['samples_refused'] = int(wrote.sum()) - summary['samples_taken']
 
@@ -153,6 +233,15 @@ class SegmentJoiner:
         meta['samples_written'] = len(out)
         meta['samples_covered'] = covered
         meta['hole_samples'] = len(out) - covered
+        meta['covered_runs'] = runs_from_mask(filled[:len(out)])
+        if self._gap_seen:
+            meta['gap_samples'] = self._gap
+        if self._masked:
+            meta['fill_runs'] = runs_from_mask(self._fill[:len(out)])
+            meta['gap_fill'] = 'zeros'
+        else:
+            meta.pop('fill_runs', None)
+            meta.pop('gap_fill', None)
         return out, meta
 
 
