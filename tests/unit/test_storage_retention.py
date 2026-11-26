@@ -86,7 +86,8 @@ def test_targets_name_the_real_time_columns():
     assert T["timestd.L2_tick_phase"] == ("phase2/timestd.db", "L2_tick_phase", "timestamp_utc")
     assert T["authority_history.authority_snapshot"] == (
         "authority_history.db", "authority_snapshot", "utc_published")
-    assert "timestd" in T  # P14: compaction names the whole file
+    assert "timestd" not in T  # compaction has its own map
+    assert storage_retention.COMPACT_TARGETS == {"timestd": "phase2/timestd.db"}
 
 
 @needs_kit

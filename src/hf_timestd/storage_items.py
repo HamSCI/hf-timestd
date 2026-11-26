@@ -368,7 +368,27 @@ def add_verbs(subparsers, data_root: Path) -> bool:
             data_root, target, days, max_seconds),
     )
     _file_level_holdings(subparsers, kit, data_root)
+    _compact_verb(subparsers, kit, data_root)
     return True
+
+
+def _compact_verb(subparsers, kit, data_root: Path) -> None:
+    """`storage compact --prepare|--holders|--estimate|--swap --target T --json`."""
+    from . import storage_compact
+
+    def do_compact(args) -> int:
+        action = next(a for a in ("prepare", "holders", "estimate", "swap")
+                      if getattr(args, a))
+        print(json.dumps(storage_compact.run_verb(data_root, action, args.target)))
+        return 0
+
+    p = kit._storage_verbs(subparsers).add_parser("compact")
+    g = p.add_mutually_exclusive_group(required=True)
+    for a in ("prepare", "holders", "estimate", "swap"):
+        g.add_argument(f"--{a}", action="store_true")
+    p.add_argument("--target", required=True)
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=do_compact)
 
 
 def apply_final(kit, data_root: Path, policy: str, fit_bytes: int, floor_bytes: int,

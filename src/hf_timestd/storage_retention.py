@@ -48,9 +48,10 @@ TARGETS: Dict[str, Tuple[str, str, str]] = {
     **{f"timestd.{t}": (TIMESTD_DB, t, "timestamp_utc") for t in TABLES},
     "authority_history.authority_snapshot":
         (AUTHORITY_DB, "authority_snapshot", "utc_published"),
-    # The whole file, for `storage compact`.  No table: expire refuses it.
-    "timestd": (TIMESTD_DB, "", ""),
 }
+
+# target -> database relative to the data root, for `storage compact`
+COMPACT_TARGETS: Dict[str, str] = {"timestd": TIMESTD_DB}
 
 
 def days_for(target: str) -> int:
@@ -62,7 +63,7 @@ def days_for(target: str) -> int:
 def retention_sinks() -> List[dict]:
     return [{"kind": "service", "target": tgt, "schema_ref": "timestd:1",
              "retention_days": days_for(tgt), "mb_per_day": 0, "expires": True}
-            for tgt, (_db, table, _col) in TARGETS.items() if table]
+            for tgt in TARGETS]
 
 
 def _answer(deleted: int = 0, complete: bool = False, refused: bool = False,
@@ -76,7 +77,7 @@ def expire_target(data_root: Path, target: str, days: int, max_seconds: int,
     """Delete rows of one target older than `days`; vacuum with the time left."""
     from . import storage_items
     spec = TARGETS.get(target)
-    if spec is None or not spec[1]:
+    if spec is None:
         return _answer(refused=True, reason=f"unknown expire target {target!r}")
     kit = storage_items.load_kit()
     if kit is None:
