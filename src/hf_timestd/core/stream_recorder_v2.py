@@ -277,7 +277,7 @@ class StreamRecorderV2:
             from .binary_archive_writer import BinaryArchiveWriter, BinaryArchiveConfig
 
             archive_config = BinaryArchiveConfig(
-                output_dir=config.output_dir,
+                output_dir=config.output_dir / 'raw_buffer',
                 channel_name=config.description,
                 frequency_hz=config.frequency_hz,
                 sample_rate=config.sample_rate,
@@ -285,7 +285,9 @@ class StreamRecorderV2:
                 compression=config.compression,
                 compression_level=config.compression_level,
                 archive_dtype=config.archive_dtype,
-                use_tiered_storage=config.tiered_storage,
+                scratch_root=(
+                    Path(config.hot_buffer_root or '/dev/shm/timestd') / 'raw_buffer'
+                    if config.tiered_storage else None),
                 file_duration_sec=config.file_duration_sec,
                 boundary_on_pulse=getattr(config, 'boundary_on_pulse', False),
             )

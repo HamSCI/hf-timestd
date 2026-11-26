@@ -12,7 +12,7 @@ U = namedtuple("U", "total used free")
 def _writer(tmp_path):
     cfg = BinaryArchiveConfig(
         channel_name="testchan", frequency_hz=10e6, sample_rate=100,
-        output_dir=tmp_path / "raw_buffer", use_tiered_storage=False,
+        output_dir=tmp_path / "raw_buffer",
         compression="none")
     w = BinaryArchiveWriter(cfg)
     w._flush_stop.set()

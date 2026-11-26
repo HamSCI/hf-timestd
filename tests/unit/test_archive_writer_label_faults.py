@@ -14,6 +14,8 @@ Review round 1 of the first-sample label fix (2026-11-22):
 import json
 import threading
 import time
+
+import pytest
 from types import SimpleNamespace
 
 import numpy as np
@@ -30,7 +32,7 @@ def _writer(tmp_path, dur=10, timesnap=0):
     cfg = BinaryArchiveConfig(
         channel_name="testchan", frequency_hz=10e6, sample_rate=SR,
         output_dir=tmp_path / "raw_buffer", file_duration_sec=dur,
-        use_tiered_storage=False, compression="none")
+        compression="none")
     w = BinaryArchiveWriter(cfg)
     w._flush_stop.set()
     w._flush_queue.put(None)
@@ -682,3 +684,26 @@ def test_writer_close_joins_the_watchdog_capture(tmp_path, monkeypatch):
     w.close()
     assert calls == [2.0]
 
+
+
+@pytest.mark.parametrize("tiered", [True, False])
+def test_stream_recorder_archives_under_raw_buffer(tmp_path, monkeypatch, tiered):
+    from unittest.mock import MagicMock
+    from hf_timestd.core import tiered_storage as ts
+    from hf_timestd.core.stream_recorder_v2 import StreamRecorderConfig
+    # F8: the global manager must never touch /dev/shm or /var/lib here.
+    monkeypatch.setattr(ts, "_manager", ts.TieredStorageManager(ts.TieredStorageConfig(
+        hot_buffer_root=tmp_path / "mgr_hot", cold_buffer_root=tmp_path / "mgr_cold")))
+    cfg = StreamRecorderConfig(
+        ssrc=None, frequency_hz=10e6, sample_rate=SR, preset="iq", encoding=4,
+        description="testchan", output_dir=tmp_path, receiver_grid="AA00aa",
+        station_config={}, archive=True, ring_seconds=0, compression="none",
+        archive_dtype="complex64", file_duration_sec=10,
+        tiered_storage=tiered, hot_buffer_root=tmp_path / "shm")
+    r = StreamRecorderV2(config=cfg, control=MagicMock())
+    w = r.archive_writer
+    w._flush_stop.set()
+    w._flush_queue.put(None)
+    w._flush_thread.join(timeout=5)
+    assert w.archive_dir == tmp_path / "raw_buffer" / "testchan"
+    assert w.scratch_dir == (tmp_path / "shm" / "raw_buffer" / "testchan" if tiered else None)

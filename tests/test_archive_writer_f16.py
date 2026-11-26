@@ -14,7 +14,7 @@ def _writer(tmp_path, **kw):
     cfg = BinaryArchiveConfig(
         channel_name="testchan", frequency_hz=10e6, sample_rate=100,
         output_dir=tmp_path / "raw_buffer", file_duration_sec=2,
-        use_tiered_storage=False, **kw)
+        **kw)
     w = BinaryArchiveWriter(cfg)
     w._gps_time_unix = 1_000_000.0
     w._gps_time_ns_raw = int(w._gps_time_unix * 1e9)

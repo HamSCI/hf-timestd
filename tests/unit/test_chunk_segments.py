@@ -28,7 +28,7 @@ def _writer(tmp_path, dur=10):
     cfg = BinaryArchiveConfig(
         channel_name="testchan", frequency_hz=10e6, sample_rate=SR,
         output_dir=tmp_path / "raw_buffer", file_duration_sec=dur,
-        use_tiered_storage=False, compression="none")
+        compression="none")
     w = BinaryArchiveWriter(cfg)
     w._flush_stop.set()
     w._flush_queue.put(None)

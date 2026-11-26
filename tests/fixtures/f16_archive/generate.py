@@ -49,7 +49,7 @@ def write(out_dir: Path) -> None:
         cfg = BinaryArchiveConfig(
             channel_name=CHANNEL, frequency_hz=10e6, sample_rate=RATE,
             output_dir=Path(out_dir), file_duration_sec=60, compression="zstd",
-            archive_dtype=dtype, use_tiered_storage=False)
+            archive_dtype=dtype)
         w = BinaryArchiveWriter(cfg)
         w._gps_time_unix = float(boundary)
         w._gps_time_ns_raw = int(boundary * 1e9)

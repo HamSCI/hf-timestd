@@ -124,7 +124,10 @@ class BinaryArchiveConfig:
     compress_completed: bool = False  # Async compression of old minutes
     compression: str = 'none'  # 'none', 'zstd', or 'lz4' - reduces disk I/O by ~2-3x
     compression_level: int = 3  # zstd: 1-22 (3 = good balance), lz4: 1-12
-    use_tiered_storage: bool = False  # Use /dev/shm hot buffer with disk cold storage
+    # Root for the open chunk's memmap (<scratch_root>/<channel_dir>/<YYYYMMDD>/),
+    # e.g. a RAM disk.  None puts the scratch beside the chunk.  Finished
+    # chunks always land under output_dir.
+    scratch_root: Optional[Path] = None
     radiod_snr_db: Optional[float] = None  # SNR from radiod (updated periodically)
     # |old-mapping vs new-snapshot| beyond this (s) ⇒ radiod stepped its
     # RTP↔GPS offset: flush + adopt the new mapping (re-anchor).  Matches
@@ -384,16 +387,13 @@ class BinaryArchiveWriter:
         self._time_map_provider = None
         self._time_map_counter_space: Optional[str] = None
         
-        if config.use_tiered_storage:
-            from .tiered_storage import get_tiered_storage_manager
-            self._tiered_manager = get_tiered_storage_manager()
-            self.archive_dir = self._tiered_manager.get_hot_buffer_path(config.channel_name)
-        else:
-            from ..paths import channel_name_to_dir
-            self._tiered_manager = None
-            self.archive_dir = config.output_dir / channel_name_to_dir(config.channel_name)
-        
+        from ..paths import channel_name_to_dir
+        self.archive_dir = config.output_dir / channel_name_to_dir(config.channel_name)
         self.archive_dir.mkdir(parents=True, exist_ok=True)
+        self.scratch_dir: Optional[Path] = None
+        if config.scratch_root is not None:
+            self.scratch_dir = Path(config.scratch_root) / channel_name_to_dir(config.channel_name)
+            self.scratch_dir.mkdir(parents=True, exist_ok=True)
         
         # Buffer sizing — one file per file_duration_sec (default 600s = 10 min)
         self.file_duration_sec = config.file_duration_sec
@@ -541,8 +541,11 @@ class BinaryArchiveWriter:
             count = 0
             # Both .tmp (compressed-write half-success) and .scratch
             # (memmap backing files from a crashed fill) need cleaning.
-            for pattern in ('*.tmp', '*.scratch'):
-                for tmp_file in self.archive_dir.rglob(pattern):
+            scans = [(self.archive_dir, '*.tmp'), (self.archive_dir, '*.scratch')]
+            if self.scratch_dir is not None:
+                scans.append((self.scratch_dir, '*.scratch'))
+            for root, pattern in scans:
+                for tmp_file in root.rglob(pattern):
                     try:
                         tmp_file.unlink()
                         count += 1
@@ -1127,6 +1130,16 @@ class BinaryArchiveWriter:
         day_dir.mkdir(parents=True, exist_ok=True)
         return day_dir
     
+    def _scratch_day_dir(self, boundary: int) -> Path:
+        """Day directory for the open chunk's memmap: under scratch_dir
+        when set, else beside the chunk."""
+        if self.scratch_dir is None:
+            return self._get_minute_dir(boundary)
+        dt = datetime.fromtimestamp(boundary, tz=timezone.utc)
+        day_dir = self.scratch_dir / dt.strftime('%Y%m%d')
+        day_dir.mkdir(parents=True, exist_ok=True)
+        return day_dir
+
     def _start_new_minute(self, rtp_derived_time: float, rtp_timestamp: int,
                           verdict: Optional[Any] = None) -> MinuteBuffer:
         """Start a new chunk buffer.
@@ -1201,8 +1214,7 @@ class BinaryArchiveWriter:
         # per-writer sequence number so a chunk reopened at the same
         # boundary (a pair step mid-chunk) never unlinks the scratch of
         # the earlier buffer still waiting in the flush queue.
-        minute_dir = self._get_minute_dir(chunk_boundary)
-        minute_dir.mkdir(parents=True, exist_ok=True)
+        minute_dir = self._scratch_day_dir(chunk_boundary)
         self._scratch_seq += 1
         scratch_path = minute_dir / (
             f"{chunk_boundary}.{self._sanitize_channel_name()}"

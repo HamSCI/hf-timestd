@@ -14,6 +14,7 @@ Locks in the np.memmap rewrite of MinuteBuffer.samples (2026-05-14):
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Optional
 from unittest.mock import patch
 
 import numpy as np
@@ -27,7 +28,8 @@ from hf_timestd.core.binary_archive_writer import (
 
 
 def _writer(tmp_path: Path, *, sample_rate: int = 100,
-            file_duration_sec: int = 2, compression: str = 'none'
+            file_duration_sec: int = 2, compression: str = 'none',
+            scratch_root: Optional[Path] = None
             ) -> BinaryArchiveWriter:
     """Minimal writer with small numbers — fast tests."""
     cfg = BinaryArchiveConfig(
@@ -37,7 +39,7 @@ def _writer(tmp_path: Path, *, sample_rate: int = 100,
         output_dir=tmp_path / "raw_buffer",
         file_duration_sec=file_duration_sec,
         compression=compression,
-        use_tiered_storage=False,
+        scratch_root=scratch_root,
     )
     w = BinaryArchiveWriter(cfg)
     # Inject the GPS_TIME mapping (writer refuses to flush without it).
@@ -310,3 +312,30 @@ def test_restore_is_not_reported_as_radiod_restart(tmp_path: Path, caplog):
         assert watchdog.on_mapping_jump.call_count == 1
     finally:
         w.close()
+
+
+# ---- scratch_root: the open chunk fills in RAM, the finished chunk is on disk
+
+
+def test_open_chunk_scratch_lives_under_scratch_root(tmp_path):
+    w = _writer(tmp_path, scratch_root=tmp_path / "shm" / "raw_buffer")
+    buf, boundary = _drive_one_chunk(w)
+    assert buf.scratch_path.parent.parent == tmp_path / "shm" / "raw_buffer" / "testchan"
+    assert not list((tmp_path / "raw_buffer").rglob("*.scratch"))
+
+
+def test_finished_chunk_lands_on_disk_not_in_scratch_root(tmp_path):
+    w = _writer(tmp_path, scratch_root=tmp_path / "shm" / "raw_buffer")
+    buf, boundary = _drive_one_chunk(w)
+    assert w._flush_minute(buf)
+    disk = list((tmp_path / "raw_buffer" / "testchan").rglob(f"{boundary}.*"))
+    assert sorted(p.suffix for p in disk) == [".bin", ".json"]
+    assert not [p for p in (tmp_path / "shm").rglob("*") if p.is_file()]
+
+
+def test_orphan_scratch_under_scratch_root_removed_at_start(tmp_path):
+    stale = tmp_path / "shm" / "raw_buffer" / "testchan" / "20200101" / "1.testchan.1.scratch"
+    stale.parent.mkdir(parents=True)
+    stale.write_bytes(b"\0" * 64)
+    _writer(tmp_path, scratch_root=tmp_path / "shm" / "raw_buffer")
+    assert not stale.exists()

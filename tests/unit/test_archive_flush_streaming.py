@@ -28,7 +28,7 @@ def _writer(tmp_path, *, sample_rate=100, file_duration_sec=120, name="testchan"
     cfg = BinaryArchiveConfig(
         channel_name=name, frequency_hz=10e6, sample_rate=sample_rate,
         output_dir=tmp_path / "raw_buffer", file_duration_sec=file_duration_sec,
-        use_tiered_storage=False, compression="zstd", **kw)
+        compression="zstd", **kw)
     w = BinaryArchiveWriter(cfg)
     w._flush_stop.set()                       # flush by hand, not via the worker
     w._gps_time_unix = 1_000_000_200.0

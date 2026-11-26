@@ -29,7 +29,7 @@ def _writer(tmp_path):
     cfg = BinaryArchiveConfig(
         channel_name="testchan", frequency_hz=10e6, sample_rate=SR,
         output_dir=tmp_path / "raw_buffer", file_duration_sec=DUR,
-        use_tiered_storage=False, compression="none")
+        compression="none")
     w = BinaryArchiveWriter(cfg)
     # Flush by hand, not via the worker: stop it, and wake it with the
     # close() sentinel so it cannot take the first buffer we queue.
