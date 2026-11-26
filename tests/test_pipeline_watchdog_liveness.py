@@ -12,6 +12,7 @@ fusion_status.json every cycle; L2-calibration pings its systemd watchdog.
 The script is exercised in --dry-run with PATH shims for systemctl, logger,
 curl and sqlite3 (the devbox has no sqlite3 CLI; the shim uses Python's).
 """
+import json
 import os
 import sqlite3
 import subprocess
@@ -36,11 +37,13 @@ for row in con.execute(sql):
 
 SYSTEMCTL_SHIM = r'''#!/bin/bash
 # is-enabled/is-active answer from $ENABLED_UNITS; everything else is a no-op.
+[[ -n "${SYSTEMCTL_LOG:-}" ]] && echo "$*" >> "$SYSTEMCTL_LOG"
 cmd=""; unit=""
 for a in "$@"; do case "$a" in --*) ;; *) if [[ -z "$cmd" ]]; then cmd="$a"; else unit="$a"; fi;; esac; done
 case "$cmd" in
   is-enabled|is-active) for u in $ENABLED_UNITS; do [[ "$u" == "$unit" ]] && exit 0; done; exit 1 ;;
   is-failed) exit 1 ;;
+  show) for a in "$@"; do [[ "$a" == "ActiveEnterTimestampMonotonic" ]] && echo "$RECORDER_ENTER_US"; done; exit 0 ;;
   *) exit 0 ;;
 esac
 '''
@@ -91,17 +94,35 @@ def env(tmp_path):
     return {
         "shim": shim, "data_root": data_root, "run_dir": run_dir,
         "db": data_root / "phase2" / "timestd.db",
+        "request_dir": tmp_path / "recorder-restart",
+        "systemctl_log": tmp_path / "systemctl.log",
+        "uptime": tmp_path / "uptime",
+        "hot_buffer": tmp_path / "hot_raw_buffer",
     }
 
 
-def _run(env, enabled_units):
+def _run(env, enabled_units, recorder_enter_s=None, newest_chunk_age=None, dry=True):
+    """recorder_enter_s: seconds after boot the recorder became active.
+    newest_chunk_age: age of the newest chunk under raw_buffer.
+    dry=False runs for real against the shims and the temp request_dir."""
     e = dict(os.environ)
     e["PATH"] = f"{env['shim']}:{e['PATH']}"
     e["ENABLED_UNITS"] = " ".join(enabled_units)
     e["DATA_ROOT"] = str(env["data_root"])
     e["RUN_DIR"] = str(env["run_dir"])
     e["SQLITE_DB"] = str(env["db"])
-    r = subprocess.run(["bash", str(WATCHDOG), "--dry-run"], env=e,
+    e["REQUEST_DIR"] = str(env["request_dir"])
+    e["UPTIME_FILE"] = str(env["uptime"])
+    e["RAW_BUFFER_HOT"] = str(env["hot_buffer"])
+    e["SYSTEMCTL_LOG"] = str(env["systemctl_log"])
+    if not env["uptime"].exists():
+        env["uptime"].write_text("10000.00 0.00\n")
+    if recorder_enter_s is not None:
+        e["RECORDER_ENTER_US"] = str(int(recorder_enter_s * 1_000_000))
+    if newest_chunk_age is not None:
+        _touch(env["data_root"] / "raw_buffer" / "chunk.bin", newest_chunk_age)
+    args = ["bash", str(WATCHDOG)] + (["--dry-run"] if dry else [])
+    r = subprocess.run(args, env=e,
                        capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stderr
     return r.stdout
@@ -213,3 +234,92 @@ def test_other_guardian_actions_do_not_suppress(env):
     _stale_metrology(env)
     _guardian_event(env, "evicted", 30)
     assert f"Would restart {MET}" in _run(env, [MET])
+
+
+REC = "timestd-core-recorder.service"
+
+
+def _uptime(env, s):
+    env["uptime"].write_text(f"{s}.50 0.00\n")
+
+
+def _log(env):
+    p = env["systemctl_log"]
+    return p.read_text() if p.exists() else ""
+
+
+def test_fresh_recorder_is_not_judged(env):
+    _uptime(env, 10_000)
+    out = _run(env, [REC], recorder_enter_s=10_000 - 400, newest_chunk_age=1300)
+    assert "request" not in out.lower(), out
+    out = _run(env, [REC], recorder_enter_s=10_000 - 400, newest_chunk_age=1300, dry=False)
+    assert not (env["request_dir"] / "pipeline-watchdog.json").exists()
+
+
+def test_stale_recorder_files_a_request_and_restarts_nothing(env):
+    _uptime(env, 10_000)
+    _run(env, [REC], recorder_enter_s=1_000, newest_chunk_age=1300, dry=False)
+    req = json.loads((env["request_dir"] / "pipeline-watchdog.json").read_text())
+    assert req["cause"] == "no-output" and req["schema"] == 1
+    assert req["reporter"] == "pipeline-watchdog" and req["stopped_recorder"] is False
+    # an epoch NUMBER: the watchdog drops a string
+    assert isinstance(req["requested_utc"], (int, float))
+    assert abs(req["requested_utc"] - time.time()) < 60
+    assert not list(env["request_dir"].glob("*.tmp"))
+    log = _log(env)
+    assert "restart timestd-core-recorder" not in log
+    assert "start --no-block sigmond-recorder-watchdog.service" in log
+
+
+def test_request_round_trips_through_sigmonds_parser(env):
+    """When the sigmond checkout is beside this repo, its parser must take it."""
+    import importlib.util
+    mod = REPO.parent / "sigmond" / "lib" / "sigmond" / "recorder_watchdog.py"
+    if not mod.exists():
+        pytest.skip("no sigmond checkout")
+    import sys
+    sys.path.insert(0, str(mod.parents[1]))
+    try:
+        spec = importlib.util.spec_from_file_location("rw_probe", mod)
+        rw = importlib.util.module_from_spec(spec)
+        sys.modules["rw_probe"] = rw
+        spec.loader.exec_module(rw)
+    finally:
+        sys.path.remove(str(mod.parents[1]))
+        sys.modules.pop("rw_probe", None)
+    _uptime(env, 10_000)
+    _run(env, [REC], recorder_enter_s=1_000, newest_chunk_age=1300, dry=False)
+    r = rw._parse((env["request_dir"] / "pipeline-watchdog.json").read_text())
+    assert r.cause == rw.NO_OUTPUT and r.reporter == "pipeline-watchdog"
+
+
+def test_chunk_younger_than_the_stale_threshold_is_healthy(env):
+    _uptime(env, 10_000)
+    _run(env, [REC], recorder_enter_s=1_000, newest_chunk_age=1100, dry=False)
+    assert not (env["request_dir"] / "pipeline-watchdog.json").exists()
+
+
+def test_stale_recorder_dry_run_says_would_request(env):
+    _uptime(env, 10_000)
+    out = _run(env, [REC], recorder_enter_s=1_000, newest_chunk_age=1300)
+    assert "[DRY-RUN] Would request" in out and "Would restart" not in out
+    assert not env["request_dir"].exists()
+
+
+def test_inactive_recorder_is_reported_only(env):
+    _uptime(env, 10_000)
+    out = _run(env, [], recorder_enter_s=1_000, newest_chunk_age=1300, dry=False)
+    # not enabled either -> silent; enable-but-inactive needs is-enabled true
+    assert not (env["request_dir"] / "pipeline-watchdog.json").exists()
+
+
+def test_enabled_but_inactive_recorder_is_reported_only(env, tmp_path):
+    shim = env["shim"] / "systemctl"
+    shim.write_text(shim.read_text().replace(
+        "is-enabled|is-active) for", "is-enabled) exit 0 ;;\n  is-active) for"))
+    _uptime(env, 10_000)
+    out = _run(env, [], recorder_enter_s=1_000, newest_chunk_age=1300, dry=False)
+    assert "not active (reported only)" in out
+    assert not (env["request_dir"] / "pipeline-watchdog.json").exists()
+    log = _log(env)
+    assert "restart timestd-core-recorder" not in log and "sigmond-recorder-watchdog" not in log

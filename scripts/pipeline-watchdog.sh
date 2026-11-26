@@ -6,7 +6,8 @@
 #   1. Is it supposed to be running? (enabled)
 #   2. Is it actually running? (active)
 #   3. Is it still doing its work?  LIVENESS, not detections (2026-09-04):
-#        - Recorder: newest binary chunk under raw_buffer (mtime check)
+#        - Recorder: newest binary chunk under raw_buffer (mtime check);
+#          never restarted here: files a request with sigmond-recorder-watchdog
 #        - Metrology: newest row per channel in ANY of L2_detection_attempts,
 #          L1_all_arrivals, L1_metrology_measurements at $SQLITE_DB.  The
 #          first two land every processed minute; an L1 row lands only when
@@ -24,7 +25,7 @@
 # every minute and detects nothing is healthy; the ionosphere is not a fault.
 #
 # Usage:
-#   ./scripts/pipeline-watchdog.sh           # normal mode (restarts)
+#   ./scripts/pipeline-watchdog.sh           # normal mode (restarts; the recorder is only reported)
 #   ./scripts/pipeline-watchdog.sh --dry-run # report only, no restarts
 # =============================================================================
 
@@ -240,12 +241,60 @@ do_restart() {
 
 RESTARTS=0
 
+# Seconds since a unit last became active, or UNKNOWN.  Compares the unit's
+# ActiveEnterTimestampMonotonic (microseconds) with the first field of
+# $UPTIME_FILE; both count from boot.
+unit_active_age() {
+    local enter_us up
+    enter_us=$(systemctl show -p ActiveEnterTimestampMonotonic --value "$1" 2>/dev/null)
+    up=$(awk '{print $1; exit}' "$UPTIME_FILE" 2>/dev/null)
+    if ! [[ "$enter_us" =~ ^[0-9]+$ ]] || [[ "$enter_us" -eq 0 ]] || [[ -z "$up" ]]; then
+        echo UNKNOWN
+        return
+    fi
+    awk -v u="$up" -v e="$enter_us" 'BEGIN { a = u - e / 1000000; if (a < 0) a = 0; printf "%d\n", a }'
+}
+
+# File a restart request with sigmond-recorder-watchdog, then kick it.
+# Format: sigmond lib/sigmond/recorder_watchdog.py, file_request.  The
+# requested_utc must be a JSON number; the watchdog drops a string.
+request_recorder_restart() {
+    local cause="$1" evidence="$2"
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_warn "[DRY-RUN] Would request recorder restart ($cause): $evidence"
+        echo "[DRY-RUN] Would request recorder restart ($cause): $evidence"
+        return 0
+    fi
+    local esc="${evidence//\\/\\\\}"
+    esc="${esc//\"/\\\"}"
+    local path="$REQUEST_DIR/pipeline-watchdog.json" tmp
+    tmp="$path.tmp"
+    mkdir -p "$REQUEST_DIR" || { log_error "cannot create $REQUEST_DIR"; return 1; }
+    printf '{"schema": 1, "reporter": "pipeline-watchdog", "cause": "%s", "requested_utc": %s, "evidence": "%s", "stopped_recorder": false}\n' \
+        "$cause" "$(date +%s.%N)" "$esc" > "$tmp" && mv -f "$tmp" "$path" \
+        || { log_error "cannot write $path"; return 1; }
+    log_warn "Requested recorder restart ($cause): $evidence"
+    systemctl start --no-block sigmond-recorder-watchdog.service 2>/dev/null || true
+}
+
 # ── Thresholds (seconds) ──
 # Recorder flushes a chunk every file_duration_sec (default 600 = 10 min).
 # Threshold must exceed one chunk duration plus normal flush jitter, otherwise
 # a healthy recorder mid-chunk trips the watchdog and gets killed — which
 # leaves the in-progress chunk overwritten with zeros on the next start.
-RECORDER_STALE=900      # 15 min: > one 10-min chunk duration + flush jitter
+# 1200 s = two 600 s disk-write cadences (Plan B, b8943302): one missed flush
+# is jitter, two are a stall.
+RECORDER_STALE=1200
+# A freshly started recorder gets its first full chunk before anyone judges
+# it: 2 x 600 s + 120 s.  A start just after a boundary waits up to 600 s for
+# the next one, writes one full 600 s chunk, then flushes.
+RECORDER_GRACE=1320
+# The recorder is restarted by sigmond-recorder-watchdog alone.  This script
+# files a request with it (cause no-output) and kicks it; it never restarts
+# the recorder itself.
+REQUEST_DIR="${REQUEST_DIR:-/run/sigmond/recorder-restart}"
+UPTIME_FILE="${UPTIME_FILE:-/proc/uptime}"
+RAW_BUFFER_HOT="${RAW_BUFFER_HOT:-/dev/shm/timestd/raw_buffer}"
 # Phase 2: metrology reads from the ring buffer and produces HDF5 data
 # every 60 s.  Lowered from 600 s (set when chunks were 10 min) to 180 s
 # so genuine stalls trip the watchdog within ~3 minutes.
@@ -262,15 +311,29 @@ check_recorder() {
     if ! is_enabled "$unit"; then return; fi
 
     if ! is_active "$unit"; then
-        do_restart "$unit" "not running but enabled"
-        RESTARTS=$((RESTARTS + 1))
+        # No request: systemd's own restart policy and the "failed" rule
+        # cover a recorder that is down.
+        log_warn "$unit is enabled but not active (reported only)"
+        echo "$unit is enabled but not active (reported only)"
+        return
+    fi
+
+    # A freshly started recorder gets its first full chunk before anyone
+    # judges it.
+    local active_age
+    active_age=$(unit_active_age "$unit")
+    if age_unknown "$active_age"; then
+        log_warn "$unit: start time unknown; not judging it this pass"
+        return
+    fi
+    if [[ $active_age -lt $RECORDER_GRACE ]]; then
         return
     fi
 
     # Recorder writes *.bin / *.bin.zst / *.bin.lz4 plus a *.json sidecar
     # at chunk flush.  The previous "*.raw" glob never matched anything.
     local age=999999
-    for buf_dir in /dev/shm/timestd/raw_buffer "$DATA_ROOT/raw_buffer"; do
+    for buf_dir in "$RAW_BUFFER_HOT" "$DATA_ROOT/raw_buffer"; do
         if [[ -d "$buf_dir" ]]; then
             for pattern in "*.bin" "*.bin.zst" "*.bin.lz4" "*.json"; do
                 local a
@@ -281,8 +344,7 @@ check_recorder() {
     done
 
     if [[ $age -gt $RECORDER_STALE ]]; then
-        do_restart "$unit" "running but no output for ${age}s (threshold: ${RECORDER_STALE}s)"
-        RESTARTS=$((RESTARTS + 1))
+        request_recorder_restart no-output "running but no output for ${age}s (threshold: ${RECORDER_STALE}s)"
     fi
 }
 
