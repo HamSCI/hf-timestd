@@ -11,9 +11,9 @@ What the guardian does:
 
 1. **Preflight** — at startup, size the daily ingest budget from the channel
    count and sample rate, and refuse to start when the disk cannot hold the
-   baseline (2 days + 1 day headroom + overhead), when the disk sits at or
-   above the hard-stop percentage, or when RAM falls short (250 MB per
-   channel + 2 GB).  Preflight never deletes.
+   baseline (2 days + 1 day headroom + overhead), or when RAM falls short (250 MB per
+   channel + 2 GB).  At or above the hard-stop percentage it starts the
+   service paused rather than refusing.  Preflight never deletes.
 
 2. **Watchdog** — every 60 s, read the disk.  Below the hard-stop percentage
    it does nothing, and it walks no data tree.  At or above it, it pauses
@@ -42,6 +42,7 @@ import logging
 import os
 import re
 import shutil
+from stat import S_ISREG
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -69,8 +70,13 @@ DISK_WARN_PERCENT = 80.0       # debug note only
 DISK_HARD_STOP_PERCENT = 95.0  # station the ledger does not manage
 LEDGER_HARD_STOP_PERCENT = 98.0  # ledger manages us: above its final stage
 
-# One evictor at a time across the metrology processes.
+# One evictor at a time across the metrology processes.  The lock lives in
+# the service-owned runtime dir (RuntimeDirectory=hf-timestd), mode 0600,
+# opened with O_NOFOLLOW and refused unless the service user owns it.
 EVICT_LOCK = Path("/run/hf-timestd/guardian-evict.lock")
+# A lock that stays contended this long is not a live evictor: evict anyway.
+# 3 x the grace window (EVICT_GRACE_SEC below, 600 s).
+EVICT_LOCK_MAX_WAIT_SEC = 3 * 600.0
 
 # hf-timestd#31 — eviction must not destroy a whole day within 2 s of a
 # transient spike over the hard stop.  A crossing PAUSES writes and alerts immediately, but
@@ -124,6 +130,7 @@ class ResourceStatus:
     ram_total_bytes: int
     message: str = ''
     bytes_cleaned: int = 0
+    skipped: bool = False        # interval not elapsed: no new reading
     days_retained: int = 0       # always 0: the guardian walks no tree
     days_headroom: float = 0.0   # always 0: the ledger keeps the headroom
 
@@ -196,7 +203,9 @@ class ResourceGuardian:
         self.evict_low_water_percent = float(evict_low_water_percent)
         self._clock = clock
 
-        self._last_watchdog_time = 0.0
+        self._last_watchdog_time = float('-inf')   # first check runs at once
+        self._evict_skipped = False
+        self._lock_contended_since: Optional[float] = None
         self._watchdog_interval = 60.0
         # hf-timestd#31: monotonic time we FIRST saw the hard stop, or None when clear.
         self._over_since: Optional[float] = None
@@ -212,7 +221,7 @@ class ResourceGuardian:
         channel count and sample rate, then verifies the disk can hold
         at least BASELINE_DAYS + HEADROOM_DAYS of data.  If the disk
         is tight, it logs and lets the ledger (or the emergency path)
-        deal with it.  Blocks startup at the hard stop.  Never deletes.
+        deal with it.  At the hard stop it starts paused.  Never deletes.
         """
         ok = True
         headroom_bytes = self.daily_disk_budget * HEADROOM_DAYS
@@ -249,15 +258,19 @@ class ResourceGuardian:
                     f"{total_gb:.0f} GB. Need a larger disk."
                 )
                 ok = False
-            # Step 2: Hard stop — refuse at the hard stop (external consumer)
+            # Step 2: at the hard stop the service starts PAUSED, not refused:
+            # a refusal strands the station, because no process then lives
+            # long enough for the watchdog's grace window to elapse and the
+            # emergency eviction to run.  The service holds its writes while
+            # the watchdog says STOP.
             elif used_pct >= self.hard_stop_percent():
                 logger.critical(
-                    f"PREFLIGHT FAIL: Disk at {used_pct:.1f}%% "
-                    f"({free_gb:.1f} GB free) — above hard stop "
-                    f"({self.hard_stop_percent()}%%). "
-                    f"Free space manually before starting hf-timestd."
+                    f"Preflight: disk at {used_pct:.1f}%% "
+                    f"({free_gb:.1f} GB free) — at or above the hard stop "
+                    f"({self.hard_stop_percent()}%%). Starting PAUSED: writes "
+                    f"held until the watchdog frees space or the disk "
+                    f"recovers."
                 )
-                ok = False
             else:
                 # Step 3: report.  Preflight never deletes.
                 headroom_days = (stat.free / self.daily_disk_budget
@@ -376,7 +389,7 @@ class ResourceGuardian:
                 disk_free_bytes=0, disk_total_bytes=0,
                 disk_used_percent=0.0,
                 ram_available_bytes=0, ram_total_bytes=0,
-                message='skipped (interval)',
+                message='skipped (interval)', skipped=True,
             )
         self._last_watchdog_time = now
 
@@ -420,18 +433,28 @@ class ResourceGuardian:
                     f"Disk at {disk_used_pct:.1f}%% (>= {hard_stop}%%) "
                     f"— PAUSING writes ({reason}); no data deleted")
                 logger.critical(message)
-                self._write_guardian_event(disk_used_pct, state, message,
+                self._write_guardian_event(disk_used_pct, state, message, hard_stop,
                                            action="paused", bytes_cleaned=0,
                                            grace_left=max(0.0, grace_left))
             else:
                 bytes_cleaned = self._evict_to_low_water(self.evict_low_water_percent)
+                skipped_locked = self._evict_skipped
+                action = "evicted"
                 try:
                     stat2 = shutil.disk_usage(self.data_root)
                     disk_used_pct = (stat2.used / stat2.total) * 100
                     disk_free = stat2.free
                 except OSError:
                     pass
-                if disk_used_pct >= hard_stop:
+                if skipped_locked and disk_used_pct >= hard_stop:
+                    # Another process holds the eviction lock and works on it.
+                    state = ResourceState.STOP
+                    message = (
+                        f"Disk at {disk_used_pct:.1f}%% (>= {hard_stop}%%) — "
+                        f"another process is evicting; still paused")
+                    logger.warning(message)
+                    action = "evict-skipped-locked"
+                elif disk_used_pct >= hard_stop:
                     state = ResourceState.EMERGENCY
                     message = (
                         f"EMERGENCY: disk at {disk_used_pct:.1f}%% even after "
@@ -445,13 +468,14 @@ class ResourceGuardian:
                         f"{bytes_cleaned / GB:.1f} GB (regenerable first, oldest "
                         f"first), now {disk_used_pct:.1f}%% — pausing to stabilize")
                     logger.error(message)
-                self._write_guardian_event(disk_used_pct, state, message,
-                                           action="evicted", bytes_cleaned=bytes_cleaned,
+                self._write_guardian_event(disk_used_pct, state, message, hard_stop,
+                                           action=action, bytes_cleaned=bytes_cleaned,
                                            grace_left=0.0)
 
         # Back under the hard stop — clear the hysteresis timer.
         else:
             self._over_since = None
+            self._lock_contended_since = None
 
         # Below the hard stop nothing else happens here: the sigmond ledger
         # owns routine retention, and the guardian walks no data tree.
@@ -484,10 +508,10 @@ class ResourceGuardian:
 
         Takes EVICT_LOCK without blocking.  A process that cannot take it
         skips this pass, so six metrology processes never evict at once."""
+        self._evict_skipped = False
         fd = self._take_evict_lock()
         if fd is False:
-            logger.debug("Guardian eviction skipped: another process holds %s",
-                         EVICT_LOCK)
+            self._evict_skipped = True
             return 0
         try:
             return self._evict_to_low_water_locked(low_water_percent)
@@ -498,23 +522,47 @@ class ResourceGuardian:
                 except OSError:
                     pass
 
-    @staticmethod
-    def _take_evict_lock():
-        """fd when taken, False when another process holds it, None when the
-        lock file cannot be opened at all (an emergency must not depend on
-        /run being writable: evict without the lock, once, and say so)."""
+    def _take_evict_lock(self):
+        """fd when taken; False when another process holds it (skip this
+        pass); None to evict WITHOUT the lock.  None covers three cases, each
+        logged at WARNING so an emergency never depends on the lock:
+        the file cannot be opened, the file is not a regular file owned by
+        this user (a planted or symlinked lock), or the lock has stayed
+        contended longer than EVICT_LOCK_MAX_WAIT_SEC (a dead or hostile
+        holder)."""
         try:
             EVICT_LOCK.parent.mkdir(parents=True, exist_ok=True)
-            fd = os.open(EVICT_LOCK, os.O_CREAT | os.O_RDWR, 0o664)
+            fd = os.open(EVICT_LOCK,
+                         os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC,
+                         0o600)
         except OSError as exc:
             logger.warning("Guardian eviction lock %s unavailable (%s); "
                            "evicting without it", EVICT_LOCK, exc)
             return None
         try:
+            st = os.fstat(fd)
+            if not S_ISREG(st.st_mode) or st.st_uid != os.geteuid():
+                logger.warning("Guardian eviction lock %s is not a regular "
+                               "file owned by uid %d; refusing it and "
+                               "evicting without it", EVICT_LOCK, os.geteuid())
+                os.close(fd)
+                return None
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             os.close(fd)
+            now = self._clock()
+            if self._lock_contended_since is None:
+                self._lock_contended_since = now
+            held = now - self._lock_contended_since
+            if held > EVICT_LOCK_MAX_WAIT_SEC:
+                logger.warning("Guardian eviction lock %s contended for %.0f s "
+                               "(> %.0f s); evicting anyway",
+                               EVICT_LOCK, held, EVICT_LOCK_MAX_WAIT_SEC)
+                return None
+            logger.warning("Guardian eviction skipped: another process holds "
+                           "%s (contended %.0f s)", EVICT_LOCK, held)
             return False
+        self._lock_contended_since = None
         return fd
 
     def _evict_to_low_water_locked(self, low_water_percent: float) -> int:
@@ -616,14 +664,13 @@ class ResourceGuardian:
             return freed
         return 0
 
-    def _write_guardian_event(self, disk_used_pct, state, message, *,
+    def _write_guardian_event(self, disk_used_pct, state, message, hard_stop, *,
                               action, bytes_cleaned, grace_left) -> None:
         """Write a structured event the fleet heartbeat can read — so a
         guardian pause/eviction is VISIBLE on the board, not just in the
         journal (hf-timestd#31, ties to sigmond#49)."""
         import json
         state_dir = self.data_root / 'state'
-        hard_stop = self.hard_stop_percent()
         try:
             state_dir.mkdir(parents=True, exist_ok=True)
             payload = {

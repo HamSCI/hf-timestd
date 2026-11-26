@@ -599,15 +599,14 @@ class TestEmergencyOnly:
             assert g.preflight_check() is True      # 85 %: over 80, under 95
         assert (tmp_data_root / 'phase2' / 'CH1' / 'L1' / 'L1_20260101.h5').exists()
 
-    def test_preflight_refuses_at_95_unmanaged_but_not_managed(self, tmp_data_root):
+    def test_preflight_at_the_hard_stop_starts_paused_not_refused(self, tmp_data_root, caplog):
         g = ResourceGuardian(data_root=str(tmp_data_root), n_channels=1)
         du = _du(500 * GB, 480 * GB)                # 96 %
         with patch('hf_timestd.core.resource_guardian.ledger_manages_us',
-                   return_value=False), patch('shutil.disk_usage', return_value=du):
-            assert g.preflight_check() is False
-        with patch('hf_timestd.core.resource_guardian.ledger_manages_us',
-                   return_value=True), patch('shutil.disk_usage', return_value=du):
+                   return_value=False), patch('shutil.disk_usage', return_value=du), \
+                caplog.at_level(logging.CRITICAL):
             assert g.preflight_check() is True
+        assert any('PAUSED' in r.getMessage() for r in caplog.records)
 
 
 class TestEvictLock:
@@ -634,8 +633,12 @@ class TestEvictLock:
             os.close(fd)
         assert s.bytes_cleaned == 0
         assert (tmp_data_root / 'phase2' / 'CH1' / 'L1' / 'L1_20260101.h5').exists()
-        assert any(r.levelno == logging.DEBUG and 'evict' in r.getMessage().lower()
+        assert any(r.levelno == logging.WARNING and 'evict' in r.getMessage().lower()
                    for r in caplog.records)
+        assert s.state == ResourceState.STOP          # not EMERGENCY: someone else is evicting
+        import json
+        ev = json.loads((tmp_data_root / 'state' / 'guardian-event.json').read_text())
+        assert ev['action'] == 'evict-skipped-locked'
 
     def test_the_lock_is_released_after_a_pass(self, tmp_data_root):
         g = self._over_grace(tmp_data_root)
@@ -657,3 +660,61 @@ class TestEvictLock:
         with patch('hf_timestd.core.resource_guardian.ledger_manages_us',
                    return_value=False), patch('shutil.disk_usage', side_effect=fake):
             assert g.watchdog_check(force=True).bytes_cleaned > 0
+
+    # -- lock hardening -------------------------------------------------
+
+    def _hot(self, root):
+        g = self._over_grace(root)
+        fake = _live_du(root, fill_bytes=24000, total_bytes=40000)
+        return g, fake
+
+    def test_the_lock_is_created_0600(self, tmp_data_root):
+        g, fake = self._hot(tmp_data_root)
+        with patch('shutil.disk_usage', side_effect=fake):
+            g.watchdog_check(force=True)
+        assert (os.stat(rg.EVICT_LOCK).st_mode & 0o777) == 0o600
+
+    def test_a_symlinked_lock_is_refused_and_eviction_still_runs(
+            self, tmp_data_root, caplog):
+        g, fake = self._hot(tmp_data_root)
+        rg.EVICT_LOCK.parent.mkdir(parents=True)
+        target = tmp_data_root / 'elsewhere'
+        target.write_text('x')
+        os.symlink(target, rg.EVICT_LOCK)
+        with patch('shutil.disk_usage', side_effect=fake), \
+                caplog.at_level(logging.WARNING):
+            assert g.watchdog_check(force=True).bytes_cleaned > 0
+        assert any('unavailable' in r.getMessage() for r in caplog.records)
+        assert target.read_text() == 'x'
+
+    def test_a_lock_owned_by_someone_else_is_refused(self, tmp_data_root, monkeypatch, caplog):
+        g, fake = self._hot(tmp_data_root)
+        rg.EVICT_LOCK.parent.mkdir(parents=True)
+        rg.EVICT_LOCK.write_text('')
+        monkeypatch.setattr(os, 'geteuid', lambda: os.stat(rg.EVICT_LOCK).st_uid + 1)
+        held = os.open(rg.EVICT_LOCK, os.O_RDWR)
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)   # a hostile holder
+        try:
+            with patch('shutil.disk_usage', side_effect=fake), \
+                    caplog.at_level(logging.WARNING):
+                assert g.watchdog_check(force=True).bytes_cleaned > 0
+        finally:
+            os.close(held)
+        assert any('not a regular file owned' in r.getMessage() for r in caplog.records)
+
+    def test_a_lock_contended_past_the_bound_is_evicted_anyway(self, tmp_data_root):
+        clk = _Clock()
+        _day(tmp_data_root, '20260101', raw_bytes=10000, phase2_bytes=5000)
+        g = ResourceGuardian(data_root=str(tmp_data_root), n_channels=1, clock=clk,
+                             evict_grace_sec=0, evict_low_water_percent=90.0)
+        rg.EVICT_LOCK.parent.mkdir(parents=True)
+        held = os.open(rg.EVICT_LOCK, os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fake = _live_du(tmp_data_root, fill_bytes=24000, total_bytes=40000)
+        try:
+            with patch('shutil.disk_usage', side_effect=fake):
+                assert g.watchdog_check(force=True).bytes_cleaned == 0     # contended: skip
+                clk.advance(rg.EVICT_LOCK_MAX_WAIT_SEC + 1)
+                assert g.watchdog_check(force=True).bytes_cleaned > 0      # bound passed
+        finally:
+            os.close(held)

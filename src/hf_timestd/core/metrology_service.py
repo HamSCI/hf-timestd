@@ -505,6 +505,40 @@ class MetrologyService:
     # minutes-scale offsets the corruption produces.
     _RING_FUTURE_HEAD_SEC = 120.0
 
+    # While the guardian says STOP the loop idles at this cadence.
+    _GUARDIAN_PAUSED_SLEEP_SEC = 1.0
+    _guardian_paused = False
+
+    def _poll_guardian(self) -> bool:
+        """Ask the resource guardian; True means the service must exit.
+
+        STOP pauses the work (self._guardian_paused) and the loop keeps
+        polling; the next non-STOP reading resumes it.  EMERGENCY (still at
+        the hard stop after the eviction pass) exits.  A reading skipped for
+        its interval changes nothing.
+        """
+        from hf_timestd.core.resource_guardian import ResourceState
+        rs = self._resource_guardian.watchdog_check()
+        if rs.skipped:
+            return False
+        if rs.state == ResourceState.EMERGENCY:
+            logger.critical(
+                f"[{self.channel_name}] resource guardian: "
+                f"{rs.message} — stopping")
+            return True
+        if rs.state == ResourceState.STOP:
+            if not self._guardian_paused:
+                logger.critical(
+                    f"[{self.channel_name}] resource guardian: "
+                    f"{rs.message} — writes PAUSED")
+            self._guardian_paused = True
+        elif self._guardian_paused:
+            logger.warning(
+                f"[{self.channel_name}] resource guardian: disk recovered "
+                f"({rs.disk_used_percent:.1f}%) — writes RESUMED")
+            self._guardian_paused = False
+        return False
+
     def run(self):
         """Main service loop — attach to the ring buffer and consume minutes."""
         self.running = True
@@ -571,27 +605,27 @@ class MetrologyService:
         last_head_utc: Optional[float] = None
         last_head_change = time.monotonic()
         last_future_warn = 0.0
-        last_guardian_check = 0.0
+        last_guardian_check = float('-inf')   # judge the disk before any work
 
         while self.running:
             try:
                 now_mono = time.monotonic()
 
-                # Resource guardian — cheap, no-op most of the time.
+                # Resource guardian — cheap, no-op most of the time.  STOP
+                # pauses this loop's work but keeps the loop (and the guardian
+                # polls) alive, so the guardian's grace window can elapse and
+                # its emergency eviction can run.  Only EMERGENCY exits.
                 if (
                     self._resource_guardian
                     and now_mono - last_guardian_check >= 30.0
                 ):
-                    from hf_timestd.core.resource_guardian import ResourceState
-                    rs = self._resource_guardian.watchdog_check()
                     last_guardian_check = now_mono
-                    if rs.state in (ResourceState.STOP, ResourceState.EMERGENCY):
-                        logger.critical(
-                            f"[{self.channel_name}] resource guardian: "
-                            f"{rs.message} — stopping"
-                        )
+                    if self._poll_guardian():
                         self.running = False
                         break
+                if self._guardian_paused:
+                    time.sleep(self._GUARDIAN_PAUSED_SLEEP_SEC)
+                    continue
 
                 cursor = reader.write_cursor()
                 if cursor == 0:
