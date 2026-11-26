@@ -98,6 +98,23 @@ unit_is_installed() {
         --type=service,target,timer "$1" &>/dev/null
 }
 
+# v3.96: the authority manager has a unit of its own.  On a station where
+# install.sh never ran, `systemctl restart` starts it but leaves it disabled,
+# so it would not return after a reboot.  Enable it too.  Other units keep
+# their state: install.sh and the service profile decide those.
+# ENABLE_AUTHORITY_BEGIN
+AUTHORITY_UNIT="timestd-authority-manager.service"
+enable_authority_if_needed() {
+    [[ "$1" == "$AUTHORITY_UNIT" ]] || return 0
+    systemctl is-enabled --quiet "$1" 2>/dev/null && return 0
+    if systemctl enable --no-reload "$1"; then
+        log_info "$1: enabled (it was started but not enabled)"
+    else
+        log_warn "$1: enable failed; it will not start after a reboot"
+    fi
+}
+# ENABLE_AUTHORITY_END
+
 # Service user the systemd units run as.  An editable install is only
 # useful if this user can actually reach the source tree at runtime,
 # so we verify traversability before `pip install -e` and re-verify by
@@ -360,6 +377,7 @@ if [[ "$DO_RESTART" == "true" ]]; then
         if systemctl restart "$unit"; then
             STATE="$(systemctl is-active "$unit" 2>/dev/null || echo unknown)"
             log_info "$unit: $STATE"
+            enable_authority_if_needed "$unit"
             [[ "$unit" == "timestd-core-recorder.service" ]] && RECORDER_RESTARTED=true
         else
             log_error "$unit: restart failed"

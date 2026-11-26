@@ -15,6 +15,8 @@
 #          minutes per hour.
 #        - Fusion: mtime of $RUN_DIR/fusion_status.json (written every cycle
 #          with or without input); L3 rows only where that file never existed
+#        - Authority manager: enabled/active only -- systemd WatchdogSec covers
+#          a hung loop; no recorder gate (the unit binds to nothing)
 #        - Physics: enabled/active only -- systemd WatchdogSec covers a hang
 #        - L2 calibration: enabled/active only -- systemd WatchdogSec covers
 #          a hung loop, and the state file this once read belongs to fusion
@@ -467,6 +469,26 @@ check_fusion() {
 }
 
 # ==========================================================================
+# Check 3b: Authority manager (v3.96: its own unit, no longer inside fusion)
+# ==========================================================================
+# Before v3.96 check_fusion revived the authority with fusion.  A unit that
+# used up StartLimitBurst stays failed and OnFailure only alerts, so this
+# rule restarts an enabled authority that is not active (reset-failed
+# included, in do_restart).  The compaction marker already stopped the whole
+# pass above.  No recorder_up gate: the unit binds to no other unit, a
+# restart cannot pull the recorder up, and the authority must publish
+# "T6 unavailable" while the recorder stands down.  A running but hung
+# manager is systemd's job (WatchdogSec=120 on the unit).
+check_authority_manager() {
+    local unit="timestd-authority-manager.service"
+    if ! is_enabled "$unit"; then return; fi
+    if ! is_active "$unit"; then
+        do_restart "$unit" "not running but enabled"
+        RESTARTS=$((RESTARTS + 1))
+    fi
+}
+
+# ==========================================================================
 # Check 4: Physics (TEC)
 # ==========================================================================
 check_physics() {
@@ -524,6 +546,7 @@ fi
 check_recorder
 check_metrology
 check_fusion
+check_authority_manager
 check_physics
 check_calibration
 

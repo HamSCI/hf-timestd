@@ -416,3 +416,40 @@ def test_metrology_and_fusion_are_revived_while_the_recorder_runs(env):
     _run(env, [REC, MET, FUS], dry=False, active_units=[REC])
     log = _log(env)
     assert f"restart {MET}" in log and f"restart {FUS}" in log
+
+
+# --- v3.96 fix wave: the authority manager has its own revival rule -----------
+
+AUTH = "timestd-authority-manager.service"
+
+
+def test_enabled_but_failed_authority_is_reset_and_restarted(env):
+    # Mutation check: drop check_authority_manager from the run list.
+    _run(env, [REC, AUTH], dry=False, active_units=[REC])
+    log = _log(env)
+    assert f"reset-failed {AUTH}" in log, log
+    assert f"restart {AUTH}" in log, log
+
+
+def test_authority_is_revived_while_the_recorder_is_down(env):
+    # No recorder gate: the unit binds to nothing and must publish
+    # "T6 unavailable" while the recorder stands down.
+    # Mutation check: add `recorder_up` to check_authority_manager.
+    _run(env, [AUTH], dry=False, active_units=[])
+    assert f"restart {AUTH}" in _log(env)
+
+
+def test_running_authority_is_left_alone(env):
+    _run(env, [REC, AUTH], dry=False, active_units=[REC, AUTH])
+    assert f"restart {AUTH}" not in _log(env)
+
+
+def test_disabled_authority_is_left_alone(env):
+    _run(env, [REC], dry=False, active_units=[REC])
+    assert f"restart {AUTH}" not in _log(env)
+
+
+def test_a_compaction_marker_holds_the_authority_restart(env):
+    env["compact_marker"].write_text("{}")
+    _run(env, [REC, AUTH], dry=False, active_units=[REC])
+    assert f"restart {AUTH}" not in _log(env)

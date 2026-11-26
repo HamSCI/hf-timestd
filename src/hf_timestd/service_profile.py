@@ -252,7 +252,7 @@ def _unit_is_active(unit: str) -> bool:
         return False
 
 
-def _restart_fusion_before_authority(actions: Dict[str, str]) -> None:
+def _restart_fusion_before_authority(actions: Dict[str, str]) -> bool:
     """Before v3.96 fusion hosted the authority runner in-process.  When the
     authority unit is about to start for the first time, a fusion that is
     already running may still be that old code, and the two would both
@@ -262,9 +262,12 @@ def _restart_fusion_before_authority(actions: Dict[str, str]) -> None:
     install.sh's `profile set`, before its own ordered restart.
 
     Skipped when the authority already runs: fusion was restarted then, and
-    an ordinary `profile set` must not bounce it."""
+    an ordinary `profile set` must not bounce it.
+
+    Returns False when the restart failed: the old fusion may still run, so
+    the caller must not start the authority beside it."""
     if _unit_is_active(AUTHORITY_UNIT) or not _unit_is_active(FUSION_UNIT):
-        return
+        return True
     try:
         subprocess.run(
             ['systemctl', 'try-restart', FUSION_UNIT],
@@ -273,14 +276,17 @@ def _restart_fusion_before_authority(actions: Dict[str, str]) -> None:
         actions[FUSION_UNIT + ' (pre-authority)'] = 'restarted'
         logger.info(f"{FUSION_UNIT}: restarted before {AUTHORITY_UNIT} "
                     f"starts, so it no longer hosts the authority")
+        return True
     except subprocess.CalledProcessError as e:
         actions[FUSION_UNIT + ' (pre-authority)'] = f'error: {e.stderr.strip()}'
         logger.error(f"{FUSION_UNIT}: restart before {AUTHORITY_UNIT} "
                      f"failed: {e.stderr.strip()}")
+        return False
     except subprocess.TimeoutExpired as e:
         actions[FUSION_UNIT + ' (pre-authority)'] = f'error: {e}'
         logger.error(f"{FUSION_UNIT}: restart before {AUTHORITY_UNIT} "
                      f"timed out: {e}")
+        return False
 
 
 def apply_profile(profile: ServiceProfile, dry_run: bool = False,
@@ -332,8 +338,14 @@ def apply_profile(profile: ServiceProfile, dry_run: bool = False,
         if dry_run:
             actions[unit] = 'would enable'
         else:
-            if unit == AUTHORITY_UNIT:
-                _restart_fusion_before_authority(actions)
+            if unit == AUTHORITY_UNIT and not _restart_fusion_before_authority(actions):
+                logger.error(
+                    f"{AUTHORITY_UNIT} NOT started: {FUSION_UNIT} did not "
+                    f"restart, and the old fusion may still host the "
+                    f"authority.  Two writers would share authority.json.  "
+                    f"Restart {FUSION_UNIT}, then run `profile set` again.")
+                actions[unit] = f'skipped: {FUSION_UNIT} pre-restart failed'
+                continue
             try:
                 subprocess.run(
                     ['systemctl', 'enable', '--no-reload', '--now', unit],

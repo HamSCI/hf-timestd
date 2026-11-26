@@ -40,9 +40,12 @@ ExecStart=/opt/git/sigmond/hf-timestd/venv/bin/python -m hf_timestd.core.authori
     --config /etc/hf-timestd/timestd-config.toml \
     --log-level INFO
 
-# A dead manager thread exits 1; restart it.
+# A dead manager thread exits 1; restart it.  A manager that cannot be
+# built (a configuration refusal) exits 78; a restart would refuse again,
+# so leave the unit failed and let OnFailure alert.
 Restart=always
 RestartSec=5
+RestartPreventExitStatus=78
 
 MemoryMax=300M
 MemoryHigh=200M

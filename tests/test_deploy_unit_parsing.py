@@ -191,3 +191,45 @@ def test_events_timer_is_listed_and_its_pass_skips_without_config():
     assert "timestd-events.timer" in units
     service = (REPO / "systemd" / "timestd-events.service").read_text()
     assert "ConditionPathExists=/etc/hf-timestd/events.toml" in service
+
+
+# ────────────────────────────────────────────────────────────────────
+# v3.96 fix wave: deploy.sh enables the authority unit it starts
+# ────────────────────────────────────────────────────────────────────
+
+def _run_enable_hook(tmp_path, unit, enabled):
+    """Extract enable_authority_if_needed from deploy.sh and run it against a
+    systemctl shim that logs its calls."""
+    text = DEPLOY_SH.read_text()
+    body = text.split("# ENABLE_AUTHORITY_BEGIN", 1)[1].split("# ENABLE_AUTHORITY_END", 1)[0]
+    shim = tmp_path / "shim"
+    shim.mkdir(parents=True)
+    log = tmp_path / "sc.log"
+    (shim / "systemctl").write_text(
+        '#!/bin/bash\necho "$*" >> "$SC_LOG"\n'
+        f'[[ "$1" == "is-enabled" ]] && exit {0 if enabled else 1}\nexit 0\n')
+    (shim / "systemctl").chmod(0o755)
+    script = ('log_info(){ :; }; log_warn(){ :; }\n' + body +
+              f'\nenable_authority_if_needed {unit}\n')
+    subprocess.run(["bash", "-c", script],
+                   env={"PATH": f"{shim}:/usr/bin:/bin", "SC_LOG": str(log)},
+                   check=True, timeout=30)
+    return log.read_text() if log.exists() else ""
+
+
+def test_deploy_enables_a_started_but_disabled_authority(tmp_path):
+    # Mutation check: drop the call after the restart, or the enable itself.
+    out = _run_enable_hook(tmp_path, "timestd-authority-manager.service", enabled=False)
+    assert "enable --no-reload timestd-authority-manager.service" in out
+
+
+def test_deploy_leaves_an_enabled_authority_and_other_units_alone(tmp_path):
+    assert "enable " not in _run_enable_hook(
+        tmp_path / "a", "timestd-authority-manager.service", enabled=True)
+    assert "enable " not in _run_enable_hook(
+        tmp_path / "b", "timestd-fusion.service", enabled=False)
+
+
+def test_deploy_calls_the_enable_hook_after_a_successful_restart():
+    text = DEPLOY_SH.read_text()
+    assert text.index("enable_authority_if_needed \"$unit\"") > text.index('systemctl restart "$unit"')

@@ -264,3 +264,18 @@ def test_main_wires_signals_to_the_stop_event(tmp_path, monkeypatch):
     assert rc == 7
     assert seen["config"] == tmp_path / "c.toml"
     assert seen[signal.SIGTERM] and seen[signal.SIGINT]
+
+
+def test_unbuildable_manager_exits_78(tmp_path):
+    """A manager that cannot be built is refused for configuration: exit 78,
+    which the unit's RestartPreventExitStatus=78 leaves failed."""
+    sent = []
+
+    def boom(cfg):
+        raise ValueError("bad config")
+
+    rc = run_authority_service(tmp_path / "cfg.toml", notify=sent.append,
+                               stop_event=threading.Event(),
+                               build_runner=boom, publish=lambda cfg: None)
+    assert rc == 78
+    assert any("could not be built" in m for m in sent)

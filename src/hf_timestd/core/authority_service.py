@@ -44,6 +44,10 @@ from hf_timestd.core.authority_runner import build_authority_runner_from_config
 
 log = logging.getLogger(__name__)
 
+# sysexits EX_CONFIG: refused for configuration.  The unit carries
+# RestartPreventExitStatus=78, so systemd leaves it failed, not looping.
+EX_CONFIG = 78
+
 #: A tick counts as stale after this many manager intervals without a
 #: successful one.  STATUS and the log only.
 STALE_INTERVALS = 3
@@ -88,15 +92,16 @@ def run_authority_service(
 ) -> int:
     """Run the authority manager until ``stop_event`` is set.
 
-    Returns 0 on a requested stop, 1 when the manager cannot be built or
-    its thread dies."""
+    Returns 0 on a requested stop, EX_CONFIG (78) when the manager cannot
+    be built (the unit's RestartPreventExitStatus=78 leaves it failed
+    instead of looping), and 1 when its thread dies (systemd restarts)."""
     cfg = load_station_config(config_path)
     try:
         runner = build_runner(cfg)
     except Exception as exc:  # noqa: BLE001
         log.exception("authority manager could not be built: %s", exc)
         notify(f"STATUS=authority manager could not be built: {exc}")
-        return 1
+        return EX_CONFIG
 
     # Best effort: the timing chain outranks its provenance record.
     try:

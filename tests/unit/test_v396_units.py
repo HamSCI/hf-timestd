@@ -85,6 +85,7 @@ def test_authority_unit_runs_the_authority_service():
     ("Unit.OnFailure", "timestd-alert@%N.service"),
     ("Unit.After", "timestd-core-recorder.service chrony.service"),
     ("Install.WantedBy", "multi-user.target"),
+    ("Service.RestartPreventExitStatus", "78"),
 ])
 def test_authority_unit_directive(key, value):
     assert _one(_directives(_unit(AUTHORITY_UNIT)), key) == value
@@ -135,9 +136,9 @@ def test_deploy_links_the_authority_unit():
 
 
 def test_deploy_lists_the_authority_after_fusion():
-    """Ruling D2: deploy.sh and sigmond restart in list order, so the new
-    fusion (no authority) restarts before the authority starts, and two
-    writers never share authority.json."""
+    """Ruling D2: deploy.sh restarts in list order, so the new fusion (no
+    authority) restarts before the authority starts.  sigmond's align uses
+    one systemctl transaction instead, where order has no effect."""
     units = _deploy()["systemd"]["units"]
     assert units.index("timestd-fusion.service") < units.index(AUTHORITY_UNIT)
 

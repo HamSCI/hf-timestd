@@ -516,3 +516,40 @@ class TestFusionRestartsBeforeTheAuthorityStarts:
     def test_no_restart_when_fusion_is_not_running(self):
         calls, _ = self._run(set())
         assert ['systemctl', 'try-restart', self.FUSION] not in calls
+
+
+class TestFusionPreRestartFailure:
+    """If the fusion pre-restart fails, the old fusion may still host the
+    authority: do not start the authority beside it, and say so at ERROR."""
+    FUSION = 'timestd-fusion.service'
+    AUTH = 'timestd-authority-manager.service'
+
+    def _run(self, restart_returncode=1):
+        import subprocess as sp
+        calls = []
+
+        def fake_run(cmd, *args, **kwargs):
+            calls.append(list(cmd))
+            if cmd[:2] == ['systemctl', 'is-active']:
+                return MagicMock(returncode=0 if cmd[-1] == self.FUSION else 3,
+                                 stderr='')
+            if cmd[:2] == ['systemctl', 'try-restart']:
+                raise sp.CalledProcessError(restart_returncode, cmd, stderr='boom')
+            return MagicMock(returncode=0, stderr='')
+
+        with patch('hf_timestd.service_profile.subprocess.run',
+                   side_effect=fake_run):
+            actions = apply_profile(ServiceProfile(profile_name='full'),
+                                    dry_run=False)
+        return calls, actions
+
+    def test_authority_not_started_and_error_names_both_units(self, caplog):
+        import logging
+        with caplog.at_level(logging.ERROR, logger='hf_timestd.service_profile'):
+            calls, actions = self._run()
+        assert ['systemctl', 'enable', '--no-reload', '--now', self.AUTH] not in calls
+        assert actions[self.AUTH].startswith('skipped')
+        errs = [r.getMessage() for r in caplog.records
+                if r.levelno >= logging.ERROR
+                and self.AUTH in r.getMessage() and self.FUSION in r.getMessage()]
+        assert errs, caplog.text

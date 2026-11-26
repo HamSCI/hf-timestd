@@ -160,9 +160,12 @@ units = [
     "timestd-metrology.target",
     "timestd-fusion.service",
     # v3.96: the authority manager left fusion for a unit of its own.  It
-    # stays AFTER fusion: deploy.sh and sigmond restart in this order, so
-    # the new fusion (which no longer hosts the authority) restarts first,
-    # and two writers never share authority.json.  A plain unit, not a
+    # stays AFTER fusion.  deploy.sh restarts the units one by one in this
+    # order, so the new fusion (which no longer hosts the authority)
+    # restarts first.  sigmond's align restarts a component's units in ONE
+    # systemctl transaction, where list order has no effect; the single
+    # transaction stops old and new code together, so two writers never
+    # share authority.json there.  A plain unit, not a
     # systemd.moves entry: a move would retire fusion.  (No square brackets
     # in comments inside this array: deploy.sh's awk reader ends the list
     # at the first one.)
