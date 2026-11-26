@@ -9,7 +9,8 @@ set -e
 
 # Configuration
 DATA_ROOT="/var/lib/timestd"
-MAX_RAW_STALE_SECONDS=600      # raw buffer freshness (core-recorder)
+# Chunks reach disk every 600 s (file_duration_sec), so the limit is two chunks.
+MAX_RAW_STALE_SECONDS=1200     # raw buffer freshness (core-recorder)
 MAX_FUSION_STALE_SECONDS=300   # fusion writes every ~8s to 60s cadence
 MAX_PHYSICS_STALE_SECONDS=900  # physics products update roughly every minute
 ALERT_FILE="/var/lib/timestd/state/freshness_alert_sent"

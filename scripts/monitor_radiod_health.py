@@ -209,6 +209,12 @@ def check_radiod_connectivity():
 # .scratch file, so this check never looks there.
 RAW_BUFFER_DIR = Path('/var/lib/timestd/raw_buffer')
 
+# Since v3.96 a finished chunk reaches disk only when it closes, every 600 s
+# (file_duration_sec=600).  A healthy station shows a newest chunk up to ~600 s
+# old, plus flush time.  Warn after 780 s; call it stopped after two chunks.
+DATA_FLOW_WARN_S = 780
+DATA_FLOW_STOPPED_S = 1200
+
 
 def check_data_flow(state_file: Path) -> dict:
     """Check if data is flowing by verifying raw buffer files are being written.
@@ -257,15 +263,14 @@ def check_data_flow(state_file: Path) -> dict:
         file_age = time.time() - latest_mtime
         
         result = {
-            'flowing': file_age < 120,  # Data flowing if file < 2 min old
+            'flowing': file_age <= DATA_FLOW_STOPPED_S,  # between WARN and STOPPED: slow, still flowing
             'latest_file': str(latest_file.name),
             'latest_file_age': file_age
         }
         
-        if file_age > 300:  # 5 minutes
-            result['flowing'] = False
+        if file_age > DATA_FLOW_STOPPED_S:
             logger.error(f"DATA FLOW STOPPED: Latest file {latest_file.name} is {file_age:.0f}s old")
-        elif file_age > 120:  # 2 minutes
+        elif file_age > DATA_FLOW_WARN_S:
             logger.warning(f"DATA FLOW SLOW: Latest file {latest_file.name} is {file_age:.0f}s old")
         
         return result
