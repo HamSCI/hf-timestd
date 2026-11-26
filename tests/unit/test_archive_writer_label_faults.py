@@ -836,7 +836,7 @@ def test_status_reports_an_abandoned_chunk_in_both_counts(tmp_path):
     assert a["abandoned_chunks"] == 1
     assert a["lost_by_cause"]["abandoned_samples"] == spc
     assert a["samples_lost"] == spc
-    assert a["samples_placed"] >= spc * n - spc        # abandoned samples stay in placed
+    assert a["samples_placed"] == spc * n             # abandoned samples stay in placed
 
 
 def test_status_reports_gap_fill_without_calling_it_a_loss(tmp_path):
@@ -848,3 +848,29 @@ def test_status_reports_gap_fill_without_calling_it_a_loss(tmp_path):
     a = r.get_status()["archive"]
     assert a["fill_samples"] == 40
     assert a["samples_lost"] == 0
+
+
+def test_status_reports_samples_dropped_waiting_for_timing(tmp_path):
+    """No GPS_TIME yet: the writer drops the batch and counts it."""
+    r, w = _recorder(tmp_path)
+    w._gps_time_unix = None
+    w._rtp_timesnap = None
+    assert w.write_samples(_ramp(70), 30 * SR) == 0
+    assert w.write_samples(_ramp(30), 30 * SR + 70) == 0
+    a = r.get_status()["archive"]
+    assert a["lost_by_cause"]["timing_drops"] == 100
+    assert a["samples_lost"] == 100
+    assert a["samples_placed"] == 0
+
+
+def test_status_reports_samples_shed_by_the_split_detector(tmp_path):
+    """A BACKLOG verdict sheds the batch.  The test forces the detector's
+    verdict (its classification has its own tests); the count is the
+    writer's."""
+    r, w = _recorder(tmp_path)
+    w._split_detector_should_drop = lambda *a, **k: True
+    assert w.write_samples(_ramp(80), 30 * SR) == 0
+    a = r.get_status()["archive"]
+    assert a["lost_by_cause"]["stale_drops"] == 80
+    assert a["samples_lost"] == 80
+    assert a["samples_placed"] == 0
