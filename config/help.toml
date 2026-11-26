@@ -96,7 +96,8 @@ hidden = true
 
 [recorder.archive_root]
 title          = "Long-term archive root"
-help           = """Deprecated.  Raw IQ reaches a USB archive drive
+help           = """Retired in v3.96; `validate` warns when it is set.
+Raw IQ reaches a USB archive drive
 through `smd archive add` and timestd-archive.service, which copies
 (F16, verified) and never moves data off the SSD.  Leave unset."""
 example        = ""

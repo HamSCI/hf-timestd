@@ -299,6 +299,16 @@ for _section in ('timing.t6_pps', 'timing.l6_pps'):
 del _section, _key
 RETIRED_KEYS[('recorder', 'storage_quota')] = (
     'retired in v3.96: the sigmond storage ledger owns retention')
+RETIRED_KEYS[('recorder', 'archive_root')] = (
+    'retired in v3.96: nothing moves data to an archive drive; '
+    '`smd archive add` and timestd-archive.service copy raw IQ, and the '
+    'sigmond storage ledger owns retention')
+RETIRED_KEYS[('recorder', 'derived_max_days')] = (
+    'retired in v3.96: nothing read it; the sigmond storage ledger owns '
+    'retention')
+RETIRED_KEYS[('recorder', 'archive_retention_days')] = (
+    'retired in v3.96 with archive_root; the sigmond storage ledger owns '
+    'retention')
 
 
 def retired_key_issues(cfg):
@@ -2022,10 +2032,6 @@ Exit codes:
     daemon_parser = subparsers.add_parser('daemon', help='Run recorder daemon')
     daemon_parser.add_argument('--config', '-c', help='Configuration file path')
     daemon_parser.add_argument('--debug', '-d', action='store_true', help='Enable DEBUG logging')
-    daemon_parser.add_argument('--archive-root', type=Path, default=None,
-        help='Archive root for moving evicted data instead of deleting (overrides config)')
-    daemon_parser.add_argument('--max-derived-days', type=int, default=None,
-        help='Max retention days for derived data (phase2, products). Overrides config; default: 7')
     
     # Discover command
     discover_parser = subparsers.add_parser('discover', help='Discover available channels')
@@ -2455,17 +2461,6 @@ Per-service overrides in [services] take precedence over the profile.
             output_dir = recorder_section.get('production_data_root', '/var/lib/signal-recorder')
         
         from .core.core_recorder_v2 import _expand_channel_groups
-        # Resolve archive_root: CLI flag overrides TOML config
-        archive_root = getattr(args, 'archive_root', None)
-        if archive_root is None:
-            ar = recorder_section.get('archive_root')
-            archive_root = Path(ar) if ar else None
-
-        # Resolve derived_max_days: CLI flag overrides TOML config
-        derived_max_days = getattr(args, 'max_derived_days', None)
-        if derived_max_days is None:
-            derived_max_days = recorder_section.get('derived_max_days', 7)
-
         recorder_config = {
             'multicast_address': config.get('ka9q', {}).get('data_address', '239.103.26.231'),
             'port': 5004,
@@ -2473,8 +2468,6 @@ Per-service overrides in [services] take precedence over the profile.
             'station': config.get('station', {}),
             'channels': _expand_channel_groups(recorder_section),
             'status_address': resolve_ka9q_status(config, default='239.192.152.141'),
-            'archive_root': archive_root,
-            'derived_max_days': derived_max_days,
         }
         
         # §11: SIGHUP re-reads log level env without restart.
@@ -2519,7 +2512,7 @@ Per-service overrides in [services] take precedence over the profile.
             # NB: Path is imported at module level (line 16).  Re-importing
             # here would shadow that into a local-only binding for the
             # entire main() function -- making the line-762
-            # `daemon_parser.add_argument('--archive-root', type=Path, ...)`
+            # a `Path(...)` use elsewhere in main()
             # raise UnboundLocalError because Python's bytecode compiler
             # sees `Path` as a local variable assigned later.
             from .core.lb1421_t5_probe import Lb1421T5Probe

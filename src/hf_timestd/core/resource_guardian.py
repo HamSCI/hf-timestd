@@ -1,55 +1,43 @@
 #!/usr/bin/env python3
 """
-Resource Guardian — budget-based disk management for hf-timestd.
+Resource Guardian — the emergency disk net for hf-timestd.
 
-Design principle: **new data is always priority over old.**
+The sigmond storage ledger owns routine retention.  It trims each store on
+its own schedule and keeps the disk well under 98 %.  The guardian no longer
+keeps headroom, counts retained days, or moves data to an archive drive.  It
+acts only when the disk fills despite the ledger.
 
-The 9 RTP streams arrive at a deterministic, predictable rate.  We
-compute the exact daily disk ingest budget from the channel count and
-sample rate, then manage eviction proactively to maintain headroom
-for incoming data.  No per-system tuning is needed — the guardian
-auto-sizes everything from the workload.
+What the guardian does:
 
-Data budget (per channel per day, at 24 kHz IQ):
-    raw_buffer      ~15.4 GB (IQ binary archive, 24 kHz × 8 B × 86400 s,
-                              before zstd; half that with archive_dtype =
-                              "f16", the default)
-    phase2           ~4 GB   (HDF5 data products)
-    ────────────────────────
-    subtotal        ~18 GB/channel/day  (or ~4 GB with tiered storage)
+1. **Preflight** — at startup, size the daily ingest budget from the channel
+   count and sample rate, and refuse to start when the disk cannot hold the
+   baseline (2 days + 1 day headroom + overhead), when the disk sits at or
+   above the hard-stop percentage, or when RAM falls short (250 MB per
+   channel + 2 GB).  Preflight never deletes.
 
-    9 channels → ~36 GB/day on disk (tiered) or ~164 GB/day (non-tiered)
+2. **Watchdog** — every 60 s, read the disk.  Below the hard-stop percentage
+   it does nothing, and it walks no data tree.  At or above it, it pauses
+   writes and alerts at once.  Only after the condition holds for the grace
+   window (600 s) does it delete: the smallest regenerable unit first, oldest
+   first, down to a low-water mark (90 %).  Raw IQ goes last, one whole day
+   at a time.  Today's data stays.  The deletion pass takes an exclusive lock
+   (EVICT_LOCK) so the six metrology processes never evict at once.
 
-Three layers of protection:
+3. **Hard stop** — if the disk stays at or above the hard-stop percentage
+   after eviction, report EMERGENCY so the caller stops all writes.
 
-1. **Preflight** — at startup, compute the daily budget and verify the
-   disk can hold at least 2 days + 1 day headroom.  If the disk is
-   tight, proactively evict oldest days.  Only blocks at 95%.
-   Also verify minimum RAM (250 MB per channel + 2 GB headroom).
+The hard-stop percentage depends on who manages the station:
 
-2. **Watchdog** — every 60 s, ensure free space ≥ 1 day of incoming
-   data.  If headroom is low, evict oldest complete days (across
-   raw_buffer/ and phase2/ simultaneously) until room is restored.
-   Always keeps today's data.  New data is ALWAYS priority over old.
+* ledger manages hf-timestd (``ledger_manages_us()``): 98 %, above the
+  ledger's final stage.
+* ledger does not manage it (a standalone install): 95 %.  The guardian is
+  then the only raw cleaner a metrology profile has.
 
-3. **Hard stop** — if disk reaches 95% despite cleanup (other processes
-   are filling disk), stop all writes and exit.  We will not crash
-   the host.
-
-Archive drive (optional):
-
-    If ``archive_root`` is set in [recorder], evicted days are moved
-    to the archive drive instead of deleted.  The archive drive has
-    its own 80% disk cap and optional ``archive_retention_days``
-    policy.  If the archive is full or unmounted, eviction falls
-    back to deletion.  Config example::
-
-        [recorder]
-        archive_root = "/mnt/timestd-archive"
-        archive_retention_days = 90
+An evicted day gets deleted.  The guardian never moves data; the archive
+drive is filled by timestd-archive.service, which copies.
 """
 
-import datetime
+import fcntl
 import logging
 import os
 import re
@@ -58,7 +46,7 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import List, Optional, Set
+from typing import Optional, Set
 
 from ..ledger_gate import ledger_manages_us
 from .binary_archive_writer import DEFAULT_ARCHIVE_DTYPE, validate_archive_dtype
@@ -72,24 +60,24 @@ logger = logging.getLogger(__name__)
 GB = 1024 ** 3
 MB = 1024 ** 2
 
-# ── Budget-based disk management ──
-# Primary mechanism: always maintain room for HEADROOM_DAYS of incoming
-# data.  The 9 RTP streams arrive at a deterministic rate, so we can
-# compute the exact daily ingest budget and manage eviction proactively.
-# New data is ALWAYS priority over old — oldest days are evicted first.
-HEADROOM_DAYS = 1   # always keep room for at least this many days
+# The headroom pass is gone: the sigmond ledger owns routine retention.
+# HEADROOM_DAYS still sizes the preflight baseline.
+HEADROOM_DAYS = 1
 
-# Secondary safety nets (percentage-based, in case something else is
-# consuming disk outside hf-timestd's management):
-DISK_WARN_PERCENT = 80.0       # log a warning
-DISK_HARD_STOP_PERCENT = 95.0  # stop all writes — something else filling disk
+# Emergency nets (percentage-based).
+DISK_WARN_PERCENT = 80.0       # debug note only
+DISK_HARD_STOP_PERCENT = 95.0  # station the ledger does not manage
+LEDGER_HARD_STOP_PERCENT = 98.0  # ledger manages us: above its final stage
+
+# One evictor at a time across the metrology processes.
+EVICT_LOCK = Path("/run/hf-timestd/guardian-evict.lock")
 
 # hf-timestd#31 — eviction must not destroy a whole day within 2 s of a
-# transient ≥95% spike.  A crossing PAUSES writes and alerts immediately, but
+# transient spike over the hard stop.  A crossing PAUSES writes and alerts immediately, but
 # nothing is deleted until it has PERSISTED for the grace window; then data is
 # freed the smallest-regenerable-unit first, oldest-first, down to a low-water
 # mark — never a whole day in one rmtree unless raw IQ is all that is left.
-EVICT_GRACE_SEC = 600.0           # ≥95% must persist this long before any delete
+EVICT_GRACE_SEC = 600.0           # the hard stop must persist this long before any delete
 EVICT_LOW_WATER_PERCENT = 90.0    # evict just enough to get back under this
 EVICT_POLICY_AUTO = 'auto'        # DASI2 default (mjh 2026-08-22): auto with hysteresis
 EVICT_POLICY_ALERT_ONLY = 'alert_only'  # never delete; pause + alert only
@@ -120,8 +108,8 @@ DATE_RE = re.compile(r'(\d{8})')
 class ResourceState(Enum):
     """Operational state returned by the watchdog."""
     OK = 'ok'                # Headroom is sufficient — normal operation
-    CLEANED = 'cleaned'      # Evicted oldest day(s) to restore headroom
-    STOP = 'stop'            # At 95% — something else filling disk, stop writes
+    CLEANED = 'cleaned'      # (retained for callers; the watchdog no longer returns it)
+    STOP = 'stop'            # At the hard stop — stop writes
     EMERGENCY = 'emergency'  # Cannot free enough — cease all activity
 
 
@@ -136,8 +124,8 @@ class ResourceStatus:
     ram_total_bytes: int
     message: str = ''
     bytes_cleaned: int = 0
-    days_retained: int = 0       # how many days of data are on disk
-    days_headroom: float = 0.0   # how many more days can fit before eviction
+    days_retained: int = 0       # always 0: the guardian walks no tree
+    days_headroom: float = 0.0   # always 0: the ledger keeps the headroom
 
 
 class ResourceGuardian:
@@ -151,7 +139,7 @@ class ResourceGuardian:
         if not guardian.preflight_check():
             sys.exit(1)
 
-        # In main loop — enforces 80% cap, evicts oldest data:
+        # In main loop — acts only at the hard stop:
         status = guardian.watchdog_check()
         if status.state in (ResourceState.STOP, ResourceState.EMERGENCY):
             break  # stop processing
@@ -163,8 +151,6 @@ class ResourceGuardian:
         n_channels: int = 9,
         sample_rate: int = 24000,
         tiered_storage: bool = False,
-        archive_root: Optional[str] = None,
-        archive_retention_days: Optional[int] = None,
         evict_policy: str = EVICT_POLICY_AUTO,
         evict_grace_sec: float = EVICT_GRACE_SEC,
         evict_low_water_percent: float = EVICT_LOW_WATER_PERCENT,
@@ -175,8 +161,6 @@ class ResourceGuardian:
         self.n_channels = n_channels
         self.sample_rate = sample_rate
         self.tiered_storage = tiered_storage
-        self.archive_root = Path(archive_root) if archive_root else None
-        self.archive_retention_days = archive_retention_days
 
         # Compute per-channel-per-day raw bytes from actual sample rate and
         # the configured archive dtype: 8 bytes per complex sample as
@@ -214,7 +198,7 @@ class ResourceGuardian:
 
         self._last_watchdog_time = 0.0
         self._watchdog_interval = 60.0
-        # hf-timestd#31: monotonic time we FIRST saw >=95%, or None when clear.
+        # hf-timestd#31: monotonic time we FIRST saw the hard stop, or None when clear.
         self._over_since: Optional[float] = None
 
     # ------------------------------------------------------------------
@@ -227,8 +211,8 @@ class ResourceGuardian:
         Budget-based: computes the exact daily ingest rate from the
         channel count and sample rate, then verifies the disk can hold
         at least BASELINE_DAYS + HEADROOM_DAYS of data.  If the disk
-        is tight, evicts oldest days proactively — new data is always
-        priority over old.  Only blocks startup at 95% (hard stop).
+        is tight, it logs and lets the ledger (or the emergency path)
+        deal with it.  Blocks startup at the hard stop.  Never deletes.
         """
         ok = True
         headroom_bytes = self.daily_disk_budget * HEADROOM_DAYS
@@ -265,66 +249,36 @@ class ResourceGuardian:
                     f"{total_gb:.0f} GB. Need a larger disk."
                 )
                 ok = False
-            # Step 2: Hard stop — refuse at 95% regardless (external consumer)
-            elif used_pct >= DISK_HARD_STOP_PERCENT:
+            # Step 2: Hard stop — refuse at the hard stop (external consumer)
+            elif used_pct >= self.hard_stop_percent():
                 logger.critical(
                     f"PREFLIGHT FAIL: Disk at {used_pct:.1f}%% "
                     f"({free_gb:.1f} GB free) — above hard stop "
-                    f"({DISK_HARD_STOP_PERCENT}%%). "
+                    f"({self.hard_stop_percent()}%%). "
                     f"Free space manually before starting hf-timestd."
                 )
                 ok = False
             else:
-                # Step 3: Bring disk under budget.
-                # New data is ALWAYS priority over old.  At startup we
-                # aggressively evict oldest days to get under 80% AND
-                # ensure headroom for incoming data.  This puts the disk
-                # in a clean state so the runtime watchdog only has to
-                # maintain it.
+                # Step 3: report.  Preflight never deletes.
+                headroom_days = (stat.free / self.daily_disk_budget
+                                 if self.daily_disk_budget > 0 else 0)
                 target_free = max(
                     headroom_bytes,
                     int(stat.total * (1.0 - DISK_WARN_PERCENT / 100.0)),
                 )
-                if stat.free < target_free and self._ledger_owns_headroom():
-                    logger.info(
-                        "Preflight: the sigmond ledger manages hf-timestd; "
-                        "startup headroom eviction deferred to it")
-                elif stat.free < target_free:
-                    deficit_gb = (target_free - stat.free) / GB
-                    logger.warning(
-                        f"Preflight: disk at {used_pct:.1f}%% "
-                        f"({free_gb:.1f} GB free), need {target_free / GB:.1f} GB free "
-                        f"(max of {HEADROOM_DAYS}-day headroom and "
-                        f"{DISK_WARN_PERCENT}%% target) "
-                        f"— evicting {deficit_gb:.1f} GB of oldest data"
-                    )
-                    cleaned = self._ensure_headroom(target_free)
-                    if cleaned > 0:
-                        logger.info(
-                            f"Preflight eviction freed {cleaned / GB:.1f} GB"
-                        )
-                    # Re-check after cleanup
-                    stat = shutil.disk_usage(self.data_root)
-                    free_gb = stat.free / GB
-                    used_pct = (stat.used / stat.total) * 100
-
-                # Report final state
-                n_days = len(self._collect_all_dates())
-                headroom_days = stat.free / self.daily_disk_budget if self.daily_disk_budget > 0 else 0
                 if stat.free < target_free:
                     logger.warning(
                         f"Preflight disk: {free_gb:.1f} GB free of "
                         f"{total_gb:.0f} GB ({used_pct:.1f}%% used), "
-                        f"{n_days} days retained, "
-                        f"{headroom_days:.1f} days headroom — "
-                        f"could not reach target but allowing startup. "
-                        f"Runtime watchdog will continue evicting."
+                        f"{headroom_days:.1f} days headroom — below the "
+                        f"{DISK_WARN_PERCENT:.0f}%% target; starting anyway "
+                        f"(the ledger trims routine data, the watchdog acts "
+                        f"at the hard stop)"
                     )
                 else:
                     logger.info(
                         f"Preflight disk: {free_gb:.1f} GB free of "
                         f"{total_gb:.0f} GB ({used_pct:.1f}%% used), "
-                        f"{n_days} days retained, "
                         f"{headroom_days:.1f} days headroom — OK"
                     )
         except OSError as e:
@@ -375,32 +329,6 @@ class ResourceGuardian:
                 logger.critical(f"PREFLIGHT FAIL: {dirpath} is not writable")
                 ok = False
 
-        # --- Archive drive ---
-        if self.archive_root:
-            if self._archive_is_mounted():
-                for dirname in ['raw_buffer', 'phase2']:
-                    adir = self.archive_root / dirname
-                    if not adir.exists():
-                        try:
-                            adir.mkdir(parents=True, exist_ok=True)
-                            logger.info(f"Preflight: created archive dir {adir}")
-                        except OSError as e:
-                            logger.warning(f"Cannot create archive dir {adir}: {e}")
-                try:
-                    astat = shutil.disk_usage(self.archive_root)
-                    logger.info(
-                        f"Preflight archive: {astat.free / GB:.1f} GB free of "
-                        f"{astat.total / GB:.0f} GB at {self.archive_root}"
-                        f"{f', retention={self.archive_retention_days}d' if self.archive_retention_days else ''}"
-                    )
-                except OSError as e:
-                    logger.warning(f"Cannot stat archive drive: {e}")
-            else:
-                logger.warning(
-                    f"Archive drive configured ({self.archive_root}) "
-                    f"but not mounted — eviction will delete instead of archive"
-                )
-
         if ok:
             logger.info("Preflight check PASSED")
         else:
@@ -414,31 +342,29 @@ class ResourceGuardian:
     # 2. Runtime watchdog
     # ------------------------------------------------------------------
 
-    def _ledger_owns_headroom(self) -> bool:
-        """Read the ledger gate (never cached); log one line per change."""
+    def hard_stop_percent(self) -> float:
+        """The hard-stop percentage in force now.  Reads the ledger gate on
+        every call (never cached) and logs one line per change."""
         managed = ledger_manages_us()
         if managed != self._ledger_managed:
             self._ledger_managed = managed
             if managed:
                 logger.info("The sigmond storage ledger manages hf-timestd: "
-                            "proactive headroom eviction steps aside "
-                            "(the %.0f%% emergency eviction stays)",
-                            DISK_HARD_STOP_PERCENT)
+                            "the emergency net moves to %.0f%%",
+                            LEDGER_HARD_STOP_PERCENT)
             else:
-                logger.info("The sigmond storage ledger no longer manages "
-                            "hf-timestd: proactive headroom eviction resumes")
-        return managed
+                logger.info("The sigmond storage ledger does not manage "
+                            "hf-timestd: the emergency net is %.0f%%",
+                            DISK_HARD_STOP_PERCENT)
+        return LEDGER_HARD_STOP_PERCENT if managed else DISK_HARD_STOP_PERCENT
 
     def watchdog_check(self, force: bool = False) -> ResourceStatus:
-        """Periodic check: ensure headroom for incoming data.
+        """Periodic emergency check.
 
-        Budget-based: the 9 RTP streams arrive at a deterministic rate.
-        We compute the exact daily disk budget and ensure at least
-        HEADROOM_DAYS of free space is available.  If not, evict the
-        oldest complete days until headroom is restored.
-
-        The 95% hard-stop is a secondary safety net in case something
-        outside hf-timestd is filling the disk.
+        Below the hard-stop percentage this reads the disk and returns OK.
+        It walks no data tree and deletes nothing; the sigmond ledger owns
+        routine retention.  At or above it, it pauses, then evicts after
+        the grace window (see the module docstring).
 
         Call from the service main loop.  Returns quickly (no-op) if
         the check interval hasn't elapsed.
@@ -454,7 +380,7 @@ class ResourceGuardian:
             )
         self._last_watchdog_time = now
 
-        headroom_bytes = self.daily_disk_budget * HEADROOM_DAYS
+        hard_stop = self.hard_stop_percent()
 
         # Read disk and RAM
         try:
@@ -471,11 +397,9 @@ class ResourceGuardian:
         state = ResourceState.OK
         message = ''
         bytes_cleaned = 0
-        n_days = 0
-        headroom_days = 0.0
 
-        # --- Safety net: hard stop at 95% (hf-timestd#31: hysteresis) ---
-        if disk_used_pct >= DISK_HARD_STOP_PERCENT:
+        # --- Safety net: hard stop (hf-timestd#31: hysteresis) ---
+        if disk_used_pct >= hard_stop:
             if self._over_since is None:
                 self._over_since = now
             over_for = now - self._over_since
@@ -493,7 +417,7 @@ class ResourceGuardian:
                     reason = f"grace {over_for:.0f}/{self.evict_grace_sec:.0f}s before evicting"
                 state = ResourceState.STOP
                 message = (
-                    f"Disk at {disk_used_pct:.1f}%% (>= {DISK_HARD_STOP_PERCENT}%%) "
+                    f"Disk at {disk_used_pct:.1f}%% (>= {hard_stop}%%) "
                     f"— PAUSING writes ({reason}); no data deleted")
                 logger.critical(message)
                 self._write_guardian_event(disk_used_pct, state, message,
@@ -507,7 +431,7 @@ class ResourceGuardian:
                     disk_free = stat2.free
                 except OSError:
                     pass
-                if disk_used_pct >= DISK_HARD_STOP_PERCENT:
+                if disk_used_pct >= hard_stop:
                     state = ResourceState.EMERGENCY
                     message = (
                         f"EMERGENCY: disk at {disk_used_pct:.1f}%% even after "
@@ -517,7 +441,7 @@ class ResourceGuardian:
                     state = ResourceState.STOP
                     self._over_since = None
                     message = (
-                        f"Disk was ≥{DISK_HARD_STOP_PERCENT}%%, evicted "
+                        f"Disk was ≥{hard_stop}%%, evicted "
                         f"{bytes_cleaned / GB:.1f} GB (regenerable first, oldest "
                         f"first), now {disk_used_pct:.1f}%% — pausing to stabilize")
                     logger.error(message)
@@ -529,47 +453,11 @@ class ResourceGuardian:
         else:
             self._over_since = None
 
-        # --- Primary mechanism: budget-based headroom ---
-        # While the sigmond ledger manages hf-timestd it owns proactive
-        # eviction.  The >= 95 % path above stays as the safety net.
-        ledger_owns = self._ledger_owns_headroom()
-        if ledger_owns and state == ResourceState.OK and disk_free < headroom_bytes:
-            pass
-        elif state == ResourceState.OK and disk_free < headroom_bytes:
-            n_days_before = len(self._collect_all_dates())
-            bytes_cleaned = self._ensure_headroom(headroom_bytes)
-            try:
-                stat2 = shutil.disk_usage(self.data_root)
-                disk_used_pct = (stat2.used / stat2.total) * 100
-                disk_free = stat2.free
-            except OSError:
-                pass
-            n_days = len(self._collect_all_dates())
-            headroom_days = disk_free / self.daily_disk_budget if self.daily_disk_budget > 0 else 0
-            state = ResourceState.CLEANED
-            message = (
-                f"Headroom low: evicted {n_days_before - n_days} day(s), "
-                f"freed {bytes_cleaned / GB:.1f} GB. "
-                f"Now {disk_free / GB:.1f} GB free "
-                f"({headroom_days:.1f} days headroom, "
-                f"{n_days} days retained)"
-            )
-            logger.info(message)
-
-        # --- Informational: warn at 80% even if headroom is OK ---
-        elif state == ResourceState.OK and disk_used_pct >= DISK_WARN_PERCENT:
-            n_days = len(self._collect_all_dates())
-            headroom_days = disk_free / self.daily_disk_budget if self.daily_disk_budget > 0 else 0
-            message = (
-                f"Disk at {disk_used_pct:.1f}%% but headroom OK "
-                f"({headroom_days:.1f} days, {n_days} days retained)"
-            )
-            logger.debug(message)
-
-        else:
-            if self.daily_disk_budget > 0:
-                headroom_days = disk_free / self.daily_disk_budget
-                n_days = len(self._collect_all_dates())
+        # Below the hard stop nothing else happens here: the sigmond ledger
+        # owns routine retention, and the guardian walks no data tree.
+        if state == ResourceState.OK and disk_used_pct >= DISK_WARN_PERCENT:
+            logger.debug("Disk at %.1f%%; the ledger trims routine data",
+                         disk_used_pct)
 
         return ResourceStatus(
             state=state,
@@ -580,8 +468,6 @@ class ResourceGuardian:
             ram_total_bytes=ram_total,
             message=message,
             bytes_cleaned=bytes_cleaned,
-            days_retained=n_days,
-            days_headroom=headroom_days,
         )
 
     # ------------------------------------------------------------------
@@ -594,7 +480,44 @@ class ResourceGuardian:
         ``low_water_percent`` (hf-timestd#31).  Raw IQ is the last resort and
         is removed a whole day at a time only when nothing regenerable is
         left; everything else (phase2 HDF5, products, vtec, upload, data) is
-        removed one file at a time.  Never touches today."""
+        removed one file at a time.  Never touches today.
+
+        Takes EVICT_LOCK without blocking.  A process that cannot take it
+        skips this pass, so six metrology processes never evict at once."""
+        fd = self._take_evict_lock()
+        if fd is False:
+            logger.debug("Guardian eviction skipped: another process holds %s",
+                         EVICT_LOCK)
+            return 0
+        try:
+            return self._evict_to_low_water_locked(low_water_percent)
+        finally:
+            if fd is not None:
+                try:
+                    os.close(fd)          # closing drops the flock
+                except OSError:
+                    pass
+
+    @staticmethod
+    def _take_evict_lock():
+        """fd when taken, False when another process holds it, None when the
+        lock file cannot be opened at all (an emergency must not depend on
+        /run being writable: evict without the lock, once, and say so)."""
+        try:
+            EVICT_LOCK.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(EVICT_LOCK, os.O_CREAT | os.O_RDWR, 0o664)
+        except OSError as exc:
+            logger.warning("Guardian eviction lock %s unavailable (%s); "
+                           "evicting without it", EVICT_LOCK, exc)
+            return None
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            return False
+        return fd
+
+    def _evict_to_low_water_locked(self, low_water_percent: float) -> int:
         total_freed = 0
         try:
             total = shutil.disk_usage(self.data_root).total
@@ -700,13 +623,14 @@ class ResourceGuardian:
         journal (hf-timestd#31, ties to sigmond#49)."""
         import json
         state_dir = self.data_root / 'state'
+        hard_stop = self.hard_stop_percent()
         try:
             state_dir.mkdir(parents=True, exist_ok=True)
             payload = {
                 'ts': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
                 'disk_used_percent': round(disk_used_pct, 1),
-                'over_threshold': disk_used_pct >= DISK_HARD_STOP_PERCENT,
-                'hard_stop_percent': DISK_HARD_STOP_PERCENT,
+                'over_threshold': disk_used_pct >= hard_stop,
+                'hard_stop_percent': hard_stop,
                 'state': state.value if hasattr(state, 'value') else str(state),
                 'policy': self.evict_policy,
                 'action': action,
@@ -720,54 +644,6 @@ class ResourceGuardian:
             tmp.replace(state_dir / 'guardian-event.json')
         except OSError as exc:
             logger.warning("Could not write guardian event: %s", exc)
-
-    def _ensure_headroom(self, min_free_bytes: int) -> int:
-        """Evict oldest complete days until free space >= *min_free_bytes*.
-
-        Budget-based: knows exactly how much space the pipeline needs
-        and evicts the minimum number of oldest days to make room.
-        New data is ALWAYS priority over old.
-
-        A "day" is identified by YYYYMMDD and removed from raw_buffer/
-        AND phase2/ simultaneously.  Always keeps today so the live
-        pipeline isn't disrupted.
-        """
-        total_freed = 0
-        today = time.strftime('%Y%m%d', time.gmtime())
-
-        all_dates = self._collect_all_dates()
-        all_dates.discard(today)
-        dates_oldest_first = sorted(all_dates)
-
-        for date_str in dates_oldest_first:
-            try:
-                stat = shutil.disk_usage(self.data_root)
-                if stat.free >= min_free_bytes:
-                    break
-            except OSError:
-                break
-
-            freed = self._evict_date(date_str)
-            total_freed += freed
-            if freed > 0:
-                logger.info(
-                    f"Evicted day {date_str}: freed {freed / GB:.1f} GB"
-                )
-
-        return total_freed
-
-    def _evict_oldest_days_until_under(
-        self,
-        disk_total: int,
-        target_percent: float,
-    ) -> int:
-        """Legacy: evict until filesystem usage drops below *target_percent*.
-
-        Kept as a fallback for the 95% hard-stop path.  Budget-based
-        _ensure_headroom() is the primary eviction mechanism.
-        """
-        target_free = disk_total * (1.0 - target_percent / 100.0)
-        return self._ensure_headroom(int(target_free))
 
     def _collect_all_dates(self) -> Set[str]:
         """Find all YYYYMMDD date strings across raw_buffer/ and phase2/."""
@@ -801,195 +677,16 @@ class ResourceGuardian:
         return dates
 
     def _evict_date(self, date_str: str) -> int:
-        """Remove all data for a single YYYYMMDD date across all dirs.
+        """Delete all data for a single YYYYMMDD date across all dirs.
 
-        If an archive drive is configured and mounted, data is moved
-        there instead of deleted.  The archive drive's own 80% cap
-        and retention policy are enforced separately.
+        Deletes, never moves.  A raw day waits while the archive drive does
+        not yet hold it, short of an emergency (archive-before-evict).
         """
-        archive = None
-        if self.archive_root and self._archive_is_mounted():
-            archive = self.archive_root
-            # Make room on archive drive before moving
-            self._enforce_archive_limits()
-
         total_freed = 0
 
-        # 1. raw_buffer/CHANNEL/YYYYMMDD/ directories (kept until the archive
-        #    drive holds them, short of an emergency: archive-before-evict)
+        # 1. raw_buffer/CHANNEL/YYYYMMDD/ directories
         raw_dir = self.data_root / 'raw_buffer'
         if raw_dir.exists() and self._raw_day_may_leave(date_str):
-            try:
-                for channel_dir in raw_dir.iterdir():
-                    date_dir = channel_dir / date_str
-                    if date_dir.is_dir():
-                        size = self._dir_size(date_dir)
-                        if archive:
-                            total_freed += self._move_to_archive(
-                                date_dir, archive / 'raw_buffer' / channel_dir.name / date_str
-                            )
-                        else:
-                            try:
-                                shutil.rmtree(date_dir)
-                                total_freed += size
-                            except OSError as e:
-                                logger.warning(f"Cannot remove {date_dir}: {e}")
-            except OSError:
-                pass
-
-        # 2. phase2: any file containing YYYYMMDD in its name
-        phase2_dir = self.data_root / 'phase2'
-        if phase2_dir.exists():
-            try:
-                for root, dirs, files in os.walk(phase2_dir):
-                    for fname in files:
-                        if date_str in fname:
-                            fpath = Path(root) / fname
-                            try:
-                                size = fpath.stat().st_size
-                                if archive:
-                                    # Mirror the directory structure under archive/phase2/
-                                    rel = fpath.relative_to(phase2_dir)
-                                    total_freed += self._move_to_archive(
-                                        fpath, archive / 'phase2' / rel
-                                    )
-                                else:
-                                    fpath.unlink()
-                                    total_freed += size
-                            except OSError:
-                                pass
-            except OSError:
-                pass
-
-        # 3. upload/ and data/ — same pattern (always delete, not archived)
-        for subdir in ('upload', 'data'):
-            d = self.data_root / subdir
-            if d.exists():
-                try:
-                    for root, dirs, files in os.walk(d):
-                        for fname in files:
-                            if date_str in fname:
-                                fpath = Path(root) / fname
-                                try:
-                                    size = fpath.stat().st_size
-                                    fpath.unlink()
-                                    total_freed += size
-                                except OSError:
-                                    pass
-                except OSError:
-                    pass
-
-        action = 'archived' if archive else 'deleted'
-        logger.info(f"Eviction: {action} day {date_str}")
-        return total_freed
-
-    # ------------------------------------------------------------------
-    # 4. Archive drive management
-    # ------------------------------------------------------------------
-
-    def _archive_is_mounted(self) -> bool:
-        """Check if the archive root exists and is a mount point or writable dir."""
-        if not self.archive_root:
-            return False
-        try:
-            return self.archive_root.is_dir() and os.access(self.archive_root, os.W_OK)
-        except OSError:
-            return False
-
-    def _move_to_archive(self, src: Path, dst: Path) -> int:
-        """Move a file or directory from primary to archive.  Returns bytes freed."""
-        try:
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            size = self._dir_size(src) if src.is_dir() else src.stat().st_size
-            shutil.move(str(src), str(dst))
-            return size
-        except OSError as e:
-            logger.warning(f"Archive move failed {src} → {dst}: {e}, deleting instead")
-            # Fallback: delete if move fails (e.g., cross-device + dir)
-            try:
-                if src.is_dir():
-                    size = self._dir_size(src)
-                    shutil.rmtree(src)
-                else:
-                    size = src.stat().st_size
-                    src.unlink()
-                return size
-            except OSError:
-                return 0
-
-    def _enforce_archive_limits(self) -> int:
-        """Enforce 80% disk cap and retention policy on the archive drive.
-
-        Evicts the oldest archived days until the archive disk is under
-        80% and all data is within the retention window.
-        Returns bytes freed.
-        """
-        if not self.archive_root or not self._archive_is_mounted():
-            return 0
-
-        total_freed = 0
-        today = time.strftime('%Y%m%d', time.gmtime())
-
-        # Collect all dates in the archive
-        archive_dates: Set[str] = set()
-        for subdir in ('raw_buffer', 'phase2'):
-            adir = self.archive_root / subdir
-            if not adir.exists():
-                continue
-            try:
-                for root, dirs, files in os.walk(adir):
-                    for name in dirs + files:
-                        m = DATE_RE.search(name)
-                        if m:
-                            archive_dates.add(m.group(1))
-            except OSError:
-                pass
-
-        archive_dates.discard(today)
-        dates_oldest_first = sorted(archive_dates)
-
-        for date_str in dates_oldest_first:
-            should_evict = False
-
-            # Retention policy: delete archive data older than N days
-            if self.archive_retention_days is not None:
-                try:
-                    date_obj = datetime.datetime.strptime(date_str, '%Y%m%d')
-                    age_days = (datetime.datetime.utcnow() - date_obj).days
-                    if age_days > self.archive_retention_days:
-                        should_evict = True
-                except ValueError:
-                    continue
-
-            # Disk cap: archive drive over 80%
-            if not should_evict:
-                try:
-                    astat = shutil.disk_usage(self.archive_root)
-                    if (astat.used / astat.total) * 100 >= DISK_WARN_PERCENT:
-                        should_evict = True
-                    else:
-                        break  # Under 80% and within retention — done
-                except OSError:
-                    break
-
-            if should_evict:
-                freed = self._evict_archive_date(date_str)
-                total_freed += freed
-                if freed > 0:
-                    logger.info(
-                        f"Archive eviction: deleted {date_str}, "
-                        f"freed {freed / GB:.1f} GB"
-                    )
-
-        return total_freed
-
-    def _evict_archive_date(self, date_str: str) -> int:
-        """Delete all data for a single date from the archive."""
-        total_freed = 0
-
-        # raw_buffer/CHANNEL/YYYYMMDD/
-        raw_dir = self.archive_root / 'raw_buffer'
-        if raw_dir.exists():
             try:
                 for channel_dir in raw_dir.iterdir():
                     date_dir = channel_dir / date_str
@@ -999,15 +696,17 @@ class ResourceGuardian:
                             shutil.rmtree(date_dir)
                             total_freed += size
                         except OSError as e:
-                            logger.warning(f"Cannot remove archive {date_dir}: {e}")
+                            logger.warning(f"Cannot remove {date_dir}: {e}")
             except OSError:
                 pass
 
-        # phase2: files containing YYYYMMDD
-        phase2_dir = self.archive_root / 'phase2'
-        if phase2_dir.exists():
+        # 2. phase2, upload/ and data/: any file containing YYYYMMDD
+        for subdir in ('phase2', 'upload', 'data'):
+            d = self.data_root / subdir
+            if not d.exists():
+                continue
             try:
-                for root, dirs, files in os.walk(phase2_dir):
+                for root, dirs, files in os.walk(d):
                     for fname in files:
                         if date_str in fname:
                             fpath = Path(root) / fname
@@ -1020,6 +719,7 @@ class ResourceGuardian:
             except OSError:
                 pass
 
+        logger.info(f"Eviction: deleted day {date_str}")
         return total_freed
 
     # ------------------------------------------------------------------
@@ -1111,8 +811,6 @@ class ResourceGuardian:
         n_channels = 0
         sample_rate = 24000
         tiered_storage = False
-        archive_root = None
-        archive_retention_days = None
         evict_policy = EVICT_POLICY_AUTO
         evict_grace_sec = EVICT_GRACE_SEC
         evict_low_water_percent = EVICT_LOW_WATER_PERCENT
@@ -1140,10 +838,6 @@ class ResourceGuardian:
                             sample_rate = int(value)
                         elif key == 'tiered_storage':
                             tiered_storage = value.lower() == 'true'
-                        elif key == 'archive_root':
-                            archive_root = value if value else None
-                        elif key == 'archive_retention_days':
-                            archive_retention_days = int(value)
                         elif key == 'evict_policy':
                             evict_policy = value
                         elif key == 'evict_grace_sec':
@@ -1177,8 +871,6 @@ class ResourceGuardian:
             n_channels=n_channels,
             sample_rate=sample_rate,
             tiered_storage=tiered_storage,
-            archive_root=archive_root,
-            archive_retention_days=archive_retention_days,
             evict_policy=evict_policy,
             evict_grace_sec=evict_grace_sec,
             evict_low_water_percent=evict_low_water_percent,

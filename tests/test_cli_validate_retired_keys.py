@@ -26,10 +26,14 @@ class RetiredStorageQuotaTests(unittest.TestCase):
         self.assertEqual(len(issues), 1)
         self.assertIn('storage ledger', issues[0]['message'])
 
-    def test_archive_root_and_derived_max_days_stay_live_until_task_11(self):
-        # `data clean` still reads both, with defaults.
-        self.assertEqual(retired_key_issues({'recorder': {'archive_root': '/x'}}), [])
-        self.assertEqual(retired_key_issues({'recorder': {'derived_max_days': 7}}), [])
+    def test_archive_root_and_derived_max_days_are_retired_keys(self):
+        # P10: retired once the guardian stopped reading them.
+        for key, value in (('archive_root', '/x'), ('derived_max_days', 7),
+                           ('archive_retention_days', 90)):
+            issues = retired_key_issues({'recorder': {key: value}})
+            self.assertEqual(len(issues), 1, key)
+            self.assertIn(key, issues[0]['message'])
+            self.assertIn('storage ledger', issues[0]['message'])
 
 
 class RetiredKeyIssueTests(unittest.TestCase):

@@ -15,7 +15,6 @@ from hf_timestd.core.resource_guardian import (
     ResourceState,
     DISK_WARN_PERCENT,
     DISK_HARD_STOP_PERCENT,
-    HEADROOM_DAYS,
     BASELINE_DAYS,
     PHASE2_BYTES_PER_CHANNEL_PER_DAY,
     RAM_PER_CHANNEL,
@@ -155,63 +154,6 @@ class TestWatchdog:
             s2 = guardian.watchdog_check(force=False)
             assert 'skipped' in s2.message
 
-    def test_watchdog_cleans_when_headroom_low(self, tmp_data_root):
-        """When free < daily_disk_budget, watchdog should evict oldest data."""
-        # Use tiered storage so daily budget is ~4 GB (phase2 only),
-        # keeping the test disk percentages well below 95%.
-        g = ResourceGuardian(
-            data_root=str(tmp_data_root),
-            n_channels=1, sample_rate=24000, tiered_storage=True,
-        )
-        headroom_needed = g.daily_disk_budget * HEADROOM_DAYS  # ~4 GB
-        # Use a small disk so that "free < headroom" doesn't also
-        # trigger the 95% hard stop.  50 GB disk, 3 GB free = 94% used.
-        disk_total = 50 * GB
-
-        # Create an old date dir in raw_buffer
-        old_date = time.strftime('%Y%m%d', time.gmtime(time.time() - 5 * 86400))
-        ch_dir = tmp_data_root / 'raw_buffer' / 'TEST_CH'
-        date_dir = ch_dir / old_date
-        date_dir.mkdir(parents=True)
-        (date_dir / 'data.bin').write_bytes(b'\x00' * 10000)
-
-        # First calls: free < headroom but under 95% used.
-        # After eviction: headroom restored.
-        low_free = 3 * GB                         # 94% used, < 4 GB headroom
-        high_free = headroom_needed * 2           # ~8 GB
-        call_count = [0]
-        def fake_disk_usage(path):
-            call_count[0] += 1
-            if call_count[0] <= 2:
-                return type('', (), {
-                    'total': disk_total,
-                    'used': disk_total - low_free,
-                    'free': low_free,
-                })()
-            else:
-                return type('', (), {
-                    'total': disk_total,
-                    'used': disk_total - high_free,
-                    'free': high_free,
-                })()
-
-        with patch('shutil.disk_usage', side_effect=fake_disk_usage):
-            status = g.watchdog_check(force=True)
-
-        assert status.state == ResourceState.CLEANED
-        assert not date_dir.exists(), "Old date dir should have been evicted"
-
-    def test_watchdog_reports_days_retained(self, tmp_data_root, guardian):
-        """ResourceStatus should include days_retained and days_headroom."""
-        with patch('shutil.disk_usage') as mock_du:
-            mock_du.return_value = type('', (), {
-                'total': 500 * GB, 'used': 200 * GB, 'free': 300 * GB,
-            })()
-            status = guardian.watchdog_check(force=True)
-            assert hasattr(status, 'days_retained')
-            assert hasattr(status, 'days_headroom')
-            assert status.days_headroom > 0
-
     def test_watchdog_pauses_on_first_crossing_then_emergency_after_grace(self, guardian):
         """hf-timestd#31: a ≥95% crossing PAUSES (STOP) first — nothing to
         evict here, so only after the grace window does it escalate to
@@ -253,22 +195,6 @@ class TestEviction:
         assert freed == 8000
         assert not raw_ch.exists()
         assert not h5_file.exists()
-
-    def test_evict_preserves_today(self, tmp_data_root, guardian):
-        """Today's data is never evicted."""
-        today = time.strftime('%Y%m%d', time.gmtime())
-        ch = tmp_data_root / 'raw_buffer' / 'CH' / today
-        ch.mkdir(parents=True)
-        (ch / 'data.bin').write_bytes(b'\x00' * 1000)
-
-        # _evict_oldest_days_until_under should skip today
-        with patch('shutil.disk_usage') as mock_du:
-            mock_du.return_value = type('', (), {
-                'total': 500 * GB, 'used': 410 * GB, 'free': 90 * GB,
-            })()
-            guardian._evict_oldest_days_until_under(500 * GB, 80.0)
-
-        assert ch.exists(), "Today's data must not be evicted"
 
     def test_collect_all_dates(self, tmp_data_root, guardian):
         """Collect dates from both raw_buffer and phase2."""
@@ -500,86 +426,234 @@ class TestGuardianHysteresis:
 
 
 # ======================================================================
-# The sigmond ledger replaces proactive headroom eviction; the >=95 %
-# emergency path stays.
+# v3.96 Task 11 — the guardian is an emergency net.  The sigmond ledger
+# owns routine retention.
 # ======================================================================
 
-class TestGuardianLedgerGate:
-    def _g(self, root, clk, **kw):
-        return ResourceGuardian(data_root=str(root), n_channels=1,
-                                sample_rate=24000, clock=clk, **kw)
+import fcntl
 
-    def test_headroom_eviction_defers_to_ledger(self, tmp_data_root, caplog):
-        clk = _Clock()
-        _day(tmp_data_root, '20260101', raw_bytes=10000, phase2_bytes=5000)
-        g = self._g(tmp_data_root, clk)
-        total = int(g.daily_disk_budget * 10)
-        du = _du(total, int(total * 0.92))            # free 0.8 day < 1 day headroom, < 95 %
+from hf_timestd.core import resource_guardian as rg
+
+
+def _guardian(root, used_pct, ledger, clock=None, **kw):
+    """A guardian whose disk reads *used_pct* and whose ledger gate reads
+    *ledger*.  Patches stay active through the test via the returned
+    object's ``watchdog_check`` (they are applied with monkeypatch-free
+    context managers inside the wrapper)."""
+    g = ResourceGuardian(data_root=str(root), n_channels=1, sample_rate=24000,
+                         clock=clock or _Clock(), **kw)
+    real = g.watchdog_check
+
+    def check(force=False):
         with patch('hf_timestd.core.resource_guardian.ledger_manages_us',
-                   return_value=True), \
-             patch('shutil.disk_usage', return_value=du), \
-             caplog.at_level(logging.INFO, logger='hf_timestd.core.resource_guardian'):
-            s = g.watchdog_check(force=True)
-            clk.advance(120)
-            g.watchdog_check(force=True)
-        assert s.state == ResourceState.OK
-        assert s.bytes_cleaned == 0
-        assert (tmp_data_root / 'raw_buffer' / 'CH1' / '20260101').exists()
-        ledger = [r for r in caplog.records if 'ledger' in r.getMessage().lower()]
-        assert len(ledger) == 1
+                   return_value=ledger), \
+             patch('shutil.disk_usage',
+                   return_value=_du(500 * GB, int(500 * GB * used_pct / 100))):
+            return real(force=force)
+    g.watchdog_check = check
+    return g
 
-    def test_headroom_eviction_unchanged_without_ledger(self, tmp_data_root):
+
+@pytest.fixture(autouse=True)
+def _evict_lock_in_tmp(tmp_path, monkeypatch):
+    monkeypatch.setattr(rg, 'EVICT_LOCK', tmp_path / 'run' / 'guardian-evict.lock')
+    # An unmanaged station unless a test says otherwise; never read the
+    # real /run/sigmond/storage-status.json.
+    monkeypatch.setattr(rg, 'ledger_manages_us', lambda: False)
+
+
+class TestEmergencyOnly:
+    def test_constants(self):
+        assert rg.DISK_HARD_STOP_PERCENT == 95.0
+        assert rg.LEDGER_HARD_STOP_PERCENT == 98.0
+
+    def test_ledger_managed_station_holds_until_98(self, tmp_data_root):
+        g = _guardian(tmp_data_root, 96.0, ledger=True)
+        assert g.watchdog_check(force=True).state == ResourceState.OK
+
+    def test_ledger_managed_station_stops_at_98(self, tmp_data_root):
+        g = _guardian(tmp_data_root, 98.5, ledger=True)
+        assert g.watchdog_check(force=True).state == ResourceState.STOP
+
+    def test_unmanaged_station_still_stops_at_95(self, tmp_data_root):
+        g = _guardian(tmp_data_root, 96.0, ledger=False)
+        assert g.watchdog_check(force=True).state == ResourceState.STOP
+
+    def test_hard_stop_percent_follows_the_gate_on_each_check(self, tmp_data_root):
+        g = ResourceGuardian(data_root=str(tmp_data_root), n_channels=1)
+        with patch('hf_timestd.core.resource_guardian.ledger_manages_us',
+                   return_value=True):
+            assert g.hard_stop_percent() == 98.0
+        with patch('hf_timestd.core.resource_guardian.ledger_manages_us',
+                   return_value=False):
+            assert g.hard_stop_percent() == 95.0
+
+    def test_unmanaged_emergency_still_evicts_after_grace(self, tmp_data_root):
+        """The metrology profile's only raw cleaner on an unmanaged station."""
         clk = _Clock()
         _day(tmp_data_root, '20260101', raw_bytes=10000, phase2_bytes=5000)
-        g = self._g(tmp_data_root, clk)
-        total = int(g.daily_disk_budget * 10)
+        g = ResourceGuardian(data_root=str(tmp_data_root), n_channels=1,
+                             clock=clk, evict_grace_sec=600,
+                             evict_low_water_percent=90.0)
+        fake = _live_du(tmp_data_root, fill_bytes=24000, total_bytes=40000)
         with patch('hf_timestd.core.resource_guardian.ledger_manages_us',
                    return_value=False), \
-             patch('shutil.disk_usage',
-                   return_value=_du(total, int(total * 0.92))):
+             patch('shutil.disk_usage', side_effect=fake):
+            assert g.watchdog_check(force=True).state == ResourceState.STOP
+            clk.advance(601)
             s = g.watchdog_check(force=True)
-        assert s.state == ResourceState.CLEANED
+        assert s.bytes_cleaned > 0
 
-    def test_guardian_emergency_still_evicts(self, tmp_data_root, caplog):
+    def test_managed_emergency_at_98_evicts_after_grace(self, tmp_data_root):
         clk = _Clock()
         _day(tmp_data_root, '20260101', raw_bytes=10000, phase2_bytes=5000)
-        g = self._g(tmp_data_root, clk, evict_grace_sec=600,
-                    evict_low_water_percent=90.0)
-        fake = _live_du(tmp_data_root, fill_bytes=24000, total_bytes=40000)  # ~97.5 %
+        g = ResourceGuardian(data_root=str(tmp_data_root), n_channels=1,
+                             clock=clk, evict_grace_sec=600,
+                             evict_low_water_percent=90.0)
+        fake = _live_du(tmp_data_root, fill_bytes=24500, total_bytes=40000)  # 98.7 %
         with patch('hf_timestd.core.resource_guardian.ledger_manages_us',
                    return_value=True), \
-             patch('shutil.disk_usage', side_effect=fake), \
-             caplog.at_level(logging.WARNING):
+             patch('shutil.disk_usage', side_effect=fake):
             assert g.watchdog_check(force=True).state == ResourceState.STOP
             clk.advance(601)
             s = g.watchdog_check(force=True)
         assert s.bytes_cleaned > 0
         assert not (tmp_data_root / 'phase2' / 'CH1' / 'L1' / 'L1_20260101.h5').exists()
-        assert any(r.levelno >= logging.WARNING for r in caplog.records)
 
+    def test_guardian_event_reports_the_threshold_in_force(self, tmp_data_root):
+        import json
+        g = _guardian(tmp_data_root, 99.0, ledger=True)
+        g.watchdog_check(force=True)
+        d = json.loads((tmp_data_root / 'state' / 'guardian-event.json').read_text())
+        assert d['hard_stop_percent'] == 98.0
 
-class TestPreflightLedgerGate:
-    def _setup(self, root):
-        _day(root, '20260101', raw_bytes=10000, phase2_bytes=5000)
-        g = ResourceGuardian(data_root=str(root), n_channels=1, sample_rate=24000)
-        return g, _du(500 * GB, 425 * GB)          # 85 %: over 80 %, under 95 %
+    def test_one_log_line_per_gate_change(self, tmp_data_root, caplog):
+        g = ResourceGuardian(data_root=str(tmp_data_root), n_channels=1)
+        with caplog.at_level(logging.INFO, logger='hf_timestd.core.resource_guardian'):
+            with patch('hf_timestd.core.resource_guardian.ledger_manages_us',
+                       return_value=True):
+                g.hard_stop_percent(); g.hard_stop_percent()
+        assert sum('ledger' in r.getMessage().lower() for r in caplog.records) == 1
 
-    def test_preflight_defers_to_ledger(self, tmp_data_root, caplog):
-        g, du = self._setup(tmp_data_root)
-        with patch('hf_timestd.core.resource_guardian.ledger_manages_us',
-                   return_value=True), \
-             patch('shutil.disk_usage', return_value=du), \
-             caplog.at_level(logging.INFO):
-            assert g.preflight_check() is True
+    def test_ok_branch_walks_no_tree(self, monkeypatch, tmp_data_root):
+        called = []
+        monkeypatch.setattr(ResourceGuardian, "_collect_all_dates",
+                            lambda self: called.append(1) or set())
+        s = _guardian(tmp_data_root, 50.0, ledger=False).watchdog_check(force=True)
+        assert called == []
+        assert s.days_retained == 0 and s.days_headroom == 0
+
+    def test_80_percent_warning_walks_no_tree_and_evicts_nothing(
+            self, monkeypatch, tmp_data_root):
+        called = []
+        monkeypatch.setattr(ResourceGuardian, "_collect_all_dates",
+                            lambda self: called.append(1) or set())
+        _day(tmp_data_root, '20260101', raw_bytes=10000)
+        s = _guardian(tmp_data_root, 90.0, ledger=False).watchdog_check(force=True)
+        assert called == []
+        assert s.state == ResourceState.OK and s.bytes_cleaned == 0
         assert (tmp_data_root / 'raw_buffer' / 'CH1' / '20260101').exists()
-        assert (tmp_data_root / 'phase2' / 'CH1' / 'L1' / 'L1_20260101.h5').exists()
-        assert sum('ledger' in r.getMessage().lower() and 'Preflight' in r.getMessage()
-                   for r in caplog.records) == 1
 
-    def test_preflight_evicts_without_ledger(self, tmp_data_root):
-        g, du = self._setup(tmp_data_root)
+    def test_low_headroom_below_threshold_evicts_nothing(self, tmp_data_root):
+        """Free space under one day's budget no longer triggers eviction."""
+        _day(tmp_data_root, '20260101', raw_bytes=10000, phase2_bytes=5000)
+        g = _guardian(tmp_data_root, 94.0, ledger=False)
+        s = g.watchdog_check(force=True)
+        assert s.state == ResourceState.OK and s.bytes_cleaned == 0
+        assert (tmp_data_root / 'phase2' / 'CH1' / 'L1' / 'L1_20260101.h5').exists()
+
+    def test_there_is_no_headroom_eviction_any_more(self):
+        assert not hasattr(ResourceGuardian, '_ensure_headroom')
+        assert not hasattr(ResourceGuardian, '_evict_oldest_days_until_under')
+
+    def test_there_are_no_archive_methods_or_parameter(self):
+        for name in ('_move_to_archive', '_enforce_archive_limits',
+                     '_evict_archive_date', '_archive_is_mounted'):
+            assert not hasattr(ResourceGuardian, name)
+        with pytest.raises(TypeError):
+            ResourceGuardian(archive_root='/x')
+
+    def test_an_evicted_day_is_deleted_never_moved(self, tmp_data_root, tmp_path):
+        _day(tmp_data_root, '20260101', raw_bytes=100, phase2_bytes=50)
+        moved = []
+        with patch('shutil.move', side_effect=lambda *a, **k: moved.append(a)):
+            g = ResourceGuardian(data_root=str(tmp_data_root), n_channels=1)
+            freed = g._evict_date('20260101')
+        assert freed == 150 and moved == []
+        assert not (tmp_data_root / 'raw_buffer' / 'CH1' / '20260101').exists()
+
+    def test_from_config_ignores_archive_keys(self, tmp_path):
+        cfg = tmp_path / 'c.toml'
+        cfg.write_text('[recorder]\nproduction_data_root = "%s"\n'
+                       'archive_root = "/mnt/x"\narchive_retention_days = 9\n'
+                       '[[channels]]\nname="a"\n' % tmp_path)
+        g = ResourceGuardian.from_config(str(cfg))
+        assert not hasattr(g, 'archive_root')
+
+    def test_preflight_never_evicts(self, tmp_data_root):
+        _day(tmp_data_root, '20260101', raw_bytes=10000, phase2_bytes=5000)
+        g = ResourceGuardian(data_root=str(tmp_data_root), n_channels=1)
         with patch('hf_timestd.core.resource_guardian.ledger_manages_us',
                    return_value=False), \
-             patch('shutil.disk_usage', return_value=du):
+             patch('shutil.disk_usage', return_value=_du(500 * GB, 425 * GB)):
+            assert g.preflight_check() is True      # 85 %: over 80, under 95
+        assert (tmp_data_root / 'phase2' / 'CH1' / 'L1' / 'L1_20260101.h5').exists()
+
+    def test_preflight_refuses_at_95_unmanaged_but_not_managed(self, tmp_data_root):
+        g = ResourceGuardian(data_root=str(tmp_data_root), n_channels=1)
+        du = _du(500 * GB, 480 * GB)                # 96 %
+        with patch('hf_timestd.core.resource_guardian.ledger_manages_us',
+                   return_value=False), patch('shutil.disk_usage', return_value=du):
+            assert g.preflight_check() is False
+        with patch('hf_timestd.core.resource_guardian.ledger_manages_us',
+                   return_value=True), patch('shutil.disk_usage', return_value=du):
             assert g.preflight_check() is True
-        assert not (tmp_data_root / 'phase2' / 'CH1' / 'L1' / 'L1_20260101.h5').exists()
+
+
+class TestEvictLock:
+    def _over_grace(self, root):
+        clk = _Clock()
+        _day(root, '20260101', raw_bytes=10000, phase2_bytes=5000)
+        g = ResourceGuardian(data_root=str(root), n_channels=1, clock=clk,
+                             evict_grace_sec=0, evict_low_water_percent=90.0)
+        return g
+
+    def test_only_one_process_evicts_at_a_time(self, tmp_data_root, caplog):
+        g = self._over_grace(tmp_data_root)
+        rg.EVICT_LOCK.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(rg.EVICT_LOCK, os.O_CREAT | os.O_RDWR)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)      # another process holds it
+        try:
+            fake = _live_du(tmp_data_root, fill_bytes=24000, total_bytes=40000)
+            with patch('hf_timestd.core.resource_guardian.ledger_manages_us',
+                       return_value=False), \
+                 patch('shutil.disk_usage', side_effect=fake), \
+                 caplog.at_level(logging.DEBUG, logger='hf_timestd.core.resource_guardian'):
+                s = g.watchdog_check(force=True)
+        finally:
+            os.close(fd)
+        assert s.bytes_cleaned == 0
+        assert (tmp_data_root / 'phase2' / 'CH1' / 'L1' / 'L1_20260101.h5').exists()
+        assert any(r.levelno == logging.DEBUG and 'evict' in r.getMessage().lower()
+                   for r in caplog.records)
+
+    def test_the_lock_is_released_after_a_pass(self, tmp_data_root):
+        g = self._over_grace(tmp_data_root)
+        fake = _live_du(tmp_data_root, fill_bytes=24000, total_bytes=40000)
+        with patch('hf_timestd.core.resource_guardian.ledger_manages_us',
+                   return_value=False), patch('shutil.disk_usage', side_effect=fake):
+            assert g.watchdog_check(force=True).bytes_cleaned > 0
+        fd = os.open(rg.EVICT_LOCK, os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)   # raises if still held
+        finally:
+            os.close(fd)
+
+    def test_an_unopenable_lock_does_not_disarm_the_emergency(self, tmp_data_root, monkeypatch):
+        g = self._over_grace(tmp_data_root)
+        monkeypatch.setattr(rg, 'EVICT_LOCK', tmp_data_root / 'raw_buffer' / 'CH1' / 'no' / 'x' / 'f')
+        (tmp_data_root / 'raw_buffer' / 'CH1' / 'no').write_text('a file, so mkdir fails')
+        fake = _live_du(tmp_data_root, fill_bytes=24000, total_bytes=40000)
+        with patch('hf_timestd.core.resource_guardian.ledger_manages_us',
+                   return_value=False), patch('shutil.disk_usage', side_effect=fake):
+            assert g.watchdog_check(force=True).bytes_cleaned > 0
