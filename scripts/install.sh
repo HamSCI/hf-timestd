@@ -926,15 +926,27 @@ fi
 # pre-create -- see sigmond docs/timing-chain-architecture.md.
 
 # ── UDP receive buffers ──
-if [[ ! -f "/etc/sysctl.d/99-timestd.conf" ]]; then
-    tee /etc/sysctl.d/99-timestd.conf > /dev/null <<'EOF'
+# 60-, not 99-: sysctl.d applies files in name order and the last value wins.
+# As 99-timestd.conf this 16 MiB sorted after sigmond's 99-sigmond-multicast.conf
+# (64 MiB) and capped every socket on the station (KFS-MAIN, 2026-11-28).  Here
+# it is a floor for a standalone host; sigmond's ceiling wins where sigmond runs.
+SYSCTL_D="${SYSCTL_D:-/etc/sysctl.d}"
+if [[ -f "$SYSCTL_D/99-timestd.conf" && ! -f "$SYSCTL_D/60-timestd.conf" ]]; then
+    mv "$SYSCTL_D/99-timestd.conf" "$SYSCTL_D/60-timestd.conf"
+    log_info "UDP buffers: 99-timestd.conf renamed 60-timestd.conf (sigmond's ceiling now wins)"
+elif [[ -f "$SYSCTL_D/99-timestd.conf" ]]; then
+    rm -f "$SYSCTL_D/99-timestd.conf"
+fi
+if [[ ! -f "$SYSCTL_D/60-timestd.conf" ]]; then
+    tee "$SYSCTL_D/60-timestd.conf" > /dev/null <<'EOF'
 # HF-TimeStd: Increase UDP receive buffers to prevent packet loss
 net.core.rmem_max = 16777216
 net.core.rmem_default = 8388608
 EOF
-    sysctl -p /etc/sysctl.d/99-timestd.conf > /dev/null
     log_info "UDP buffers configured"
 fi
+# Reload every sysctl.d file in order so the highest-sorting ceiling is live.
+sysctl --system > /dev/null || true
 
 # ── Chrony SHM segments: deliberately NOT touched here ──
 # This used to be a "clear stale SHM segments" loop running

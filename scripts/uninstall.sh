@@ -251,10 +251,12 @@ fi
 log_step "Removing system configurations..."
 
 # Remove UDP buffer configuration
-if [[ -f "/etc/sysctl.d/99-timestd.conf" ]]; then
-    sudo rm -f "/etc/sysctl.d/99-timestd.conf"
-    log_info "  Removed: /etc/sysctl.d/99-timestd.conf"
-fi
+for f in /etc/sysctl.d/60-timestd.conf /etc/sysctl.d/99-timestd.conf; do
+    if [[ -f "$f" ]]; then
+        sudo rm -f "$f"
+        log_info "  Removed: $f"
+    fi
+done
 
 # Remove tmpfiles.d configuration
 if [[ -f "/etc/tmpfiles.d/timestd.conf" ]]; then
